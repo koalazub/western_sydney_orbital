@@ -1,0 +1,264 @@
+use super::model::{Scenario, Terrain};
+
+pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
+    validate_limits(s)?;
+    validate_gravity(s)?;
+    validate_integration(s)?;
+    validate_guidance(s)?;
+    validate_lander(s)?;
+    validate_pad(s)?;
+    validate_mission(s)?;
+    validate_debris(s)?;
+    validate_sensors(s)?;
+    validate_terrain(&s.terrain, s.gravity.phobos_radii_m)?;
+    validate_contacts(s)?;
+    Ok(())
+}
+
+fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
+    let l = s.limits;
+    if s.default_seed > u32::MAX as u64
+        || s.debris.count == 0
+        || s.debris.count > 512
+        || s.debris.radar_count > s.debris.count
+        || l.events == 0
+        || l.contacts == 0
+        || l.observations < s.debris.radar_count
+        || !positive(&[l.position_m, l.velocity_mps, l.mass_kg, l.radius_m])
+        || s.description.trim().is_empty()
+        || s.frame_description.trim().is_empty()
+    {
+        return Err("invalid scenario limits or metadata");
+    }
+    Ok(())
+}
+
+fn validate_gravity(s: &Scenario) -> Result<(), &'static str> {
+    let g = s.gravity;
+    if !bounded_positive(
+        &[
+            g.mars_mu_m3_s2,
+            g.phobos_mu_m3_s2,
+            g.separation_m,
+            g.mars_radius_m,
+            g.phobos_rotation_period_s,
+        ],
+        1.0e18,
+    ) || !bounded_positive(&g.phobos_radii_m, 1.0e8)
+    {
+        return Err("gravity parameters must be finite and positive");
+    }
+    Ok(())
+}
+
+fn validate_integration(s: &Scenario) -> Result<(), &'static str> {
+    if !positive(&[
+        s.integration.fixed_step_s,
+        s.integration.maximum_command_step_s,
+    ]) || s.integration.fixed_step_s > s.integration.maximum_command_step_s
+        || s.integration.fixed_step_s > 1.0
+        || s.integration.maximum_command_step_s > 300.0
+    {
+        return Err("integration steps are outside configured bounds");
+    }
+    Ok(())
+}
+
+fn validate_lander(s: &Scenario) -> Result<(), &'static str> {
+    let l = s.lander;
+    let matrix = l.inertia_kg_m2;
+    let symmetric = (0..3).all(|r| (0..3).all(|c| (matrix[r][c] - matrix[c][r]).abs() <= 1.0e-10));
+    let minor_2 = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    let determinant = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+        - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
+    if !bounded_positive(
+        &[
+            l.mass_kg,
+            l.max_accel_mps2,
+            l.max_angular_accel_rad_s2,
+            l.specific_impulse_s,
+            l.standard_gravity_mps2,
+            l.proxy_radius_m,
+            l.foot_radius_m,
+        ],
+        1.0e12,
+    ) || !l
+        .inertia_kg_m2
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite() && value.abs() <= 1.0e15)
+        || !symmetric
+        || matrix[0][0] <= 0.0
+        || !minor_2.is_finite()
+        || !determinant.is_finite()
+        || minor_2 <= 0.0
+        || determinant <= 0.0
+        || !bounded_positive(&l.hull_half_extents_m, 1.0e4)
+        || !bounded_positive(&l.leg_half_extents_m, 1.0e4)
+        || !l
+            .leg_positions_m
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite() && value.abs() <= 1.0e5)
+    {
+        return Err("lander dimensions, controls, mass, or inertia are invalid");
+    }
+    Ok(())
+}
+
+fn validate_guidance(s: &Scenario) -> Result<(), &'static str> {
+    let g = s.guidance;
+    if !bounded_positive(
+        &[
+            g.cadence_hz,
+            g.position_gain_s2,
+            g.velocity_gain_s,
+            g.avoidance_range_m,
+            g.avoidance_accel_mps2,
+        ],
+        1.0e6,
+    ) || g.cadence_hz * s.integration.fixed_step_s > 1.0
+    {
+        return Err("guidance parameters must be positive and no faster than integration");
+    }
+    Ok(())
+}
+
+fn validate_mission(s: &Scenario) -> Result<(), &'static str> {
+    let m = &s.mission;
+    if m.target_name.trim().is_empty()
+        || !bounded_positive(
+            &[
+                m.target_mass_kg,
+                m.target_radius_m,
+                m.arrival_radius_m,
+                m.impact_threshold_j,
+                m.nominal_fuel_kg,
+                m.nominal_time_s,
+            ],
+            1.0e15,
+        )
+        || !m.score_offset.is_finite()
+        || m.arrival_radius_m <= m.target_radius_m
+    {
+        return Err("mission settings are invalid");
+    }
+    Ok(())
+}
+
+fn validate_pad(s: &Scenario) -> Result<(), &'static str> {
+    if !positive(&s.pad.half_extents_m)
+        || !positive(&[s.pad.lander_clearance_m, s.pad.fixed_mass_kg])
+        || !bounded_positive(&s.pad.half_extents_m, 1.0e5)
+        || s.pad.lander_clearance_m <= s.lander.leg_half_extents_m[2] + s.lander.foot_radius_m
+    {
+        return Err("landing pad and deployed-foot geometry are invalid");
+    }
+    Ok(())
+}
+
+fn validate_debris(s: &Scenario) -> Result<(), &'static str> {
+    let d = s.debris;
+    if !finite(&[
+        d.x_min_m,
+        d.x_span_m,
+        d.y_half_width_m,
+        d.z_half_width_m,
+        d.speed_min_mps,
+        d.speed_span_mps,
+        d.radius_min_m,
+        d.radius_span_m,
+        d.density_kg_m3,
+        d.spin_max_rad_s,
+        s.sensors.range_noise_m,
+        s.sensors.range_rate_noise_mps,
+        d.diameter_noise_fraction,
+    ]) || d.x_min_m <= 0.0
+        || d.x_span_m < 0.0
+        || d.y_half_width_m < 0.0
+        || d.z_half_width_m < 0.0
+        || d.speed_min_mps < 0.0
+        || d.speed_span_mps < 0.0
+        || d.radius_min_m <= 0.0
+        || d.radius_span_m < 0.0
+        || d.density_kg_m3 <= 0.0
+        || d.spin_max_rad_s < 0.0
+        || s.sensors.range_noise_m < 0.0
+        || s.sensors.range_rate_noise_mps < 0.0
+        || d.diameter_noise_fraction < 0.0
+        || d.x_min_m > 1.0e8
+        || d.x_span_m > 1.0e8
+        || d.y_half_width_m > 1.0e8
+        || d.z_half_width_m > 1.0e8
+        || d.radius_span_m > 1.0e5
+        || d.density_kg_m3 > 1.0e8
+    {
+        return Err("debris parameters or sensor noise are outside configured bounds");
+    }
+    Ok(())
+}
+
+fn validate_sensors(s: &Scenario) -> Result<(), &'static str> {
+    if !bounded_positive(
+        &[s.sensors.cadence_hz, s.sensors.minimum_reported_diameter_m],
+        1.0e6,
+    ) || s.sensors.range_noise_m > 1.0e8
+        || s.sensors.range_rate_noise_mps > 1.0e8
+    {
+        return Err("sensor cadence must be finite and positive");
+    }
+    Ok(())
+}
+
+fn validate_contacts(s: &Scenario) -> Result<(), &'static str> {
+    if !finite(&[s.contacts.friction, s.contacts.restitution])
+        || s.contacts.friction < 0.0
+        || !(0.0..=1.0).contains(&s.contacts.restitution)
+    {
+        return Err("contact material settings are outside configured bounds");
+    }
+    Ok(())
+}
+
+fn validate_terrain(t: &Terrain, body_radii: [f64; 3]) -> Result<(), &'static str> {
+    let surface_values = [
+        t.relief_amplitude,
+        t.relief_longitude_frequency,
+        t.relief_latitude_frequency,
+        t.relief_longitude_phase,
+        t.crater_rim_fraction,
+        t.crater_rim_width,
+        t.crater_rim_depth,
+    ];
+    let valid_craters = t.craters.iter().all(|crater| {
+        finite(&crater.center)
+            && crater.center.iter().any(|value| *value != 0.0)
+            && positive(&[crater.width_rad])
+            && crater.depth.is_finite()
+            && crater.depth >= 0.0
+    });
+    if t.radii_m != body_radii
+        || !bounded_positive(&t.radii_m, 1.0e8)
+        || !(4..=256).contains(&t.latitude_segments)
+        || !(8..=512).contains(&t.longitude_segments)
+        || !finite(&surface_values)
+        || t.crater_rim_width <= 0.0
+        || !valid_craters
+    {
+        return Err("terrain geometry is outside configured bounds");
+    }
+    Ok(())
+}
+
+fn finite(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn positive(values: &[f64]) -> bool {
+    finite(values) && values.iter().all(|value| *value > 0.0)
+}
+
+fn bounded_positive(values: &[f64], maximum: f64) -> bool {
+    positive(values) && values.iter().all(|value| *value <= maximum)
+}

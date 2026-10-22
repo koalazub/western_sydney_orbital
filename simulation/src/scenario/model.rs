@@ -1,0 +1,145 @@
+use crate::domain::LagrangeRegion;
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Scenario {
+    pub default_seed: u64,
+    pub description: String,
+    pub frame_description: String,
+    pub gravity: Gravity,
+    pub integration: Integration,
+    pub guidance: Guidance,
+    pub lander: Lander,
+    pub pad: Pad,
+    pub mission: Mission,
+    pub debris: Debris,
+    pub sensors: Sensors,
+    pub terrain: Terrain,
+    pub limits: Limits,
+    pub contacts: Contacts,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Gravity {
+    pub mars_mu_m3_s2: f64,
+    pub phobos_mu_m3_s2: f64,
+    pub separation_m: f64,
+    pub mars_radius_m: f64,
+    pub phobos_radii_m: [f64; 3],
+    pub phobos_rotation_period_s: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Integration {
+    pub fixed_step_s: f64,
+    pub maximum_command_step_s: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Guidance {
+    pub cadence_hz: f64,
+    pub position_gain_s2: f64,
+    pub velocity_gain_s: f64,
+    pub avoidance_range_m: f64,
+    pub avoidance_accel_mps2: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Lander {
+    pub mass_kg: f64,
+    pub fuel_unlimited: bool,
+    pub inertia_kg_m2: [[f64; 3]; 3],
+    pub max_accel_mps2: f64,
+    pub max_angular_accel_rad_s2: f64,
+    pub specific_impulse_s: f64,
+    pub standard_gravity_mps2: f64,
+    pub proxy_radius_m: f64,
+    pub hull_half_extents_m: [f64; 3],
+    pub leg_positions_m: [[f64; 3]; 4],
+    pub leg_half_extents_m: [f64; 3],
+    pub foot_radius_m: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Pad {
+    pub half_extents_m: [f64; 3],
+    pub lander_clearance_m: f64,
+    pub fixed_mass_kg: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Mission {
+    pub target_name: String,
+    pub target_region: LagrangeRegion,
+    pub target_mass_kg: f64,
+    pub target_radius_m: f64,
+    pub arrival_radius_m: f64,
+    pub impact_threshold_j: f64,
+    pub nominal_fuel_kg: f64,
+    pub nominal_time_s: f64,
+    pub score_offset: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Debris {
+    pub count: usize,
+    pub x_min_m: f64,
+    pub x_span_m: f64,
+    pub y_half_width_m: f64,
+    pub z_half_width_m: f64,
+    pub speed_min_mps: f64,
+    pub speed_span_mps: f64,
+    pub radius_min_m: f64,
+    pub radius_span_m: f64,
+    pub density_kg_m3: f64,
+    pub spin_max_rad_s: f64,
+    pub radar_count: usize,
+    pub diameter_noise_fraction: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Sensors {
+    pub range_noise_m: f64,
+    pub range_rate_noise_mps: f64,
+    pub cadence_hz: f64,
+    pub minimum_reported_diameter_m: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Terrain {
+    pub radii_m: [f64; 3],
+    pub latitude_segments: usize,
+    pub longitude_segments: usize,
+    pub relief_amplitude: f64,
+    pub relief_longitude_frequency: f64,
+    pub relief_latitude_frequency: f64,
+    pub relief_longitude_phase: f64,
+    pub crater_rim_fraction: f64,
+    pub crater_rim_width: f64,
+    pub crater_rim_depth: f64,
+    pub craters: Vec<Crater>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Crater {
+    pub center: [f64; 3],
+    pub width_rad: f64,
+    pub depth: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Limits {
+    pub events: usize,
+    pub contacts: usize,
+    pub observations: usize,
+    pub position_m: f64,
+    pub velocity_mps: f64,
+    pub mass_kg: f64,
+    pub radius_m: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Contacts {
+    pub friction: f64,
+    pub restitution: f64,
+}

@@ -1,60 +1,10 @@
+use crate::domain::{
+    EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus,
+};
+pub use crate::terrain::{LandingSite, landing_site, phobos_geometry};
 use serde::{Deserialize, Serialize};
-
-/// Approximate dimensions, not an official STP terrain model. The launch-side
-/// depression is synthetic because the installed simulator's mesh/frame
-/// transform is not published in the competition configuration.
-pub const PHOBOS_RADII_M: [f64; 3] = [13_000.0, 11_400.0, 9_100.0];
-
-/// Shared meter-scale terrain for Bevy and Rapier. No upstream assets are copied.
-pub fn phobos_geometry() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
-    const LATITUDES: usize = 32;
-    const LONGITUDES: usize = 64;
-    let craters = [
-        ([-0.078, 0.011, -0.996], 0.34, 0.15),
-        ([0.35, 0.81, -0.46], 0.14, 0.12),
-        ([0.78, -0.32, -0.53], 0.10, 0.09),
-        ([0.25, 0.35, 0.9], 0.24, 0.08),
-    ];
-    let mut vertices = Vec::with_capacity((LATITUDES + 1) * (LONGITUDES + 1));
-    for latitude in 0..=LATITUDES {
-        let lat = -std::f64::consts::FRAC_PI_2
-            + std::f64::consts::PI * latitude as f64 / LATITUDES as f64;
-        for longitude in 0..=LONGITUDES {
-            let lon = std::f64::consts::TAU * longitude as f64 / LONGITUDES as f64;
-            let direction = [lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin()];
-            let mut relief = 0.006 * (7.0 * lon + 0.3).sin() * (5.0 * lat).cos();
-            for (center, width, depth) in craters {
-                let center_length = f64::sqrt(center.iter().map(|x| x * x).sum());
-                let cosine = direction
-                    .iter()
-                    .zip(center)
-                    .map(|(a, b)| a * b / center_length)
-                    .sum::<f64>();
-                let angle = cosine.clamp(-1.0, 1.0).acos();
-                let q = angle / width;
-                let bowl = (1.0 - q * q).max(0.0);
-                let rim = (-((q - 0.88) / 0.11).powi(2)).exp() * 0.025;
-                relief += depth * bowl - rim;
-            }
-            vertices.push(std::array::from_fn(|i| {
-                direction[i] * PHOBOS_RADII_M[i] * (1.0 - relief)
-            }));
-        }
-    }
-    let mut triangles = Vec::with_capacity(2 * LATITUDES * LONGITUDES);
-    for latitude in 0..LATITUDES {
-        for longitude in 0..LONGITUDES {
-            let a = (latitude * (LONGITUDES + 1) + longitude) as u32;
-            let b = a + (LONGITUDES + 1) as u32;
-            if latitude > 0 {
-                triangles.push([a, b, a + 1]);
-            }
-            if latitude + 1 < LATITUDES {
-                triangles.push([a + 1, b, b + 1]);
-            }
-        }
-    }
-    (vertices, triangles)
+pub fn phobos_radii_m() -> [f64; 3] {
+    crate::scenario::settings().gravity.phobos_radii_m
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +14,8 @@ pub struct Snapshot {
     pub seed: u64,
     pub frame: String,
     pub body: PrimaryBody,
+    #[serde(default)]
+    pub environment: crate::astrophysics::Environment,
     pub assets: Vec<EntityState>,
     pub events: Vec<Event>,
     pub collisions: u32,
@@ -74,28 +26,73 @@ pub struct Snapshot {
     #[serde(default, with = "decimal_u64")]
     pub rng_state: u64,
     #[serde(default)]
-    pub active_contacts: Vec<String>,
+    pub active_contacts: Vec<[EntityId; 2]>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Typed simulation requests, deserialized only at the external API boundary.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PhysicsCommand {
+    Reset {
+        seed: Option<u64>,
+    },
+    Observe,
+    Restore {
+        state: Box<Snapshot>,
+    },
+    Step {
+        seconds: f64,
+    },
+    SetCommand {
+        accel: [f64; 3],
+        angular_accel: [f64; 3],
+    },
+    Stop,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MissionState {
-    pub shuttle_id: String,
-    pub target_id: String,
+    pub shuttle_id: EntityId,
+    pub target_id: EntityId,
     pub target_distance_m: f64,
+    #[serde(default)]
+    pub initial_distance_m: f64,
     pub relative_speed_mps: f64,
     pub fuel_used_kg: f64,
     pub damage: f64,
-    pub status: String,
+    pub status: MissionStatus,
     #[serde(default)]
     pub score: Option<f64>,
     #[serde(default)]
     pub score_label: String,
+    #[serde(default)]
+    pub phase: MissionPhase,
+    pub target_region: LagrangeRegion,
+}
+
+impl Default for MissionState {
+    fn default() -> Self {
+        Self {
+            shuttle_id: EntityId::Lander,
+            target_id: EntityId::ReturnShip,
+            target_distance_m: 0.0,
+            initial_distance_m: 0.0,
+            relative_speed_mps: 0.0,
+            fuel_used_kg: 0.0,
+            damage: 0.0,
+            status: MissionStatus::Running,
+            score: None,
+            score_label: String::new(),
+            phase: MissionPhase::OnPad,
+            target_region: LagrangeRegion::L2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Observation {
-    pub id: String,
-    pub kind: String,
+    pub id: EntityId,
+    pub kind: EntityKind,
     pub relative_position_m: [f64; 3],
     pub relative_velocity_mps: [f64; 3],
     pub range_m: f64,
@@ -117,9 +114,9 @@ pub struct PrimaryBody {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EntityState {
-    pub id: String,
+    pub id: EntityId,
     pub name: String,
-    pub kind: String,
+    pub kind: EntityKind,
     pub position: [f64; 3],
     pub velocity: [f64; 3],
     pub rotation: [f64; 4],
@@ -128,7 +125,7 @@ pub struct EntityState {
     pub fuel_kg: f64,
     pub max_thrust_n: f64,
     pub thrust_n: [f64; 3],
-    pub status: String,
+    pub status: EntityStatus,
     #[serde(default)]
     pub torque_nm: [f64; 3],
     #[serde(default)]
@@ -142,7 +139,7 @@ pub struct EntityState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub t_s: f64,
-    pub asset: String,
+    pub asset: EntityId,
     pub message: String,
 }
 
