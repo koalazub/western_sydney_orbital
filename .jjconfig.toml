@@ -6,6 +6,6 @@ default-command = "log"
 [aliases]
 st = ["status"]
 l = ["log", "-r", "@ | ancestors(@, 5)"]
-ci = ["new", "-m"]
+ci = ["commit", "-m"]
 sync = ["git", "fetch", "--all-remotes"]
 # Push explicitly with `jj git push`, after setting an appropriate bookmark.
