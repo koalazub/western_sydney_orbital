@@ -1,4 +1,21 @@
 { pkgs, ... }:
+let
+  workerCli = name: package: pkgs.writeShellScriptBin name ''
+    export PATH="${pkgs.nodejs_22}/bin:$PATH"
+
+    root="''${DEVENV_ROOT:-}"
+    if [ -z "$root" ]; then
+      root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+
+    if [ -z "$root" ] || [ ! -x "$root/worker/node_modules/.bin/${package}" ]; then
+      printf '%s\n' "${name} is installed with the Worker dependencies. Run: npm ci --prefix <root>/worker" >&2
+      exit 1
+    fi
+
+    exec "$root/worker/node_modules/.bin/${package}" "$@"
+  '';
+in
 {
   packages = with pkgs; [
     uv
@@ -9,6 +26,9 @@
     gnumake
     jq
     direnv
+    nodejs_22
+    (workerCli "cf" "cf")
+    (workerCli "wrangler" "wrangler")
   ];
 
   env = {

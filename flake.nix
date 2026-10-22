@@ -1,5 +1,5 @@
 {
-  description = "Western Sydney Orbital development shell";
+  description = "Western Sydney Orbital development toolkit";
 
   inputs = {
     # Keep Intel macOS supported; nixpkgs rolling dropped x86_64-darwin.

@@ -30,6 +30,15 @@ result-*
 .env
 .env.local
 
+# Cloudflare and Node
+node_modules/
+.wrangler/
+.cloudflare/
+.dev.vars
+.dev.vars.*
+.env.*
+worker/worker-configuration.d.ts
+
 # Keep generated runs, but not scratch output.
 runs/scratch/
 runs/**/raw/
