@@ -5,6 +5,7 @@ let
   rustToolchain = inputs.fenix.packages.${system}.combine [
     inputs.fenix.packages.${system}.stable.rustc
     inputs.fenix.packages.${system}.stable.cargo
+    inputs.fenix.packages.${system}.stable.rustfmt
     inputs.fenix.packages.${system}.targets.wasm32-unknown-unknown.stable.rust-std
   ];
   workerCli = name: package: pkgs.writeShellScriptBin name ''

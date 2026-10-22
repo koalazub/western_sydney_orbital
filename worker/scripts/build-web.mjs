@@ -18,6 +18,7 @@ await build({
   entryPoints: [resolve(source, "app.ts")],
   outfile: resolve(output, "app.js"),
   bundle: true,
+  external: ["/sim/*"],
   format: "esm",
   target: "es2022",
   minify: true,

@@ -135,13 +135,17 @@ export class Room extends DurableObject {
   }
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-    if (text.length > MAX_BODY) { ws.close(1009, "Message too large"); return; }
+    const messageSize = typeof message === "string" ? new TextEncoder().encode(message).byteLength : message.byteLength;
+    // State snapshots are JSON-wrapped and updates are base64-encoded, so bound
+    // the whole frame above those encodings before parsing it.
+    if (messageSize > MAX_SNAPSHOT * 2) { ws.close(1009, "Message too large"); return; }
     let msg: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(text);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid message");
       msg = parsed as Record<string, unknown>;
     } catch { ws.close(1003, "Invalid message"); return; }
+    if (msg.type !== "document" && msg.type !== "state" && msg.type !== "result" && messageSize > MAX_BODY) { ws.close(1009, "Message too large"); return; }
     const clientId = (ws.deserializeAttachment() as { clientId?: string } | null)?.clientId;
     if (!clientId) return;
     const row = this.row();
@@ -173,7 +177,7 @@ export class Room extends DurableObject {
       this.broadcast(JSON.stringify({ type: "host", hostId }));
     } else if (msg.type === "state" && clientId === row.host_id && msg.state !== undefined) {
       const state = JSON.stringify(msg.state);
-      if (state.length > MAX_SNAPSHOT) return;
+      if (new TextEncoder().encode(state).byteLength > MAX_SNAPSHOT) return;
       this.ctx.storage.sql.exec("UPDATE room SET state = ?, updated_at = ?", state, Date.now());
       this.broadcast(JSON.stringify({ type: "state", state: msg.state }));
     } else if (msg.type === "notebook" && validNotebookUrl(msg.url)) {
@@ -198,7 +202,7 @@ export class Room extends DurableObject {
       else this.sendTo(pending.requester, result);
       if (msg.state !== undefined) {
         const state = JSON.stringify(msg.state);
-        if (state.length <= MAX_SNAPSHOT) {
+        if (new TextEncoder().encode(state).byteLength <= MAX_SNAPSHOT) {
           this.ctx.storage.sql.exec("UPDATE room SET state = ?, updated_at = ?", state, Date.now());
           this.broadcast(JSON.stringify({ type: "state", state: msg.state }));
         }

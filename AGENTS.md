@@ -12,5 +12,5 @@
 - Local shared services use Tailscale Serve, never Funnel. Hosted services use Cloudflare; authenticate private data and control endpoints. Do not change account-wide networking or access rules without permission.
 - Support macOS, Linux, and Windows through WSL2. Space Teams PRO itself is installed separately.
 - `simulation/` is the browser Bevy engine, `worker/web/` provides Python controls, and `worker/src/` coordinates shared rooms. `src/wsorb/` retains the earlier offline practice runner and notebook tools.
-- The Lunar SAR model is a strategy approximation, not the real STP simulator or official competition scoring.
+- The browser model targets Escape from Phobos. Published mission parameters and scoring do not establish parity with STP terrain, contacts, damage or camera sensors. Legacy Lunar SAR experiments are separate practice approximations.
 - Notebook entries live in `notebook/entries/`; regenerate the index with `uv run wsorb notebook index`. Preserve other contributors' entries and code.
