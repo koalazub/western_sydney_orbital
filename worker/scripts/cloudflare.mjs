@@ -26,12 +26,12 @@ if (action === "account") {
   let identity;
   try { identity = JSON.parse(cf.stdout || "{}"); } catch { identity = {}; }
   if (cf.status !== 0 || !identity.authenticated || !identity.accounts?.some(account => account.id === config.account_id)) {
-    console.error("cf is not authorized for this project's account. Run make login-cf with the same account as Wrangler.");
+    console.error("cf is not authorized for this project's account. Run just login-cf with the same account as Wrangler.");
     process.exit(1);
   }
   const wrangler = spawnSync(binary("wrangler"), ["whoami"], { env, encoding: "utf8" });
   if (wrangler.status !== 0 || !wrangler.stdout?.includes(config.account_id)) {
-    console.error("Wrangler is not authorized for this project's account. Run make login-wrangler.");
+    console.error("Wrangler is not authorized for this project's account. Run just login-wrangler.");
     process.exit(1);
   }
   console.log(`cf and Wrangler are authorized for project account ${config.account_id}.`);
