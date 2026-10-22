@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from typing import Any, Literal
 
 from wsorb.geometry import Bounds, Vec2
@@ -480,6 +481,8 @@ class CampaignResult:
     def to_dict(self, *, include_runs: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "campaign_id": self.campaign_id,
+            "software_version": version("western-sydney-orbital"),
+            "numpy_version": version("numpy"),
             "created_at": self.created_at,
             "scenario": self.scenario.to_dict(),
             "seed": self.seed,

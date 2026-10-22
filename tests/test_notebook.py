@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+
+import pytest
 
 from wsorb.notebook import add_entry, list_entries, read_entry, write_index
 
@@ -23,3 +26,53 @@ def test_frontmatter_round_trip_and_generated_index(tmp_path) -> None:
     assert list_entries(tmp_path) == [entry]
     index = write_index(tmp_path).read_text()
     assert "Relay \\| test" in index
+
+
+@pytest.mark.parametrize("title", ["Rescue 🚀", "C+++ notes", 'A "quoted" title', "澳大利亚"])
+def test_titles_round_trip_as_toml(tmp_path, title) -> None:
+    entry = add_entry(tmp_path, title=title, author="Zoë 🚀", body="A +++ marker in the body.")
+    parsed = read_entry(entry)
+    assert parsed.title == title
+    assert parsed.author == "Zoë 🚀"
+    assert parsed.body.endswith("A +++ marker in the body.")
+
+
+def test_concurrent_entries_do_not_overwrite_each_other(tmp_path) -> None:
+    created = datetime(2026, 1, 2, tzinfo=UTC)
+
+    def write(number):
+        return add_entry(
+            tmp_path, title="Same title", author="Team", body=f"Note {number}", created=created
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        paths = list(workers.map(write, range(16)))
+    assert len(set(paths)) == 16
+    assert len({read_entry(path).body for path in paths}) == 16
+    assert all(read_entry(path).metadata["id"] == path.stem for path in paths)
+
+
+@pytest.mark.parametrize(
+    "text", ["No metadata", 'text +++ title="bad" +++', '+++\ntitle="unclosed"\n']
+)
+def test_metadata_requires_standalone_delimiters(tmp_path, text) -> None:
+    path = tmp_path / "invalid.md"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="front matter"):
+        read_entry(path)
+
+
+def test_failed_index_replacement_preserves_previous_index(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    path = write_index(tmp_path)
+    original = path.read_bytes()
+
+    def fail_replace(*args):
+        raise PermissionError("cannot replace")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(PermissionError):
+        write_index(tmp_path)
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob(".index-*"))

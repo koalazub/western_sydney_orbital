@@ -15,7 +15,13 @@ REPORT_FILES = {"summary.md", "campaign.json", "results.csv"}
 
 
 def _safe_file(root: Path, parts: list[str]) -> Path | None:
-    if not parts or any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+    if not parts or any(
+        part in {"", ".", ".."}
+        or part.startswith(".")
+        or "\\" in part
+        or re.match(r"^[A-Za-z]:", part)
+        for part in parts
+    ):
         return None
     current = root
     for part in parts:

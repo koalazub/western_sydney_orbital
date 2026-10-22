@@ -56,17 +56,17 @@ fi
 
 uv run python -m wsorb.sharing --port "$port" &
 backend_pid=$!
-created_rule=0
+serve_pid=""
 cleaned=0
 cleanup() {
   if (( cleaned )); then
     return
   fi
   cleaned=1
-  if (( created_rule )); then
-    "$tailscale_bin" serve --https=443 --set-path=/wsorb off >/dev/null 2>&1 || \
-      echo "Could not remove only the /wsorb Serve mount. Inspect with: tailscale serve status" >&2
-    created_rule=0
+  if [[ -n "$serve_pid" ]]; then
+    kill "$serve_pid" 2>/dev/null || true
+    wait "$serve_pid" 2>/dev/null || true
+    serve_pid=""
   fi
   kill "$backend_pid" 2>/dev/null || true
   wait "$backend_pid" 2>/dev/null || true
@@ -82,7 +82,7 @@ trap on_signal INT TERM
 ready=0
 for _ in {1..50}; do
   if ! kill -0 "$backend_pid" 2>/dev/null; then
-    echo "WSORB backend exited before becoming ready" >&2
+    echo "WSORB backend exited before becoming ready; check whether port $port is already in use." >&2
     exit 1
   fi
   if uv run python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:"+__import__("sys").argv[1]+"/healthz", timeout=0.2)' "$port" >/dev/null 2>&1; then
@@ -96,11 +96,21 @@ if (( ! ready )); then
   exit 1
 fi
 
-if ! "$tailscale_bin" serve --bg --https=443 --set-path=/wsorb "http://127.0.0.1:$port"; then
-  echo "Tailscale Serve failed. Check HTTPS certificate and Serve policy prerequisites." >&2
-  exit 1
-fi
-created_rule=1
+"$tailscale_bin" serve --https=443 --set-path=/wsorb "http://127.0.0.1:$port" &
+serve_pid=$!
 echo "Tailnet-only notebook URL: $url"
-echo "Keep this process running. Ctrl-C removes only the /wsorb Serve mount."
-while kill -0 "$backend_pid" 2>/dev/null; do sleep 1; done
+echo "Keep this process running. Ctrl-C stops this foreground Serve session."
+while kill -0 "$backend_pid" 2>/dev/null && kill -0 "$serve_pid" 2>/dev/null; do
+  sleep 0.1
+done
+completed_pid="$serve_pid"
+if ! kill -0 "$backend_pid" 2>/dev/null; then
+  completed_pid="$backend_pid"
+fi
+if wait "$completed_pid"; then
+  exit 0
+else
+  status=$?
+  echo "Notebook sharing stopped. Check the backend and Tailscale Serve output above." >&2
+  exit "$status"
+fi

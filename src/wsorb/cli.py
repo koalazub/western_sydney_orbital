@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--plan-out",
         type=Path,
         default=None,
-        help="export asset waypoint plans for an STP Mission Manager",
+        help="export the practice model's asset waypoints",
     )
 
     campaign = subparsers.add_parser("campaign", help="run a paired Monte Carlo campaign")
@@ -118,7 +118,7 @@ def _scenario_from_args(args: argparse.Namespace):
 
 def _target_from_args(args: argparse.Namespace) -> Vec2 | None:
     if (args.target_x is None) != (args.target_y is None):
-        raise SystemExit("provide both --target-x and --target-y, or neither")
+        raise ValueError("provide both --target-x and --target-y, or neither")
     if args.target_x is None:
         return None
     return Vec2(args.target_x, args.target_y)
@@ -194,7 +194,7 @@ def _cmd_sim_run(args: argparse.Namespace) -> int:
     if args.summary_out:
         args.summary_out.parent.mkdir(parents=True, exist_ok=True)
         args.summary_out.write_text(render_run_markdown(result), encoding="utf-8")
-        print(f"report: {args.summary_out}")
+        print(f"report: {args.summary_out}", file=sys.stderr if args.json else sys.stdout)
 
     if args.plan_out:
         args.plan_out.parent.mkdir(parents=True, exist_ok=True)
@@ -218,7 +218,7 @@ def _cmd_sim_run(args: argparse.Namespace) -> int:
             },
         }
         args.plan_out.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-        print(f"plan: {args.plan_out}")
+        print(f"plan: {args.plan_out}", file=sys.stderr if args.json else sys.stdout)
     return 0 if result.success else 1
 
 
@@ -251,7 +251,7 @@ def _cmd_campaign_run(args: argparse.Namespace) -> int:
         ]
         if best is not None:
             body.append(
-                f"Best policy: `{best.strategy_name}` — "
+                f"Top result in this practice sample: `{best.strategy_name}`, "
                 f"{best.successes}/{best.runs} successes, median report "
                 f"{format_duration(best.median_report_s)}, coverage "
                 f"{best.mean_coverage:.1%}."
@@ -270,7 +270,7 @@ def _cmd_campaign_run(args: argparse.Namespace) -> int:
             run=relative,
         )
         index = write_index("notebook")
-        print(f"notebook: {entry} (index: {index})")
+        print(f"notebook: {entry} (index: {index})", file=sys.stderr if args.json else sys.stdout)
     return 0
 
 
@@ -348,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_campaign_show(args)
         if args.command == "notebook":
             return _cmd_notebook(args)
-    except (ValueError, KeyError, FileNotFoundError) as exc:
+    except (ValueError, KeyError, OSError) as exc:
         print(f"wsorb: {exc}", file=sys.stderr)
         return 2
     parser.error("unknown command")

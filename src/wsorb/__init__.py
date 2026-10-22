@@ -1,10 +1,10 @@
-"""Western Sydney Orbital — a Space Teams PRO campaign lab.
+"""Western Sydney Orbital practice simulations.
 
-The package provides a deterministic, dependency-light surrogate for the
-surface-search mechanics documented in the Space Teams PRO Python API. It is
-designed for strategy iteration: run many simulated missions, compare policies,
-record what changed, and export the winning plan for a real STP Mission Manager.
+Practice simulations, paired strategy comparisons, reports and team notes.
+This package does not include the Space Teams PRO runtime or a live STP adapter.
 """
+
+from importlib.metadata import version
 
 from wsorb.model import (
     AssetSpec,
@@ -31,4 +31,4 @@ __all__ = [
     "run_simulation",
 ]
 
-__version__ = "0.1.0"
+__version__ = version("western-sydney-orbital")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -23,6 +24,11 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "tailscale.log"
+    port_socket = socket.socket()
+    port_socket.bind(("127.0.0.1", 0))
+    port = port_socket.getsockname()[1]
+    port_socket.close()
+    serve_pid_file = tmp_path / "serve.pid"
     fake_ts = bin_dir / "tailscale"
     fake_ts.write_text(
         "#!/bin/sh\n"
@@ -31,9 +37,8 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
         "  'status --json') printf '%s\\n' \"$TS_STATUS\" ;;\n"
         "  'serve status --json') echo \"$SERVE_CONFIG\" ;;\n"
         "  'funnel status --json') echo \"$FUNNEL_CONFIG\" ;;\n"
-        "  'serve --bg --https=443 --set-path=/wsorb http://127.0.0.1:'*) "
-        'exit "${SERVE_RESULT:-0}" ;;\n'
-        "  'serve --https=443 --set-path=/wsorb off') exit 0 ;;\n"
+        "  'serve --https=443 --set-path=/wsorb http://127.0.0.1:'*) "
+        'echo "$$" > "$SERVE_PID_FILE"; exec sleep 30 ;;\n'
         "  *) exit 9 ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -43,10 +48,14 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
         os.environ,
         PATH=f"{bin_dir}:{os.environ['PATH']}",
         TS_LOG=str(log),
+        SERVE_PID_FILE=str(serve_pid_file),
         TS_STATUS='{"BackendState":"Running","Self":{"DNSName":"host.example.ts.net."}}',
-        SERVE_CONFIG='{"mount":"/other"}',
-        FUNNEL_CONFIG='{"Web":{"other:443":{}},"AllowFunnel":{"other:443":false}}',
-        WSORB_PORT="18765",
+        SERVE_CONFIG=(
+            '{"TCP":{"443":{"HTTPS":true}},"Web":{"host:443":'
+            '{"Handlers":{"/other":{"Proxy":"http://127.0.0.1:1234"}}}},"AllowFunnel":{}}'
+        ),
+        FUNNEL_CONFIG="{}",
+        WSORB_PORT=str(port),
     )
     proc = subprocess.Popen(
         ["bash", "scripts/serve-tailnet"],
@@ -59,7 +68,7 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
     try:
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
-            if log.exists() and "--bg --https=443" in log.read_text(encoding="utf-8"):
+            if log.exists() and "serve --https=443" in log.read_text(encoding="utf-8"):
                 break
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate()
@@ -67,7 +76,7 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
             time.sleep(0.05)
         else:
             raise AssertionError("wrapper did not configure Serve")
-        time.sleep(0.2)  # Let the Serve CLI return and the wrapper record ownership.
+        time.sleep(0.1)
     finally:
         proc.send_signal(signal.SIGINT)
         try:
@@ -80,14 +89,23 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
         if proc.stderr:
             proc.stderr.close()
     commands = log.read_text(encoding="utf-8").splitlines()
+    assert "Tailnet-only notebook URL: https://host.example.ts.net/wsorb/" in stdout
     assert "status --json" in commands
     assert "serve status --json" in commands
     assert any(
-        "--set-path=/wsorb" in command and "http://127.0.0.1:18765" in command
+        "--set-path=/wsorb" in command and f"http://127.0.0.1:{port}" in command
         for command in commands
     )
-    assert "serve --https=443 --set-path=/wsorb off" in commands
-    assert not any(command.endswith("/other off") for command in commands)
+    assert not any("--bg" in command or command.endswith(" off") for command in commands)
+    assert not any(command == "serve reset" or command == "funnel reset" for command in commands)
+    assert not any(
+        "funnel " in command and not command.endswith("status --json") for command in commands
+    )
+    serve_pid = int(serve_pid_file.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(serve_pid, 0)
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)
     assert commands.count("funnel status --json") == 1
     assert not any(command == "funnel" or "reset" in command for command in commands)
 
@@ -102,7 +120,7 @@ def test_wrapper_uses_tailnet_serve_mount_and_scoped_cleanup(tmp_path: Path) -> 
         ("{}", "{}", "NeedsLogin", "0", "not running"),
         ("{}", '{"AllowFunnel":{"host:443":true}}', "Running", "0", "Funnel is inactive"),
         ("{}", "not JSON", "Running", "0", "Funnel is inactive"),
-        ("{}", "{}", "Running", "1", "Tailscale Serve failed"),
+        ("{}", "{}", "Running", "1", "Notebook sharing stopped"),
     ],
 )
 def test_wrapper_fails_closed(
@@ -122,7 +140,7 @@ def test_wrapper_fails_closed(
         "  'status --json') printf '%s\\n' \"$TS_STATUS\" ;;\n"
         "  'serve status --json') echo \"$SERVE_CONFIG\" ;;\n"
         "  'funnel status --json') echo \"$FUNNEL_CONFIG\" ;;\n"
-        "  'serve --bg --https=443 --set-path=/wsorb http://127.0.0.1:'*) "
+        "  'serve --https=443 --set-path=/wsorb http://127.0.0.1:'*) "
         'exit "$SERVE_RESULT" ;;\n'
         "  *) exit 9 ;;\n"
         "esac\n",
@@ -149,10 +167,56 @@ def test_wrapper_fails_closed(
     assert expected in result.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Bash wrapper runs on Linux/macOS, not native Windows"
+)
+def test_wrapper_fails_when_backend_port_is_occupied(tmp_path: Path) -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_ts = bin_dir / "tailscale"
+    log = tmp_path / "tailscale.log"
+    fake_ts.write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$TS_LOG"\n'
+        'case "$*" in\n'
+        "  'status --json') printf '%s\\n' \"$TS_STATUS\" ;;\n"
+        "  'serve status --json'|'funnel status --json') echo '{}' ;;\n"
+        "  *) exit 9 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_ts.chmod(0o755)
+    try:
+        result = subprocess.run(
+            ["bash", "scripts/serve-tailnet"],
+            cwd=Path(__file__).parents[1],
+            env=dict(
+                os.environ,
+                PATH=f"{bin_dir}:{os.environ['PATH']}",
+                TS_LOG=str(log),
+                TS_STATUS='{"BackendState":"Running","Self":{"DNSName":"host.example.ts.net."}}',
+                WSORB_PORT=str(port),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        listener.close()
+    assert "Address already in use" in result.stderr
+    assert "exited before becoming ready" in result.stderr
+    assert not any(line.startswith("serve --https=") for line in log.read_text().splitlines())
+
+
 def test_allowlisted_files_and_generated_index(tmp_path: Path) -> None:
     (tmp_path / "notebook/entries").mkdir(parents=True)
     (tmp_path / "notebook/NOTEBOOK.md").write_text("Notebook", encoding="utf-8")
     (tmp_path / "notebook/entries/a.md").write_text("Entry", encoding="utf-8")
+    (tmp_path / "private.md").write_text("private", encoding="utf-8")
     run = "20261022T022803Z-35a51684"
     (tmp_path / f"runs/{run}").mkdir(parents=True)
     (tmp_path / f"runs/{run}/summary.md").write_text("Report", encoding="utf-8")
@@ -196,6 +260,7 @@ def test_allowlisted_files_and_generated_index(tmp_path: Path) -> None:
             "/runs/scratch/summary.md",
             f"/runs/{run}/../.env",
             "/notebook/../.env",
+            "/notebook/entries/folder%5C..%5C..%5Cprivate.md",
         ):
             try:
                 with urlopen(base + path):
@@ -229,6 +294,8 @@ def test_symlink_and_traversal_rejected(tmp_path: Path) -> None:
     assert _safe_file(root, ["link.md"]) is None
     assert _safe_file(root, ["..", "outside.md"]) is None
     assert _safe_file(root, [".env"]) is None
+    assert _safe_file(root, ["entries", r"folder\..\..\..\private.md"]) is None
+    assert _safe_file(root, ["C:private.md"]) is None
 
     notebook_target = tmp_path / "notebook-target"
     (notebook_target / "entries").mkdir(parents=True)

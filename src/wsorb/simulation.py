@@ -243,6 +243,8 @@ class Simulation:
             asset.status = "idle"
 
     def _request_charger(self, asset: AssetState) -> None:
+        if asset.stranded:
+            return
         if asset.name in self.charger.slots or asset.name in self.charger.queue:
             return
         if len(self.charger.slots) < self.charger.bays:
@@ -278,30 +280,55 @@ class Simulation:
                 next_name,
             )
 
-    def _consume_power(self, asset: AssetState, dt: float, moving: bool, slope: float) -> None:
+    def _consume_power(
+        self,
+        asset: AssetState,
+        dt: float,
+        moving: bool,
+        slope: float,
+        *,
+        strand_on_depletion: bool = True,
+    ) -> float:
+        """Consume available energy and return the portion of ``dt`` powered."""
+
+        if dt <= 0:
+            if strand_on_depletion and asset.soc <= 1e-9 and not asset.stranded:
+                self._strand(asset)
+            return 0.0
         power = asset.spec.idle_power_kw
         if moving:
             power += asset.spec.move_power_kw * (1.0 + slope / 25.0)
-        energy = power * dt / 3600.0
+        available_kwh = asset.soc * asset.spec.battery_kwh
+        required_kwh = power * dt / 3600.0
+        energy = min(available_kwh, required_kwh)
+        powered_dt = (
+            dt if power <= 0 or available_kwh >= required_kwh else available_kwh * 3600.0 / power
+        )
         asset.energy_kwh += energy
-        asset.soc = max(0.0, asset.soc - energy / asset.spec.battery_kwh)
+        asset.soc = max(0.0, (available_kwh - energy) / asset.spec.battery_kwh)
         asset.min_soc = min(asset.min_soc, asset.soc)
-        if asset.soc <= 1e-9 and not asset.stranded:
-            asset.stranded = True
-            asset.status = "stranded"
-            asset.path = []
-            if asset.name in self.charger.slots:
-                self.charger.slots.remove(asset.name)
-            if asset.name in self.charger.queue:
-                self.charger.queue.remove(asset.name)
-            _log(
-                self.events,
-                self._time,
-                "power",
-                f"{asset.name}: battery depleted; asset stranded",
-                asset.name,
-                asset.position,
-            )
+        if strand_on_depletion and asset.soc <= 1e-9:
+            self._strand(asset)
+        return powered_dt
+
+    def _strand(self, asset: AssetState) -> None:
+        if asset.stranded:
+            return
+        asset.stranded = True
+        asset.status = "stranded"
+        asset.path = []
+        if asset.name in self.charger.slots:
+            self.charger.slots.remove(asset.name)
+        if asset.name in self.charger.queue:
+            self.charger.queue.remove(asset.name)
+        _log(
+            self.events,
+            self._time,
+            "power",
+            f"{asset.name}: battery depleted; asset stranded",
+            asset.name,
+            asset.position,
+        )
 
     def _speed(self, asset: AssetState) -> float:
         slope = self.terrain.slope_at(asset.position)
@@ -312,8 +339,14 @@ class Simulation:
     def _advance(self, asset: AssetState, dt: float) -> bool:
         """Move along the current path. Returns whether the asset moved."""
 
+        while asset.path and asset.position.distance_to(asset.path[0]) <= 1e-9:
+            asset.path.pop(0)
         slope = self.terrain.slope_at(asset.position)
-        remaining = self._speed(asset) * dt
+        speed = self._speed(asset)
+        powered_dt = self._consume_power(
+            asset, dt, bool(asset.path), slope, strand_on_depletion=False
+        )
+        remaining = speed * powered_dt
         moved = False
         while remaining > 1e-9 and asset.path:
             target = asset.path[0]
@@ -332,7 +365,8 @@ class Simulation:
                 asset.distance_m += remaining
                 remaining = 0.0
                 moved = True
-        self._consume_power(asset, dt, moved, slope)
+        if asset.soc <= 1e-9:
+            self._strand(asset)
         return moved
 
     def _update_comms(self, asset: AssetState, t_s: float) -> None:
@@ -447,8 +481,12 @@ class Simulation:
             return
 
         if asset.relay_stage == 1:
-            asset.relay_dwell_s -= dt
-            self._consume_power(asset, dt, False, self.terrain.slope_at(asset.position))
+            powered_dt = self._consume_power(
+                asset, dt, False, self.terrain.slope_at(asset.position)
+            )
+            if asset.stranded:
+                return
+            asset.relay_dwell_s -= powered_dt
             if asset.relay_dwell_s <= 0:
                 source = self.search_plan.relay_source
                 if source is not None:
@@ -498,8 +536,12 @@ class Simulation:
             return
 
         if asset.relay_stage == 3:
-            asset.relay_dwell_s -= dt
-            self._consume_power(asset, dt, False, self.terrain.slope_at(asset.position))
+            powered_dt = self._consume_power(
+                asset, dt, False, self.terrain.slope_at(asset.position)
+            )
+            if asset.stranded:
+                return
+            asset.relay_dwell_s -= powered_dt
             if asset.relay_dwell_s > 0:
                 return
             assert self.relay_position is not None
@@ -530,6 +572,8 @@ class Simulation:
                     asset.status = "idle"
                 return
             self._advance(asset, dt)
+            if asset.stranded:
+                return
             if asset.position.distance_to(self.scenario.charger) <= self.terrain.resolution_m * 0.5:
                 asset.path = []
                 self._request_charger(asset)
@@ -663,7 +707,7 @@ class Simulation:
             seed=self.seed,
             terrain_seed=self.terrain_seed,
             target=self.target,
-            found=self.reported,
+            found=self.detected_at_s is not None,
             horizon_s=self.scenario.horizon_s,
             coverage_fraction=self.coverage_fraction,
             comms_fraction=comms_fraction,

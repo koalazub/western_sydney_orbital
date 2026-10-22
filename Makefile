@@ -27,4 +27,3 @@ serve:
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache htmlcov .coverage
-	find . -type d -name __pycache__ -prune -exec rm -rf {} +

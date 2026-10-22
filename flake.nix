@@ -3,7 +3,7 @@
 
   inputs = {
     # Keep Intel macOS supported; nixpkgs rolling dropped x86_64-darwin.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+    nixpkgs.url = "github:NixOS/nixpkgs/36fd15bbb657815e2028e31d715c2e43a1230c91";
   };
 
   outputs =
@@ -27,7 +27,7 @@
           pkgs.mkShell (
             {
               name = "western-sydney-orbital";
-              packages = environment.packages ++ [ pkgs.devenv ];
+              packages = environment.packages;
               shellHook = environment.enterShell or "";
             }
             // environment.env

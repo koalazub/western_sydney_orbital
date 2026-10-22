@@ -76,13 +76,14 @@ def render_campaign_markdown(result: CampaignResult) -> str:
         f"**Master seed:** {result.seed}",
         "",
         "Each replicate draws one terrain and one target, then runs every strategy on that",
-        "same draw. This is a paired comparison; differences come from the policy, not luck.",
+        "same draw, so policies are compared against shared terrain and target locations.",
         "",
         "## Ranking",
         "",
         render_summary_table(result.summaries),
         "",
         "Ranking is success rate first, then median time-to-report, then coverage.",
+        "Report times include successful runs only. Coverage and energy are measured at run end.",
         "",
         "## Strategies",
         "",
@@ -97,13 +98,11 @@ def render_campaign_markdown(result: CampaignResult) -> str:
         f"- Horizon: {format_duration(scenario.horizon_s)}; step: {scenario.dt_s:.0f} s",
         f"- Search spacing factor: {scenario.search_spacing_factor:.2f} × sensor radius",
         "",
-        "## Reproduce",
-        "",
-        "```bash",
-        "uv run wsorb campaign run \\",
-        f"  --scenario {scenario.id} --replicates {result.replicates} --seed {result.seed}",
-        "```",
-        "",
+        *(
+            ["## Recorded command", "", "```sh", result.command, "```", ""]
+            if result.command
+            else []
+        ),
         "## Scope",
         "",
         "This is a campaign-level surrogate, not Space Teams PRO itself. It models terrain,",
@@ -113,8 +112,6 @@ def render_campaign_markdown(result: CampaignResult) -> str:
         "in the high-fidelity simulator.",
         "",
     ]
-    if result.command:
-        lines.extend(["Command:", "", "```bash", result.command, "```", ""])
     return "\n".join(lines)
 
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import statistics
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -67,11 +68,15 @@ STRATEGIES: dict[str, Strategy] = {
 def resolve_strategies(names: Iterable[str] | None) -> list[Strategy]:
     if names is None:
         return list(STRATEGIES.values())
+    keys = [name.strip() for name in names]
+    if keys == ["all"]:
+        return list(STRATEGIES.values())
+    if "all" in keys:
+        raise ValueError("'all' cannot be combined with individual strategies")
+    if len(keys) != len(set(keys)):
+        raise ValueError("strategy names must be unique")
     resolved: list[Strategy] = []
-    for name in names:
-        key = name.strip()
-        if key == "all":
-            return list(STRATEGIES.values())
+    for key in keys:
         if key not in STRATEGIES:
             available = ", ".join(STRATEGIES)
             raise ValueError(f"unknown strategy {key!r}; available: {available}")
@@ -82,17 +87,26 @@ def resolve_strategies(names: Iterable[str] | None) -> list[Strategy]:
 
 
 def _campaign_id(scenario: Scenario, strategies: list[Strategy], replicates: int, seed: int) -> str:
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    now = datetime.now(UTC)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
     payload = json.dumps(
         {
-            "scenario": scenario.id,
+            "scenario": scenario.to_dict(),
             "strategies": [strategy.to_dict() for strategy in strategies],
             "replicates": replicates,
             "seed": seed,
+            "created_at": now.isoformat(timespec="microseconds"),
         },
         sort_keys=True,
     ).encode()
     return f"{stamp}-{hashlib.sha256(payload).hexdigest()[:8]}"
+
+
+def _validate_campaign_id(campaign_id: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", campaign_id):
+        raise ValueError(
+            "campaign id must be a single filename using letters, numbers, '.', '-' or '_'"
+        )
 
 
 def _p90(values: list[float]) -> float | None:
@@ -153,6 +167,10 @@ def run_campaign(
         raise ValueError("replicates must be at least 1")
     if not strategies:
         raise ValueError("at least one strategy is required")
+    if len({strategy.name for strategy in strategies}) != len(strategies):
+        raise ValueError("strategy names must be unique")
+    if campaign_id is not None:
+        _validate_campaign_id(campaign_id)
 
     runs: list[RunResult] = []
     for replicate in range(replicates):
@@ -188,12 +206,12 @@ def run_campaign(
 def write_campaign(result: CampaignResult, out_dir: str | Path) -> Path:
     """Write JSON, CSV and Markdown artefacts. Returns the run directory."""
 
+    _validate_campaign_id(result.campaign_id)
+    payload = json.dumps(result.to_dict(), indent=2, allow_nan=False) + "\n"
     run_dir = Path(out_dir) / result.campaign_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=False)
 
-    (run_dir / "campaign.json").write_text(
-        json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8"
-    )
+    (run_dir / "campaign.json").write_text(payload, encoding="utf-8")
     (run_dir / "summary.md").write_text(render_campaign_markdown(result), encoding="utf-8")
 
     fieldnames = [
@@ -247,6 +265,31 @@ def load_campaign(path: str | Path) -> dict:
     """Load a campaign.json artefact for inspection."""
 
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if "summaries" not in payload or "runs" not in payload:
-        raise ValueError(f"{path} is not a campaign artefact")
+    error = f"{path} is not a valid campaign artefact"
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("campaign_id"), str)
+        or not isinstance(payload.get("scenario"), dict)
+        or not isinstance(payload.get("summaries"), list)
+        or not isinstance(payload.get("runs"), list)
+        or not all(isinstance(run, dict) for run in payload["runs"])
+    ):
+        raise ValueError(error)
+    for item in payload["summaries"]:
+        if not isinstance(item, dict) or not isinstance(item.get("strategy"), str):
+            raise ValueError(error)
+        runs, successes = item.get("runs"), item.get("successes")
+        if type(runs) is not int or type(successes) is not int or not 0 <= successes <= runs:
+            raise ValueError(error)
+        for key in ("median_report_s", "mean_coverage", "mean_min_soc"):
+            value = item.get(key)
+            if key == "median_report_s" and value is None and key in item:
+                continue
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value < 0
+                or (key != "median_report_s" and value > 1)
+            ):
+                raise ValueError(error)
     return payload

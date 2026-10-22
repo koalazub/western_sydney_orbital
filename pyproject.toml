@@ -1,6 +1,6 @@
 [project]
 name = "western-sydney-orbital"
-version = "0.1.0"
+version = "0.2.0"
 description = "Space Teams PRO campaign lab for the Western Sydney Orbital team."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
