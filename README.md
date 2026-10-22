@@ -14,10 +14,10 @@ The same environment keeps setup consistent across teammates' machines. Private 
 
 ## Get running
 
-Install Nix and devenv using the link above, and connect Tailscale on the machine hosting shared services. Windows users need [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install); run the development tools and Tailscale in the same Linux environment.
+Install Nix, devenv, and Jujutsu using the links above, and connect Tailscale on the machine hosting shared services. Windows users need [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install); run the development tools and Tailscale in the same Linux environment.
 
 ```sh
-jj git clone https://github.com/koalazub/western_sydney_orbital
+jj git clone --colocate https://github.com/koalazub/western_sydney_orbital
 cd western_sydney_orbital
 devenv shell
 uv sync --locked
