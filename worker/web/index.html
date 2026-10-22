@@ -2,100 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f5f6f6">
-  <title>Escape from Phobos | Western Sydney Orbital</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#070b10">
+  <title>Escape from Phobos</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">Western Sydney Orbital</a>
-    <div class="button-row"><span id="room-status" role="status">Private workspace</span><button id="share-button">Share room</button></div>
-  </header>
-  <main>
-    <h1>Escape from Phobos</h1>
-    <p class="intro">Fly the crew shuttle to the return ship through the debris field. Run a Python controller, inspect the flight and compare time, fuel and damage.</p>
-    <p class="model-note">Browser practice model. Mission settings follow the <a href="https://github.com/SimDynamX/STU4-Solution/wiki" target="_blank" rel="noopener noreferrer">2026 competition</a>. Terrain, collisions, fuel and radar are approximations. Camera images and the proprietary Space Teams PRO physics are not reproduced.</p>
-    <section class="workspace" aria-label="Simulation workspace">
-      <section class="world-panel panel" aria-labelledby="world-heading">
-        <div class="panel-head"><h2 id="world-heading">Simulation</h2><span id="sim-status" role="status">Loading 3D engine</span></div>
-        <div class="toolbar">
-          <button class="primary" id="run-strategy" disabled>Run strategy</button>
-          <button id="stop-python" disabled>Stop execution</button>
-          <button id="step-button" disabled>Step</button>
-          <label>Step duration, s <input id="step-seconds" type="number" min="0.01" max="30" step="0.01" value="1"></label>
-          <button id="reset-button" disabled>Reset simulation</button>
-        </div>
-        <div class="canvas-wrap"><canvas id="simulation-canvas" aria-label="3D view of Phobos, the shuttle, return ship and debris. Exact states are available in the entity inspector and telemetry."></canvas></div>
-        <div class="view-controls" aria-label="Camera controls">
-          <button id="view-mission" aria-pressed="true" disabled>Mission view</button>
-          <button id="view-overview" aria-pressed="false" disabled>Phobos overview</button>
-          <button id="view-follow" aria-pressed="false" disabled>Follow selected</button>
-          <button id="zoom-in" disabled>Zoom in</button><button id="zoom-out" disabled>Zoom out</button>
-        </div>
-        <p class="legend">Shuttle and return-ship markers are enlarged for visibility. Debris sizes and positions use meters. Trails show sampled flight paths.</p>
-        <div id="world-message" class="world-message" role="status">Downloading and starting the 3D engine. Run becomes available after a rendered frame.</div>
-        <div class="loading-state">
-          <progress id="wasm-progress" max="100" value="0" aria-label="3D engine download"></progress><span id="wasm-progress-text">Preparing download</span>
-          <progress id="python-progress" max="100" value="0" aria-label="Python runtime download"></progress><span id="python-progress-text">Python downloads when you run a strategy.</span>
-          <button id="retry-world" hidden>Reload 3D engine</button>
-        </div>
-        <dl class="telemetry" aria-label="Mission telemetry">
-          <div><dt>Simulation time</dt><dd id="time-value">Not started</dd></div>
-          <div><dt>Mission</dt><dd id="mission-value">Waiting</dd></div>
-          <div><dt>Target distance</dt><dd id="distance-value">Not available</dd></div>
-          <div><dt>Relative speed</dt><dd id="relative-speed-value">Not available</dd></div>
-          <div><dt>Fuel estimate</dt><dd id="fuel-value">Not available</dd></div>
-          <div><dt>Impact energy estimate</dt><dd id="damage-value">Not available</dd></div>
-          <div><dt>Practice score</dt><dd id="score-value">Run not finished</dd></div>
-          <div><dt>All-body contacts</dt><dd id="collision-value">0</dd></div>
-          <div><dt>Spacecraft</dt><dd id="ship-count">0</dd></div>
-          <div><dt>Debris</dt><dd id="asteroid-count">0</dd></div>
-          <div><dt>Seed</dt><dd id="seed-value">100</dd></div>
-        </dl>
-        <p class="frame-note" id="frame-value">Coordinates and units will appear after initialization.</p>
-        <details class="model-details"><summary>Practice model assumptions</summary><p id="model-description">The engine will list its physics and sensor approximations after initialization.</p></details>
-        <label class="seed-control">Reset seed <input id="seed-input" type="number" min="0" max="4294967295" step="1" value="100"></label>
-      </section>
-      <aside class="inspector panel" aria-labelledby="entities-heading">
-        <div class="panel-head"><h2 id="entities-heading">Entity inspector</h2><span id="asset-count">0 entities</span></div>
-        <label for="asset-list">Select an entity. Scroll for debris.</label>
-        <select id="asset-list" class="asset-list" size="7" disabled><option>Waiting for simulation</option></select>
-        <h3>State in Phobos frame</h3><dl id="selected-details" class="entity-details"><div><dt>State</dt><dd>Waiting for simulation</dd></div></dl>
-        <section class="thrust" aria-labelledby="command-heading">
-          <h3 id="command-heading">Shuttle command</h3>
-          <p>Body-frame acceleration, limited to 0.5 m/s². Apply a command, then Step to advance time. Zero acceleration does not stop velocity.</p>
-          <div class="vector-inputs">
-            <label>X, m/s² <input id="thrust-x" type="number" min="-0.5" max="0.5" step="0.01" value="0"></label>
-            <label>Y, m/s² <input id="thrust-y" type="number" min="-0.5" max="0.5" step="0.01" value="0"></label>
-            <label>Z, m/s² <input id="thrust-z" type="number" min="-0.5" max="0.5" step="0.01" value="0"></label>
-          </div>
-          <div class="button-row"><button id="apply-thrust" disabled>Apply acceleration</button><button id="cancel-thrust" disabled>Zero command</button></div>
-          <p id="control-help">Select the shuttle to set its command.</p>
-        </section>
-        <button id="export-button" disabled>Export flight data</button>
-      </aside>
-      <section class="editor-panel panel" aria-labelledby="strategy-heading">
-        <div class="panel-head"><div><h2 id="strategy-heading">Python strategy</h2><span id="collab-state">Local draft</span></div><button id="claim-host" hidden>Claim simulation host</button></div>
-        <p class="editor-help">Python runs in this browser. <code>await sim.observe()</code> returns shuttle and target states plus noisy radar, not debris truth. Commands use body-frame m/s² and rad/s². This async bridge is not a drop-in replacement for the Space Teams PRO connection API.</p>
-        <div id="editor" class="editor"></div>
-        <div class="editor-foot"><span>Python <span id="python-version">not loaded</span></span><span id="execution-status" role="status">Waiting for 3D engine</span></div>
-        <div class="console-head"><h3>Output</h3><button id="clear-console">Clear output</button></div><pre id="console" class="console" tabindex="0" aria-label="Python output">Run a strategy to see its output.</pre>
-      </section>
-      <section class="analysis-panel panel" aria-labelledby="analysis-heading">
-        <div class="panel-head"><h2 id="analysis-heading">Flight analysis</h2><span id="sample-count">0 samples</span></div>
-        <p>Target distance over simulation time. Export includes sampled spacecraft states, commands and mission events.</p>
-        <canvas id="analysis-chart" width="900" height="220" role="img" aria-label="Target distance over time. Current distance is shown in mission telemetry; sampled data is available in Export flight data."></canvas>
-        <h3>Mission events <span id="event-count"></span></h3><ol id="event-list"><li>Events appear when the flight starts.</li></ol>
-      </section>
-      <section class="notebook-panel panel" aria-labelledby="notebook-heading">
-        <div><h2 id="notebook-heading">Team references</h2><p>Keep the room link and flight exports in your team's NotebookLM workspace.</p></div>
-        <form id="notebook-form"><label for="notebook-url">NotebookLM or Google Docs URL</label><div class="url-row"><input id="notebook-url" type="url" placeholder="https://notebooklm.google.com/" autocomplete="url"><button type="submit">Save link</button></div><a id="notebook-open" href="https://notebooklm.google.com" target="_blank" rel="noopener noreferrer">Open NotebookLM</a><span id="notebook-status" role="status"></span></form>
-      </section>
+  <main id="simulation-viewport" aria-label="Escape from Phobos simulation">
+    <canvas id="simulation-canvas" tabindex="0" aria-label="Interactive Bevy simulation" aria-describedby="camera-instructions"></canvas>
+    <section id="boot-screen" class="boot-screen" aria-labelledby="boot-title">
+      <h1 id="boot-title">Escape from Phobos</h1>
+      <p id="sim-status" role="status">Preparing WebGPU</p>
+      <progress id="wasm-progress" aria-label="Simulation engine download"></progress>
+      <p id="wasm-progress-text">Checking browser graphics support.</p>
+      <p id="world-message" role="alert"></p>
+      <button id="retry-world" type="button" hidden>Reload simulation</button>
     </section>
+    <p id="camera-instructions" class="screen-reader-only">Click or focus the canvas to use the in-game controls. Left drag orbits, right drag pans, and the wheel zooms. Keys 1 through 5 select orbit, first person, third person, free flight and overview. WASD moves the camera, Q and E move vertically, and Shift increases speed. F frames the selected object. Space runs or pauses the mission, period steps, T changes playback rate, and R opens reset confirmation. I opens the entity inspector, H opens help, M maximizes and X toggles fullscreen. Tab navigates game buttons, and Enter activates them. Escape releases the mouse and canvas focus so Tab can leave the game. Camera movement does not control the lander.</p>
+    <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
   </main>
-  <dialog id="share-dialog" aria-labelledby="share-heading"><form method="dialog"><button class="dialog-close">Close</button><h2 id="share-heading">Share simulation</h2><p>Anyone with this private link can edit the strategy and request simulation commands. The host's browser runs the simulation.</p><div id="share-result" hidden><label for="share-link">Private room link</label><div class="url-row"><input id="share-link" readonly><button id="copy-link" type="button">Copy link</button></div></div><button id="create-room" class="primary" type="button">Create room</button><p id="share-status" role="status"></p></form></dialog>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

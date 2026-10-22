@@ -7,23 +7,28 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const worker = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const output = process.env.PREVIEW_OUTPUT_DIR || join(tmpdir(), "opencode", "wso-preview");
+const output = resolve(process.env.PREVIEW_OUTPUT_DIR || join(tmpdir(), "opencode", "wso-preview"));
+if (output === dirname(worker) || output.startsWith(dirname(worker) + sep)) throw new Error("PREVIEW_OUTPUT_DIR must be outside the repository.");
 const width = optionNumber("width", 1440, 320, 3840);
 const height = optionNumber("height", 1000, 240, 2160);
-const block = optionValue("block");
+const block = optionValue("block") || (process.argv.includes("--blockwasm") || process.argv.includes("--block-wasm") ? "wasm" : undefined);
 const view = optionValue("view");
-if (view && !["mission", "overview", "follow"].includes(view)) throw new Error("--view must be mission, overview or follow.");
-const runStrategy = process.argv.includes("--run-strategy") || block === "python";
-const doRoom = process.argv.includes("--room");
+if (view && !["1", "2", "3", "4", "5", "orbit", "first_person", "third_person", "free", "overview"].includes(view)) throw new Error("--view must select 1/orbit, 2/first_person, 3/third_person, 4/free or 5/overview.");
+const runMission = process.argv.includes("--run-mission") || process.argv.includes("--run-strategy");
+const doControls = process.argv.includes("--controls");
+const doPlatform = process.argv.includes("--platform");
 const doStep = process.argv.includes("--step");
-if (block && !["wasm", "python"].includes(block)) throw new Error("--block must be wasm or python.");
+const missionTimeout = optionNumber("mission-timeout", 120, 1, 600) * 1000;
+if (process.argv.includes("--room")) throw new Error("--room is unsupported: the share-room UI was removed.");
+if (block && block !== "wasm") throw new Error("--block must be wasm.");
 await mkdir(output, { recursive: true });
-const profile = await mkdtemp(join(output, "browser-"));
+await writeFile(join(output, "preview.json"), JSON.stringify({ result: "FAIL", error: "Browser verification has not completed." }, null, 2));
 const chrome = process.env.CHROME_BIN || [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
 ].find(existsSync);
 if (!chrome) throw new Error("Set CHROME_BIN to an installed Chrome or Chromium browser.");
+const profile = await mkdtemp(join(output, "browser-"));
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".json": "application/json", ".txt": "text/plain" };
 const publicDirectory = join(worker, "public");
 const server = createServer(async (request, response) => {
@@ -40,12 +45,18 @@ const server = createServer(async (request, response) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const supplied = optionValue("url");
 const url = supplied || `http://127.0.0.1:${server.address().port}/`;
-const child = spawn(chrome, ["--headless=new", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+const child = spawn(chrome, [...(process.argv.includes("--headed") ? [] : ["--headless=new"]), "--force-device-scale-factor=1", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--enable-unsafe-webgpu", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+process.once("SIGTERM", () => { child.kill("SIGKILL"); process.exit(143); });
 let browserError = "";
 child.stderr.on("data", data => { browserError = (browserError + data).slice(-12_000); });
+child.on("error", error => { browserError = `${browserError}\n${error.message}`; });
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 let socket;
 let failed = false;
+let report;
+let capture;
+let closeBrowser;
+const commandTimers = new Set();
 const messages = [];
 const requests = [];
 let blockObserved = false;
@@ -64,10 +75,11 @@ try {
   const requestUrls = new Map();
   const targets = new Map();
   const targetSetups = [];
-  const call = (method, params = {}, timeout = 260_000, sessionId) => new Promise((resolve, reject) => {
+  const call = (method, params = {}, timeout = 30_000, sessionId) => new Promise((resolve, reject) => {
     const id = ++next;
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Browser command timed out: ${method}`)); }, timeout);
-    pending.set(id, message => { clearTimeout(timer); message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result); });
+    const timer = setTimeout(() => { commandTimers.delete(timer); pending.delete(id); reject(new Error(`Browser command timed out: ${method}`)); }, timeout);
+    commandTimers.add(timer);
+    pending.set(id, message => { clearTimeout(timer); commandTimers.delete(timer); message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result); });
     socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
   socket.onmessage = event => {
@@ -83,7 +95,6 @@ try {
           await Promise.allSettled([
             call("Network.enable", {}, 10_000, childSession),
             call("Runtime.enable", {}, 10_000, childSession),
-            ...(block === "python" ? [call("Network.setBlockedURLs", { urls: ["*cdn.jsdelivr.net/pyodide/*"] }, 10_000, childSession)] : []),
           ]);
         } finally {
           try { await call("Runtime.runIfWaitingForDebugger", {}, 10_000, childSession); }
@@ -100,93 +111,130 @@ try {
       const item = { type: "request-failed", target: target?.type || "page", url: requestUrls.get(`${sessionId || "page"}:${message.params.requestId}`), error: message.params.errorText, blockedReason: message.params.blockedReason };
       requests.push(item);
       if (requests.length > 200) requests.shift();
-      if (item.blockedReason || (block === "python" && item.url?.includes("cdn.jsdelivr.net/pyodide/"))) blockObserved = true;
+      if (block === "wasm" && item.url?.includes(".wasm") && item.blockedReason) blockObserved = true;
     }
     if (message.method === "Network.responseReceived" && message.params.response.status >= 400) {
       requests.push({ type: "http-error", target: target?.type || "page", url: message.params.response.url, status: message.params.response.status });
       if (requests.length > 200) requests.shift();
     }
   };
-  const evaluate = async (expression, timeout = 260_000) => {
+  closeBrowser = () => call("Browser.close", {}, 5000);
+  const evaluate = async (expression, timeout = 30_000) => {
     const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, timeout);
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result?.value;
   };
-  const readRuntime = () => evaluate(`(async()=>{try{const m=await import('/sim/wsorb_bevy.js');const parse=x=>{try{return typeof x==='string'?JSON.parse(x):x}catch{return null}};const result=parse(m.command(JSON.stringify({op:'observe'})));const s=result?.state;const assets=Array.isArray(s?.assets)?s.assets:[];const byKind={};for(const a of assets)byKind[a.kind]=(byKind[a.kind]||0)+1;const pick=a=>a?{id:a.id,kind:a.kind,position:a.position,velocity:a.velocity,rotation:a.rotation,mass_kg:a.mass_kg}:null;const shuttle=assets.find(a=>a.id==='Shuttle');const target=assets.find(a=>a.id==='Target');const observation=parse(m.observation?.());return {renderer:parse(m.renderer_status?.()),snapshot:s?{time_s:s.time_s,seed:s.seed,frame:s.frame,shuttle:pick(shuttle),target:pick(target),mission:s.mission?{target_distance_m:s.mission.target_distance_m,relative_speed_mps:s.mission.relative_speed_mps,fuel_used_kg:s.mission.fuel_used_kg,damage:s.mission.damage,status:s.mission.status}:null,asset_counts:{total:assets.length,by_kind:byKind},assets:assets.slice(0,3).map(pick)}:null,radar_count:Array.isArray(observation?.radar)?observation.radar.length:Array.isArray(observation?.observations)?observation.observations.length:null};}catch(e){return {error:String(e)}}})()`);
+  const readRuntime = (options = {}) => evaluate(`(${runtimeSnapshot})(${JSON.stringify(options)})`);
+  const input = createInput(call, evaluate, readRuntime, delay);
   await call("Runtime.enable");
   await call("Page.enable");
+  await call("Page.bringToFront");
+  await call("Emulation.setFocusEmulationEnabled", { enabled: true });
   await call("Network.enable");
   await call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
   if (block === "wasm") await call("Network.setBlockedURLs", { urls: ["*/*.wasm*", "*.wasm*"] });
-  if (block === "python") await call("Network.setBlockedURLs", { urls: ["*cdn.jsdelivr.net/pyodide/*"] });
-  await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width <= 600 });
+  await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: process.argv.includes("--headed") ? 0 : 1, mobile: width <= 600 });
+  await call("Page.addScriptToEvaluateOnNewDocument", { source: `globalThis.__wsoGpuPreflight=(()=>{if(!navigator.gpu)return Promise.resolve({available:false,error:'navigator.gpu unavailable'});return navigator.gpu.requestAdapter().then(a=>a?({available:true,isFallbackAdapter:a.isFallbackAdapter??a.info?.isFallbackAdapter??null,info:a.info?{vendor:a.info.vendor,architecture:a.info.architecture,device:a.info.device,description:a.info.description}:null}):({available:false,error:'requestAdapter returned null'}),e=>({available:false,error:String(e)}))})()` });
   await call("Page.navigate", { url });
 
-  const stateExpression = `(()=>{const byId=id=>document.getElementById(id);const text=id=>byId(id)?.textContent?.trim()??null;const progress=id=>{const p=byId(id);return p?{value:p.value,max:p.max,percent:p.max?Math.round(p.value/p.max*100):null,indeterminate:p.hasAttribute('value')===false}:null};const c=byId('simulation-canvas');return {title:document.title,engine:text('sim-status'),worldMessage:text('world-message'),execution:text('execution-status'),console:text('console'),wasmProgressText:text('wasm-progress-text'),wasmProgress:progress('wasm-progress'),pythonProgressText:text('python-progress-text'),pythonProgress:progress('python-progress'),controls:Object.fromEntries(['run-strategy','step-button','reset-button','apply-thrust','cancel-thrust','export-button','stop-python'].map(id=>[id,{exists:!!byId(id),disabled:byId(id)?.disabled??null}])),canvas:c?{width:c.width,height:c.height,clientWidth:c.clientWidth,clientHeight:c.clientHeight,rect:{width:c.getBoundingClientRect().width,height:c.getBoundingClientRect().height}}:null,viewport:{width:innerWidth,height:innerHeight,documentWidth:document.documentElement.scrollWidth,horizontalOverflow:document.documentElement.scrollWidth>innerWidth}};})()`;
-  const capture = async path => {
+  const stateExpression = `(()=>{const byId=id=>document.getElementById(id);const text=id=>byId(id)?.textContent?.trim()??null;const c=byId('simulation-canvas');const visible=e=>!!(e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');return {title:document.title,engine:text('sim-status'),worldMessage:text('world-message'),bootVisible:!!byId('boot-screen')&&visible(byId('boot-screen')),externalPanels:Object.fromEntries(['editor','console','metrics','telemetry','shuttle-controls','python-console'].map(id=>[id,!!byId(id)])),externalControls:[...document.querySelectorAll('input,textarea,select,button,[contenteditable=true]')].filter(e=>!e.closest('#boot-screen')&&visible(e)).map(e=>({tag:e.tagName,id:e.id})),canvas:c?{width:c.width,height:c.height,clientWidth:c.clientWidth,clientHeight:c.clientHeight,rect:{width:c.getBoundingClientRect().width,height:c.getBoundingClientRect().height}}:null,viewport:{width:innerWidth,height:innerHeight,documentWidth:document.documentElement.scrollWidth,horizontalOverflow:document.documentElement.scrollWidth>innerWidth}};})()`;
+  capture = async path => {
     const screenshot = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: process.argv.includes("--full-page") });
     await writeFile(join(output, path), Buffer.from(screenshot.data, "base64"));
   };
   const waitForEngine = async () => evaluate(`(async()=>{const ready=new Set(['3D ready','World ready']);const errors=new Set(['3D unavailable','World unavailable','Engine failed']);const end=Date.now()+60000;while(Date.now()<end){const s=document.getElementById('sim-status')?.textContent?.trim();if(ready.has(s)||errors.has(s))return s;await new Promise(r=>setTimeout(r,100));}return document.getElementById('sim-status')?.textContent?.trim()||'missing';})()`, 65_000);
   const engine = await waitForEngine();
-  if (view && ["3D ready", "World ready"].includes(engine)) await evaluate(`document.getElementById(${JSON.stringify(`view-${view}`)})?.click()`);
-  await delay(300);
+  const ready = ["3D ready", "World ready"].includes(engine);
+  if (ready) await input.waitFrames();
+  const gpu = await evaluate(`globalThis.__wsoGpuPreflight||{available:false,error:'preflight missing'}`, 15_000);
   const before = await evaluate(stateExpression);
-  const runtimeBefore = ["3D ready", "World ready"].includes(engine) ? await readRuntime() : null;
+  const runtimeBefore = ready ? await readRuntime({ physics: true }) : null;
   await capture("before.png");
-  let room = null;
-  if (doRoom && ["3D ready", "World ready"].includes(engine)) {
-    room = await verifyRoom(evaluate, delay, url);
-    if (room.result !== "PASS") failed = true;
-  }
+  let controls = null;
+  if (doControls && ready) controls = await exerciseControls({ evaluate, call, readRuntime, input, capture });
+  const platform = doPlatform && ready ? await exerciseViewport({ evaluate, readRuntime, input, capture }) : null;
   let step = { requested: doStep, changed: null, beforeTime: null, afterTime: null };
-  if (doStep && ["3D ready", "World ready"].includes(engine)) {
-    const timeBefore = await evaluate("document.getElementById('time-value')?.textContent?.trim() ?? null");
-    await evaluate("document.getElementById('step-button')?.click()");
-    const timeAfter = await evaluate(`(async()=>{const start=${JSON.stringify(timeBefore)};const end=Date.now()+15000;while(Date.now()<end){const now=document.getElementById('time-value')?.textContent?.trim()??null;if(now!==start)return now;await new Promise(r=>setTimeout(r,100));}return document.getElementById('time-value')?.textContent?.trim()??null;})()`, 17_000);
-    step = { requested: true, beforeTime: timeBefore, afterTime: timeAfter, changed: timeAfter !== timeBefore };
+  if (doStep && ready) {
+    await input.focusScene();
+    const stateBefore = await readRuntime();
+    await input.pressKey("Period");
+    const stateAfter = await readRuntime();
+    await input.waitFrames(3);
+    const settled = await readRuntime();
+    const timeBefore = stateBefore?.snapshot?.time_s, timeAfter = stateAfter?.snapshot?.time_s;
+    step = { requested: true, beforeTime: timeBefore, afterTime: timeAfter, changed: Number.isFinite(timeBefore) && Number.isFinite(timeAfter) && timeAfter > timeBefore, paused: stateBefore?.runtime?.running === false && stateAfter?.runtime?.running === false, stableAfterStep: timeAfter === settled?.snapshot?.time_s };
+    step.passed = step.changed && step.paused && step.stableAfterStep;
   }
-  let strategy = { requested: runStrategy, status: null, timedOut: false };
-  if (runStrategy && ["3D ready", "World ready"].includes(engine)) {
-    await evaluate("document.getElementById('run-strategy')?.click()");
-    const outcome = await evaluate(`(async()=>{const end=Date.now()+240000;while(Date.now()<end){const s=document.getElementById('execution-status')?.textContent?.trim()||'';if(['Complete','Stopped with error','Stopped','Python unavailable'].includes(s))return {status:s,timedOut:false};await new Promise(r=>setTimeout(r,100));}return {status:document.getElementById('execution-status')?.textContent?.trim()||null,timedOut:true};})()`, 245_000);
-    strategy = { requested: true, ...outcome };
+  let mission = { requested: runMission, status: null, timedOut: false, passed: false };
+  if (runMission && ready) mission = await exerciseMission({ evaluate, readRuntime, input, delay, timeout: missionTimeout });
+  let selectedView = null;
+  if (view && ready) {
+    const viewKey = ({ orbit:"1", first_person:"2", third_person:"3", free:"4", overview:"5" })[view] || view;
+    const expected = ({ "1":"orbit", "2":"first_person", "3":"third_person", "4":"free", "5":"overview" })[viewKey];
+    await input.focusScene();
+    await input.pressKey(viewKey);
+    const actual = (await readRuntime())?.camera?.mode;
+    selectedView = { expected, actual, passed: actual === expected };
   }
   await Promise.allSettled(targetSetups);
   await delay(250);
   const after = await evaluate(stateExpression);
-  const runtimeAfter = ["3D ready", "World ready"].includes(engine) ? await readRuntime() : null;
+  const runtimeAfter = ready ? await readRuntime({ physics: true }) : null;
   const poseBefore = runtimeBefore?.snapshot?.shuttle?.position;
   const poseAfter = runtimeAfter?.snapshot?.shuttle?.position;
-  const poseChanged = Array.isArray(poseBefore) && Array.isArray(poseAfter) && poseBefore.some((value, index) => value !== poseAfter[index]);
+  const poseChanged = vectorDistance(poseBefore, poseAfter) > 0.000001;
   const simulationTimeChanged = runtimeBefore?.snapshot?.time_s !== undefined && runtimeAfter?.snapshot?.time_s !== undefined && runtimeBefore.snapshot.time_s !== runtimeAfter.snapshot.time_s;
   await capture("preview.png");
-  if (block) blockObserved ||= requests.some(item => item.type === "request-failed" && (block === "wasm" ? item.url?.includes(".wasm") : item.url?.includes("cdn.jsdelivr.net/pyodide/")));
-  const expectedBlockedOutcome = block === "wasm"
-    ? blockObserved && ["3D unavailable", "World unavailable", "Engine failed"].includes(engine)
-    : block === "python" && blockObserved && ["3D ready", "World ready"].includes(engine) && strategy.status === "Stopped with error";
+  if (block === "wasm") blockObserved ||= requests.some(item => item.type === "request-failed" && item.url?.includes(".wasm") && (item.blockedReason || /BLOCKED_BY_CLIENT/.test(item.error)));
+  const expectedBlockedOutcome = block === "wasm" && blockObserved && ["3D unavailable", "World unavailable", "Engine failed"].includes(engine) && after.bootVisible && !!after.worldMessage;
   const errors = messages.filter(item => item.type === "exception" || item.type === "error");
-  const unexpectedNetworkFailures = requests.filter(item => !blockObserved || !(block === "wasm" ? item.url?.includes(".wasm") : item.url?.includes("cdn.jsdelivr.net/pyodide/")));
+  const unexpectedNetworkFailures = requests.filter(item => !(block === "wasm" && blockObserved && item.url?.includes(".wasm")));
   const runtimeReady = ["3D ready", "World ready"].includes(engine) && ["3D ready", "World ready"].includes(after.engine);
-  if (block ? !expectedBlockedOutcome : !runtimeReady) failed = true;
-  if (!block && (errors.length || unexpectedNetworkFailures.length)) failed = true;
-  if (doStep && !step.changed) failed = true;
-  if (runStrategy && !block && (strategy.timedOut || strategy.status !== "Complete")) failed = true;
-  if (runStrategy && !block && (!simulationTimeChanged || !poseChanged)) failed = true;
-  const report = { url, viewport: { width, height }, requested: { block, step: doStep, runStrategy, room: doRoom }, engine, state: { before, after }, runtime: { before: runtimeBefore, after: runtimeAfter, motion: { shuttlePoseChanged: poseChanged, simulationTimeChanged } }, room, step, strategy, blockedOutcomeObserved: block ? expectedBlockedOutcome : null, messages: messages.slice(-200), networkFailures: requests.slice(-200), result: failed ? "FAIL" : "PASS" };
+  if (block ? !expectedBlockedOutcome : !runtimeReady || gpu?.available !== true) failed = true;
+  if (unexpectedNetworkFailures.length || (!block && errors.length)) failed = true;
+  const canvasOnly = [before, after].every(state => !Object.values(state.externalPanels).some(Boolean) && !state.externalControls.length && !state.viewport.horizontalOverflow && state.canvas?.width > 0 && state.canvas?.height > 0);
+  const runtimeReadable = [runtimeBefore, runtimeAfter].every(state => !state?.error && state?.renderer?.ready === true && Number.isFinite(state.snapshot?.time_s) && vectorDistance(state.snapshot?.shuttle?.position, [0, 0, 0]) !== null && vectorDistance(state.snapshot?.shuttle?.velocity, [0, 0, 0]) !== null && vectorDistance(state.snapshot?.landing_pad?.position, [0, 0, 0]) !== null && ["running", "success", "failed_damage"].includes(state.snapshot?.mission?.status));
+  if (!canvasOnly || (!block && (before.bootVisible || after.bootVisible || !runtimeReadable))) failed = true;
+  if (doStep && !step.passed) failed = true;
+  if (runMission && !mission.passed) failed = true;
+  if (view && !selectedView?.passed) failed = true;
+  if (doControls && (!controls || controls.result !== "PASS")) failed = true;
+  if (doPlatform && (!platform?.maximize?.passed || !platform?.fullscreen?.passed)) failed = true;
+  report = { url: redactUrl(url), viewport: { width, height }, requested: { block, view, step: doStep, runMission, controls: doControls, platform: doPlatform }, engine, gpu, softwareRenderer: gpu?.isFallbackAdapter === true || /swiftshader|software|llvmpipe/i.test(JSON.stringify(gpu?.info)), state: { before, after }, canvasOnly, runtime: { readable: runtimeReadable, before: runtimeBefore, after: runtimeAfter, motion: { shuttlePoseChanged: poseChanged, simulationTimeChanged } }, selectedView, controls, platform, mission, step, blockedOutcomeObserved: block ? expectedBlockedOutcome : null, messages: messages.slice(-200), networkFailures: requests.slice(-200), result: failed ? "FAIL" : "PASS" };
   await writeFile(join(output, "preview.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   console.log(`Screenshots: ${join(output, "before.png")} and ${join(output, "preview.png")}`);
+} catch (error) {
+  failed = true;
+  await capture?.("failure.png").catch(() => {});
+  report = { ...report, url: redactUrl(url), viewport: { width, height }, error: error.stack || String(error), messages, networkFailures: requests, browserError, result: "FAIL" };
+  await writeFile(join(output, "preview.json"), JSON.stringify(report, null, 2));
+  console.error(JSON.stringify(report, null, 2));
 } finally {
+  await closeBrowser?.().catch(() => {});
+  for (const timer of commandTimers) clearTimeout(timer);
+  commandTimers.clear();
   socket?.close();
   child.kill("SIGTERM");
-  await new Promise(resolve => { if (child.exitCode !== null) resolve(); else { child.once("exit", resolve); setTimeout(resolve, 3000).unref(); } });
+  await new Promise(resolve => { if (child.exitCode !== null) resolve(); else { child.once("exit", resolve); setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 3000).unref(); } });
   server.close();
   await rm(profile, { recursive: true, force: true }).catch(() => {});
 }
 if (failed) process.exitCode = 1;
 
-function optionValue(name) { return process.argv.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3); }
+function optionValue(name) {
+  const inline = process.argv.find(arg => arg.startsWith(`--${name}=`));
+  if (inline !== undefined) {
+    const value = inline.slice(name.length + 3);
+    if (!value) throw new Error(`--${name} requires a value.`);
+    return value;
+  }
+  const index = process.argv.indexOf(`--${name}`);
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`--${name} requires a value.`);
+  return value;
+}
 function optionNumber(name, fallback, min, max) {
   const raw = optionValue(name);
   if (raw === undefined) return fallback;
@@ -196,96 +244,415 @@ function optionNumber(name, fallback, min, max) {
 }
 function addMessage(item) { messages.push({ ...item, text: String(item.text || "").slice(0, 8000) }); if (messages.length > 200) messages.shift(); }
 
-async function verifyRoom(evaluate, delay, pageUrl) {
-  const outcome = { requested: true, unauthorizedStatus: null, authorizedStatus: null, snapshotBytes: null, commandStatus: null, commandSnapshotBytes: null, viewerWelcome: false, viewerResult: false, result: "FAIL" };
-  let viewer;
+function redactUrl(raw) { const u = new URL(raw); if (u.hash) u.hash = "[redacted]"; return u.toString(); }
+
+// This function is serialized into the page. Keep all module reads here; input
+// checks below interact with the game through CDP, never command/view setters.
+async function runtimeSnapshot({ statusOnly = false, physics = false } = {}) {
   try {
-    const page = new URL(pageUrl);
-    await evaluate("document.getElementById('share-button')?.click(); document.getElementById('create-room')?.click()");
-    const link = await evaluate(`(async()=>{const end=Date.now()+20000;while(Date.now()<end){const value=document.getElementById('share-link')?.value;if(value)return value;await new Promise(r=>setTimeout(r,100));}throw new Error('Room creation timed out');})()`, 25_000);
-    const privateLink = new URL(link);
-    const params = new URLSearchParams(privateLink.hash.slice(1));
-    const id = params.get("room");
-    const key = params.get("key");
-    if (!id || !key) throw new Error("Room link was incomplete");
-    const hostReady = await evaluate(`(async()=>{const end=Date.now()+20000;while(Date.now()<end){const button=document.getElementById('claim-host');if(button&&!button.disabled&&button.textContent.trim()==='Release simulation host')return true;await new Promise(r=>setTimeout(r,100));}return false;})()`, 25_000);
-    outcome.hostClaimed = hostReady;
-    if (!hostReady) throw new Error("Browser did not connect and claim the simulation host");
-    await evaluate("document.querySelector('#share-dialog .dialog-close')?.click()");
-    const endpoint = new URL(`/api/rooms/${encodeURIComponent(id)}/state`, page.origin);
-    const unauthorized = await fetch(endpoint);
-    outcome.unauthorizedStatus = unauthorized.status;
-    const stateUrl = new URL(`/api/rooms/${encodeURIComponent(id)}/state`, page.origin);
-    const authorized = await fetch(stateUrl, { headers: { Authorization: `Bearer ${key}` } });
-    outcome.authorizedStatus = authorized.status;
-    if (authorized.ok) {
-      const data = await authorized.json();
-      outcome.snapshotBytes = new TextEncoder().encode(data.state ? JSON.stringify(data.state) : "").byteLength;
+    const m = await import("/sim/wsorb_bevy.js");
+    const parse = value => typeof value === "string" ? JSON.parse(value) : value;
+    const status = { renderer: parse(m.renderer_status()), camera: parse(m.camera_status()), runtime: parse(m.runtime_status()) };
+    if (statusOnly) return status;
+    const response = parse(m.command(JSON.stringify({ op: "observe" })));
+    if (!response?.ok || !response.state) throw new Error(response?.error || "observe returned no state");
+    const s = response.state, assets = s.assets;
+    if (!Array.isArray(assets)) throw new Error("observe returned no assets");
+    const byKind = {};
+    for (const asset of assets) byKind[asset.kind] = (byKind[asset.kind] || 0) + 1;
+    const pick = a => a ? { id: a.id, kind: a.kind, status: a.status, position: a.position, velocity: a.velocity, rotation: a.rotation, angular_velocity_rad_s: a.angular_velocity_rad_s, commanded_accel_mps2: a.commanded_accel_mps2, mass_kg: a.mass_kg, fuel_kg: a.fuel_kg } : null;
+    const result = { ...status, snapshot: { time_s: s.time_s, seed: s.seed, frame: s.frame, environment: s.environment || null, shuttle: pick(assets.find(a => a.id === "Lander" || a.id === "Shuttle")), target: pick(assets.find(a => a.id === s.mission?.target_id || a.id === "ReturnShip" || a.id === "Target")), landing_pad: pick(assets.find(a => a.id === "LandingPad")), mission: s.mission || null, asset_counts: { total: assets.length, by_kind: byKind }, assets: assets.slice(0, 3).map(pick) }, radar_count: Array.isArray(s.observations) ? s.observations.length : null };
+    if (physics) {
+      // Compare every physical entity and mission field, not the camera's frame
+      // counter or just the lander's first coordinate.
+      const bytes = new TextEncoder().encode(JSON.stringify(s));
+      const hash = await crypto.subtle.digest("SHA-256", bytes);
+      result.physics = { time_s: s.time_s, asset_count: assets.length, sha256: Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("") };
     }
-
-    const wsUrl = new URL(`/api/rooms/${encodeURIComponent(id)}/ws`, page.origin);
-    wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-    viewer = new WebSocket(wsUrl, ["wsorb", `auth.${key}`]);
-    const received = [];
-    viewer.addEventListener("message", event => {
-      try { received.push(JSON.parse(event.data)); } catch { /* Ignore malformed frames. */ }
-    });
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Viewer WebSocket timed out")), 15000);
-      viewer.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-      viewer.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Viewer WebSocket failed")); }, { once: true });
-    });
-    const welcomeEnd = Date.now() + 15000;
-    while (!received.some(item => item.type === "welcome") && Date.now() < welcomeEnd) await delay(100);
-    outcome.viewerWelcome = received.some(item => item.type === "welcome");
-    if (!outcome.viewerWelcome) throw new Error("Viewer did not receive a room welcome");
-
-    const viewerCommandId = `preview-viewer-${Date.now()}`;
-    viewer.send(JSON.stringify({ type: "command", id: viewerCommandId, command: { op: "observe" } }));
-    const viewerResultEnd = Date.now() + 35000;
-    while (!received.some(item => item.type === "result" && item.id === viewerCommandId) && Date.now() < viewerResultEnd) await delay(100);
-    const viewerResult = received.find(item => item.type === "result" && item.id === viewerCommandId);
-    outcome.viewerResult = !!viewerResult;
-    outcome.viewerResultSnapshotBytes = viewerResult?.state ? new TextEncoder().encode(JSON.stringify(viewerResult.state)).byteLength : 0;
-
-    const observeResponse = await fetch(new URL(`/api/rooms/${encodeURIComponent(id)}/commands`, page.origin), {
-      method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ id: `preview-observe-${Date.now()}`, command: { op: "observe" } }),
-    });
-    outcome.commandStatus = observeResponse.status;
-    if (!observeResponse.ok) {
-      const failure = await observeResponse.json().catch(() => ({}));
-      outcome.commandError = typeof failure.error === "string" ? failure.error.slice(0, 300) : `HTTP ${observeResponse.status}`;
-      throw new Error(`Command endpoint returned HTTP ${observeResponse.status}`);
-    }
-    if (observeResponse.ok) {
-      const result = await observeResponse.json();
-      outcome.commandSnapshotBytes = result?.state ? new TextEncoder().encode(JSON.stringify(result.state)).byteLength : 0;
-    }
-    const stepResponse = await fetch(new URL(`/api/rooms/${encodeURIComponent(id)}/commands`, page.origin), {
-      method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ id: `preview-step-${Date.now()}`, command: { op: "step", seconds: 1 } }),
-    });
-    const stepped = stepResponse.ok ? await stepResponse.json() : null;
-    outcome.stepStatus = stepResponse.status;
-    if (!stepResponse.ok) throw new Error(`Step endpoint returned HTTP ${stepResponse.status}`);
-    outcome.simulationTimeAfterStep = stepped?.state?.time_s ?? null;
-    const broadcastEnd = Date.now() + 5000;
-    while (!received.some(item => item.type === "state" && item.state?.time_s === outcome.simulationTimeAfterStep) && Date.now() < broadcastEnd) await delay(100);
-    const broadcastState = received.find(item => item.type === "state" && item.state?.time_s === outcome.simulationTimeAfterStep);
-    outcome.viewerSawStepBroadcast = !!broadcastState;
-    outcome.broadcastSnapshotBytes = broadcastState?.state ? new TextEncoder().encode(JSON.stringify(broadcastState.state)).byteLength : 0;
-    const refresh = await fetch(stateUrl, { headers: { Authorization: `Bearer ${key}` } });
-    if (refresh.ok) {
-      const data = await refresh.json();
-      outcome.persistedSnapshotBytes = data.state ? new TextEncoder().encode(JSON.stringify(data.state)).byteLength : 0;
-      outcome.snapshotPersisted = outcome.persistedSnapshotBytes > 0;
-    }
-    outcome.result = outcome.unauthorizedStatus === 401 && outcome.authorizedStatus === 200 && outcome.commandStatus === 200 && outcome.stepStatus === 200 && outcome.viewerWelcome && outcome.viewerResult && outcome.viewerResultSnapshotBytes > 64 * 1024 && outcome.viewerSawStepBroadcast && outcome.snapshotPersisted ? "PASS" : "FAIL";
-  } catch (error) {
-    outcome.error = String(error?.message || error).slice(0, 500);
-  } finally {
-    if (viewer && viewer.readyState < WebSocket.CLOSING) viewer.close(1000, "preview complete");
-  }
-  return outcome;
+    return result;
+  } catch (error) { return { error: String(error) }; }
 }
+
+function createInput(call, evaluate, readRuntime, delay) {
+  // Waiting for rendered Bevy frames also works when software WebGPU is much
+  // slower than Chrome's animation callbacks. Never release in the same frame.
+  const waitFrames = async (count = 2, minimumMs = 80) => {
+    const before = await readRuntime({ statusOnly: true });
+    const frame = before?.renderer?.rendered_frames;
+    if (!Number.isFinite(frame)) throw new Error(`Cannot synchronize input with Bevy frames: ${before?.error || "rendered_frames missing"}`);
+    const deadline = Date.now() + 15_000;
+    await delay(minimumMs);
+    while (Date.now() < deadline) {
+      const state = await readRuntime({ statusOnly: true });
+      if (state?.renderer?.error || state?.error) throw new Error(state.error || state.renderer.error);
+      if (state?.renderer?.rendered_frames >= frame + count) return;
+      await delay(25);
+    }
+    throw new Error(`Bevy did not render ${count} frames after frame ${frame}; input verification stopped.`);
+  };
+  const keyEvent = async (type, name, synchronize = true) => {
+    const { code, key, vk } = keyDescriptor(name);
+    await call("Input.dispatchKeyEvent", { type, code, key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
+    if (synchronize) await waitFrames();
+  };
+  const keyDown = (name, synchronize) => keyEvent("keyDown", name, synchronize);
+  const keyUp = (name, synchronize) => keyEvent("keyUp", name, synchronize);
+  const pressKey = async (name, synchronize) => {
+    try { await keyDown(name, synchronize); } finally { await keyUp(name, synchronize); }
+  };
+  const mouse = async (type, x, y, { button = "none", buttons = 0, deltaY = 0 } = {}) => {
+    await call("Input.dispatchMouseEvent", { type, x, y, button, buttons, pointerType: "mouse", ...(type === "mouseWheel" ? { deltaX: 0, deltaY } : {}), ...(type === "mousePressed" || type === "mouseReleased" ? { clickCount: 1 } : {}) });
+    await waitFrames(2, 50);
+  };
+  const click = async (x, y, button = "left") => {
+    const buttons = button === "right" ? 2 : button === "middle" ? 4 : 1;
+    await mouse("mouseMoved", x, y);
+    try { await mouse("mousePressed", x, y, { button, buttons }); }
+    finally { await mouse("mouseReleased", x, y, { button }); }
+  };
+  const canvasBox = () => evaluate(`(()=>{const c=document.getElementById('simulation-canvas');if(!c)return null;const r=c.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`);
+  const scenePoint = async () => {
+    const box = await canvasBox();
+    if (!box?.width || !box?.height) throw new Error("Canvas missing or has no rendered dimensions");
+    return { x: Math.round(box.x + box.width * .35), y: Math.round(box.y + box.height * .45) };
+  };
+  const moveToScene = async () => { const p = await scenePoint(); await mouse("mouseMoved", p.x, p.y); return p; };
+  const focusScene = async ({ preserveFocus = false } = {}) => {
+    await evaluate("document.getElementById('simulation-canvas')?.focus()");
+    const p = await scenePoint();
+    // Right-click activates the DOM canvas without left-click object picking.
+    await click(p.x, p.y, preserveFocus ? "right" : "left");
+    if ((await readRuntime({ statusOnly: true }))?.camera?.active !== true) throw new Error("A real canvas click did not activate the camera");
+    return p;
+  };
+  const drag = async (button, dx, dy) => {
+    const p = await moveToScene(), buttons = button === "right" ? 2 : button === "middle" ? 4 : 1;
+    try {
+      await mouse("mousePressed", p.x, p.y, { button, buttons });
+      for (let i = 1; i <= 6; i++) await mouse("mouseMoved", p.x + dx * i / 6, p.y + dy * i / 6, { button, buttons });
+    } finally { await mouse("mouseReleased", p.x + dx, p.y + dy, { button }); }
+  };
+  return { waitFrames, keyDown, keyUp, pressKey, mouse, click, canvasBox, moveToScene, focusScene, drag };
+}
+
+function keyDescriptor(name) {
+  const code = /^[0-9]$/.test(name) ? `Digit${name}` : /^[a-z]$/i.test(name) ? `Key${name.toUpperCase()}` : name;
+  const special = { Space: [" ", 32], Period: [".", 190], Comma: [",", 188], Slash: ["/", 191], Escape: ["Escape", 27], Enter: ["Enter", 13], Tab: ["Tab", 9], ShiftLeft: ["Shift", 16] };
+  const [key, vk] = special[code] || (code.startsWith("Digit") ? [code.slice(5), Number(code.slice(5)) + 48] : code.startsWith("Key") ? [code.slice(3).toLowerCase(), code.charCodeAt(3)] : []);
+  if (!key || !vk) throw new Error(`Unsupported preview key: ${name}`);
+  return { code, key, vk };
+}
+
+async function exerciseControls({ evaluate, call, readRuntime, input, capture }) {
+  const result = { modes: {}, orbitDrag: false, panDrag: false, wheelZoom: false, freeMove: false, focusGuard: false, mousePicking: false, focusCycle: false, keyboardOverHud: false, worldUnchangedDuringCameraInput: false, fullscreen: null, maximize: null, nativeHud: null, evidence: {} };
+  try {
+    // Take the physical baseline before focusing, selecting a mode or moving
+    // the camera. Native mission-control clicks are checked separately below.
+    const baseline = await readRuntime({ physics: true });
+    if (baseline.runtime?.running !== false || !baseline.physics?.sha256) throw new Error("Camera verification requires a readable, paused mission");
+    result.evidence.physicsBeforeCamera = baseline.physics;
+    const pose = async () => (await readRuntime({ statusOnly: true }))?.camera;
+    await evaluate(`(()=>{const i=document.createElement('input');i.id='__preview_focus_guard';i.setAttribute('aria-label','temporary preview focus guard');i.style.cssText='position:fixed;left:0;top:0;width:2px;height:2px;z-index:99999';document.body.append(i)})()`);
+    try {
+      const { root } = await call("DOM.getDocument");
+      const { nodeId } = await call("DOM.querySelector", { nodeId: root.nodeId, selector: "#__preview_focus_guard" });
+      await call("DOM.focus", { nodeId });
+      await delay(150);
+      const beforeGuard = await readRuntime({ physics: true });
+      // Canvas blur may suspend Bevy redraws. Test real DOM input without
+      // demanding game frames until focus returns to the canvas.
+      await input.keyDown("KeyW", false);
+      await delay(300);
+      await input.keyUp("KeyW", false);
+      for (const key of ["5", "Space", "Period", "KeyT"]) await input.pressKey(key, false);
+      await call("Input.insertText", { text: "WASD" });
+      await delay(150);
+      const guarded = await evaluate(`(()=>{const i=document.getElementById('__preview_focus_guard');return {focused:document.activeElement===i,value:i?.value}})()`);
+      const afterGuard = await readRuntime({ physics: true });
+      result.focusGuard = guarded.focused && guarded.value === "WASD" && samePhysics(beforeGuard, afterGuard) && sameCamera(beforeGuard.camera, afterGuard.camera) && beforeGuard.runtime.running === afterGuard.runtime.running && beforeGuard.runtime.rate === afterGuard.runtime.rate;
+      result.evidence.focusGuard = { input: guarded, before: beforeGuard.camera, after: afterGuard.camera, physicsBefore: beforeGuard.physics, physicsAfter: afterGuard.physics };
+    } finally { await evaluate("document.getElementById('__preview_focus_guard')?.remove()"); }
+
+    await input.focusScene({ preserveFocus: true });
+    for (const [key, name] of [["1", "orbit"], ["2", "first_person"], ["3", "third_person"], ["4", "free"], ["5", "overview"]]) {
+      await input.pressKey(key);
+      const actual = await pose();
+      result.modes[name] = { ...actual, passed: actual?.mode === name };
+      await capture(`controls-${name}.png`);
+    }
+    await capture("controls-overview.png");
+    await input.pressKey("1");
+    const orbitBefore = await pose();
+    await input.drag("left", 52, 8);
+    const orbitAfter = await pose();
+    result.evidence.orbit = cameraDelta(orbitBefore, orbitAfter);
+    result.orbitDrag = orbitAfter?.mode === "orbit" && orbitAfter?.focus === orbitBefore?.focus && result.evidence.orbit.positionDeltaM > .01 && result.evidence.orbit.rotationDelta > .000001;
+
+    const panBefore = await pose();
+    await input.drag("right", 38, 24);
+    const panAfter = await pose();
+    await input.waitFrames(3);
+    const panSettled = await pose();
+    result.evidence.pan = { ...cameraDelta(panBefore, panAfter), settled: panSettled };
+    result.panDrag = panAfter?.mode === "orbit" && panAfter?.focus === panBefore?.focus && result.evidence.pan.positionDeltaM > .01 && Number.isFinite(result.evidence.pan.rotationDelta) && result.evidence.pan.rotationDelta < .03 && sameCamera(panAfter, panSettled);
+
+    const zoomBefore = await pose(), wheelPoint = await input.moveToScene();
+    await input.mouse("mouseWheel", wheelPoint.x, wheelPoint.y, { deltaY: -120 });
+    const zoomAfter = await pose();
+    result.evidence.zoom = cameraDelta(zoomBefore, zoomAfter);
+    result.wheelZoom = zoomAfter?.mode === "orbit" && zoomAfter?.focus === zoomBefore?.focus && Number.isFinite(zoomBefore?.distance_m) && Number.isFinite(zoomAfter?.distance_m) && zoomAfter.distance_m < zoomBefore.distance_m - .01 && result.evidence.zoom.positionDeltaM > .01;
+
+    await input.pressKey("4");
+    const moveBefore = await pose();
+    try { await input.keyDown("KeyW"); await input.waitFrames(3, 300); }
+    finally { await input.keyUp("KeyW"); }
+    const moveAfter = await pose();
+    result.evidence.freeMove = cameraDelta(moveBefore, moveAfter);
+    const forwardDistance = forwardTravel(moveBefore, moveAfter);
+    result.evidence.freeMove.forwardDistanceM = forwardDistance;
+    result.freeMove = moveBefore?.mode === "free" && moveAfter?.mode === "free" && moveAfter?.focus === moveBefore?.focus && result.evidence.freeMove.positionDeltaM > .01 && forwardDistance > .01;
+
+    await input.pressKey("KeyF");
+    const pickBefore = await pose(), pickBox = await input.canvasBox();
+    await input.click(pickBox.x + pickBox.width * .5, pickBox.y + pickBox.height * .5);
+    const pickedLander = await pose();
+    await input.click(pickBox.x + pickBox.width * .98, pickBox.y + pickBox.height * .4);
+    const picked = await pose();
+    for (let i = 0; i < 8 && (await pose())?.focus !== "Shuttle"; i++) await input.pressKey("Comma");
+    const pickRestored = await pose();
+    result.mousePicking = pickBefore?.focus === "Shuttle" && pickedLander?.focus === "Shuttle" && ["Phobos", "LandingPad"].includes(picked?.focus) && pickRestored?.focus === "Shuttle";
+    result.evidence.mousePicking = { before: pickBefore, pickedLander, picked, restored: pickRestored };
+    const focusBefore = await pose();
+    await input.pressKey("Slash");
+    const focusNext = await pose();
+    await input.pressKey("Comma");
+    const focusRestored = await pose();
+    result.focusCycle = focusBefore?.focus === "Shuttle" && focusNext?.focus === "Target" && focusRestored?.focus === "Shuttle" && [focusBefore, focusNext, focusRestored].every(p => p?.mode === "orbit");
+    result.evidence.focusCycle = { before: focusBefore, next: focusNext, restored: focusRestored };
+    const viewport = await exerciseViewport({ evaluate, readRuntime, input, capture });
+    result.maximize = viewport.maximize;
+    result.fullscreen = viewport.fullscreen;
+    const hoveredButton = (await locateHudButtons({ call, evaluate, input }))[0];
+    if (!hoveredButton) throw new Error("No HUD button available for keyboard hover verification");
+    await input.mouse("mouseMoved", hoveredButton.x + hoveredButton.width / 2, hoveredButton.y + hoveredButton.height / 2);
+    await input.pressKey("4");
+    result.keyboardOverHud = (await pose())?.mode === "free";
+    await input.pressKey("1");
+
+    const afterCamera = await readRuntime({ physics: true });
+    result.evidence.physicsAfterCamera = afterCamera.physics;
+    result.worldUnchangedDuringCameraInput = samePhysics(baseline, afterCamera) && afterCamera.runtime?.running === false;
+    result.nativeHud = await exerciseNativeHud({ evaluate, call, readRuntime, input, capture, baseline });
+    result.result = Object.keys(result.modes).length === 5 && Object.values(result.modes).every(p => p.passed) && result.orbitDrag && result.panDrag && result.wheelZoom && result.freeMove && result.focusGuard && result.mousePicking && result.focusCycle && result.keyboardOverHud && result.worldUnchangedDuringCameraInput && result.maximize?.passed && (result.fullscreen?.supported === false || result.fullscreen?.passed) && result.nativeHud?.result === "PASS" ? "PASS" : "FAIL";
+  } catch (error) { result.error = error.stack || String(error); result.result = "FAIL"; }
+  return result;
+}
+
+async function exerciseViewport({ evaluate, readRuntime, input, capture }) {
+  const read = async () => {
+    const dom = await evaluate(`(()=>{const c=document.getElementById('simulation-canvas'),v=document.getElementById('simulation-viewport'),r=c.getBoundingClientRect();return {fullscreenEnabled:document.fullscreenEnabled===true&&typeof v.requestFullscreen==='function',fullscreenElement:document.fullscreenElement?.id||null,windowed:v.classList.contains('windowed'),width:innerWidth,height:innerHeight,canvas:{x:r.x,y:r.y,width:r.width,height:r.height,bufferWidth:c.width,bufferHeight:c.height},dpr:devicePixelRatio}})()`);
+    return { ...dom, diagnostic: await evaluate("globalThis.__wsorbFullscreenFailure || null"), runtime: (await readRuntime({ statusOnly: true }))?.runtime };
+  };
+  await input.focusScene({ preserveFocus: true });
+  const before = await read();
+  // Normalize by real input if the hosted page was already windowed.
+  if (before.windowed) await input.pressKey("KeyM");
+  const maximizedBefore = await read();
+  await input.pressKey("KeyM");
+  const windowed = await read();
+  await capture("windowed.png");
+  await input.pressKey("KeyM");
+  const maximizedAfter = await read();
+  const maximize = { before: maximizedBefore, windowed, after: maximizedAfter, passed: windowed.windowed && windowed.runtime?.maximized === false && windowed.canvas.width < maximizedBefore.canvas.width - 1 && windowed.canvas.height < maximizedBefore.canvas.height - 1 && fillsViewport(maximizedAfter) && maximizedAfter.runtime?.maximized === true && !maximizedAfter.windowed && bufferMatches(windowed) && bufferMatches(maximizedAfter) };
+  const fullBefore = await read();
+  if (!fullBefore.fullscreenEnabled) return { maximize, fullscreen: { supported: false, before: fullBefore, passed: null, status: "unsupported_browser_api" } };
+  await input.pressKey("KeyX");
+  await input.waitFrames(3, 200);
+  const fullAfter = await read();
+  const entered = fullAfter.fullscreenElement === "simulation-viewport" && fullAfter.runtime?.fullscreen === true;
+  let exited = null;
+  if (entered) {
+    await capture("gamefull.png");
+    await input.pressKey("KeyX");
+    await input.waitFrames(3, 200);
+    exited = await read();
+  }
+  const fullscreen = { supported: true, before: fullBefore, after: fullAfter, exited, apiEntered: entered, passed: entered && fillsViewport(fullAfter) && bufferMatches(fullAfter) && exited?.fullscreenElement === null && exited?.runtime?.fullscreen === false && fillsViewport(exited), status: entered ? "entered" : "failed_to_enter" };
+  if (fullscreen.passed) fullscreen.status = "verified_enter_and_exit";
+  return { maximize, fullscreen };
+}
+
+async function exerciseNativeHud({ evaluate, call, readRuntime, input, capture, baseline }) {
+  const result = { locationMethod: "screenshot button rectangles in native HUD source order", buttons: null, step: null, playback: null, rates: [], reset: null, result: "FAIL" };
+  try {
+    const actions = async (allowDisabledStep = false) => {
+      await input.moveToScene();
+      const buttons = await locateHudButtons({ call, evaluate, input });
+      const running = (await readRuntime({ statusOnly: true }))?.runtime?.running;
+      if (buttons.length !== 8 && !(allowDisabledStep && running && buttons.length === 7)) throw new Error(`Expected eight native mission buttons, found ${buttons.length}: ${JSON.stringify(buttons)}`);
+      return buttons;
+    };
+    const clickAction = async index => {
+      const buttons = await actions(index === 0), b = buttons[index];
+      await input.click(b.x + b.width / 2, b.y + b.height / 2);
+      return b;
+    };
+    result.buttons = await actions();
+    await capture("native-hud.png");
+    const stepBefore = await readRuntime();
+    const stepButton = await clickAction(1);
+    const stepAfter = await readRuntime();
+    await input.waitFrames(3);
+    const stepSettled = await readRuntime();
+    result.step = { button: stepButton, beforeTime: stepBefore.snapshot?.time_s, afterTime: stepAfter.snapshot?.time_s, settledTime: stepSettled.snapshot?.time_s, passed: stepBefore.runtime?.running === false && stepAfter.runtime?.running === false && Number.isFinite(stepBefore.snapshot?.time_s) && stepAfter.snapshot?.time_s > stepBefore.snapshot.time_s && stepSettled.snapshot?.time_s === stepAfter.snapshot.time_s };
+
+    const runButton = await clickAction(0);
+    await input.waitFrames(4, 300);
+    const running = await readRuntime();
+    const pauseButton = await clickAction(0);
+    const paused = await readRuntime();
+    await input.waitFrames(3);
+    const pausedSettled = await readRuntime();
+    result.playback = { runButton, pauseButton, running: { runtime: running.runtime, time_s: running.snapshot?.time_s }, paused: { runtime: paused.runtime, time_s: paused.snapshot?.time_s }, passed: running.runtime?.running === true && running.snapshot?.time_s > stepAfter.snapshot?.time_s && paused.runtime?.running === false && pausedSettled.snapshot?.time_s === paused.snapshot?.time_s };
+
+    let previousRate = paused.runtime?.rate;
+    for (let i = 0; i < 3; i++) {
+      const expected = ({ 1: 5, 5: 10, 10: 1 })[previousRate];
+      const button = await clickAction(4), after = await readRuntime();
+      result.rates.push({ button, before: previousRate, expected, actual: after.runtime?.rate, passed: Number.isFinite(expected) && after.runtime?.rate === expected && after.runtime?.running === false && after.snapshot?.time_s === paused.snapshot?.time_s });
+      previousRate = after.runtime?.rate;
+    }
+
+    const beforeReset = await readRuntime({ physics: true });
+    const resetButton = await clickAction(2);
+    const promptState = await readRuntime({ physics: true });
+    const box = await input.canvasBox();
+    const promptButtons = await locateHudButtons({ call, evaluate, input, region: { x: box.x + box.width * .05, y: box.y + box.height * .35, width: box.width * .9, height: Math.min(190, box.height * .65) } });
+    // Reset and Cancel are the two buttons in the native modal, not DOM buttons.
+    const left = box.x + box.width * .05 + 10;
+    const confirmation = promptButtons.filter(b => Math.abs(b.x - left) < 8);
+    await capture("native-reset.png");
+    if (confirmation.length !== 2) throw new Error(`Could not identify both native reset confirmation buttons: ${JSON.stringify(promptButtons)}`);
+    const confirmButton = confirmation[0];
+    await input.click(confirmButton.x + confirmButton.width / 2, confirmButton.y + confirmButton.height / 2);
+    const reset = await readRuntime({ physics: true });
+    result.reset = { button: resetButton, confirmButton, promptButtons: confirmation, promptDidNotReset: samePhysics(beforeReset, promptState), beforeTime: beforeReset.snapshot?.time_s, afterTime: reset.snapshot?.time_s, phase: reset.snapshot?.mission?.phase, shuttle: reset.snapshot?.shuttle, passed: beforeReset.snapshot?.time_s > 0 && samePhysics(beforeReset, promptState) && reset.runtime?.running === false && reset.snapshot?.time_s === 0 && reset.snapshot?.mission?.phase === "on_pad" && reset.snapshot?.mission?.status === "running" && samePhysics(baseline, reset) };
+    await input.focusScene();
+    await input.pressKey("Tab");
+    await input.pressKey("Tab");
+    const keyboardBefore = await readRuntime();
+    await input.pressKey("Enter");
+    const keyboardAfter = await readRuntime();
+    await input.waitFrames(3);
+    const keyboardSettled = await readRuntime();
+    result.keyboardStep = { beforeTime: keyboardBefore.snapshot?.time_s, afterTime: keyboardAfter.snapshot?.time_s, passed: keyboardBefore.runtime?.running === false && keyboardAfter.runtime?.running === false && keyboardAfter.snapshot?.time_s > keyboardBefore.snapshot?.time_s && keyboardAfter.snapshot?.time_s === keyboardSettled.snapshot?.time_s };
+    result.result = result.step.passed && result.playback.passed && result.rates.length === 3 && result.rates.every(rate => rate.passed) && result.reset.passed && result.keyboardStep.passed ? "PASS" : "FAIL";
+  } catch (error) { result.error = error.stack || String(error); }
+  return result;
+}
+
+async function locateHudButtons({ call, evaluate, input, region }) {
+  const box = await input.canvasBox();
+  const viewport = await evaluate("({width:innerWidth,height:innerHeight})");
+  const screenshot = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  return evaluate(`(${screenshotButtons})(${JSON.stringify(screenshot.data)},${JSON.stringify({ viewport, region: region || { x: box.x, y: box.y, width: box.width, height: box.height * .48 } })})`);
+}
+
+// Decode CDP's screenshot offscreen. This reads rendered button backgrounds;
+// it neither changes the WebGPU canvas nor adds an HTML testing interface.
+async function screenshotButtons(base64, { viewport, region }) {
+  const image = await createImageBitmap(new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: "image/png" }));
+  try {
+    const canvas = new OffscreenCanvas(image.width, image.height), context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, image.width, image.height);
+    const sx = image.width / viewport.width, sy = image.height / viewport.height;
+    const x0 = Math.max(0, Math.floor(region.x * sx)), y0 = Math.max(0, Math.floor(region.y * sy));
+    const x1 = Math.min(image.width, Math.ceil((region.x + region.width) * sx)), y1 = Math.min(image.height, Math.ceil((region.y + region.height) * sy));
+    const w = x1 - x0, h = y1 - y0, mask = new Uint8Array(w * h), queue = new Int32Array(w * h);
+    // Enabled BUTTON, SELECTED, FOCUSED and HOVERED colors. Disabled controls
+    // can blend into a translucent panel and must not join its pixel region.
+    const palette = [[31, 48, 64], [31, 87, 107], [48, 117, 145], [46, 79, 97]];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = ((y + y0) * image.width + x + x0) * 4;
+      if (palette.some(c => Math.abs(data[i] - c[0]) <= 5 && Math.abs(data[i + 1] - c[1]) <= 5 && Math.abs(data[i + 2] - c[2]) <= 5)) mask[y * w + x] = 1;
+    }
+    const buttons = [];
+    for (let start = 0; start < mask.length; start++) {
+      if (!mask[start]) continue;
+      let head = 0, tail = 1, minX = w, minY = h, maxX = 0, maxY = 0;
+      queue[0] = start; mask[start] = 0;
+      while (head < tail) {
+        const i = queue[head++], x = i % w, y = Math.floor(i / w);
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        for (const n of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1]) {
+          if (n >= 0 && mask[n]) { mask[n] = 0; queue[tail++] = n; }
+        }
+      }
+      const width = (maxX - minX + 1) / sx, height = (maxY - minY + 1) / sy;
+      const fill = tail / ((maxX - minX + 1) * (maxY - minY + 1));
+      if (width >= 12 && height >= 30 && height <= 90 && fill >= .55) buttons.push({ x: (minX + x0) / sx, y: (minY + y0) / sy, width, height, backgroundFill: fill });
+    }
+    const rows = [];
+    for (const button of buttons.sort((a, b) => a.y - b.y || a.x - b.x)) {
+      let row = rows.find(r => Math.abs(r.y - button.y) < 4);
+      if (!row) { row = { y: button.y, buttons: [] }; rows.push(row); }
+      row.buttons.push(button);
+    }
+    return rows.flatMap(row => row.buttons.sort((a, b) => a.x - b.x));
+  } finally { image.close(); }
+}
+
+async function exerciseMission({ evaluate, readRuntime, input, delay, timeout }) {
+  const command = async request => {
+    const response = await evaluate(`(async()=>{const m=await import('/sim/wsorb_bevy.js');return JSON.parse(m.command(${JSON.stringify(JSON.stringify(request))}))})()`);
+    if (response?.ok !== true) throw new Error(`Mission ${request.op} failed: ${response?.error || "no acknowledgement"}`);
+  };
+  await command({ op: "reset" });
+  await input.waitFrames(3);
+  const initial = await readRuntime();
+  await command({ op: "play", rate: 10 });
+  const start = Date.now(), deadline = start + timeout;
+  let latest = initial, samples = 0, maximumDisplacementM = 0, pathLengthM = 0, previousPosition = initial.snapshot?.shuttle?.position;
+  const phases = [{ phase: initial.snapshot?.mission?.phase, time_s: initial.snapshot?.time_s }];
+  while (Date.now() < deadline) {
+    latest = await readRuntime();
+    samples++;
+    const position = latest.snapshot?.shuttle?.position, phase = latest.snapshot?.mission?.phase;
+    maximumDisplacementM = Math.max(maximumDisplacementM, vectorDistance(initial.snapshot?.shuttle?.position, position) || 0);
+    pathLengthM += vectorDistance(previousPosition, position) || 0;
+    previousPosition = position;
+    if (phase && phases.at(-1)?.phase !== phase) phases.push({ phase, time_s: latest.snapshot.time_s });
+    if (latest.error || (latest.snapshot?.mission?.status && latest.snapshot.mission.status !== "running")) break;
+    await delay(250);
+  }
+  const terminal = latest.snapshot?.mission, status = terminal?.status || null;
+  const timedOut = status === "running" && Date.now() >= deadline;
+  await input.waitFrames(3, 300);
+  const settled = await readRuntime();
+  const simulatedElapsedSeconds = latest.snapshot?.time_s - initial.snapshot?.time_s;
+  const pausedAfter = latest.runtime?.running === false && settled.runtime?.running === false && settled.snapshot?.time_s === latest.snapshot?.time_s && vectorDistance(latest.snapshot?.shuttle?.position, settled.snapshot?.shuttle?.position) === 0;
+  const result = { requested: true, status, phase: terminal?.phase, score: terminal?.score, timedOut, timeoutSeconds: timeout / 1000, wallElapsedSeconds: (Date.now() - start) / 1000, simulatedElapsedSeconds, samples, phases, initial: { runtime: initial.runtime, time_s: initial.snapshot?.time_s, mission: initial.snapshot?.mission, shuttle: initial.snapshot?.shuttle }, terminal: { runtime: latest.runtime, time_s: latest.snapshot?.time_s, mission: terminal, shuttle: latest.snapshot?.shuttle, target: latest.snapshot?.target }, motion: { maximumDisplacementM, sampledPathLengthM: pathLengthM, shuttlePoseChanged: maximumDisplacementM > .01 }, pausedAfter, error: latest.error || null };
+  result.passed = !timedOut && !latest.error && initial.snapshot?.mission?.phase === "on_pad" && initial.runtime?.autopilot === true && status === "success" && terminal?.phase === "arrived" && Number.isFinite(terminal?.score) && simulatedElapsedSeconds > 0 && maximumDisplacementM > .01 && pausedAfter;
+  return result;
+}
+
+function vectorDistance(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length || !a.every(Number.isFinite) || !b.every(Number.isFinite)) return null;
+  return Math.hypot(...a.map((value, index) => value - b[index]));
+}
+function rotationDistance(a, b) {
+  const direct = vectorDistance(a, b), negated = Array.isArray(b) ? vectorDistance(a, b.map(value => -value)) : null;
+  return direct === null || negated === null ? null : Math.min(direct, negated);
+}
+function cameraDelta(before, after) { return { before, after, positionDeltaM: vectorDistance(before?.position_m, after?.position_m), rotationDelta: rotationDistance(before?.rotation, after?.rotation) }; }
+function sameCamera(a, b) { return !!a && !!b && a.mode === b.mode && a.focus === b.focus && vectorDistance(a.position_m, b.position_m) !== null && vectorDistance(a.position_m, b.position_m) < .001 && rotationDistance(a.rotation, b.rotation) !== null && rotationDistance(a.rotation, b.rotation) < .000001 && Number.isFinite(a.distance_m) && Math.abs(a.distance_m - b.distance_m) < .001; }
+function samePhysics(a, b) { return !!a?.physics?.sha256 && a.physics.sha256 === b?.physics?.sha256 && a.physics.time_s === b.physics.time_s && a.physics.asset_count === b.physics.asset_count; }
+function forwardTravel(before, after) {
+  const q = before?.rotation, a = before?.position_m, b = after?.position_m;
+  if (!Array.isArray(q) || q.length !== 4 || vectorDistance(a, b) === null) return null;
+  const [x, y, z, w] = q, forward = [-2 * (x * z + w * y), 2 * (w * x - y * z), -(1 - 2 * (x * x + y * y))];
+  return forward.reduce((sum, value, index) => sum + value * (b[index] - a[index]), 0);
+}
+function fillsViewport(state) { return !!state?.canvas && Math.abs(state.canvas.width - state.width) <= 2 && Math.abs(state.canvas.height - state.height) <= 2 && Math.abs(state.canvas.x) <= 1 && Math.abs(state.canvas.y) <= 1; }
+function bufferMatches(state) { return !!state?.canvas && Math.abs(state.canvas.bufferWidth - state.canvas.width * state.dpr) <= 2 && Math.abs(state.canvas.bufferHeight - state.canvas.height * state.dpr) <= 2; }
