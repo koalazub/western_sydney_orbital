@@ -220,7 +220,13 @@ try {
   server.close();
   await rm(profile, { recursive: true, force: true }).catch(() => {});
 }
-if (failed) process.exitCode = 1;
+// This is a one-shot CLI. Chrome/CDP can leave idle HTTP handles after all
+// owned browser/server resources are closed; flush the report before exiting.
+await Promise.all([
+  new Promise(resolve => process.stdout.write("", resolve)),
+  new Promise(resolve => process.stderr.write("", resolve)),
+]);
+process.exit(failed ? 1 : 0);
 
 function optionValue(name) {
   const inline = process.argv.find(arg => arg.startsWith(`--${name}=`));
