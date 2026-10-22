@@ -4,11 +4,15 @@ Western Sydney Orbital is our team's workspace for the Space Teams PRO competiti
 
 ## Our approach
 
-Open the [team simulation workspace](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) to edit strategies, run the browser simulation and share a private room through your team's NotebookLM workspace.
+Open the [team simulation](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) to explore the mission in your browser. Camera navigation, mission controls, telemetry and entity inspection belong to the Bevy game itself.
 
 The Fall 2026 challenge is **Escape from Phobos**. An autonomous crew shuttle must reach a return ship through impact debris. We compare guidance and avoidance strategies using flight time, fuel use and damage, then validate them in Space Teams PRO. Our [shared notebook](notebook/NOTEBOOK.md) brings together research, observations and team decisions.
 
-The browser practice model uses the published mission settings and scoring formula. Its terrain, collision shapes, fuel and impact-energy estimates, and radar differ from the official simulator; it does not reproduce the camera sensors or jet allocator. Practice results are not official competition scores. Earlier Lunar SAR and rover experiments remain in the repository for reference.
+Our practice game starts a lander on a landing pad on Phobos. The objective is to cross the debris field and reach a return ship near the Mars–Phobos L2 point. The rotating-frame model accounts for both bodies' gravity, Coriolis and centrifugal effects, and calculates L1 and L2 from the same force model.
+
+Each teammate can run an independent browser instance. Scenario inputs live in [`simulation/scenarios/`](simulation/scenarios/), so proposed changes can be reviewed in the repository and discussed through NotebookLM before publishing a shared release.
+
+This is a circular, point-mass practice model with synthetic terrain and approximate contacts, fuel, damage and radar. It does not reproduce the proprietary STP physics, jet allocator or camera sensors. Practice results are not official competition scores. Earlier Lunar SAR and rover experiments remain in the repository for reference.
 
 ## Team members
 
