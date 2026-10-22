@@ -4,26 +4,34 @@
   inputs = {
     # Keep Intel macOS supported; nixpkgs rolling dropped x86_64-darwin.
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
-    devenv.url = "github:cachix/devenv";
-    devenv.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  nixConfig = {
-    extra-substituters = [ "https://devenv.cachix.org" ];
-    extra-trusted-public-keys = [ "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=" ];
-  };
-
-  outputs = inputs@{ self, nixpkgs, devenv, ... }:
+  outputs =
+    { nixpkgs, ... }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-    in {
+    in
+    {
       devShells = forAllSystems (system: {
-        default = devenv.lib.mkShell {
-          inherit inputs;
-          pkgs = nixpkgs.legacyPackages.${system};
-          modules = [ ./devenv.nix ];
-        };
+        default =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            environment = import ./devenv.nix { inherit pkgs; };
+          in
+          pkgs.mkShell (
+            {
+              name = "western-sydney-orbital";
+              packages = environment.packages ++ [ pkgs.devenv ];
+              shellHook = environment.enterShell or "";
+            }
+            // environment.env
+          );
       });
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-rfc-style);
     };
