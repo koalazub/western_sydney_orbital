@@ -1,8 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "western-sydney-orbital-api",
-  "account_id": "802ff9691cdad79784c4113aefbb47d8",
+  "account_id": "e74cdc2ff8fdb3053c6ab91be7524909",
   "main": "src/index.ts",
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "ratelimits": [{ "name": "ROOM_CREATE_LIMIT", "namespace_id": "982436591205", "simple": { "limit": 100, "period": 60 } }],
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "Room" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
   "compatibility_date": "2026-10-22",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,

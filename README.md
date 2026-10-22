@@ -4,6 +4,8 @@ Western Sydney Orbital is our team's workspace for the Space Teams PRO competiti
 
 ## Our approach
 
+Open the [team simulation workspace](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) to edit strategies, run the browser simulation and share a private room through your team's NotebookLM workspace.
+
 We use practice simulations to compare search strategies before trying them in Space Teams PRO. Our [shared notebook](notebook/NOTEBOOK.md) brings together research, observations and team decisions.
 
 The included model draws on the [Lunar SAR practice scenario](https://github.com/SimDynamX/STU_Lunar_SAR). It does not reproduce official competition scoring.

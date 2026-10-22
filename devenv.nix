@@ -1,7 +1,14 @@
-{ pkgs, ... }:
+{ pkgs, inputs, ... }:
 let
+  system = pkgs.stdenv.hostPlatform.system;
+  nodejs = import ./nix/nodejs.nix { inherit pkgs; };
+  rustToolchain = inputs.fenix.packages.${system}.combine [
+    inputs.fenix.packages.${system}.stable.rustc
+    inputs.fenix.packages.${system}.stable.cargo
+    inputs.fenix.packages.${system}.targets.wasm32-unknown-unknown.stable.rust-std
+  ];
   workerCli = name: package: pkgs.writeShellScriptBin name ''
-    export PATH="${pkgs.nodejs_22}/bin:$PATH"
+    export PATH="${nodejs}/bin:$PATH"
 
     root="''${DEVENV_ROOT:-}"
     if [ -z "$root" ]; then
@@ -13,7 +20,7 @@ let
       exit 1
     fi
 
-    exec "$root/worker/node_modules/.bin/${package}" "$@"
+    exec node "$root/worker/scripts/cloudflare.mjs" "${package}" "$@"
   '';
 in
 {
@@ -26,7 +33,11 @@ in
     gnumake
     jq
     direnv
-    nodejs_22
+    nodejs
+    rustToolchain
+    wasm-bindgen-cli
+    pkg-config
+    libiconv
     (workerCli "cf" "cf")
     (workerCli "wrangler" "wrangler")
   ];

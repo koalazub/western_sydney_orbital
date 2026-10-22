@@ -4,10 +4,14 @@
   inputs = {
     # Keep Intel macOS supported; nixpkgs rolling dropped x86_64-darwin.
     nixpkgs.url = "github:NixOS/nixpkgs/36fd15bbb657815e2028e31d715c2e43a1230c91";
+    fenix = {
+      url = "github:nix-community/fenix/02d6357e9d59c4626a82b27371ae6e90508839e5";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, fenix, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -22,7 +26,7 @@
         default =
           let
             pkgs = nixpkgs.legacyPackages.${system};
-            environment = import ./devenv.nix { inherit pkgs; };
+            environment = import ./devenv.nix { inherit pkgs; inputs = { inherit fenix; }; };
           in
           pkgs.mkShell (
             {

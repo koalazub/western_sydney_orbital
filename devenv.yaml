@@ -1,3 +1,8 @@
 inputs:
   nixpkgs:
     url: github:NixOS/nixpkgs/36fd15bbb657815e2028e31d715c2e43a1230c91
+  fenix:
+    url: github:nix-community/fenix/02d6357e9d59c4626a82b27371ae6e90508839e5
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

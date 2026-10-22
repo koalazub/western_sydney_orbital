@@ -38,6 +38,8 @@ node_modules/
 .dev.vars.*
 .env.*
 worker/worker-configuration.d.ts
+/worker/public/
+/simulation/target/
 
 # Keep generated runs, but not scratch output.
 runs/scratch/
