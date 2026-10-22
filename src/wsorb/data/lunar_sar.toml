@@ -10,7 +10,7 @@ name = "Shackleton Lunar Search & Rescue"
 description = """
 A lander has gone down inside the south-polar search box. Seven surface assets
 must find the crash site, keep comms, and report it before the mission clock
-expires. The surrogate is calibrated to the STP Lunar SAR mission-manager API:
+expires. The practice model draws on the STP Lunar SAR mission-manager API:
 MoveToCoord, Stop, RotateToAzimuth, PickUpAntenna, PlaceDownAntenna, telemetry,
 state of charge, comms and target-scan status.
 """
@@ -76,7 +76,7 @@ x = 1260.0
 y = -820.0
 height_m = 18.0
 
-# Battery capacities are surrogate-calibrated so a representative campaign
+# Battery capacities are deliberately limited so a representative campaign
 # exercises the charging queue and reserve policies. They are not STP model
 # values. Sensor radii, speeds and power draw are likewise campaign-level
 # approximations of the documented asset classes.

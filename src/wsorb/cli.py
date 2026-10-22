@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -230,7 +231,7 @@ def _cmd_campaign_run(args: argparse.Namespace) -> int:
         strategies,
         replicates=args.replicates,
         seed=args.seed,
-        command=" ".join(sys.argv),
+        command=args.invocation,
     )
     run_dir = write_campaign(result, args.out)
     if args.json:
@@ -333,6 +334,9 @@ def _cmd_notebook(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    args.invocation = shlex.join(
+        ["uv", "run", "--locked", "wsorb", *(sys.argv[1:] if argv is None else argv)]
+    )
     try:
         if args.command == "scenario":
             return _cmd_scenario(args)
