@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+port="${WSORB_PORT:-8765}"
+if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+  echo "WSORB_PORT must be an integer from 1 to 65535" >&2
+  exit 2
+fi
+
+find_tailscale() {
+  if command -v tailscale >/dev/null 2>&1; then
+    command -v tailscale
+    return
+  fi
+  if [[ "$(uname -s)" == Darwin ]]; then
+    for candidate in \
+      "/Applications/Tailscale.app/Contents/MacOS/Tailscale" \
+      "$HOME/Applications/Tailscale.app/Contents/MacOS/Tailscale"; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+  return 1
+}
+
+if ! tailscale_bin="$(find_tailscale)"; then
+  echo "Tailscale CLI not found. Install/start the host Tailscale app or daemon; this script will not log in or start it." >&2
+  exit 1
+fi
+
+status="$("$tailscale_bin" status --json 2>&1)" || {
+  echo "Cannot query Tailscale status. Start the host daemon and authorize this device first." >&2
+  exit 1
+}
+if ! url="$(uv run python -c 'import json,sys; d=json.load(sys.stdin); s=d.get("Self",{}); state=d.get("BackendState"); dns=s.get("DNSName", "").rstrip("."); print("https://"+dns+"/wsorb/" if state == "Running" and dns else "")' <<<"$status")" || [[ -z "$url" ]]; then
+  echo "Tailscale is not running or has no tailnet DNS name. Connect and authorize this host, then retry." >&2
+  exit 1
+fi
+
+# The mount point belongs to this wrapper. Existing paths or Funnel rules are never reset.
+serve_status="$("$tailscale_bin" serve status --json 2>&1 || true)"
+if uv run python -c 'import json,sys; d=json.load(sys.stdin); text=json.dumps(d).lower(); sys.exit(0 if "wsorb" in text else 1)' <<<"$serve_status"; then
+  echo "A Tailscale Serve rule already mentions /wsorb. Remove or inspect that specific rule before retrying." >&2
+  exit 1
+elif ! uv run python -c 'import json,sys; json.load(sys.stdin)' <<<"$serve_status"; then
+  echo "Could not inspect Tailscale Serve configuration safely; refusing to change it." >&2
+  exit 1
+fi
+funnel_status="$("$tailscale_bin" funnel status --json 2>&1 || true)"
+if ! uv run --locked python -c 'import json,sys; d=json.load(sys.stdin); flags=d.get("AllowFunnel", {}) if isinstance(d, dict) else {}; safe=d is None or (isinstance(d, dict) and isinstance(flags, dict) and all(v is False for v in flags.values())); sys.exit(0 if safe else 1)' <<<"$funnel_status"; then
+  echo "Could not confirm that Tailscale Funnel is inactive. Inspect 'tailscale funnel status'; refusing to change exposure." >&2
+  exit 1
+fi
+
+uv run python -m wsorb.sharing --port "$port" &
+backend_pid=$!
+created_rule=0
+cleaned=0
+cleanup() {
+  if (( cleaned )); then
+    return
+  fi
+  cleaned=1
+  if (( created_rule )); then
+    "$tailscale_bin" serve --https=443 --set-path=/wsorb off >/dev/null 2>&1 || \
+      echo "Could not remove only the /wsorb Serve mount. Inspect with: tailscale serve status" >&2
+    created_rule=0
+  fi
+  kill "$backend_pid" 2>/dev/null || true
+  wait "$backend_pid" 2>/dev/null || true
+}
+on_signal() {
+  trap - INT TERM
+  cleanup
+  exit 130
+}
+trap cleanup EXIT
+trap on_signal INT TERM
+
+ready=0
+for _ in {1..50}; do
+  if ! kill -0 "$backend_pid" 2>/dev/null; then
+    echo "WSORB backend exited before becoming ready" >&2
+    exit 1
+  fi
+  if uv run python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:"+__import__("sys").argv[1]+"/healthz", timeout=0.2)' "$port" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+if (( ! ready )); then
+  echo "WSORB backend did not become ready on 127.0.0.1:$port" >&2
+  exit 1
+fi
+
+if ! "$tailscale_bin" serve --bg --https=443 --set-path=/wsorb "http://127.0.0.1:$port"; then
+  echo "Tailscale Serve failed. Check HTTPS certificate and Serve policy prerequisites." >&2
+  exit 1
+fi
+created_rule=1
+echo "Tailnet-only notebook URL: $url"
+echo "Keep this process running. Ctrl-C removes only the /wsorb Serve mount."
+while kill -0 "$backend_pid" 2>/dev/null; do sleep 1; done

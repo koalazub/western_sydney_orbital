@@ -1,0 +1,193 @@
+# Reference surrogate scenario: STP-style lunar search and rescue.
+#
+# Coordinates are local metres in the documented STU Lunar SAR search box
+# (x: -317..1199, y: -718..796). Assets, charger and antennas sit in the
+# surrounding world margin. Capabilities are campaign-level approximations of
+# the STP entities, not the proprietary platform models.
+
+id = "lunar_sar"
+name = "Shackleton Lunar Search & Rescue"
+description = """
+A lander has gone down inside the south-polar search box. Seven surface assets
+must find the crash site, keep comms, and report it before the mission clock
+expires. The surrogate is calibrated to the STP Lunar SAR mission-manager API:
+MoveToCoord, Stop, RotateToAzimuth, PickUpAntenna, PlaceDownAntenna, telemetry,
+state of charge, comms and target-scan status.
+"""
+terrain_seed = 20261022
+terrain_resolution_m = 20.0
+horizon_s = 21600.0
+dt_s = 15.0
+charger_bays = 2
+world_margin_m = 500.0
+search_spacing_factor = 1.5
+comms_check_interval_s = 30.0
+relay_source_antenna = "ANT-1"
+
+[bounds]
+min_x = -317.154
+max_x = 1199.211
+min_y = -718.026
+max_y = 795.979
+
+[charger]
+x = -250.0
+y = -1060.0
+
+[[relay_candidates]]
+x = 441.0
+y = 39.0
+
+[[relay_candidates]]
+x = 170.0
+y = 500.0
+
+[[relay_candidates]]
+x = 700.0
+y = -350.0
+
+[[relay_candidates]]
+x = 0.0
+y = 0.0
+
+[[relay_candidates]]
+x = 800.0
+y = 600.0
+
+[[relay_candidates]]
+x = -100.0
+y = -500.0
+
+[[antennas]]
+name = "ANT-1"
+x = -450.0
+y = 820.0
+height_m = 18.0
+
+[[antennas]]
+name = "ANT-2"
+x = 1260.0
+y = 820.0
+height_m = 18.0
+
+[[antennas]]
+name = "ANT-3"
+x = 1260.0
+y = -820.0
+height_m = 18.0
+
+# Battery capacities are surrogate-calibrated so a representative campaign
+# exercises the charging queue and reserve policies. They are not STP model
+# values. Sensor radii, speeds and power draw are likewise campaign-level
+# approximations of the documented asset classes.
+
+# Deliberate keep-outs so route plans cannot all be straight lines.
+[[obstacles]]
+x = 150.0
+y = 300.0
+radius_m = 45.0
+
+[[obstacles]]
+x = 720.0
+y = -120.0
+radius_m = 60.0
+
+[[obstacles]]
+x = 980.0
+y = 520.0
+radius_m = 35.0
+
+[[obstacles]]
+x = -50.0
+y = -350.0
+radius_m = 50.0
+
+[[obstacles]]
+x = 520.0
+y = 650.0
+radius_m = 40.0
+
+[[assets]]
+name = "LTV1"
+kind = "ltv"
+max_speed_mps = 2.6
+battery_kwh = 3.0
+move_power_kw = 2.6
+idle_power_kw = 0.06
+sensor_radius_m = 62.0
+charge_rate_kw = 4.0
+max_slope_deg = 25.0
+can_carry_antenna = true
+start = { x = -300.0, y = -1000.0 }
+
+[[assets]]
+name = "LTV2"
+kind = "ltv"
+max_speed_mps = 2.6
+battery_kwh = 3.0
+move_power_kw = 2.6
+idle_power_kw = 0.06
+sensor_radius_m = 62.0
+charge_rate_kw = 4.0
+max_slope_deg = 25.0
+start = { x = -220.0, y = -1000.0 }
+
+[[assets]]
+name = "Scout1"
+kind = "scout"
+max_speed_mps = 4.4
+battery_kwh = 1.6
+move_power_kw = 1.7
+idle_power_kw = 0.04
+sensor_radius_m = 48.0
+charge_rate_kw = 3.0
+max_slope_deg = 28.0
+start = { x = -300.0, y = -930.0 }
+
+[[assets]]
+name = "Scout2"
+kind = "scout"
+max_speed_mps = 4.4
+battery_kwh = 1.6
+move_power_kw = 1.7
+idle_power_kw = 0.04
+sensor_radius_m = 48.0
+charge_rate_kw = 3.0
+max_slope_deg = 28.0
+start = { x = -220.0, y = -930.0 }
+
+[[assets]]
+name = "TruckRover"
+kind = "truck"
+max_speed_mps = 1.7
+battery_kwh = 6.0
+move_power_kw = 3.6
+idle_power_kw = 0.08
+sensor_radius_m = 55.0
+charge_rate_kw = 5.0
+max_slope_deg = 22.0
+start = { x = -380.0, y = -1000.0 }
+
+[[assets]]
+name = "ExcavatorRover"
+kind = "excavator"
+max_speed_mps = 1.2
+battery_kwh = 4.0
+move_power_kw = 4.2
+idle_power_kw = 0.10
+sensor_radius_m = 42.0
+charge_rate_kw = 4.0
+max_slope_deg = 20.0
+start = { x = -380.0, y = -930.0 }
+
+[[assets]]
+name = "SamplingRover"
+kind = "sampler"
+max_speed_mps = 1.9
+battery_kwh = 2.25
+move_power_kw = 2.0
+idle_power_kw = 0.05
+sensor_radius_m = 50.0
+charge_rate_kw = 3.0
+max_slope_deg = 24.0
+start = { x = -140.0, y = -1000.0 }

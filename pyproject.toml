@@ -1,0 +1,55 @@
+[project]
+name = "western-sydney-orbital"
+version = "0.1.0"
+description = "Space Teams PRO campaign lab for the Western Sydney Orbital team."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+authors = [{ name = "Western Sydney Orbital" }]
+dependencies = ["numpy>=2.3.0"]
+
+[project.urls]
+Repository = "https://github.com/koalazub/western_sydney_orbital"
+"Space Teams PRO documentation" = "https://github.com/SimDynamX/SpaceTeamsPRO/wiki"
+
+[project.scripts]
+wsorb = "wsorb.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-cov>=6.2.0",
+    "ruff>=0.14.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "wsorb"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+pythonpath = ["src"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["wsorb"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM108"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,0 +1,35 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.uv-cache/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Nix / direnv
+.direnv/
+.devenv/
+result
+result-*
+
+# Jujutsu working-copy metadata (kept alongside .git after jj git init)
+.jj/
+
+# macOS
+.DS_Store
+
+# Local environment
+.env
+.env.local
+
+# Keep generated runs, but not scratch output.
+runs/scratch/
+runs/**/raw/

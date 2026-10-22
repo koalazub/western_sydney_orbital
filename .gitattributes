@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+
+# Generated notebook index; edit entries, not this file.
+notebook/NOTEBOOK.md linguist-generated=true
+runs/**/summary.md linguist-generated=true
+runs/**/results.csv linguist-generated=true
