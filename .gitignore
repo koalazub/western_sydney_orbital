@@ -42,3 +42,10 @@ worker/worker-configuration.d.ts
 # Keep generated runs, but not scratch output.
 runs/scratch/
 runs/**/raw/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*

@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "wso",
+  "project_id": "a1103c5c-e45a-4b44-8034-9c1948919fc4"
+}
