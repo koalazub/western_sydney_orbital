@@ -9,6 +9,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone)]
