@@ -82,6 +82,7 @@ pub(super) fn setup(mut commands: Commands) {
                         LayoutPart::CameraPanel,
                         children![
                             (text("Orbit | Lander", CAPTION_SIZE_PX, MUTED), Readout::CameraMode),
+                            text("WASD + Q/E: ship | hold Alt/Option: debug", CAPTION_SIZE_PX, MUTED),
                             (
                                 button_row(),
                                 Pickable::IGNORE,
@@ -147,6 +148,7 @@ pub(super) fn setup(mut commands: Commands) {
                             (text("", COPY_SIZE_PX, TEXT), Readout::Mission),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::Environment),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::Authority),
+                            (text("", CAPTION_SIZE_PX, MUTED), Readout::FlightControls),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::PathDetails),
                         ],
                     ),
@@ -181,7 +183,9 @@ pub(super) fn setup(mut commands: Commands) {
                             text("Amber line: advisory path preview in debug views only. Cyan sphere: waypoint arrival region. Radar covers only part of the debris. The preview does not control the ship or feed the example controller.", COPY_SIZE_PX, MUTED),
                             text(", / change focus | L capture or release", COPY_SIZE_PX, MUTED),
                             text("Drag to orbit; wheel or trackpad pinch zooms viewer cameras. Ship sensor optics stay fixed.", COPY_SIZE_PX, MUTED),
-                            text("Arrows orbit | WASD/QE fly | Tab moves focus | Enter or Space activates a button", COPY_SIZE_PX, MUTED),
+                            text("Run the mission first. WASD moves the ship; Q/E applies down/up thrust in its body frame. E lifts off from the pad. Releasing keys stops thrust, not velocity. Manual thrust turns off the example controller.", COPY_SIZE_PX, MUTED),
+                            text("Alt/Option + WASD/QE moves only the debug camera. Shift boosts debug movement only. Ship sensor mounts and optics stay fixed.", COPY_SIZE_PX, MUTED),
+                            text("Arrows orbit | Tab moves focus | Enter or Space activates a button", COPY_SIZE_PX, MUTED),
                             text("M maximize | X fullscreen | I inspect | H help", COPY_SIZE_PX, MUTED),
                             text("Esc closes help, inspector, details or the reset prompt.", COPY_SIZE_PX, MUTED),
                             text("Frame axes: +X points to Mars; +Y is orbit normal. L1/L2 use a circular point-mass model. Terrain, contacts and damage are practice approximations. Viewer cameras are not STP sensor feeds.", COPY_SIZE_PX, MUTED),

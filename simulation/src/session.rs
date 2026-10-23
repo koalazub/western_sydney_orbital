@@ -1,6 +1,7 @@
 //! Imperative adapter for the pure playback transition and physical world.
 use crate::{
     api::Dispatch,
+    controls::{KeyboardPilot, Movement, PilotContext, PilotEffect},
     domain::{EngineAction, MissionStatus, ViewportAction},
     model::Snapshot,
     physics::{PhysicsCommand, Simulation},
@@ -24,7 +25,7 @@ impl Default for ViewportState {
         Self {
             fullscreen: false,
             maximized: true,
-            message: "WebGPU · Click the scene to activate camera controls".into(),
+            message: "WebGPU · Click the scene to activate ship and debug controls".into(),
         }
     }
 }
@@ -35,6 +36,7 @@ thread_local! {
     static RUNTIME: RefCell<PlaybackState> = RefCell::new(PlaybackState::default());
     static VIEWPORT: RefCell<ViewportState> = RefCell::new(ViewportState::default());
     static PUBLISHED: RefCell<Option<Rc<Snapshot>>> = const { RefCell::new(None) };
+    static KEYBOARD_PILOT: RefCell<KeyboardPilot> = RefCell::new(KeyboardPilot::default());
 }
 
 pub(crate) fn request_action(action: EngineAction) {
@@ -83,8 +85,13 @@ pub(crate) fn set_viewport(fullscreen: bool, maximized: bool, message: &str) {
 pub(crate) fn runtime_report() -> String {
     RUNTIME.with(|state| {
         let state = state.borrow();
-        serde_json::json!({"running":state.running,"autopilot":state.autopilot,"rate":state.rate.factor(),"can_control":state.can_control,"fullscreen":state.fullscreen,"maximized":state.maximized,"message":state.message}).to_string()
+        let keyboard_thrust = KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command()) && state.running;
+        serde_json::json!({"running":state.running,"autopilot":state.autopilot,"keyboard_thrust":keyboard_thrust,"keyboard_requires_release":keyboard_requires_release(),"rate":state.rate.factor(),"can_control":state.can_control,"fullscreen":state.fullscreen,"maximized":state.maximized,"message":state.message}).to_string()
     })
+}
+
+pub(crate) fn keyboard_requires_release() -> bool {
+    KEYBOARD_PILOT.with(|pilot| pilot.borrow().requires_release())
 }
 
 fn platform_effect(action: ViewportAction) {
@@ -118,6 +125,13 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
             {
                 return Err("Pause the mission before stepping manually".into());
             }
+            let replaces_keyboard_command = matches!(
+                command,
+                PhysicsCommand::Reset { .. }
+                    | PhysicsCommand::Restore { .. }
+                    | PhysicsCommand::SetCommand { .. }
+                    | PhysicsCommand::Stop
+            );
             match command {
                 PhysicsCommand::Reset { .. } | PhysicsCommand::Restore { .. } => {
                     request_action(EngineAction::Pause)
@@ -127,26 +141,52 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
                 }
                 PhysicsCommand::Observe | PhysicsCommand::Step { .. } => {}
             }
-            SIMULATION
-                .with(|sim| sim.borrow_mut().execute(command))
-                .map(publish)
+            let state = SIMULATION.with(|sim| sim.borrow_mut().execute(command))?;
+            if replaces_keyboard_command {
+                // An external command already replaced our force. A later
+                // key release must not zero it or revive a previously held key.
+                KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
+            }
+            Ok(publish(state))
         }
     }
 }
 
-pub(crate) fn advance_world(time: Res<Time>, mut state: ResMut<PlaybackState>) {
+pub(crate) fn advance_world(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    hud: Res<crate::hud::HudState>,
+    mut state: ResMut<PlaybackState>,
+) {
+    let movement = crate::controls::movement(&keys);
     let context = VIEWPORT.with(|context| context.borrow().clone());
     state.fullscreen = context.fullscreen;
     state.maximized = context.maximized;
     state.message = context.message;
     let actions: Vec<_> = ACTIONS.with(|queue| queue.borrow_mut().drain(..).collect());
     for action in actions {
+        if matches!(action, EngineAction::ToggleAutopilot) && state.can_control {
+            let owned = KEYBOARD_PILOT.with(|pilot| {
+                let mut pilot = pilot.borrow_mut();
+                let owned = pilot.has_installed_command();
+                pilot.cancel_until_release();
+                owned
+            });
+            if owned {
+                SIMULATION.with(|sim| {
+                    let _ = sim.borrow_mut().set_command([0.0; 3], [0.0; 3]);
+                });
+                refresh();
+            }
+        }
         let status = SIMULATION.with(|sim| sim.borrow().mission_status());
         let transition = runtime::transition(state.clone(), action, status);
         *state = transition.state;
         match transition.effect {
             Effect::None => {}
             Effect::Advance => {
+                // A queued pause/step must not advance with stale keyboard thrust.
+                update_keyboard_pilot(&mut state, movement, hud.movement_blocked());
                 SIMULATION.with(|sim| {
                     sim.borrow_mut()
                         .advance(scenario::settings().integration.fixed_step_s)
@@ -156,6 +196,7 @@ pub(crate) fn advance_world(time: Res<Time>, mut state: ResMut<PlaybackState>) {
             Effect::Reset => {
                 let seed = snapshot().seed;
                 SIMULATION.with(|sim| *sim.borrow_mut() = Simulation::new(seed));
+                KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
                 refresh();
             }
             Effect::ZeroCommand => {
@@ -167,6 +208,7 @@ pub(crate) fn advance_world(time: Res<Time>, mut state: ResMut<PlaybackState>) {
             Effect::Viewport(action) => platform_effect(action),
         }
     }
+    update_keyboard_pilot(&mut state, movement, hud.movement_blocked());
     if state.running && state.can_control {
         let step = scenario::settings().integration.fixed_step_s;
         state.accumulator += time.delta_secs_f64().min(0.1) * state.rate.factor();
@@ -199,4 +241,202 @@ pub(crate) fn advance_world(time: Res<Time>, mut state: ResMut<PlaybackState>) {
         state.accumulator = 0.0;
     }
     RUNTIME.with(|current| *current.borrow_mut() = state.clone());
+}
+
+fn update_keyboard_pilot(state: &mut PlaybackState, movement: Movement, modal: bool) {
+    let mission_running =
+        SIMULATION.with(|sim| sim.borrow().mission_status() == MissionStatus::Running);
+    let effect = KEYBOARD_PILOT.with(|pilot| {
+        pilot.borrow_mut().update(
+            movement,
+            PilotContext {
+                active: crate::camera::input_active(),
+                running: state.running,
+                can_control: state.can_control,
+                mission_running,
+                modal,
+            },
+            scenario::settings().lander.max_accel_mps2,
+        )
+    });
+    let changed =
+        SIMULATION.with(|sim| apply_keyboard_effect(&mut sim.borrow_mut(), state, effect));
+    if changed {
+        refresh();
+    }
+}
+
+/// The only keyboard-to-physics adapter. This sets bounded body-frame thrust,
+/// never position or velocity. Planner output is not an input to this function.
+fn apply_keyboard_effect(
+    sim: &mut Simulation,
+    state: &mut PlaybackState,
+    effect: PilotEffect,
+) -> bool {
+    match effect {
+        PilotEffect::None => false,
+        PilotEffect::SetCommand(accel)
+            if state.can_control
+                && state.running
+                && sim.mission_status() == MissionStatus::Running =>
+        {
+            if sim.set_command(accel, [0.0; 3]).is_err() {
+                return false;
+            }
+            *state = runtime::transition(
+                state.clone(),
+                EngineAction::ManualControl,
+                sim.mission_status(),
+            )
+            .state;
+            true
+        }
+        PilotEffect::ReleaseCommand if state.can_control => {
+            sim.set_command([0.0; 3], [0.0; 3]).is_ok()
+        }
+        PilotEffect::SetCommand(_) | PilotEffect::ReleaseCommand => false,
+    }
+}
+
+#[cfg(test)]
+mod keyboard_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ship_keys_use_real_thrust_without_teleporting_or_changing_vehicle_parameters() {
+        let mut simulation = Simulation::new_default();
+        let before = simulation.snapshot();
+        let mut playback = PlaybackState {
+            running: true,
+            ..default()
+        };
+        let mut pilot = KeyboardPilot::default();
+        let context = PilotContext {
+            active: true,
+            running: true,
+            can_control: true,
+            mission_running: true,
+            modal: false,
+        };
+        let effect = pilot.update(
+            crate::controls::decode(1),
+            context,
+            scenario::settings().lander.max_accel_mps2,
+        );
+        assert!(apply_keyboard_effect(
+            &mut simulation,
+            &mut playback,
+            effect
+        ));
+        assert!(!playback.autopilot);
+        let after = simulation.snapshot();
+        let old_ship = before
+            .assets
+            .iter()
+            .find(|actor| actor.id == before.mission.shuttle_id)
+            .unwrap();
+        let ship = after
+            .assets
+            .iter()
+            .find(|actor| actor.id == after.mission.shuttle_id)
+            .unwrap();
+        assert_eq!(ship.position, old_ship.position);
+        assert_eq!(ship.velocity, old_ship.velocity);
+        assert_eq!(ship.mass_kg, old_ship.mass_kg);
+        assert_eq!(ship.radius_m, old_ship.radius_m);
+        assert_eq!(ship.max_thrust_n, old_ship.max_thrust_n);
+        assert_eq!(ship.rotation, old_ship.rotation);
+        assert_eq!(
+            ship.commanded_accel_mps2,
+            [scenario::settings().lander.max_accel_mps2, 0.0, 0.0]
+        );
+        simulation.advance(0.5);
+        let moving = simulation.snapshot();
+        assert!(moving.mission.fuel_used_kg > before.mission.fuel_used_kg);
+        let velocity = moving
+            .assets
+            .iter()
+            .find(|actor| actor.id == moving.mission.shuttle_id)
+            .unwrap()
+            .velocity;
+        let release = pilot.update(
+            crate::controls::decode(0),
+            context,
+            scenario::settings().lander.max_accel_mps2,
+        );
+        assert!(apply_keyboard_effect(
+            &mut simulation,
+            &mut playback,
+            release
+        ));
+        let stopped_thrust = simulation.snapshot();
+        let ship = stopped_thrust
+            .assets
+            .iter()
+            .find(|actor| actor.id == stopped_thrust.mission.shuttle_id)
+            .unwrap();
+        assert_eq!(
+            ship.velocity, velocity,
+            "key release stops thrust, not inertia"
+        );
+        assert_eq!(ship.commanded_accel_mps2, [0.0; 3]);
+    }
+
+    #[test]
+    fn alt_only_camera_input_cannot_command_ship_or_disable_its_controller() {
+        let mut simulation = Simulation::new_default();
+        let before = serde_json::to_string(&simulation.snapshot()).unwrap();
+        let mut playback = PlaybackState {
+            running: true,
+            ..default()
+        };
+        let mut pilot = KeyboardPilot::default();
+        let effect = pilot.update(
+            crate::controls::decode(1 | (1 << 6)),
+            PilotContext {
+                active: true,
+                running: true,
+                can_control: true,
+                mission_running: true,
+                modal: false,
+            },
+            scenario::settings().lander.max_accel_mps2,
+        );
+        assert!(!apply_keyboard_effect(
+            &mut simulation,
+            &mut playback,
+            effect
+        ));
+        assert!(playback.autopilot);
+        assert_eq!(
+            before,
+            serde_json::to_string(&simulation.snapshot()).unwrap()
+        );
+    }
+
+    #[test]
+    fn paused_or_view_only_keyboard_adapter_cannot_apply_ship_thrust() {
+        for (running, can_control) in [(false, true), (true, false)] {
+            let mut simulation = Simulation::new_default();
+            let before = serde_json::to_string(&simulation.snapshot()).unwrap();
+            let mut playback = PlaybackState {
+                running,
+                can_control,
+                ..default()
+            };
+            assert!(!apply_keyboard_effect(
+                &mut simulation,
+                &mut playback,
+                PilotEffect::SetCommand([0.5, 0.0, 0.0])
+            ));
+            assert!(playback.autopilot);
+            assert_eq!(
+                before,
+                serde_json::to_string(&simulation.snapshot()).unwrap()
+            );
+        }
+    }
 }

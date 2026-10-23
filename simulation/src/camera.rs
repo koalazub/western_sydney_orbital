@@ -2,6 +2,7 @@
 
 mod controller;
 mod model;
+mod movement;
 mod zoom;
 
 pub(crate) use controller::SimulationCamera;

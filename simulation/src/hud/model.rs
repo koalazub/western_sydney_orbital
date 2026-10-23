@@ -3,11 +3,17 @@ use bevy::prelude::*;
 use crate::domain::{CameraMode, EntityId};
 
 #[derive(Resource, Default)]
-pub(super) struct HudState {
-    pub controls: ControlsState,
-    pub help_open: bool,
-    pub inspector_open: bool,
-    pub reset_confirm_open: bool,
+pub(crate) struct HudState {
+    pub(super) controls: ControlsState,
+    pub(super) help_open: bool,
+    pub(super) inspector_open: bool,
+    pub(super) reset_confirm_open: bool,
+}
+
+impl HudState {
+    pub(crate) fn movement_blocked(&self) -> bool {
+        self.reset_confirm_open
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -62,6 +68,7 @@ pub(super) enum Readout {
     Summary,
     PathBrief,
     PathDetails,
+    FlightControls,
     Mission,
     Environment,
     CameraMode,

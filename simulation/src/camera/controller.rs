@@ -1,4 +1,5 @@
 use super::model::{CameraError, CameraRig, CameraStatus};
+use super::movement::DebugFlight;
 use super::zoom::{self, MAX_DISTANCE_KM, MIN_DISTANCE_KM};
 use crate::{
     domain::{CameraMode, CameraRequest, EngineAction, EntityId, EntityKind, ViewportAction},
@@ -99,6 +100,7 @@ struct CameraInput<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     buttons: Res<'w, ButtonInput<MouseButton>>,
     input_focus: Res<'w, InputFocus>,
+    hud: Res<'w, crate::hud::HudState>,
     motion: Res<'w, AccumulatedMouseMotion>,
     scroll: Res<'w, AccumulatedMouseScroll>,
     pinches: MessageReader<'w, 's, PinchGesture>,
@@ -120,12 +122,14 @@ fn update_camera(
     >,
     mut rig: ResMut<CameraRig>,
     mut gesture: Local<PointerGesture>,
+    mut flight: Local<DebugFlight>,
 ) {
     let CameraInput {
         time,
         keys,
         buttons,
         input_focus,
+        hud,
         motion,
         scroll,
         mut pinches,
@@ -173,7 +177,7 @@ fn update_camera(
         return;
     };
     if mode_changed && rig.mode == CameraMode::FreeFlight {
-        preserve_pose(&mut rig, transform.rotation);
+        flight.preserve_pose(&mut rig, transform.rotation);
     }
     let snapshot = crate::snapshot();
     if !focus_exists(rig.focus, &snapshot) {
@@ -187,9 +191,7 @@ fn update_camera(
     }
     let mut target = focus_position(rig.focus, &snapshot) + rig.pan_offset;
     if !rig.initialized {
-        let forward = transform.rotation * Vec3::NEG_Z;
-        rig.yaw = (-forward.x).atan2(-forward.z);
-        rig.pitch = forward.y.asin().clamp(-1.52, 1.52);
+        flight.preserve_pose(&mut rig, transform.rotation);
         rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
         rig.initialized = true;
     }
@@ -219,7 +221,7 @@ fn update_camera(
             rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
         }
         if keys.just_pressed(KeyCode::Digit4) {
-            preserve_pose(&mut rig, transform.rotation);
+            flight.preserve_pose(&mut rig, transform.rotation);
             rig.mode = CameraMode::FreeFlight;
         }
         if keys.just_pressed(KeyCode::Digit5) {
@@ -343,48 +345,15 @@ fn update_camera(
             );
         }
 
-        let moving = !button_focused
-            && [
-                KeyCode::KeyW,
-                KeyCode::KeyA,
-                KeyCode::KeyS,
-                KeyCode::KeyD,
-                KeyCode::KeyQ,
-                KeyCode::KeyE,
-            ]
-            .into_iter()
-            .any(|key| keys.pressed(key));
-        if moving {
-            if rig.mode != CameraMode::FreeFlight {
-                preserve_pose(&mut rig, transform.rotation);
-                rig.mode = CameraMode::FreeFlight;
-            }
-            transform.rotation = look_rotation(rig.yaw, rig.pitch);
-            let forward = transform.rotation * Vec3::NEG_Z;
-            let right = transform.rotation * Vec3::X;
-            let mut direction = Vec3::ZERO;
-            if keys.pressed(KeyCode::KeyW) {
-                direction += forward;
-            }
-            if keys.pressed(KeyCode::KeyS) {
-                direction -= forward;
-            }
-            if keys.pressed(KeyCode::KeyD) {
-                direction += right;
-            }
-            if keys.pressed(KeyCode::KeyA) {
-                direction -= right;
-            }
-            if keys.pressed(KeyCode::KeyE) {
-                direction += Vec3::Y;
-            }
-            if keys.pressed(KeyCode::KeyQ) {
-                direction -= Vec3::Y;
-            }
-            let boost = if shift { 5.0 } else { 1.0 };
-            transform.translation +=
-                direction.normalize_or_zero() * rig.speed_mps * KM * dt * boost;
-        }
+        // Dedicated movement ignores stale button focus, but not the reset modal.
+        flight.translate(
+            &mut rig,
+            &mut transform,
+            &crate::controls::movement(&keys),
+            input_active(),
+            hud.movement_blocked(),
+            dt,
+        );
     }
 
     target = focus_position(rig.focus, &snapshot) + rig.pan_offset;
@@ -394,7 +363,7 @@ fn update_camera(
         RenderLayers::layer(0).with(1)
     };
     match rig.mode {
-        CameraMode::FreeFlight => transform.rotation = look_rotation(rig.yaw, rig.pitch),
+        CameraMode::FreeFlight => transform.rotation = flight.rotation(&rig),
         CameraMode::FirstPerson => {
             let body_rotation = focus_entity(rig.focus, &snapshot)
                 .map(|entity| rotation(entity.rotation))
@@ -454,28 +423,9 @@ fn update_camera(
     });
 }
 
-fn preserve_pose(rig: &mut CameraRig, rotation: Quat) {
-    let forward = rotation * Vec3::NEG_Z;
-    rig.yaw = (-forward.x).atan2(-forward.z);
-    rig.pitch = forward.y.asin().clamp(-1.52, 1.52);
-}
-
 fn rotate_camera(rig: &mut CameraRig, delta: Vec2) {
     rig.yaw -= delta.x * 0.004;
     rig.pitch = (rig.pitch + delta.y * 0.004).clamp(-1.52, 1.52);
-}
-
-fn look_rotation(yaw: f32, pitch: f32) -> Quat {
-    Transform::IDENTITY
-        .looking_to(
-            Vec3::new(
-                -yaw.sin() * pitch.cos(),
-                pitch.sin(),
-                -yaw.cos() * pitch.cos(),
-            ),
-            Vec3::Y,
-        )
-        .rotation
 }
 
 fn focus_exists(focus: EntityId, snapshot: &Snapshot) -> bool {

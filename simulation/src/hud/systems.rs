@@ -489,6 +489,7 @@ fn update_readouts(
             Readout::Summary => summary_readout(&snapshot, &playback),
             Readout::PathBrief => crate::navigation::brief(),
             Readout::PathDetails => crate::navigation::details(),
+            Readout::FlightControls => flight_controls_readout(&playback),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
@@ -682,6 +683,25 @@ fn environment_readout(snapshot: &Snapshot) -> String {
         "L1 {:.1} km | L2 {:.1} km",
         snapshot.environment.l1_position_m[0] / 1000.0,
         snapshot.environment.l2_position_m[0] / 1000.0,
+    )
+}
+
+fn flight_controls_readout(playback: &PlaybackState) -> String {
+    let state = if !playback.can_control {
+        "Ship controls unavailable in view-only mode."
+    } else if !playback.running {
+        "Ship paused. Press Space or Run before flying."
+    } else if !camera::input_active() {
+        "Click the scene or focus the canvas to enable movement keys."
+    } else if crate::session::keyboard_requires_release() {
+        "Release the movement keys, then press them again to rearm ship thrust."
+    } else if playback.autopilot {
+        "Example controller active. A ship thrust key switches to manual control."
+    } else {
+        "Manual ship control. Release thrust keys to coast."
+    };
+    format!(
+        "{state}\nShip: W/S forward/back, A/D left/right, E/Q up/down. E lifts off from the pad.\nAlt/Option + WASD/QE: debug camera only. Shift boosts the debug camera, not the ship.\nRelease keys to stop thrust. The ship keeps coasting; opposite thrust slows it."
     )
 }
 

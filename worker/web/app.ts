@@ -8,6 +8,7 @@ type Engine = {
   runtime_status: () => string;
   command: (json: string) => string;
   set_viewport_input: (active: boolean, locked: boolean) => void;
+  set_movement_keys: (mask: number) => void;
   pinch_zoom: (logDistanceDelta: number) => void;
   fullscreen_button_at: (x: number, y: number) => boolean;
   fullscreen_button_focused: () => boolean;
@@ -37,13 +38,56 @@ const progress = byId<HTMLProgressElement>("wasm-progress");
 let engine: Engine | undefined;
 let ready = false;
 let failed = false;
-let platformMessage = "WebGPU · Click the scene to activate camera controls";
+let platformMessage = "WebGPU · Click the scene to activate ship and debug controls";
 let startupPhase = "checking_graphics";
 let startupVisibleWait = 0;
 let lastRendererStatus: RendererStatus | undefined;
 let fullscreenPending = false;
 let fullscreenPress: number | null = null;
 let gestureScale: number | null = null;
+let pointerLockExitPending = false;
+const movementCodes = ["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"] as const;
+const movementHeld = new Set<string>();
+
+function pageBackgroundFocused() {
+  return document.activeElement === document.body || document.activeElement === document.documentElement;
+}
+
+function viewportInputActive() {
+  // Pointer lock does not give the game keys belonging to an HTML control.
+  return ready && document.hasFocus() && !document.hidden && !pointerLockExitPending
+    && (document.activeElement === canvas || (document.pointerLockElement === canvas && pageBackgroundFocused()));
+}
+
+function clearMovementKeys() {
+  movementHeld.clear();
+  engine?.set_movement_keys(0);
+}
+
+function movementKey(event: KeyboardEvent, down: boolean) {
+  if (!ready || !engine) return;
+  if (!viewportInputActive() || event.code === "Escape") {
+    clearMovementKeys();
+    return;
+  }
+  const movement = (movementCodes as readonly string[]).includes(event.code);
+  if (event.ctrlKey || event.metaKey) {
+    // Browser and assistive shortcuts must not turn into delayed ship input.
+    movementHeld.clear();
+  } else if (movement) {
+    // A clear requires a fresh press, never an autorepeat after focus or a chord.
+    if (!down) movementHeld.delete(event.code);
+    else if (!event.repeat) movementHeld.add(event.code);
+    // Use physical codes: Option+W may have a printable non-W character on macOS.
+    event.preventDefault();
+  }
+  let mask = movementCodes.reduce((bits, code, index) => bits | (movementHeld.has(code) ? 1 << index : 0), 0);
+  if (event.altKey) mask |= 1 << 6;
+  if (event.shiftKey) mask |= 1 << 7;
+  if (event.ctrlKey || event.metaKey) mask |= 1 << 8;
+  engine.set_movement_keys(mask);
+  inputState();
+}
 
 type WebKitDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void | Promise<void> };
 type WebKitElement = HTMLElement & { webkitRequestFullscreen?: () => void | Promise<void> };
@@ -75,7 +119,8 @@ function publishPlatform(message = platformMessage) {
 }
 function inputState() {
   const locked = document.pointerLockElement === canvas;
-  const active = ready && document.hasFocus() && (document.activeElement === canvas || locked);
+  const active = viewportInputActive();
+  if (!active) clearMovementKeys();
   engine?.set_viewport_input(active, locked);
 }
 function fail(message: string) {
@@ -153,8 +198,11 @@ async function captureMouse() {
   catch { publishPlatform("Mouse capture unavailable. Drag to look instead."); announce(platformMessage); }
 }
 function releaseMouse() {
+  // exitPointerLock is asynchronous; stop input before its change event arrives.
+  pointerLockExitPending = document.pointerLockElement === canvas;
+  clearMovementKeys();
   if (document.pointerLockElement) document.exitPointerLock();
-  canvas.blur(); inputState(); publishPlatform("Mouse released · Click the scene to resume camera controls");
+  canvas.blur(); inputState(); publishPlatform("Mouse released · Click the scene to resume ship and debug controls");
 }
 function exportFlight() {
   if (!engine) return;
@@ -191,7 +239,7 @@ canvas.addEventListener("pointerup", event => {
 }, { capture: true });
 canvas.addEventListener("pointercancel", () => { fullscreenPress = null; });
 canvas.addEventListener("focus", inputState);
-canvas.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; inputState(); });
+canvas.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; clearMovementKeys(); inputState(); });
 canvas.addEventListener("contextmenu", event => event.preventDefault());
 canvas.addEventListener("wheel", event => {
   if (!ready || event.metaKey) return;
@@ -219,13 +267,21 @@ canvas.addEventListener("gestureend", event => {
   changeGesture(event);
   gestureScale = null;
 }, { passive: false, capture: true });
-window.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; });
+window.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; clearMovementKeys(); });
 window.addEventListener("blur", inputState); window.addEventListener("focus", inputState);
+document.addEventListener("focusin", inputState, { capture: true });
+document.addEventListener("focusout", inputState, { capture: true });
 document.addEventListener("visibilitychange", inputState);
-document.addEventListener("pointerlockchange", () => { inputState(); publishPlatform(document.pointerLockElement === canvas ? "Mouse captured · Escape releases it" : "Mouse released"); });
+document.addEventListener("pointerlockchange", () => {
+  if (document.pointerLockElement !== canvas) pointerLockExitPending = false;
+  clearMovementKeys(); inputState();
+  publishPlatform(document.pointerLockElement === canvas ? "Mouse captured · Escape releases it" : "Mouse released");
+});
 for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
-  document.addEventListener(name, () => { publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : "Fullscreen closed"); inputState(); window.dispatchEvent(new Event("resize")); });
+  document.addEventListener(name, () => { clearMovementKeys(); publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : "Fullscreen closed"); inputState(); window.dispatchEvent(new Event("resize")); });
 }
+window.addEventListener("keydown", event => movementKey(event, true), { capture: true });
+window.addEventListener("keyup", event => movementKey(event, false), { capture: true });
 window.addEventListener("keydown", event => {
   if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
     || document.activeElement !== canvas) return;
@@ -347,8 +403,10 @@ async function start() {
     byId("sim-status").textContent = "Starting Bevy 0.20";
     byId("wasm-progress-text").textContent = `Downloaded ${megabytes(bytes.byteLength)}. Compiling WebAssembly and WebGPU pipelines.`;
     startupPhase = "compiling_webassembly"; recordStartup();
-    engine = module as Engine;
-    await engine.default({ module_or_path: bytes });
+    const loaded = module as Engine;
+    await loaded.default({ module_or_path: bytes });
+    engine = loaded;
+    clearMovementKeys();
     engine.set_viewport_input(false, false);
     startupPhase = "starting_renderer"; recordStartup();
     engine.start_simulation("#simulation-canvas");
@@ -356,7 +414,9 @@ async function start() {
     if (failed) return;
     ready = true; byId("sim-status").textContent = "3D ready"; boot.hidden = true;
     publishPlatform("WebGPU · Lander ready on Phobos. Space runs the mission; H opens controls.");
-    canvas.focus({ preventScroll: true }); inputState();
+    // Loading may finish after the user has moved to another tab or HTML control.
+    if (document.hasFocus() && !document.hidden && pageBackgroundFocused()) canvas.focus({ preventScroll: true });
+    inputState();
   } catch (error) { if (!failed) fail(errorMessage(error)); }
 }
 void start();

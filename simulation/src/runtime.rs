@@ -25,7 +25,7 @@ impl Default for PlaybackState {
             can_control: true,
             fullscreen: false,
             maximized: true,
-            message: "WebGPU · Click the scene to activate camera controls".into(),
+            message: "WebGPU · Click the scene to activate ship and debug controls".into(),
             accumulator: 0.0,
             guidance_elapsed: f64::MAX,
         }

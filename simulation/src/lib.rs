@@ -4,6 +4,7 @@ mod api;
 mod app;
 pub mod astrophysics;
 mod camera;
+mod controls;
 pub mod domain;
 mod guidance;
 mod hud;
@@ -75,6 +76,12 @@ pub fn runtime_status() -> String {
 #[wasm_bindgen]
 pub fn set_viewport_input(active: bool, locked: bool) {
     camera::set_input_active(active, locked);
+}
+
+/// Physical movement keys only. Routing and ship commands remain in Rust.
+#[wasm_bindgen]
+pub fn set_movement_keys(mask: u16) {
+    controls::set_movement_keys(mask);
 }
 
 #[wasm_bindgen]
