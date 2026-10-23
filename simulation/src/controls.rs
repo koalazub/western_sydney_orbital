@@ -21,3 +21,8 @@ pub(crate) fn set_movement_keys(mask: u16) {
 pub(crate) fn movement(keys: &bevy::prelude::ButtonInput<bevy::prelude::KeyCode>) -> Movement {
     decode(routing::key_mask(keys))
 }
+
+/// Space is physical bit 9 in the shared browser/native movement protocol.
+pub(crate) fn lift_key_down(keys: &bevy::prelude::ButtonInput<bevy::prelude::KeyCode>) -> bool {
+    routing::key_mask(keys) & (1 << 9) != 0
+}

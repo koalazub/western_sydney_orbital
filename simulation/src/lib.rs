@@ -19,6 +19,7 @@ mod scene;
 mod sensors;
 mod session;
 pub mod terrain;
+mod thrusters;
 
 pub(crate) use app::EngineSet;
 pub(crate) use runtime::PlaybackState;

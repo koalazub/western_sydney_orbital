@@ -46,7 +46,11 @@ let fullscreenPending = false;
 let fullscreenPress: number | null = null;
 let gestureScale: number | null = null;
 let pointerLockExitPending = false;
-const movementCodes = ["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"] as const;
+const movementBits = new Map([
+  ["KeyW", 1 << 0], ["KeyA", 1 << 1], ["KeyS", 1 << 2],
+  ["KeyD", 1 << 3], ["KeyQ", 1 << 4], ["KeyE", 1 << 5],
+  ["Space", 1 << 9],
+]);
 const movementHeld = new Set<string>();
 
 function pageBackgroundFocused() {
@@ -70,7 +74,8 @@ function movementKey(event: KeyboardEvent, down: boolean) {
     clearMovementKeys();
     return;
   }
-  const movement = (movementCodes as readonly string[]).includes(event.code);
+  const movement = movementBits.has(event.code);
+  const ownsMovement = movement && !event.ctrlKey && !event.metaKey;
   if (event.ctrlKey || event.metaKey) {
     // Browser and assistive shortcuts must not turn into delayed ship input.
     movementHeld.clear();
@@ -78,15 +83,20 @@ function movementKey(event: KeyboardEvent, down: boolean) {
     // A clear requires a fresh press, never an autorepeat after focus or a chord.
     if (!down) movementHeld.delete(event.code);
     else if (!event.repeat) movementHeld.add(event.code);
-    // Use physical codes: Option+W may have a printable non-W character on macOS.
-    event.preventDefault();
   }
-  let mask = movementCodes.reduce((bits, code, index) => bits | (movementHeld.has(code) ? 1 << index : 0), 0);
+  let mask = 0;
+  // Use physical codes: Option+W may have a printable non-W character on macOS.
+  for (const code of movementHeld) mask |= movementBits.get(code) ?? 0;
   if (event.altKey) mask |= 1 << 6;
   if (event.shiftKey) mask |= 1 << 7;
   if (event.ctrlKey || event.metaKey) mask |= 1 << 8;
   engine.set_movement_keys(mask);
   inputState();
+  if (ownsMovement) {
+    event.preventDefault();
+    // Publish the raw source first, then keep Space out of Winit's button input.
+    if (event.code === "Space") event.stopImmediatePropagation();
+  }
 }
 
 type WebKitDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void | Promise<void> };
@@ -285,14 +295,14 @@ window.addEventListener("keyup", event => movementKey(event, false), { capture: 
 window.addEventListener("keydown", event => {
   if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
     || document.activeElement !== canvas) return;
-  const buttonActivation = ["Enter", "Space"].includes(event.code) && engine.fullscreen_button_focused();
+  const buttonActivation = event.code === "Enter" && engine.fullscreen_button_focused();
   if (event.code !== "KeyX" && !buttonActivation) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   if (!event.repeat) void fullscreen();
 }, { capture: true });
 window.addEventListener("keydown", event => {
-  if (ready && document.activeElement === canvas && !event.ctrlKey && !event.metaKey && ["Tab", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
+  if (ready && document.activeElement === canvas && !event.ctrlKey && !event.metaKey && ["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
 });
 window.addEventListener("error", event => { if (/wasm|wsorb_bevy/.test(`${event.filename} ${event.error?.stack || ""}`)) fail(`The simulation stopped: ${event.message}`); });
 window.addEventListener("unhandledrejection", event => { if (/wasm|wsorb_bevy/.test(String(event.reason?.stack || ""))) fail(`The simulation stopped: ${errorMessage(event.reason)}`); });
@@ -413,7 +423,7 @@ async function start() {
     await waitForRenderer();
     if (failed) return;
     ready = true; byId("sim-status").textContent = "3D ready"; boot.hidden = true;
-    publishPlatform("WebGPU · Lander ready on Phobos. Space runs the mission; H opens controls.");
+    publishPlatform("WebGPU · Lander ready on Phobos. P runs the mission; H opens controls.");
     // Loading may finish after the user has moved to another tab or HTML control.
     if (document.hasFocus() && !document.hidden && pageBackgroundFocused()) canvas.focus({ preventScroll: true });
     inputState();

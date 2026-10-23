@@ -1,7 +1,7 @@
 //! Imperative adapter for the pure playback transition and physical world.
 use crate::{
     api::Dispatch,
-    controls::{KeyboardPilot, Movement, PilotContext, PilotEffect},
+    controls::{KeyboardPilot, Movement, MovementTarget, PilotContext, PilotEffect},
     domain::{EngineAction, MissionStatus, ViewportAction},
     model::Snapshot,
     physics::{PhysicsCommand, Simulation},
@@ -9,7 +9,11 @@ use crate::{
     scenario,
 };
 use bevy::prelude::*;
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    rc::Rc,
+};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -37,6 +41,7 @@ thread_local! {
     static VIEWPORT: RefCell<ViewportState> = RefCell::new(ViewportState::default());
     static PUBLISHED: RefCell<Option<Rc<Snapshot>>> = const { RefCell::new(None) };
     static KEYBOARD_PILOT: RefCell<KeyboardPilot> = RefCell::new(KeyboardPilot::default());
+    static SPACE_HELD: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn request_action(action: EngineAction) {
@@ -159,11 +164,22 @@ pub(crate) fn advance_world(
     mut state: ResMut<PlaybackState>,
 ) {
     let movement = crate::controls::movement(&keys);
+    let space_down = crate::controls::lift_key_down(&keys);
+    let fresh_space = SPACE_HELD.with(|held| !held.replace(space_down) && space_down);
     let context = VIEWPORT.with(|context| context.borrow().clone());
     state.fullscreen = context.fullscreen;
     state.maximized = context.maximized;
     state.message = context.message;
     let actions: Vec<_> = ACTIONS.with(|queue| queue.borrow_mut().drain(..).collect());
+    let explicit_playback_action = actions.iter().any(|action| {
+        matches!(
+            action,
+            EngineAction::Pause
+                | EngineAction::TogglePlayback
+                | EngineAction::Reset
+                | EngineAction::Step
+        )
+    });
     for action in actions {
         if matches!(action, EngineAction::ToggleAutopilot) && state.can_control {
             let owned = KEYBOARD_PILOT.with(|pilot| {
@@ -207,6 +223,26 @@ pub(crate) fn advance_world(
             }
             Effect::Viewport(action) => platform_effect(action),
         }
+    }
+    if fresh_space
+        && !explicit_playback_action
+        && !state.running
+        && state.can_control
+        && crate::camera::input_active()
+        && !hud.movement_blocked()
+        && movement.target == MovementTarget::Ship
+        && movement.axes[2] > 0.0
+        && SIMULATION.with(|sim| sim.borrow().mission_status() == MissionStatus::Running)
+    {
+        // A fresh lift key is a launch action, not a pause toggle or teleport.
+        let rate = state.rate;
+        *state = runtime::transition(
+            state.clone(),
+            EngineAction::Play(rate),
+            MissionStatus::Running,
+        )
+        .state;
+        KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().rearm_for_launch());
     }
     update_keyboard_pilot(&mut state, movement, hud.movement_blocked());
     if state.running && state.can_control {
@@ -280,7 +316,7 @@ fn apply_keyboard_effect(
                 && state.running
                 && sim.mission_status() == MissionStatus::Running =>
         {
-            if sim.set_command(accel, [0.0; 3]).is_err() {
+            if sim.set_manual_thrust(accel).is_err() {
                 return false;
             }
             *state = runtime::transition(

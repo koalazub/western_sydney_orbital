@@ -56,7 +56,7 @@ pub(super) fn setup(mut commands: Commands) {
                         Pickable::IGNORE,
                         LayoutPart::MissionActions,
                         children![
-                            button("Run [Space]", HudAction::TogglePlayback, Readout::Playback),
+                            button("Run [P]", HudAction::TogglePlayback, Readout::Playback),
                             (button("Fullscreen [X]", HudAction::Fullscreen, Readout::Fullscreen), FullscreenButton),
                             button("Details +", HudAction::ToggleControls, Readout::Controls),
                         ],
@@ -82,7 +82,7 @@ pub(super) fn setup(mut commands: Commands) {
                         LayoutPart::CameraPanel,
                         children![
                             (text("Orbit | Lander", CAPTION_SIZE_PX, MUTED), Readout::CameraMode),
-                            text("WASD + Q/E: ship | hold Alt/Option: debug", CAPTION_SIZE_PX, MUTED),
+                            text("WASD lander | Space lift | Alt/Option debug | P pause", CAPTION_SIZE_PX, MUTED),
                             (
                                 button_row(),
                                 Pickable::IGNORE,
@@ -177,15 +177,16 @@ pub(super) fn setup(mut commands: Commands) {
                         Visibility::Hidden,
                         children![
                             text("Keyboard and camera help", COPY_SIZE_PX, TEXT),
-                            text("Space run/pause | . step | R reset | T rate", COPY_SIZE_PX, MUTED),
+                            text("Space lift/launch | P run/pause | . step | R reset | T rate", COPY_SIZE_PX, MUTED),
                             text("1-5 viewer cameras | 6 top sensor | 7 bottom sensor", COPY_SIZE_PX, MUTED),
                             text("Ship sensors: 512 x 512, RGB8 per channel, fixed exposure and configured field of view. No debug markers or contrast boost.", COPY_SIZE_PX, MUTED),
                             text("Amber line: advisory path preview in debug views only. Cyan sphere: waypoint arrival region. Radar covers only part of the debris. The preview does not control the ship or feed the example controller.", COPY_SIZE_PX, MUTED),
                             text(", / change focus | L capture or release", COPY_SIZE_PX, MUTED),
                             text("Drag to orbit; wheel or trackpad pinch zooms viewer cameras. Ship sensor optics stay fixed.", COPY_SIZE_PX, MUTED),
-                            text("Run the mission first. WASD moves the ship; Q/E applies down/up thrust in its body frame. E lifts off from the pad. Releasing keys stops thrust, not velocity. Manual thrust turns off the example controller.", COPY_SIZE_PX, MUTED),
+                            text("Space launches a paused lander and fires its lift jet while held. WASD applies body-frame forces at offset nozzles; Q/E fires down/up thrust. Side jets create real turning moments and ground contacts can tip the lander. Releasing keys stops thrust, not velocity or spin. Manual thrust turns off the example controller.", COPY_SIZE_PX, MUTED),
+                            text("Blue-white exhaust streams in debug views follow the actual applied jet forces. They are a debug animation, not calibrated light or gas simulation, and do not appear in ship-camera RGB images.", COPY_SIZE_PX, MUTED),
                             text("Alt/Option + WASD/QE moves only the debug camera. Shift boosts debug movement only. Ship sensor mounts and optics stay fixed.", COPY_SIZE_PX, MUTED),
-                            text("Arrows orbit | Tab moves focus | Enter or Space activates a button", COPY_SIZE_PX, MUTED),
+                            text("Arrows orbit | Tab moves focus | Enter activates a button", COPY_SIZE_PX, MUTED),
                             text("M maximize | X fullscreen | I inspect | H help", COPY_SIZE_PX, MUTED),
                             text("Esc closes help, inspector, details or the reset prompt.", COPY_SIZE_PX, MUTED),
                             text("Frame axes: +X points to Mars; +Y is orbit normal. L1/L2 use a circular point-mass model. Terrain, contacts and damage are practice approximations. Viewer cameras are not STP sensor feeds.", COPY_SIZE_PX, MUTED),

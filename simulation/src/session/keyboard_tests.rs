@@ -18,6 +18,7 @@ fn fresh_app() -> App {
     RUNTIME.with(|runtime| *runtime.borrow_mut() = PlaybackState::default());
     VIEWPORT.with(|viewport| *viewport.borrow_mut() = ViewportState::default());
     KEYBOARD_PILOT.with(|pilot| *pilot.borrow_mut() = KeyboardPilot::default());
+    SPACE_HELD.with(|held| held.set(false));
     crate::controls::set_movement_keys(0);
     crate::camera::set_input_active(true, false);
 
@@ -81,7 +82,7 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
         assert!(app.world().resource::<PlaybackState>().autopilot);
         let before = snapshot();
         let mut expected = Simulation::new_default();
-        expected.set_command(command, [0.0; 3]).unwrap();
+        expected.set_manual_thrust(command).unwrap();
         expected.advance(STEP.as_secs_f64());
         let expected = expected.snapshot();
 
@@ -98,6 +99,15 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
         assert_eq!(after.time_s, STEP.as_secs_f64());
         assert_eq!(lander.commanded_accel_mps2, command);
         assert_eq!(lander.commanded_angular_accel_rad_s2, [0.0; 3]);
+        assert_eq!(
+            lander.thrust_application,
+            crate::model::ThrustApplication::ManualNozzles
+        );
+        assert_eq!(lander.torque_nm, ship(&expected).torque_nm);
+        assert_eq!(
+            lander.angular_velocity_rad_s,
+            ship(&expected).angular_velocity_rad_s
+        );
         assert_eq!(lander.mass_kg, ship(&before).mass_kg);
         assert_eq!(lander.radius_m, ship(&before).radius_m);
         assert_eq!(lander.max_thrust_n, ship(&before).max_thrust_n);
@@ -445,4 +455,64 @@ fn authority_return_respects_new_external_commands_and_explicit_autopilot_handof
         }
         assert!(!keyboard_owns_command());
     }
+}
+
+#[test]
+fn fresh_space_launches_a_paused_lander_with_real_upward_thrust() {
+    let mut app = fresh_app();
+    let before = snapshot();
+    let body_up = bevy::math::DQuat::from_array(ship(&before).rotation) * bevy::math::DVec3::Z;
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert!(app.world().resource::<PlaybackState>().running);
+    assert!(!app.world().resource::<PlaybackState>().autopilot);
+    assert!(keyboard_owns_command());
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        [0.0, 0.0, scenario::settings().lander.max_accel_mps2]
+    );
+    for _ in 0..9 {
+        frame(&mut app, STEP);
+    }
+    let after = snapshot();
+    let lift = bevy::math::DVec3::from_array(ship(&after).position)
+        - bevy::math::DVec3::from_array(ship(&before).position);
+    assert!(
+        lift.dot(body_up) > 0.02,
+        "Space must lift through actual dynamics, not toggle pause"
+    );
+    assert!(after.mission.fuel_used_kg > before.mission.fuel_used_kg);
+    release(&mut app, &[KeyCode::Space]);
+    frame(&mut app, Duration::ZERO);
+    assert!(app.world().resource::<PlaybackState>().running);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(ship(&snapshot()).velocity, ship(&after).velocity);
+}
+
+#[test]
+fn space_never_cancels_an_explicit_pause_or_launches_from_debug_or_view_only_input() {
+    for guarded in 0..3 {
+        let mut app = fresh_app();
+        press(&mut app, &[KeyCode::Space]);
+        match guarded {
+            0 => request_action(EngineAction::Pause),
+            1 => press(&mut app, &[KeyCode::AltLeft]),
+            2 => app.world_mut().resource_mut::<PlaybackState>().can_control = false,
+            _ => unreachable!(),
+        }
+        frame(&mut app, STEP);
+        assert!(!app.world().resource::<PlaybackState>().running);
+        assert_eq!(snapshot().time_s, 0.0);
+        assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    }
+    let mut app = fresh_app();
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    request_action(EngineAction::TogglePlayback);
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    let paused = snapshot().time_s;
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    assert_eq!(snapshot().time_s, paused);
 }

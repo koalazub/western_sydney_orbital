@@ -70,6 +70,16 @@ fn interactions(
     mut hud: ResMut<HudState>,
     playback: Res<PlaybackState>,
 ) {
+    // P is an application shortcut even when a native HUD button retains focus.
+    // Space belongs to the lift jet and must never toggle playback here.
+    if camera::input_active()
+        && !hud.reset_confirm_open
+        && playback_hotkey(&keys)
+        && playback.can_control
+        && !crate::snapshot().mission.status.is_terminal()
+    {
+        crate::request_action(EngineAction::TogglePlayback);
+    }
     let button_focused = input_focus
         .get()
         .is_some_and(|entity| buttons.contains(entity));
@@ -90,12 +100,6 @@ fn interactions(
             hud.reset_confirm_open = false;
         }
         return;
-    }
-    if keys.just_pressed(KeyCode::Space)
-        && playback.can_control
-        && !crate::snapshot().mission.status.is_terminal()
-    {
-        crate::request_action(EngineAction::TogglePlayback);
     }
     if keys.just_pressed(KeyCode::Period)
         && playback.can_control
@@ -158,6 +162,20 @@ fn interactions(
         crate::request_action(EngineAction::Reset);
         hud.reset_confirm_open = false;
     }
+}
+
+fn playback_hotkey(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::KeyP)
+        && ![
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+        ]
+        .into_iter()
+        .any(|key| keys.pressed(key))
 }
 
 fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackState) {
@@ -512,9 +530,9 @@ fn update_readouts(
                 if snapshot.mission.status.is_terminal() {
                     snapshot.mission.status.to_string()
                 } else if playback.running {
-                    "Pause [Space]".into()
+                    "Pause [P]".into()
                 } else {
-                    "Run [Space]".into()
+                    "Run [P]".into()
                 }
             }
             Readout::Rate => format!("{}x [T]", playback.rate.factor() as u32),
@@ -690,7 +708,7 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
     let state = if !playback.can_control {
         "Ship controls unavailable in view-only mode."
     } else if !playback.running {
-        "Ship paused. Press Space or Run before flying."
+        "Lander paused. Space launches; P or Run resumes playback."
     } else if !camera::input_active() {
         "Click the scene or focus the canvas to enable movement keys."
     } else if crate::session::keyboard_requires_release() {
@@ -701,7 +719,7 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
         "Manual ship control. Release thrust keys to coast."
     };
     format!(
-        "{state}\nShip: W/S forward/back, A/D left/right, E/Q up/down. E lifts off from the pad.\nAlt/Option + WASD/QE: debug camera only. Shift boosts the debug camera, not the ship.\nRelease keys to stop thrust. The ship keeps coasting; opposite thrust slows it."
+        "{state}\nLander: W/S forward/back, A/D left/right, Space/E lift, Q down.\nSide jets apply forces below the centre of mass, so they can roll or topple the lander. Debug exhaust streams show the opposite force direction.\nAlt/Option + movement keys: debug camera only. Shift boosts debug movement only.\nRelease keys to stop thrust, not linear or angular momentum. P pauses or resumes."
     )
 }
 
@@ -933,5 +951,30 @@ fn region_label(region: LagrangeRegion) -> &'static str {
     match region {
         LagrangeRegion::L1 => "L1",
         LagrangeRegion::L2 => "L2",
+    }
+}
+
+#[cfg(test)]
+mod playback_key_tests {
+    use super::*;
+
+    #[test]
+    fn p_controls_playback_but_space_and_browser_modifier_chords_do_not() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Space);
+        assert!(!playback_hotkey(&keys));
+        for modifier in [
+            None,
+            Some(KeyCode::ControlLeft),
+            Some(KeyCode::SuperLeft),
+            Some(KeyCode::AltLeft),
+        ] {
+            let mut keys = ButtonInput::default();
+            keys.press(KeyCode::KeyP);
+            if let Some(modifier) = modifier {
+                keys.press(modifier);
+            }
+            assert_eq!(playback_hotkey(&keys), modifier.is_none());
+        }
     }
 }

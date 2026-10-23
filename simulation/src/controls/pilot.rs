@@ -8,6 +8,14 @@ pub(crate) struct KeyboardPilot {
 }
 
 impl KeyboardPilot {
+    /// A fresh, authorized Space press explicitly starts a new manual launch.
+    /// This is not called for held keys, focus recovery or modifier handoffs.
+    pub(crate) fn rearm_for_launch(&mut self) {
+        self.command = None;
+        self.pending_release = false;
+        self.inhibited = false;
+    }
+
     pub(crate) fn update(
         &mut self,
         movement: Movement,
