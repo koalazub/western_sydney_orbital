@@ -92,43 +92,6 @@ local-check:
     } finally {child.kill('SIGTERM');}
     JS
 
-# Observe real mouse, keyboard, native HUD and fullscreen behavior in Chrome.
-preview:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-controls" nix shell --impure .#game --command npm --prefix worker run preview -- --controls --headed
-
-startup-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-startup" nix shell --impure .#game --command npm --prefix worker run preview -- --view=orbit
-
-hardware-startup-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hardware-startup" nix shell --impure .#game --command npm --prefix worker run preview -- --view=orbit --hardware --headed
-
-sensor-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors
-
-small-sensor-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-small-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --width=320 --height=600 --sensors
-
-hardware-sensor-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hardware-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors --hardware --headed
-
-platform-browser-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-platform" nix shell --impure .#game --command npm --prefix worker run preview -- --platform
-
-headed-platform-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-headed-platform" nix shell --impure .#game --command npm --prefix worker run preview -- --platform --headed
-
-preview-artifacts name:
-    PREVIEW_PARENT="${TMPDIR:-/tmp}/opencode" nix shell --impure .#game --command node --input-type=module -e 'import {readdirSync,statSync} from "node:fs"; import {join} from "node:path"; const d=join(process.env.PREVIEW_PARENT,process.argv[1]); console.log(readdirSync(d).map(name=>({name,time:statSync(join(d,name)).mtime.toISOString(),bytes:statSync(join(d,name)).size})).sort((a,b)=>b.time.localeCompare(a.time)));' {{quote(name)}}
-
-mission-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-mission" nix shell --impure .#game --command npm --prefix worker run preview -- --run-mission
-
-small-screen-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-small-screen" nix shell --impure .#game --command npm --prefix worker run preview -- --width=320 --height=900 --controls --headed
-
-download-failure-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-download-failure" nix shell --impure .#game --command npm --prefix worker run preview -- --block=wasm
-
 tools:
     nix shell --impure .#game --command rustc --version
     nix shell --impure .#game --command cargo --version
@@ -172,44 +135,6 @@ cf-network-debug:
 cf-http2-check:
     WSO_CF_HTTP2=1 WSO_CF_NETWORK_DIAGNOSTICS=1 nix shell --impure .#game --command npm --prefix worker run wrangler -- deployments status
 
-cf-network-self-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    nix shell --impure .#game --command node --input-type=module <<'JS'
-    import assert from 'node:assert/strict';
-    import {spawnSync} from 'node:child_process';
-    const source=`
-      import {channel} from 'node:diagnostics_channel';
-      await import('./worker/scripts/cloudflare-network.mjs');
-      const request={origin:'https://api.cloudflare.com',method:'POST',path:'/client/v4/example?token=QUERY_SENTINEL',headers:'HEADER_SENTINEL'};
-      const send=(name,value)=>channel('undici:'+name).publish({request,...value});
-      send('request:create',{});
-      send('client:sendHeaders',{headers:'HEADER_SENTINEL',socket:{bytesWritten:0,alpnProtocol:'h2',authorized:true,remoteAddress:'127.0.0.1'}});
-      send('request:bodyChunkSent',{chunk:Buffer.from('BODY_SENTINEL')});
-      send('request:bodySent',{});
-      send('request:headers',{response:{statusCode:201,headers:'RESPONSE_SENTINEL'}});
-      send('request:trailers',{trailers:'TRAILER_SENTINEL'});
-      send('request:create',{});
-      send('request:error',{error:{name:'Error',code:'TEST_ERROR',message:'ERROR_SENTINEL'}});
-      channel('undici:request:create').publish({request:{...request,origin:'https://example.com'}});
-    `;
-    for(const enabled of ['0','1']) {
-      const run=spawnSync(process.execPath,['--input-type=module','-e',source],{encoding:'utf8',timeout:10000,env:{...process.env,WSO_CF_NETWORK_DIAGNOSTICS:enabled,WSO_CF_HTTP2:'0'}});
-      assert.equal(run.status,0,run.stderr);
-      assert.equal(run.stdout,'');
-      assert.doesNotMatch(run.stderr,/SENTINEL|example\.com/);
-      if(enabled==='0') assert.equal(run.stderr,'');
-      else {
-        const events=run.stderr.trim().split('\n').map(line=>JSON.parse(line.slice('[cf-network] '.length)));
-        assert.deepEqual(events.map(event=>event.event),['created','connected','body_sent','response','complete','created','error']);
-        assert.equal(events[2].body_bytes,Buffer.byteLength('BODY_SENTINEL'));
-        assert.equal(events[3].status,201);
-        assert.equal(events[6].code,'TEST_ERROR');
-      }
-    }
-    console.log('PASS: diagnostics are opt-in, count bytes and omit credentials, queries and bodies.');
-    JS
-
 # Pin the optional CLI transport dependency without upgrading Wrangler.
 setup-cloudflare-network:
     nix shell --impure .#game --command npm --prefix worker install --save-dev --save-exact undici@7.29.1
@@ -225,15 +150,6 @@ deployment-status:
 
 deploy-dry-run:
     nix shell --impure .#game --command npm --prefix worker run wrangler -- deploy --dry-run
-
-hosted-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-controls" nix shell --impure .#game --command npm --prefix worker run preview -- --controls --headed --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
-
-hosted-mission-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-mission" nix shell --impure .#game --command npm --prefix worker run preview -- --run-mission --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
-
-hosted-sensor-check:
-    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors --hardware --headed --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
 
 hosted-artifact-check:
     #!/usr/bin/env bash

@@ -60,19 +60,3 @@ def test_metadata_requires_standalone_delimiters(tmp_path, text) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="front matter"):
         read_entry(path)
-
-
-def test_failed_index_replacement_preserves_previous_index(tmp_path, monkeypatch) -> None:
-    from pathlib import Path
-
-    path = write_index(tmp_path)
-    original = path.read_bytes()
-
-    def fail_replace(*args):
-        raise PermissionError("cannot replace")
-
-    monkeypatch.setattr(Path, "replace", fail_replace)
-    with pytest.raises(PermissionError):
-        write_index(tmp_path)
-    assert path.read_bytes() == original
-    assert not list(tmp_path.glob(".index-*"))

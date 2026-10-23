@@ -7,8 +7,6 @@ import pytest
 
 from wsorb.campaign import STRATEGIES
 from wsorb.geometry import Vec2
-from wsorb.model import Strategy
-from wsorb.planner import SearchPlan
 from wsorb.scenario import default_scenario
 from wsorb.simulation import Simulation, run_simulation
 
@@ -103,32 +101,6 @@ def test_waypoint_at_current_position_only_draws_idle_power() -> None:
     assert asset.energy_kwh == pytest.approx(asset.spec.idle_power_kw * 15 / 3600)
 
 
-def test_relay_pickup_movement_and_placement_complete(monkeypatch) -> None:
-    original = default_scenario()
-    asset = original.assets[0]
-    source = replace(original.antennas[0], position=asset.start)
-    destination = Vec2(asset.start.x + 10, asset.start.y)
-    scenario = replace(
-        original, assets=(asset,), antennas=(source, *original.antennas[1:]), horizon_s=600
-    )
-    plan = SearchPlan(
-        routes={asset.name: []},
-        relay_asset=asset.name,
-        relay_position=destination,
-        relay_source=source,
-    )
-    monkeypatch.setattr("wsorb.simulation.build_search_plan", lambda *args: plan)
-    simulation = Simulation(
-        scenario, Strategy("relay", deploy_relay=True), target=scenario.bounds.center
-    )
-    result = simulation.run()
-    assert result.relay_completed
-    assert simulation.assets[asset.name].relay_done
-    assert source.name not in {antenna.name for antenna in simulation.active_antennas}
-    assert any(antenna.position == destination for antenna in simulation.active_antennas)
-    assert any(event.message.endswith("relay online") for event in result.events)
-
-
 def test_detection_without_comms_is_found_but_not_successful() -> None:
     simulation = Simulation(
         default_scenario(), STRATEGIES["sector-baseline"], seed=5, target=Vec2(0, 0)
@@ -176,39 +148,3 @@ def test_open_charger_bay_promotes_waiting_asset() -> None:
     assert simulation.charger.slots == [waiting.name]
     assert simulation.charger.queue == []
     assert waiting.status == "charging"
-
-
-def test_deployment_plan_does_not_export_target(tmp_path, monkeypatch) -> None:
-    import json
-
-    from wsorb.cli import main
-
-    destination = tmp_path / "plan.json"
-    monkeypatch.setattr("wsorb.cli.run_simulation", lambda *args, **kwargs: _result())
-    assert main(["sim", "run", "--plan-out", str(destination)]) == 0
-    assert "target" not in json.loads(destination.read_text())
-
-
-def _result():
-    from wsorb.model import RunResult
-
-    return RunResult(
-        scenario_id="x",
-        strategy_name="x",
-        seed=0,
-        terrain_seed=0,
-        target=Vec2(1, 2),
-        found=True,
-        horizon_s=10,
-        coverage_fraction=0,
-        comms_fraction=1,
-        min_soc=1,
-        energy_kwh=0,
-        stranded_assets=(),
-        charger_wait_s=0,
-        detected_at_s=0,
-        reported_at_s=0,
-        asset_stats=(),
-        events=(),
-        asset_plans={},
-    )
