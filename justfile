@@ -153,6 +153,70 @@ task-info id:
 account:
     nix shell --impure .#game --command npm --prefix worker run account
 
+cf-network-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix shell --impure .#game --command node --input-type=module <<'JS'
+    import {resolve4,resolve6} from 'node:dns/promises';
+    console.log({ipv4:await resolve4('api.cloudflare.com').catch(String),ipv6:await resolve6('api.cloudflare.com').catch(String)});
+    for(const url of ['https://api.cloudflare.com/client/v4/user','https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/sim/manifest.json']) {
+      const start=Date.now();
+      try {const response=await fetch(url,{signal:AbortSignal.timeout(15000)});await response.arrayBuffer();console.log({url,status:response.status,ms:Date.now()-start});}
+      catch(error){console.log({url,error:String(error),cause: String(error.cause),code:error.cause?.code,errors:error.cause?.errors?.map(e=>({message:e.message,code:e.code,address:e.address}))});process.exitCode=1;}
+    }
+    JS
+
+cf-network-debug:
+    WSO_CF_NETWORK_DIAGNOSTICS=1 nix shell --impure .#game --command npm --prefix worker run wrangler -- deployments status
+
+cf-http2-check:
+    WSO_CF_HTTP2=1 WSO_CF_NETWORK_DIAGNOSTICS=1 nix shell --impure .#game --command npm --prefix worker run wrangler -- deployments status
+
+cf-network-self-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix shell --impure .#game --command node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import {spawnSync} from 'node:child_process';
+    const source=`
+      import {channel} from 'node:diagnostics_channel';
+      await import('./worker/scripts/cloudflare-network.mjs');
+      const request={origin:'https://api.cloudflare.com',method:'POST',path:'/client/v4/example?token=QUERY_SENTINEL',headers:'HEADER_SENTINEL'};
+      const send=(name,value)=>channel('undici:'+name).publish({request,...value});
+      send('request:create',{});
+      send('client:sendHeaders',{headers:'HEADER_SENTINEL',socket:{bytesWritten:0,alpnProtocol:'h2',authorized:true,remoteAddress:'127.0.0.1'}});
+      send('request:bodyChunkSent',{chunk:Buffer.from('BODY_SENTINEL')});
+      send('request:bodySent',{});
+      send('request:headers',{response:{statusCode:201,headers:'RESPONSE_SENTINEL'}});
+      send('request:trailers',{trailers:'TRAILER_SENTINEL'});
+      send('request:create',{});
+      send('request:error',{error:{name:'Error',code:'TEST_ERROR',message:'ERROR_SENTINEL'}});
+      channel('undici:request:create').publish({request:{...request,origin:'https://example.com'}});
+    `;
+    for(const enabled of ['0','1']) {
+      const run=spawnSync(process.execPath,['--input-type=module','-e',source],{encoding:'utf8',timeout:10000,env:{...process.env,WSO_CF_NETWORK_DIAGNOSTICS:enabled,WSO_CF_HTTP2:'0'}});
+      assert.equal(run.status,0,run.stderr);
+      assert.equal(run.stdout,'');
+      assert.doesNotMatch(run.stderr,/SENTINEL|example\.com/);
+      if(enabled==='0') assert.equal(run.stderr,'');
+      else {
+        const events=run.stderr.trim().split('\n').map(line=>JSON.parse(line.slice('[cf-network] '.length)));
+        assert.deepEqual(events.map(event=>event.event),['created','connected','body_sent','response','complete','created','error']);
+        assert.equal(events[2].body_bytes,Buffer.byteLength('BODY_SENTINEL'));
+        assert.equal(events[3].status,201);
+        assert.equal(events[6].code,'TEST_ERROR');
+      }
+    }
+    console.log('PASS: diagnostics are opt-in, count bytes and omit credentials, queries and bodies.');
+    JS
+
+# Pin the optional CLI transport dependency without upgrading Wrangler.
+setup-cloudflare-network:
+    nix shell --impure .#game --command npm --prefix worker install --save-dev --save-exact undici@7.29.1
+
+cf-processes:
+    nix shell --impure .#game --command node --input-type=module -e 'import {execFileSync} from "node:child_process"; const root=process.cwd()+"/worker/node_modules/"; console.log(execFileSync("ps",["-axo","pid=,ppid=,etime=,command="],{encoding:"utf8"}).split("\n").filter(line=>line.includes(root)&&/\bdeploy\b/.test(line)).join("\n")||"No project deployment processes remain.");'
+
 deploy-help:
     nix shell --impure .#game --command npm --prefix worker run wrangler -- deploy --help
 
@@ -170,6 +234,30 @@ hosted-mission-check:
 
 hosted-sensor-check:
     PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors --hardware --headed --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
+
+hosted-artifact-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix shell --impure .#game --command node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import {createHash} from 'node:crypto';
+    import {readFile} from 'node:fs/promises';
+    const base='https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/';
+    const expected=JSON.parse(await readFile('worker/public/sim/manifest.json','utf8'));
+    const request=path=>fetch(new URL(path,base),{cache:'no-store',signal:AbortSignal.timeout(60000)});
+    const manifestResponse=await request('sim/manifest.json');
+    assert.equal(manifestResponse.status,200);
+    const manifest=await manifestResponse.json();
+    assert.deepEqual(manifest,expected);
+    const response=await request(`sim/wsorb_bevy_bg.wasm?sha256=${expected.sha256}`);
+    assert.equal(response.status,200);
+    assert.match(response.headers.get('content-type'),/^application\/wasm(?:;|$)/);
+    const bytes=Buffer.from(await response.arrayBuffer());
+    const sha256=createHash('sha256').update(bytes).digest('hex');
+    assert.equal(bytes.length,expected.bytes);
+    assert.equal(sha256,expected.sha256);
+    console.log(JSON.stringify({url:base,bytes:bytes.length,sha256,result:'PASS'},null,2));
+    JS
 
 disable-ci:
     gh api --method PUT repos/koalazub/western_sydney_orbital/actions/permissions -F enabled=false
@@ -189,6 +277,16 @@ login-wrangler:
 # Owner-controlled release only. Never a dependency of local/check/preview.
 deploy:
     nix shell --impure .#game --command npm --prefix worker run deploy
+
+# Per-process fallback for intermittent dual-stack connection failures.
+deploy-ipv4:
+    NODE_OPTIONS="${NODE_OPTIONS:-} --dns-result-order=ipv4first" nix shell --impure .#game --command npm --prefix worker run deploy
+
+deploy-debug:
+    WSO_CF_NETWORK_DIAGNOSTICS=1 nix shell --impure .#game --command npm --prefix worker run deploy
+
+deploy-http2:
+    WSO_CF_HTTP2=1 WSO_CF_NETWORK_DIAGNOSTICS=1 nix shell --impure .#game --command npm --prefix worker run deploy
 
 tasks:
     bd list --status open --json --sandbox
