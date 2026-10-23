@@ -18,6 +18,10 @@ if (current[0] !== 26 || current[1] < 12 || (current[1] === 12 && current[2] < 1
 }
 
 const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: config.account_id };
+if (env.WSO_CF_NETWORK_DIAGNOSTICS === "1" || env.WSO_CF_HTTP2 === "1") {
+  const preload = new URL("./cloudflare-network.mjs", import.meta.url).href;
+  env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --import=${preload}`;
+}
 const binary = name => resolve(worker, "node_modules", ".bin", name);
 const [action, ...args] = process.argv.slice(2);
 
