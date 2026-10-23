@@ -30,6 +30,12 @@ impl ControlsState {
 }
 
 #[derive(Component)]
+pub(super) struct HudRoot;
+
+#[derive(Component)]
+pub(super) struct HudStatusPanel;
+
+#[derive(Component)]
 pub(super) struct DetailsPanel;
 
 #[derive(Component)]
@@ -57,6 +63,7 @@ pub(super) enum HudAction {
     ToggleCapture,
     ToggleControls,
     ToggleHelp,
+    FollowLander,
     ToggleInspector,
     FocusNext,
     FocusPrevious,
@@ -74,6 +81,7 @@ pub(super) enum Readout {
     TelemetryDetails,
     ThrustProfile,
     BoostToggle,
+    ControllerSettings,
     Mission,
     Environment,
     CameraMode,

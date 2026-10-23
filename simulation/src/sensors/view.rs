@@ -54,7 +54,7 @@ pub(super) fn setup(mut commands: Commands, images: Res<SensorImages>) {
 }
 
 pub(super) fn update(
-    rig: Res<CameraRig>,
+    view: (Res<CameraRig>, Res<UiScale>),
     images: Res<SensorImages>,
     windows: Query<&Window, With<PrimaryWindow>>,
     chrome: Query<(&LayoutPart, &ComputedNode)>,
@@ -62,6 +62,7 @@ pub(super) fn update(
     mut pictures: Query<(&mut Node, &mut ImageNode), With<SensorPicture>>,
     mut captions: Query<(&mut Text, &ComputedNode), With<SensorCaption>>,
 ) {
+    let (rig, ui_scale) = view;
     let selected = rig.mode.sensor();
     for mut node in &mut panels {
         let display = if selected.is_some() {
@@ -77,8 +78,19 @@ pub(super) fn update(
         return;
     };
     let config = &settings().ship_cameras;
-    let width = windows.single().map(Window::width).unwrap_or(800.0);
-    let height = windows.single().map(Window::height).unwrap_or(800.0);
+    let scale = if ui_scale.0.is_finite() && ui_scale.0 > 0.0 {
+        ui_scale.0
+    } else {
+        1.0
+    };
+    let width = windows
+        .single()
+        .map(|window| window.width() / scale)
+        .unwrap_or(800.0);
+    let height = windows
+        .single()
+        .map(|window| window.height() / scale)
+        .unwrap_or(800.0);
     let mut top = SCREEN_PADDING_PX + PANEL_GAP_PX;
     let mut bottom = SCREEN_PADDING_PX + PANEL_GAP_PX;
     for (part, computed) in &chrome {

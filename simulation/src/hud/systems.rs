@@ -24,7 +24,7 @@ pub(super) fn install(app: &mut App) {
         app.add_plugins(TabNavigationPlugin);
     }
     app.init_resource::<HudState>()
-        .add_systems(Startup, view::setup)
+        .add_systems(Startup, view::setup.after(crate::scene::setup))
         .add_systems(Update, interactions.in_set(EngineSet::Input))
         .add_systems(
             Update,
@@ -42,6 +42,7 @@ pub(super) fn install(app: &mut App) {
             scroll_focused_control_into_view.after(UiSystems::PostLayout),
         );
     input::install(app);
+    super::diagnostics::install(app);
 }
 
 pub(super) fn activate_button(
@@ -63,7 +64,7 @@ pub(super) fn activate_button(
     activate_action(*action, &mut hud, &playback);
 }
 
-fn interactions(
+pub(super) fn interactions(
     keys: Res<ButtonInput<KeyCode>>,
     input_focus: Res<InputFocus>,
     buttons: Query<(), With<Button>>,
@@ -79,6 +80,10 @@ fn interactions(
         && !crate::snapshot().mission.status.is_terminal()
     {
         crate::request_action(EngineAction::TogglePlayback);
+    }
+    if camera::input_active() && !hud.reset_confirm_open && plain_key_pressed(&keys, KeyCode::KeyH)
+    {
+        toggle_help(&mut hud);
     }
     let button_focused = input_focus
         .get()
@@ -135,12 +140,6 @@ fn interactions(
         };
         crate::request_action(EngineAction::Viewport(action));
     }
-    if keys.just_pressed(KeyCode::KeyH) {
-        hud.help_open = !hud.help_open;
-        if hud.help_open {
-            hud.controls = ControlsState::Expanded;
-        }
-    }
     if keys.just_pressed(KeyCode::KeyI) {
         hud.inspector_open = !hud.inspector_open;
         if hud.inspector_open {
@@ -165,7 +164,11 @@ fn interactions(
 }
 
 fn playback_hotkey(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.just_pressed(KeyCode::KeyP)
+    plain_key_pressed(keys, KeyCode::KeyP)
+}
+
+fn plain_key_pressed(keys: &ButtonInput<KeyCode>, key: KeyCode) -> bool {
+    keys.just_pressed(key)
         && ![
             KeyCode::ControlLeft,
             KeyCode::ControlRight,
@@ -176,6 +179,14 @@ fn playback_hotkey(keys: &ButtonInput<KeyCode>) -> bool {
         ]
         .into_iter()
         .any(|key| keys.pressed(key))
+}
+
+fn toggle_help(hud: &mut HudState) {
+    hud.help_open = !hud.help_open;
+    if hud.help_open {
+        hud.controls = ControlsState::Compact;
+        hud.inspector_open = false;
+    }
 }
 
 fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackState) {
@@ -233,15 +244,20 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
                 ControlsState::Expanded => ControlsState::Compact,
             };
             if !hud.controls.expanded() {
-                hud.help_open = false;
                 hud.inspector_open = false;
+            } else {
+                hud.help_open = false;
             }
         }
         HudAction::ToggleHelp => {
-            hud.help_open = !hud.help_open;
-            if hud.help_open {
-                hud.controls = ControlsState::Expanded;
-            }
+            toggle_help(hud);
+        }
+        HudAction::FollowLander => {
+            let _ = camera::request_view(CameraRequest {
+                mode: Some(crate::domain::CameraMode::Orbit),
+                focus: Some(EntityId::Lander),
+                zoom: Some(1.0),
+            });
         }
         HudAction::ToggleInspector => {
             hud.inspector_open = !hud.inspector_open;
@@ -266,8 +282,9 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
     }
 }
 
-fn update_layout(
+pub(super) fn update_layout(
     windows: Query<&Window, With<PrimaryWindow>>,
+    ui_scale: Res<UiScale>,
     hud: Res<HudState>,
     mut input_focus: ResMut<InputFocus>,
     mut previous_sensor: Local<bool>,
@@ -281,9 +298,14 @@ fn update_layout(
         input_focus.clear();
         *previous_sensor = sensor;
     }
+    let scale = if ui_scale.0.is_finite() && ui_scale.0 > 0.0 {
+        ui_scale.0
+    } else {
+        1.0
+    };
     let (width, height) = windows
         .single()
-        .map(|window| (window.width(), window.height()))
+        .map(|window| (window.width() / scale, window.height() / scale))
         .unwrap_or((800.0, 800.0));
     let mut top = SCREEN_PADDING_PX + PANEL_GAP_PX;
     let mut bottom = SCREEN_PADDING_PX + PANEL_GAP_PX;
@@ -342,7 +364,7 @@ type OverlayVisual = (
     &'static mut ScrollPosition,
 );
 
-fn update_overlays(
+pub(super) fn update_overlays(
     mut commands: Commands,
     hud: Res<HudState>,
     mut input_focus: ResMut<InputFocus>,
@@ -377,7 +399,10 @@ fn update_overlays(
             Overlay::Inspector if hud.inspector_open => Display::Flex,
             _ => Display::None,
         };
-        if matches!(overlay, Overlay::Controls) && !was_shown && node.display != Display::None {
+        if matches!(overlay, Overlay::Controls | Overlay::Help)
+            && !was_shown
+            && node.display != Display::None
+        {
             position.y = 0.0;
         }
         *visibility = if node.display == Display::None {
@@ -496,8 +521,9 @@ fn update_buttons(
     }
 }
 
-fn update_readouts(
+pub(super) fn update_readouts(
     playback: Res<PlaybackState>,
+    keys: Res<ButtonInput<KeyCode>>,
     hud: Res<HudState>,
     mut reads: Query<(&mut Text, &Readout, &ChildOf)>,
     mut buttons: Query<&mut AccessibilityNode, With<Button>>,
@@ -513,7 +539,8 @@ fn update_readouts(
             Readout::FlightControls => flight_controls_readout(&playback),
             Readout::TelemetryBrief => crate::telemetry::brief(),
             Readout::TelemetryDetails => crate::telemetry::details(),
-            Readout::ThrustProfile => thrust_profile_readout(&playback),
+            Readout::ThrustProfile => thrust_profile_brief(&playback),
+            Readout::ControllerSettings => controller_settings_readout(&playback, &keys),
             Readout::BoostToggle => {
                 if playback.practice_boost {
                     "Use reference Space thrust".into()
@@ -584,9 +611,9 @@ fn update_readouts(
             }
             .into(),
             Readout::HelpToggle => if hud.help_open {
-                "Close help [H]"
+                "Close controls [H]"
             } else {
-                "Help [H]"
+                "Controls [H]"
             }
             .into(),
             Readout::InspectorToggle => if hud.inspector_open {
@@ -608,12 +635,15 @@ fn update_readouts(
 
 pub(super) fn scroll_details(
     mut event: On<FocusedInput<KeyboardInput>>,
-    mut panels: Query<(&ComputedNode, &mut ScrollPosition), With<DetailsPanel>>,
+    mut panels: Query<(&Node, &ComputedNode, &mut ScrollPosition), With<DetailsPanel>>,
 ) {
     if event.input.state != ButtonState::Pressed {
         return;
     }
-    let Ok((computed, mut position)) = panels.single_mut() else {
+    let Some((_, computed, mut position)) = panels
+        .iter_mut()
+        .find(|(node, computed, _)| node.display != Display::None && !computed.is_empty())
+    else {
         return;
     };
     let visible = computed.size().y * computed.inverse_scale_factor();
@@ -751,6 +781,48 @@ fn thrust_profile_readout(playback: &PlaybackState) -> String {
             settings.lander.max_accel_mps2
         )
     }
+}
+
+fn thrust_profile_brief(playback: &PlaybackState) -> String {
+    let settings = crate::scenario::settings();
+    if playback.practice_boost {
+        format!(
+            "Space practice boost {:.0}x | {:.1} m/s²",
+            settings.practice.space_lift_accel_mps2 / settings.lander.max_accel_mps2,
+            settings.practice.space_lift_accel_mps2
+        )
+    } else {
+        format!(
+            "Space reference {:.2} m/s² | local model",
+            settings.lander.max_accel_mps2
+        )
+    }
+}
+
+fn controller_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyCode>) -> String {
+    let config = crate::scenario::settings();
+    let input = if camera::input_active() {
+        "active"
+    } else {
+        "inactive; click/focus the scene"
+    };
+    let controller = if playback.autopilot {
+        "example controller"
+    } else {
+        "manual/externally commanded"
+    };
+    format!(
+        "Input {input}\nHeld keys: {}\nController: {controller} | simulation {}\nReference command caps: {:.2} m/s² and {:.2} rad/s²\n{}\nF follows the lander. Alt/Option + WASD/QE moves only the debug camera.\nSpace launches/lifts; W/S forward/back; A/D left/right; E/Q up/down.\nP pause/run | R reset | T rate | L mouse capture/release\n1 orbit | 2 debug FP | 3 third-person | 4 free | 5 overview | 6/7 ship sensors\nTab selects controls; Enter activates. H or Esc closes this panel.\nThe planner is advisory. The browser uses local practice physics, not the STP SDK.",
+        crate::controls::held_key_labels(keys),
+        if playback.running {
+            "running"
+        } else {
+            "paused"
+        },
+        config.lander.max_accel_mps2,
+        config.lander.max_angular_accel_rad_s2,
+        thrust_profile_readout(playback)
+    )
 }
 
 fn camera_readout(camera: crate::camera::CameraStatus) -> String {

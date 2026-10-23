@@ -54,6 +54,11 @@ pub fn camera_status() -> String {
 }
 
 #[wasm_bindgen]
+pub fn hud_status() -> String {
+    hud::status()
+}
+
+#[wasm_bindgen]
 pub fn ship_camera_status() -> String {
     sensors::status()
 }

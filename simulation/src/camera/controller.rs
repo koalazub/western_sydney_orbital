@@ -142,29 +142,6 @@ fn update_camera(
             .map(|gesture| gesture.0)
             .filter(|delta| delta.is_finite())
             .sum::<f32>();
-    let mut focus_changed = false;
-    let mut mode_changed = false;
-    let mut zoom_changed = false;
-    while let Some(request) = COMMANDS.with(|queue| queue.borrow_mut().pop_front()) {
-        if let Some(mode) = request.mode {
-            mode_changed |= rig.mode != mode;
-            rig.mode = mode;
-            if mode_changed && mode == CameraMode::FirstPerson {
-                rig.yaw = 0.0;
-                rig.pitch = 0.0;
-            }
-        }
-        if let Some(focus) = request.focus {
-            focus_changed |= rig.focus != focus;
-            rig.focus = focus;
-            rig.pan_offset = Vec3::ZERO;
-        }
-        if let Some(zoom) = request.zoom {
-            rig.zoom = zoom;
-            zoom_changed = true;
-        }
-    }
-
     let gate = GATE.with(|gate| *gate.borrow());
     if !gate.active {
         gesture.start = None;
@@ -176,25 +153,27 @@ fn update_camera(
     else {
         return;
     };
-    if mode_changed && rig.mode == CameraMode::FreeFlight {
-        flight.preserve_pose(&mut rig, transform.rotation);
-    }
     let snapshot = crate::snapshot();
-    if !focus_exists(rig.focus, &snapshot) {
-        rig.focus = EntityId::Lander;
-        rig.pan_offset = Vec3::ZERO;
-        focus_changed = true;
-    }
-    if focus_changed || zoom_changed || mode_changed {
-        rig.distance_km = (base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom)
-            .clamp(MIN_DISTANCE_KM, MAX_DISTANCE_KM);
-    }
-    let mut target = focus_position(rig.focus, &snapshot) + rig.pan_offset;
     if !rig.initialized {
         flight.preserve_pose(&mut rig, transform.rotation);
         rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
         rig.initialized = true;
     }
+    let mut mode_changed = false;
+    while let Some(request) = COMMANDS.with(|queue| queue.borrow_mut().pop_front()) {
+        mode_changed |= request.mode.is_some_and(|mode| rig.mode != mode);
+        apply_view_request(&mut rig, request, &snapshot);
+    }
+    if mode_changed && rig.mode == CameraMode::FreeFlight {
+        flight.preserve_pose(&mut rig, transform.rotation);
+    }
+    if !focus_exists(rig.focus, &snapshot) {
+        rig.focus = EntityId::Lander;
+        rig.pan_offset = Vec3::ZERO;
+        rig.distance_km = (base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom)
+            .clamp(MIN_DISTANCE_KM, MAX_DISTANCE_KM);
+    }
+    let mut target = focus_target(&rig, &snapshot);
 
     let over_ui = ui
         .iter()
@@ -233,12 +212,6 @@ fn update_camera(
         }
         if keys.just_pressed(KeyCode::Digit7) {
             rig.mode = CameraMode::ShipBottom;
-        }
-        if keys.just_pressed(KeyCode::KeyF) {
-            rig.pan_offset = Vec3::ZERO;
-            rig.mode = CameraMode::Orbit;
-            rig.zoom = 1.0;
-            rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode);
         }
         if rig.mode.sensor().is_none() && keys.pressed(KeyCode::ArrowLeft) {
             rig.yaw += dt;
@@ -356,7 +329,13 @@ fn update_camera(
         );
     }
 
-    target = focus_position(rig.focus, &snapshot) + rig.pan_offset;
+    // Dedicated follow ignores stale button focus, but not browser chords or a modal.
+    if let Some(request) = frame_shortcut(&keys, input_active(), hud.movement_blocked(), rig.focus)
+    {
+        apply_view_request(&mut rig, request, &snapshot);
+    }
+
+    target = focus_target(&rig, &snapshot);
     *layers = if rig.mode.sensor().is_some() {
         RenderLayers::none()
     } else {
@@ -392,10 +371,9 @@ fn update_camera(
             transform.look_at(center, Vec3::Y);
         }
         CameraMode::Orbit => {
-            transform.translation = orbit_position(target, &rig);
-            transform.translation = outside_body(transform.translation);
-            transform.translation = outside_mars(transform.translation, &snapshot);
-            transform.look_at(target, Vec3::Y);
+            let view = orbit_view(&rig, &snapshot);
+            transform.translation = view.translation;
+            transform.rotation = view.rotation;
         }
         CameraMode::ShipTop | CameraMode::ShipBottom => {}
     }
@@ -421,6 +399,104 @@ fn update_camera(
         );
         *status.borrow_mut() = next;
     });
+}
+
+fn frame_shortcut(
+    keys: &ButtonInput<KeyCode>,
+    active: bool,
+    blocked: bool,
+    selected: EntityId,
+) -> Option<CameraRequest> {
+    if !active
+        || blocked
+        || !keys.just_pressed(KeyCode::KeyF)
+        || keys.any_pressed([
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+        ])
+    {
+        return None;
+    }
+    Some(CameraRequest {
+        mode: Some(CameraMode::Orbit),
+        focus: Some(
+            if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+                selected
+            } else {
+                EntityId::Lander
+            },
+        ),
+        zoom: Some(1.0),
+    })
+}
+
+fn apply_view_request(rig: &mut CameraRig, request: CameraRequest, snapshot: &Snapshot) {
+    if let Some(focus) = request.focus
+        && request.mode == Some(CameraMode::Orbit)
+        && request.zoom == Some(1.0)
+    {
+        frame_focus(rig, focus, snapshot);
+        return;
+    }
+    let mode_changed = request.mode.is_some_and(|mode| rig.mode != mode);
+    if let Some(mode) = request.mode {
+        rig.mode = mode;
+        if mode_changed && mode == CameraMode::FirstPerson {
+            rig.yaw = 0.0;
+            rig.pitch = 0.0;
+        }
+    }
+    if let Some(focus) = request.focus {
+        rig.focus = focus;
+        rig.pan_offset = Vec3::ZERO;
+    }
+    if let Some(zoom) = request.zoom {
+        rig.zoom = zoom;
+    }
+    if mode_changed || request.focus.is_some() || request.zoom.is_some() {
+        rig.distance_km = (base_distance_km(rig.focus, snapshot, rig.mode) * rig.zoom)
+            .clamp(MIN_DISTANCE_KM, MAX_DISTANCE_KM);
+    }
+}
+
+fn frame_focus(rig: &mut CameraRig, focus: EntityId, snapshot: &Snapshot) {
+    rig.mode = CameraMode::Orbit;
+    rig.focus = focus;
+    rig.pan_offset = Vec3::ZERO;
+    rig.zoom = 1.0;
+    rig.distance_km = base_distance_km(focus, snapshot, rig.mode);
+    if focus != EntityId::Lander {
+        return;
+    }
+
+    let target = focus_target(rig, snapshot);
+    let from_mars = target - meters(snapshot.environment.mars_position_m);
+    let near_mars = from_mars.length()
+        <= snapshot.environment.mars_radius_m as f32 * KM + 0.25 + rig.distance_km;
+    let near_body = target.length() <= body_radius_bound_km() + rig.distance_km;
+    let outward = if near_mars {
+        from_mars.normalize_or(Vec3::Z)
+    } else {
+        target.normalize_or(Vec3::NEG_X)
+    };
+    let offset = orbit_offset(rig, rig.distance_km);
+    let position = target + offset;
+    let bounded = outside_mars(outside_body(position), snapshot);
+    if rig.yaw.is_finite()
+        && rig.pitch.is_finite()
+        && (-1.52..=1.52).contains(&rig.pitch)
+        && (!(near_body || near_mars) || offset.dot(outward) >= 0.0)
+        && position.distance_squared(bounded) < 1e-10
+    {
+        return;
+    }
+    // Keep usable world-space angles. Otherwise look inward from the body's outer side.
+    rig.yaw = outward.x.atan2(outward.z);
+    rig.pitch = outward.y.clamp(-1.0, 1.0).asin().clamp(-1.3, 1.3);
 }
 
 fn rotate_camera(rig: &mut CameraRig, delta: Vec2) {
@@ -449,6 +525,10 @@ fn focus_position(focus: EntityId, snapshot: &Snapshot) -> Vec3 {
             .map(|asset| meters(asset.position))
             .unwrap_or(Vec3::ZERO),
     }
+}
+
+fn focus_target(rig: &CameraRig, snapshot: &Snapshot) -> Vec3 {
+    focus_position(rig.focus, snapshot) + rig.pan_offset
 }
 
 fn base_distance_km(focus: EntityId, snapshot: &Snapshot, mode: CameraMode) -> f32 {
@@ -504,12 +584,23 @@ fn orbit_position(target: Vec3, rig: &CameraRig) -> Vec3 {
     target + orbit_offset(rig, rig.distance_km)
 }
 
-fn outside_body(position: Vec3) -> Vec3 {
-    let radius_bound = crate::model::phobos_radii_m()
+fn orbit_view(rig: &CameraRig, snapshot: &Snapshot) -> Transform {
+    let target = focus_target(rig, snapshot);
+    let position = outside_mars(outside_body(orbit_position(target, rig)), snapshot);
+    // Orbit follows translation, never the lander's rolling body frame.
+    Transform::from_translation(position).looking_at(target, Vec3::Y)
+}
+
+fn body_radius_bound_km() -> f32 {
+    crate::model::phobos_radii_m()
         .into_iter()
         .fold(0.0_f64, f64::max) as f32
         * KM
-        * 1.1;
+        * 1.1
+}
+
+fn outside_body(position: Vec3) -> Vec3 {
+    let radius_bound = body_radius_bound_km();
     if position.length() > radius_bound {
         return position;
     }
@@ -681,5 +772,315 @@ fn ray_ellipsoid(origin: Vec3, direction: Vec3, radii: [f32; 3]) -> Option<f32> 
         Some(far)
     } else {
         None
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{domain::ShipCameraId, physics::Simulation};
+
+    fn keys(pressed: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut keys = ButtonInput::default();
+        for key in pressed {
+            keys.press(*key);
+        }
+        keys
+    }
+
+    fn close(actual: Vec3, expected: Vec3) {
+        assert!(
+            actual.distance(expected) < 2e-6,
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn f_always_relocks_the_lander_from_every_mode_and_focus() {
+        let snapshot = Simulation::new_default().snapshot();
+        let keys = keys(&[KeyCode::KeyF]);
+        for mode in [
+            CameraMode::Orbit,
+            CameraMode::FirstPerson,
+            CameraMode::ThirdPerson,
+            CameraMode::FreeFlight,
+            CameraMode::Overview,
+            CameraMode::ShipTop,
+            CameraMode::ShipBottom,
+        ] {
+            for focus in [
+                EntityId::Phobos,
+                EntityId::Mars,
+                EntityId::L1,
+                EntityId::L2,
+                EntityId::Lander,
+                EntityId::ReturnShip,
+                EntityId::LandingPad,
+                EntityId::Debris(1),
+            ] {
+                let mut rig = CameraRig {
+                    mode,
+                    focus,
+                    pan_offset: Vec3::new(5.0, -3.0, 1.0),
+                    zoom: 7.0,
+                    distance_km: 42.0,
+                    speed_mps: 321.0,
+                    ..default()
+                };
+                let request = frame_shortcut(&keys, true, false, rig.focus).unwrap();
+                assert_eq!(request.mode, Some(CameraMode::Orbit));
+                assert_eq!(request.focus, Some(EntityId::Lander));
+                assert_eq!(request.zoom, Some(1.0));
+                apply_view_request(&mut rig, request, &snapshot);
+                assert_eq!(rig.mode, CameraMode::Orbit);
+                assert_eq!(rig.focus, EntityId::Lander);
+                assert_eq!(rig.pan_offset, Vec3::ZERO);
+                assert_eq!(rig.zoom, 1.0);
+                assert_eq!(rig.distance_km, 0.12);
+                assert_eq!(rig.speed_mps, 321.0);
+                let view = orbit_view(&rig, &snapshot);
+                let target = focus_target(&rig, &snapshot);
+                close(
+                    view.rotation * Vec3::NEG_Z,
+                    (target - view.translation).normalize(),
+                );
+                let status = CameraStatus::from_view(&rig, &view, target, true, false);
+                assert_eq!(status.mode, CameraMode::Orbit);
+                assert_eq!(status.focus, EntityId::Lander);
+            }
+        }
+    }
+
+    #[test]
+    fn hud_follow_request_relocks_again_without_touching_physics_or_sensors() {
+        let simulation = Simulation::new_default();
+        let snapshot = simulation.snapshot();
+        let before = serde_json::to_value(&snapshot).unwrap();
+        let sensor_poses =
+            [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| crate::sensors::pose(id, &snapshot));
+        let mut rig = CameraRig {
+            mode: CameraMode::ShipBottom,
+            focus: EntityId::Mars,
+            pan_offset: Vec3::ONE,
+            zoom: 0.05,
+            ..default()
+        };
+        let request = CameraRequest {
+            mode: Some(CameraMode::Orbit),
+            focus: Some(EntityId::Lander),
+            zoom: Some(1.0),
+        };
+        apply_view_request(&mut rig, request, &snapshot);
+        let angles = (rig.yaw, rig.pitch);
+        rig.pan_offset = Vec3::new(1.0, 2.0, 3.0);
+        rig.distance_km = 0.8;
+        rig.zoom = 4.0;
+        apply_view_request(&mut rig, request, &snapshot);
+        assert_eq!(rig.mode, CameraMode::Orbit);
+        assert_eq!(rig.focus, EntityId::Lander);
+        assert_eq!(rig.pan_offset, Vec3::ZERO);
+        assert_eq!(rig.zoom, 1.0);
+        assert_eq!(rig.distance_km, 0.12);
+        assert_eq!((rig.yaw, rig.pitch), angles);
+        assert_eq!(
+            [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| crate::sensors::pose(id, &snapshot)),
+            sensor_poses
+        );
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), before);
+        assert_eq!(serde_json::to_value(simulation.snapshot()).unwrap(), before);
+    }
+
+    #[test]
+    fn browser_and_assistive_f_chords_never_request_a_camera_change() {
+        for modifier in [
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+        ] {
+            for shift in [false, true] {
+                let mut pressed = vec![KeyCode::KeyF, modifier];
+                if shift {
+                    pressed.push(KeyCode::ShiftLeft);
+                }
+                assert!(
+                    frame_shortcut(&keys(&pressed), true, false, EntityId::Mars).is_none(),
+                    "camera changed for {pressed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn follow_requires_active_nonmodal_input_and_a_fresh_f_press() {
+        let mut keys = keys(&[KeyCode::KeyF]);
+        for (active, blocked) in [(false, false), (false, true), (true, true)] {
+            assert!(frame_shortcut(&keys, active, blocked, EntityId::Mars).is_none());
+        }
+        assert!(frame_shortcut(&keys, true, false, EntityId::Mars).is_some());
+        keys.clear();
+        assert!(keys.pressed(KeyCode::KeyF));
+        assert!(frame_shortcut(&keys, true, false, EntityId::Mars).is_none());
+        assert!(frame_shortcut(&ButtonInput::default(), true, false, EntityId::Mars).is_none());
+    }
+
+    #[test]
+    fn shift_f_keeps_the_selected_object_framing_shortcut() {
+        let snapshot = Simulation::new_default().snapshot();
+        for shift in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+            for focus in [EntityId::Phobos, EntityId::Mars, EntityId::ReturnShip] {
+                let mut rig = CameraRig {
+                    mode: CameraMode::FreeFlight,
+                    focus,
+                    pan_offset: Vec3::ONE,
+                    zoom: 3.0,
+                    ..default()
+                };
+                let request =
+                    frame_shortcut(&keys(&[shift, KeyCode::KeyF]), true, false, focus).unwrap();
+                apply_view_request(&mut rig, request, &snapshot);
+                assert_eq!(rig.mode, CameraMode::Orbit);
+                assert_eq!(rig.focus, focus);
+                assert_eq!(rig.pan_offset, Vec3::ZERO);
+                assert_eq!(rig.zoom, 1.0);
+                assert_eq!(
+                    rig.distance_km,
+                    base_distance_km(focus, &snapshot, CameraMode::Orbit)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partial_view_requests_preserve_unrequested_camera_state() {
+        let snapshot = Simulation::new_default().snapshot();
+        let mut rig = CameraRig {
+            mode: CameraMode::FreeFlight,
+            focus: EntityId::Mars,
+            pan_offset: Vec3::ONE,
+            zoom: 2.0,
+            ..default()
+        };
+        let angles = (rig.yaw, rig.pitch);
+        apply_view_request(
+            &mut rig,
+            CameraRequest {
+                focus: Some(EntityId::ReturnShip),
+                ..default()
+            },
+            &snapshot,
+        );
+        assert_eq!(rig.mode, CameraMode::FreeFlight);
+        assert_eq!(rig.focus, EntityId::ReturnShip);
+        assert_eq!(rig.pan_offset, Vec3::ZERO);
+        assert_eq!(rig.zoom, 2.0);
+        assert_eq!(rig.distance_km, 0.5);
+        assert_eq!((rig.yaw, rig.pitch), angles);
+        apply_view_request(
+            &mut rig,
+            CameraRequest {
+                mode: Some(CameraMode::FirstPerson),
+                ..default()
+            },
+            &snapshot,
+        );
+        assert_eq!(rig.mode, CameraMode::FirstPerson);
+        assert_eq!(rig.focus, EntityId::ReturnShip);
+        assert_eq!(rig.zoom, 2.0);
+        assert_eq!((rig.yaw, rig.pitch), (0.0, 0.0));
+    }
+
+    #[test]
+    fn reframing_preserves_safe_world_angles_but_replaces_inward_or_invalid_angles() {
+        let snapshot = Simulation::new_default().snapshot();
+        let mut rig = CameraRig::default();
+        frame_focus(&mut rig, EntityId::Lander, &snapshot);
+        let angles = (rig.yaw, rig.pitch);
+        frame_focus(&mut rig, EntityId::Lander, &snapshot);
+        assert_eq!((rig.yaw, rig.pitch), angles);
+        let target = focus_target(&rig, &snapshot);
+        let outward = target.normalize();
+        let inward = -outward;
+        for (yaw, pitch) in [
+            (inward.x.atan2(inward.z), inward.y.asin()),
+            (f32::NAN, 0.0),
+            (0.0, f32::NAN),
+            (f32::INFINITY, 0.0),
+            (0.0, f32::NEG_INFINITY),
+            (0.0, 2.0),
+        ] {
+            rig.yaw = yaw;
+            rig.pitch = pitch;
+            frame_focus(&mut rig, EntityId::Lander, &snapshot);
+            assert!(rig.yaw.is_finite() && rig.pitch.is_finite());
+            assert!(orbit_offset(&rig, rig.distance_km).dot(outward) > 0.0);
+            let view = orbit_view(&rig, &snapshot);
+            close(view.translation, orbit_position(target, &rig));
+            close(outside_body(view.translation), view.translation);
+            close(outside_mars(view.translation, &snapshot), view.translation);
+        }
+    }
+
+    #[test]
+    fn orbit_tracks_each_real_snapshot_in_world_space_without_steering_the_lander() {
+        let mut simulation = Simulation::new_default();
+        let initial = simulation.snapshot();
+        let mut rig = CameraRig::default();
+        frame_focus(&mut rig, EntityId::Lander, &initial);
+        let angles = (rig.yaw, rig.pitch);
+        let offset = orbit_offset(&rig, rig.distance_km);
+        let mut previous_time = initial.time_s;
+        for _ in 0..12 {
+            let snapshot = simulation
+                .execute(crate::model::PhysicsCommand::Step { seconds: 0.1 })
+                .unwrap();
+            assert!(snapshot.time_s > previous_time);
+            previous_time = snapshot.time_s;
+            let lander = snapshot
+                .assets
+                .iter()
+                .find(|asset| asset.id == EntityId::Lander)
+                .unwrap();
+            let position =
+                Vec3::from_array(lander.position.map(|value| (value * KM as f64) as f32));
+            close(focus_target(&rig, &snapshot), position);
+            close(
+                orbit_position(focus_target(&rig, &snapshot), &rig),
+                position + offset,
+            );
+            let view = orbit_view(&rig, &snapshot);
+            let expected_position = outside_mars(outside_body(position + offset), &snapshot);
+            close(view.translation, expected_position);
+            let expected =
+                Transform::from_translation(expected_position).looking_at(position, Vec3::Y);
+            close(view.rotation * Vec3::X, expected.rotation * Vec3::X);
+            close(view.rotation * Vec3::Y, expected.rotation * Vec3::Y);
+            close(view.rotation * Vec3::NEG_Z, expected.rotation * Vec3::NEG_Z);
+            assert_eq!((rig.yaw, rig.pitch), angles);
+            assert_eq!(lander.commanded_accel_mps2, [0.0; 3]);
+            assert_eq!(lander.commanded_angular_accel_rad_s2, [0.0; 3]);
+
+            rig.pan_offset = Vec3::new(0.01, -0.02, 0.03);
+            close(focus_target(&rig, &snapshot), position + rig.pan_offset);
+            rig.pan_offset = Vec3::ZERO;
+        }
+    }
+
+    #[test]
+    fn orbit_safeguards_keep_the_view_outside_real_terrain_and_mars() {
+        let snapshot = Simulation::new_default().snapshot();
+        let body_position = outside_body(Vec3::ZERO);
+        let surface =
+            crate::terrain::surface_radius_m(body_position.normalize().as_dvec3()) as f32 * KM;
+        assert!(body_position.length() >= surface + 0.003 - 2e-6);
+        close(outside_body(body_position), body_position);
+
+        let mars_center = meters(snapshot.environment.mars_position_m);
+        let mars_position = outside_mars(mars_center, &snapshot);
+        let mars_bound = snapshot.environment.mars_radius_m as f32 * KM + 0.25;
+        assert!(mars_position.distance(mars_center) >= mars_bound - 0.001);
+        close(outside_mars(mars_position, &snapshot), mars_position);
     }
 }

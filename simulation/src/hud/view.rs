@@ -9,9 +9,15 @@ use bevy::{
 use super::{model::*, systems};
 use crate::domain::CameraMode;
 
-pub(super) fn setup(mut commands: Commands) {
-    commands.spawn((
+pub(super) fn setup(
+    mut commands: Commands,
+    cameras: Query<Entity, With<crate::camera::SimulationCamera>>,
+) {
+    let root = commands.spawn((
         Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
             width: percent(100),
             height: percent(100),
             padding: UiRect::all(px(SCREEN_PADDING_PX)),
@@ -21,6 +27,10 @@ pub(super) fn setup(mut commands: Commands) {
             row_gap: px(PANEL_GAP_PX),
             ..default()
         },
+        HudRoot,
+        Name::new("Flight HUD"),
+        GlobalZIndex(10),
+        Visibility::Visible,
         TabGroup::new(0),
         children![
             (
@@ -39,7 +49,8 @@ pub(super) fn setup(mut commands: Commands) {
                 LayoutPart::TopRow,
                 children![
                     (
-                        panel_style(),
+                        Node { width: px(360), ..panel_style() },
+                        HudStatusPanel,
                         BackgroundColor(PANEL),
                         children![
                             (text("Phobos practice | T+00:00:00 | paused", CAPTION_SIZE_PX, TEXT), Readout::Summary),
@@ -59,6 +70,8 @@ pub(super) fn setup(mut commands: Commands) {
                         LayoutPart::MissionActions,
                         children![
                             button("Run [P]", HudAction::TogglePlayback, Readout::Playback),
+                            button("Follow lander [F]", HudAction::FollowLander, Readout::Static),
+                            button("Controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
                             (button("Fullscreen [X]", HudAction::Fullscreen, Readout::Fullscreen), FullscreenButton),
                             button("Details +", HudAction::ToggleControls, Readout::Controls),
                         ],
@@ -164,7 +177,7 @@ pub(super) fn setup(mut commands: Commands) {
                             button("< Focus [,]", HudAction::FocusPrevious, Readout::Static),
                             button("Focus [/] >", HudAction::FocusNext, Readout::Static),
                             button("Capture [L]", HudAction::ToggleCapture, Readout::Capture),
-                            button("Help [H]", HudAction::ToggleHelp, Readout::HelpToggle),
+                            button("Controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
                             button("Inspect [I]", HudAction::ToggleInspector, Readout::InspectorToggle),
                         ],
                     ),
@@ -175,28 +188,40 @@ pub(super) fn setup(mut commands: Commands) {
                         Visibility::Hidden,
                         children![(text("", COPY_SIZE_PX, TEXT), Readout::Inspector)],
                     ),
+                ],
+            ),
+            (
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(SCREEN_PADDING_PX),
+                    width: px(420),
+                    overflow: Overflow::scroll_y(),
+                    display: Display::None,
+                    ..panel_style()
+                },
+                BackgroundColor(PANEL),
+                ZIndex(1),
+                Overlay::Help,
+                DetailsPanel,
+                ScrollArea,
+                Hovered::default(),
+                observe(systems::scroll_details),
+                Visibility::Hidden,
+                children![
+                    text("Controls and controller settings [H]", COPY_SIZE_PX, TEXT),
+                    text("H or Esc closes. Scroll for all settings; Page Up/Down works from a focused control.", CAPTION_SIZE_PX, MUTED),
                     (
-                        Node { display: Display::None, width: percent(100), ..panel_style() },
-                        Overlay::Help,
-                        Visibility::Hidden,
+                        button_row(),
                         children![
-                            text("Keyboard and camera help", COPY_SIZE_PX, TEXT),
-                            text("Space lift/launch | P run/pause | . step | R reset | T rate", COPY_SIZE_PX, MUTED),
-                            text("1-5 viewer cameras | 6 top sensor | 7 bottom sensor", COPY_SIZE_PX, MUTED),
-                            text("Ship sensors: 512 x 512, RGB8 per channel, fixed exposure and configured field of view. No debug markers or contrast boost.", COPY_SIZE_PX, MUTED),
-                            text("Amber line: advisory path preview in debug views only. Cyan sphere: waypoint arrival region. Radar covers only part of the debris. The preview does not control the ship or feed the example controller.", COPY_SIZE_PX, MUTED),
-                            text(", / change focus | L capture or release", COPY_SIZE_PX, MUTED),
-                            text("Drag to orbit; wheel or trackpad pinch zooms viewer cameras. Ship sensor optics stay fixed.", COPY_SIZE_PX, MUTED),
-                            text("Space launches a paused lander and fires its lift jet while held. WASD applies body-frame forces at offset nozzles; Q/E fires down/up thrust. Side jets create real turning moments and ground contacts can tip the lander. Releasing keys stops thrust, not velocity or spin. Manual thrust turns off the example controller.", COPY_SIZE_PX, MUTED),
-                            text("Space practice boost adds lift power only. Use the reference-thrust option in Details and reset before comparing strategy runs. Speed is measured in the Phobos rotating frame; terrain clearance is measured at the lander centre, not its feet. Export includes telemetry and the selected profile.", COPY_SIZE_PX, MUTED),
-                            text("Blue-white exhaust streams in debug views follow the actual applied jet forces. They are a debug animation, not calibrated light or gas simulation, and do not appear in ship-camera RGB images.", COPY_SIZE_PX, MUTED),
-                            text("Alt/Option + WASD/QE moves only the debug camera. Shift boosts debug movement only. Ship sensor mounts and optics stay fixed.", COPY_SIZE_PX, MUTED),
-                            text("Arrows orbit | Tab moves focus | Enter activates a button", COPY_SIZE_PX, MUTED),
-                            text("M maximize | X fullscreen | I inspect | H help", COPY_SIZE_PX, MUTED),
-                            text("Esc closes help, inspector, details or the reset prompt.", COPY_SIZE_PX, MUTED),
-                            text("Frame axes: +X points to Mars; +Y is orbit normal. L1/L2 use a circular point-mass model. Terrain, contacts and damage are practice approximations. Viewer cameras are not STP sensor feeds.", COPY_SIZE_PX, MUTED),
+                            button("Follow lander [F]", HudAction::FollowLander, Readout::Static),
+                            button("Example controller", HudAction::ToggleAutopilot, Readout::Autopilot),
+                            button("Use reference Space thrust", HudAction::TogglePracticeBoost, Readout::BoostToggle),
+                            button("Close controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
                         ],
                     ),
+                    (text("Loading current input state", COPY_SIZE_PX, TEXT), Readout::ControllerSettings),
+                    text("This panel shows live physical input and current settings. It does not pause the simulation. Scroll or use Page Up/Down while a control is focused.", CAPTION_SIZE_PX, MUTED),
+                    text("Amber line: advisory path. Blue-white exhaust: actual-force debug cue. Neither is added to the fixed 512 x 512 RGB8 ship-camera images.", CAPTION_SIZE_PX, MUTED),
                 ],
             ),
             (
@@ -234,7 +259,10 @@ pub(super) fn setup(mut commands: Commands) {
                 ],
             ),
         ],
-    ));
+    )).id();
+    if let Ok(camera) = cameras.single() {
+        commands.entity(root).insert(UiTargetCamera(camera));
+    }
 }
 
 fn panel_style() -> Node {
@@ -242,7 +270,7 @@ fn panel_style() -> Node {
         flex_direction: FlexDirection::Column,
         flex_shrink: 0.0,
         min_width: px(0),
-        align_items: AlignItems::FlexStart,
+        align_items: AlignItems::Stretch,
         row_gap: px(CONTROL_GAP_PX),
         padding: UiRect::axes(px(PANEL_PADDING_X_PX), px(PANEL_PADDING_Y_PX)),
         max_width: percent(100),
@@ -273,7 +301,6 @@ fn text(value: &str, size: u32, color: Color) -> impl Bundle {
         },
         Node {
             min_width: px(0),
-            max_width: percent(100),
             flex_shrink: 0.0,
             ..default()
         },

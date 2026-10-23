@@ -5,6 +5,7 @@ type Engine = {
   start_simulation: (selector: string) => void;
   renderer_status: () => string;
   camera_status: () => string;
+  hud_status: () => string;
   runtime_status: () => string;
   telemetry_status: () => string;
   command: (json: string) => string;
@@ -116,6 +117,7 @@ function recordStartup(error?: string) {
   (globalThis as any).__wsorbStartup = {
     stage: failed ? "failed" : lastRendererStatus?.stage ?? startupPhase,
     renderer: lastRendererStatus ?? null,
+    hud: engine ? JSON.parse(engine.hud_status()) : null,
     gpu_preflight: (globalThis as any).__wsorbGPU ?? null,
     browser: navigator.userAgent,
     secure_context: isSecureContext,

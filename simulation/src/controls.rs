@@ -26,3 +26,27 @@ pub(crate) fn movement(keys: &bevy::prelude::ButtonInput<bevy::prelude::KeyCode>
 pub(crate) fn lift_key_down(keys: &bevy::prelude::ButtonInput<bevy::prelude::KeyCode>) -> bool {
     routing::key_mask(keys) & (1 << 9) != 0
 }
+
+pub(crate) fn held_key_labels(keys: &bevy::prelude::ButtonInput<bevy::prelude::KeyCode>) -> String {
+    let mask = routing::key_mask(keys);
+    let held: Vec<_> = [
+        (0, "W"),
+        (1, "A"),
+        (2, "S"),
+        (3, "D"),
+        (4, "Q"),
+        (5, "E"),
+        (9, "Space"),
+        (6, "Alt/Option"),
+        (7, "Shift"),
+        (8, "Ctrl/Meta"),
+    ]
+    .into_iter()
+    .filter_map(|(bit, name)| (mask & (1 << bit) != 0).then_some(name))
+    .collect();
+    if held.is_empty() {
+        "none".into()
+    } else {
+        held.join(" + ")
+    }
+}
