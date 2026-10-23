@@ -11,6 +11,7 @@ pub struct Scenario {
     pub guidance: Guidance,
     pub path_planning: PathPlanning,
     pub lander: Lander,
+    pub debug_thrust: DebugThrust,
     pub pad: Pad,
     pub mission: Mission,
     pub debris: Debris,
@@ -78,6 +79,20 @@ pub struct Lander {
     pub leg_positions_m: [[f64; 3]; 4],
     pub leg_half_extents_m: [f64; 3],
     pub foot_radius_m: f64,
+    /// Synthetic practice nozzles for forces +X, -X, +Y, -Y, +Z, -Z.
+    /// These are not a claimed STP actuator layout.
+    pub manual_nozzles_body_m: [[f64; 3]; 6],
+}
+
+/// Debug-only exhaust animation, not a photometric or propellant-flow model.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct DebugThrust {
+    pub max_particles: usize,
+    pub particles_per_second_per_jet: f64,
+    pub particle_lifetime_s: f64,
+    pub exhaust_speed_mps: f64,
+    pub particle_radius_m: f64,
+    pub spread_rad: f64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

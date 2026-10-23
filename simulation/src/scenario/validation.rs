@@ -8,6 +8,7 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_guidance(s)?;
     validate_path_planning(s)?;
     validate_lander(s)?;
+    validate_debug_thrust(s)?;
     validate_pad(s)?;
     validate_mission(s)?;
     validate_debris(s)?;
@@ -136,8 +137,28 @@ fn validate_lander(s: &Scenario) -> Result<(), &'static str> {
             .iter()
             .flatten()
             .all(|value| value.is_finite() && value.abs() <= 1.0e5)
+        || !l
+            .manual_nozzles_body_m
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite() && value.abs() <= l.proxy_radius_m * 2.0)
     {
         return Err("lander dimensions, controls, mass, or inertia are invalid");
+    }
+    Ok(())
+}
+
+fn validate_debug_thrust(s: &Scenario) -> Result<(), &'static str> {
+    let visuals = s.debug_thrust;
+    if !(1..=4096).contains(&visuals.max_particles)
+        || !bounded_positive(&[visuals.particles_per_second_per_jet], 1000.0)
+        || !bounded_positive(&[visuals.particle_lifetime_s], 5.0)
+        || !bounded_positive(&[visuals.exhaust_speed_mps], 10_000.0)
+        || !bounded_positive(&[visuals.particle_radius_m], 2.0)
+        || !visuals.spread_rad.is_finite()
+        || !(0.0..=0.8).contains(&visuals.spread_rad)
+    {
+        return Err("debug exhaust settings must be finite and bounded");
     }
     Ok(())
 }
@@ -403,6 +424,20 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nozzle_points_and_debug_exhaust_cannot_be_nonfinite_or_unbounded() {
+        let mut scenario = crate::scenario::settings().clone();
+        assert!(validate_lander(&scenario).is_ok());
+        assert!(validate_debug_thrust(&scenario).is_ok());
+        scenario.lander.manual_nozzles_body_m[0][0] = f64::NAN;
+        assert!(validate_lander(&scenario).is_err());
+        scenario.debug_thrust.max_particles = 4097;
+        assert!(validate_debug_thrust(&scenario).is_err());
+        scenario.debug_thrust.max_particles = 512;
+        scenario.debug_thrust.exhaust_speed_mps = f64::INFINITY;
+        assert!(validate_debug_thrust(&scenario).is_err());
+    }
 
     #[test]
     fn advisory_search_rejects_nonfinite_geometry_and_unbounded_work() {

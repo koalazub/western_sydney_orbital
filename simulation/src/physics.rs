@@ -2,7 +2,10 @@ use crate::domain::{
     EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus,
 };
 use crate::mission::{self, FlightMetrics};
-use crate::model::{EntityState, Event, MissionState, Observation, PrimaryBody, Snapshot};
+use crate::model::{
+    EntityState, Event, MissionState, Observation, PrimaryBody, Snapshot, ThrustApplication,
+};
+use crate::propulsion::{applied_jets, applied_wrench};
 use crate::scenario::settings;
 use rapier3d_f64::prelude::*;
 use serde_json::{Value, json};
@@ -48,7 +51,18 @@ impl Simulation {
         sim.state.rng_state = sim.rng;
         sim
     }
-    fn from_state(state: Snapshot) -> Self {
+    fn from_state(mut state: Snapshot) -> Self {
+        if let Some(lander) = state.assets.iter_mut().find(|e| e.id == EntityId::Lander)
+            && lander.thrust_application == ThrustApplication::CenterOfMass
+        {
+            // Older center snapshots can omit command/torque fields. Preserve
+            // their command-driven dynamics and reconcile the reported wrench.
+            let cfg = settings().lander;
+            let a = lander.commanded_angular_accel_rad_s2;
+            let i = cfg.inertia_kg_m2;
+            lander.thrust_n = scale(lander.commanded_accel_mps2, cfg.mass_kg);
+            lander.torque_nm = [dot(i[0], a), dot(i[1], a), dot(i[2], a)];
+        }
         let rng = if state.rng_state == 0 {
             state.seed.max(1)
         } else {
@@ -200,6 +214,7 @@ impl Simulation {
             .ok_or("controlled Shuttle missing")?;
         e.commanded_accel_mps2 = a;
         e.commanded_angular_accel_rad_s2 = aa;
+        e.thrust_application = ThrustApplication::CenterOfMass;
         e.thrust_n = scale(a, settings().lander.mass_kg);
         let i = cfg.inertia_kg_m2;
         e.torque_nm = [dot(i[0], aa), dot(i[1], aa), dot(i[2], aa)];
@@ -210,6 +225,20 @@ impl Simulation {
         } else {
             EntityStatus::Coasting
         };
+        Ok(())
+    }
+    pub(crate) fn set_manual_thrust(&mut self, accel: [f64; 3]) -> Result<(), String> {
+        // Reuse the API's finite checks, norm limit and terminal-mission guard.
+        // A manual translation replaces, rather than inherits, angular control.
+        self.set_command(accel, [0.0; 3])?;
+        let lander = self
+            .state
+            .assets
+            .iter_mut()
+            .find(|e| e.id == EntityId::Lander)
+            .ok_or("controlled Shuttle missing")?;
+        lander.thrust_application = ThrustApplication::ManualNozzles;
+        lander.torque_nm = applied_wrench(&applied_jets(lander)).torque_body_nm;
         Ok(())
     }
     pub fn execute(&mut self, command: PhysicsCommand) -> Result<Snapshot, String> {
@@ -267,22 +296,34 @@ impl Simulation {
                     rb.reset_forces(false);
                     rb.reset_torques(false);
                     if e.id == EntityId::Lander {
+                        let cfg = settings().lander;
                         let q = *rb.rotation();
-                        let accel = Vector::new(
-                            e.commanded_accel_mps2[0],
-                            e.commanded_accel_mps2[1],
-                            e.commanded_accel_mps2[2],
-                        );
-                        let a = q * accel;
-                        rb.add_force(a * rb.mass(), true);
+                        let fuel_force_n = match e.thrust_application {
+                            ThrustApplication::CenterOfMass => {
+                                let accel = Vector::from_array(e.commanded_accel_mps2);
+                                rb.add_force(q * accel * rb.mass(), true);
+                                accel.length() * cfg.mass_kg
+                            }
+                            ThrustApplication::ManualNozzles => {
+                                let jets = applied_jets(e);
+                                for jet in &jets {
+                                    let force_world = q * Vector::from_array(jet.force_body_n);
+                                    let point_world = rb
+                                        .position()
+                                        .transform_point(Vector::from_array(jet.point_body_m));
+                                    rb.add_force_at_point(force_world, point_world, true);
+                                }
+                                applied_wrench(&jets).propellant_force_n
+                            }
+                        };
+                        // add_force_at_point already supplies every r × F moment.
+                        // Only an explicit angular request contributes direct torque.
                         let x = e.commanded_angular_accel_rad_s2;
-                        let i = settings().lander.inertia_kg_m2;
+                        let i = cfg.inertia_kg_m2;
                         let torque = q * Vector::new(dot(i[0], x), dot(i[1], x), dot(i[2], x));
                         rb.add_torque(torque, true);
                         self.state.mission.fuel_used_kg +=
-                            accel.length() * settings().lander.mass_kg * h
-                                / (settings().lander.specific_impulse_s
-                                    * settings().lander.standard_gravity_mps2);
+                            fuel_force_n * h / (cfg.specific_impulse_s * cfg.standard_gravity_mps2);
                     }
                     if matches!(e.kind, EntityKind::Lander | EntityKind::Debris) {
                         let p = rb.translation();
@@ -628,6 +669,7 @@ fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f
             0.0
         },
         thrust_n: [0.0; 3],
+        thrust_application: ThrustApplication::CenterOfMass,
         status: match kind {
             EntityKind::LandingPad => EntityStatus::Fixed,
             EntityKind::ReturnShip => EntityStatus::StationKeeping,
@@ -749,6 +791,27 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                 e.max_thrust_n,
                 fixed.max_thrust_n
             ));
+        }
+        match e.thrust_application {
+            // Keep legacy center snapshots compatible, including the historically
+            // optional fields. from_state reconciles reports with the commands.
+            ThrustApplication::CenterOfMass => {}
+            ThrustApplication::ManualNozzles => {
+                if e.id != EntityId::Lander || e.kind != EntityKind::Lander {
+                    return Err("only the lander can use manual nozzles".into());
+                }
+                if e.commanded_angular_accel_rad_s2 != [0.0; 3] {
+                    return Err("manual nozzles cannot include a direct angular command".into());
+                }
+                let force = scale(e.commanded_accel_mps2, settings().lander.mass_kg);
+                let wrench = applied_wrench(&applied_jets(e));
+                if !vectors_match(e.thrust_n, force)
+                    || !vectors_match(wrench.force_body_n, force)
+                    || !vectors_match(e.torque_nm, wrench.torque_body_nm)
+                {
+                    return Err("manual nozzle wrench differs from its applied forces".into());
+                }
+            }
         }
         match (e.id, e.kind) {
             (EntityId::Lander, EntityKind::Lander) if e.mass_kg == settings().lander.mass_kg => {
@@ -912,4 +975,437 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 fn scale(a: [f64; 3], k: f64) -> [f64; 3] {
     [a[0] * k, a[1] * k, a[2] * k]
+}
+fn vectors_match(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.into_iter()
+        .zip(b)
+        .all(|(a, b)| (a - b).abs() <= 1e-8 + b.abs() * 1e-10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lander(sim: &Simulation) -> &EntityState {
+        sim.state
+            .assets
+            .iter()
+            .find(|e| e.id == EntityId::Lander)
+            .unwrap()
+    }
+
+    fn lander_mut(state: &mut Snapshot) -> &mut EntityState {
+        state
+            .assets
+            .iter_mut()
+            .find(|e| e.id == EntityId::Lander)
+            .unwrap()
+    }
+
+    fn rigid_body(sim: &Simulation) -> &RigidBody {
+        &sim.bodies[sim.handles[&EntityId::Lander]]
+    }
+
+    fn rotation(e: &EntityState) -> Rotation {
+        Rotation::from_xyzw(e.rotation[0], e.rotation[1], e.rotation[2], e.rotation[3])
+    }
+
+    fn angular_momentum(sim: &Simulation) -> Vector {
+        let rb = rigid_body(sim);
+        let q = *rb.rotation();
+        let w = (q.inverse() * rb.angvel()).to_array();
+        let i = settings().lander.inertia_kg_m2;
+        q * Vector::new(dot(i[0], w), dot(i[1], w), dot(i[2], w))
+    }
+
+    fn assert_vector_close(actual: Vector, expected: Vector, tolerance: f64) {
+        assert!(
+            (actual - expected).length() <= tolerance,
+            "actual {actual:?}, expected {expected:?}, tolerance {tolerance}"
+        );
+    }
+
+    #[test]
+    fn manual_force_at_point_rotates_the_actual_default_lander_without_doubled_torque() {
+        let mut sim = Simulation::new_default();
+        let before = lander(&sim).clone();
+        let q = rotation(&before);
+        let dt = settings().integration.fixed_step_s;
+        sim.set_manual_thrust([0.0, settings().lander.max_accel_mps2, 0.0])
+            .unwrap();
+        let commanded = lander(&sim).clone();
+        assert_eq!(commanded.position, before.position);
+        assert_eq!(commanded.rotation, before.rotation);
+        assert_eq!(commanded.velocity, before.velocity);
+        assert_eq!(
+            commanded.angular_velocity_rad_s,
+            before.angular_velocity_rad_s
+        );
+        assert_eq!(commanded.commanded_angular_accel_rad_s2, [0.0; 3]);
+        assert!(commanded.torque_nm[0] > 0.0);
+        sim.advance(dt);
+
+        let rb = rigid_body(&sim);
+        assert_vector_close(
+            rb.user_torque(),
+            q * Vector::from_array(commanded.torque_nm),
+            1e-6,
+        );
+        let gravity = crate::astrophysics::acceleration(
+            Vector::from_array(before.position),
+            Vector::from_array(before.velocity),
+            settings().gravity,
+        );
+        assert_vector_close(
+            rb.user_force(),
+            q * Vector::from_array(commanded.thrust_n) + gravity * rb.mass(),
+            1e-7,
+        );
+        let body_w = q.inverse() * rb.angvel();
+        // Passive nozzle response is not limited by the direct angular-command cap.
+        assert!(body_w.x > settings().lander.max_angular_accel_rad_s2 * dt * 10.0);
+        assert!((q * Vector::Z).dot(*rb.rotation() * Vector::Z) < 1.0 - 1e-8);
+        assert!((rb.mass() - before.mass_kg).abs() < 1e-9);
+        assert!(rb.mass_properties().flags.is_empty());
+    }
+
+    #[test]
+    fn holding_a_body_left_push_naturally_tips_over_on_the_real_default_pad() {
+        let mut sim = Simulation::new_default();
+        let up = rotation(lander(&sim)) * Vector::Z;
+        let dt = settings().integration.fixed_step_s;
+        let mut minimum_up_alignment = 1.0_f64;
+        let mut peak_roll_rate = 0.0_f64;
+        let mut touched_pad = false;
+        sim.set_manual_thrust([0.0, settings().lander.max_accel_mps2, 0.0])
+            .unwrap();
+
+        // No pose, angular velocity, gravity, inertia, or contact changes. This is
+        // the same sustained +Y force the A key requests on the configured pad.
+        for _ in 0..(12.0 / dt).ceil() as usize {
+            sim.advance(dt);
+            let rb = rigid_body(&sim);
+            minimum_up_alignment = minimum_up_alignment.min(up.dot(*rb.rotation() * Vector::Z));
+            peak_roll_rate = peak_roll_rate.max((rb.rotation().inverse() * rb.angvel()).x.abs());
+            touched_pad |= sim
+                .state
+                .active_contacts
+                .contains(&pair_key(EntityId::Lander, EntityId::LandingPad));
+            if touched_pad && minimum_up_alignment < 0.0 {
+                break;
+            }
+        }
+
+        assert!(
+            touched_pad,
+            "the actual foot/pad colliders must participate"
+        );
+        assert!(
+            minimum_up_alignment < 0.0,
+            "sustained manual force must tip body-up beyond 90 degrees; minimum dot {minimum_up_alignment}"
+        );
+        assert!(peak_roll_rate > settings().lander.max_angular_accel_rad_s2);
+        assert_eq!(lander(&sim).commanded_angular_accel_rad_s2, [0.0; 3]);
+    }
+
+    #[test]
+    fn manual_up_thrust_clears_stale_angular_control_and_has_no_jet_moment() {
+        let cfg = settings().lander;
+        let mut sim = Simulation::new_default();
+        sim.set_command([0.0; 3], [cfg.max_angular_accel_rad_s2, 0.0, 0.0])
+            .unwrap();
+        sim.set_manual_thrust([0.0, 0.0, cfg.max_accel_mps2])
+            .unwrap();
+        let up = rotation(lander(&sim)) * Vector::Z;
+        assert_eq!(
+            lander(&sim).thrust_application,
+            ThrustApplication::ManualNozzles
+        );
+        assert_eq!(lander(&sim).commanded_angular_accel_rad_s2, [0.0; 3]);
+        assert_eq!(lander(&sim).torque_nm, [0.0; 3]);
+        sim.advance(settings().integration.fixed_step_s);
+        let rb = rigid_body(&sim);
+        assert_vector_close(rb.user_torque(), Vector::ZERO, 1e-6);
+        assert_vector_close(rb.angvel(), Vector::ZERO, 1e-9);
+        assert!(rb.linvel().dot(up) > 0.0);
+    }
+
+    #[test]
+    fn release_clears_force_and_moment_without_braking_or_erasing_angular_momentum() {
+        for release_with_manual_zero in [false, true] {
+            let mut sim = Simulation::new_default();
+            let dt = settings().integration.fixed_step_s;
+            sim.set_manual_thrust([0.0, settings().lander.max_accel_mps2, 0.0])
+                .unwrap();
+            sim.advance(dt);
+            let thrusting = lander(&sim).clone();
+            let fuel = sim.state.mission.fuel_used_kg;
+            let momentum = angular_momentum(&sim);
+            assert!(momentum.length() > 0.0);
+            if release_with_manual_zero {
+                sim.set_manual_thrust([0.0; 3]).unwrap();
+            } else {
+                sim.execute(PhysicsCommand::Stop).unwrap();
+            }
+            let released = lander(&sim);
+            assert_eq!(released.thrust_n, [0.0; 3]);
+            assert_eq!(released.torque_nm, [0.0; 3]);
+            assert_eq!(released.commanded_accel_mps2, [0.0; 3]);
+            assert_eq!(released.commanded_angular_accel_rad_s2, [0.0; 3]);
+            assert_eq!(released.velocity, thrusting.velocity);
+            assert_eq!(
+                released.angular_velocity_rad_s,
+                thrusting.angular_velocity_rad_s
+            );
+            assert_eq!(released.rotation, thrusting.rotation);
+            assert!(applied_jets(released).is_empty());
+            assert_vector_close(angular_momentum(&sim), momentum, 1e-12);
+            let rb = rigid_body(&sim);
+            let gravity_force = crate::astrophysics::acceleration(
+                rb.translation(),
+                rb.linvel(),
+                settings().gravity,
+            ) * rb.mass();
+
+            // The next short step is still above the pad. Gravity changes linear
+            // velocity, but no stale jet moment or braking torque can remain.
+            sim.advance(dt);
+            assert_eq!(sim.state.mission.fuel_used_kg, fuel);
+            assert_vector_close(rigid_body(&sim).user_force(), gravity_force, 1e-9);
+            assert_vector_close(rigid_body(&sim).user_torque(), Vector::ZERO, 1e-12);
+            assert_vector_close(angular_momentum(&sim), momentum, momentum.length() * 1e-4);
+            assert!(norm(lander(&sim).velocity) > 0.0);
+        }
+    }
+
+    #[test]
+    fn api_center_force_and_direct_angular_command_keep_their_existing_limits() {
+        let cfg = settings().lander;
+        let dt = settings().integration.fixed_step_s;
+        let mut sim = Simulation::new_default();
+        sim.set_manual_thrust([0.0, cfg.max_accel_mps2, 0.0])
+            .unwrap();
+        sim.set_command([1.0, -2.0, 3.0], [0.1, 0.2, -0.3]).unwrap();
+        let commanded = lander(&sim).clone();
+        let a = clamp_vec([1.0, -2.0, 3.0], cfg.max_accel_mps2);
+        let aa = clamp_vec([0.1, 0.2, -0.3], cfg.max_angular_accel_rad_s2);
+        let i = cfg.inertia_kg_m2;
+        assert_eq!(
+            commanded.thrust_application,
+            ThrustApplication::CenterOfMass
+        );
+        assert_eq!(commanded.commanded_accel_mps2, a);
+        assert_eq!(commanded.commanded_angular_accel_rad_s2, aa);
+        assert_eq!(commanded.thrust_n, scale(a, cfg.mass_kg));
+        assert_eq!(
+            commanded.torque_nm,
+            [dot(i[0], aa), dot(i[1], aa), dot(i[2], aa)]
+        );
+        sim.advance(dt);
+        assert_vector_close(
+            rigid_body(&sim).user_torque(),
+            rotation(&commanded) * Vector::from_array(commanded.torque_nm),
+            1e-8,
+        );
+
+        let mut center = Simulation::new_default();
+        center
+            .set_command([0.0, cfg.max_accel_mps2, 0.0], [0.0; 3])
+            .unwrap();
+        center.advance(dt);
+        assert_eq!(rigid_body(&center).user_torque(), Vector::ZERO);
+        assert_vector_close(rigid_body(&center).angvel(), Vector::ZERO, 1e-12);
+    }
+
+    #[test]
+    fn nonfinite_manual_and_api_inputs_are_rejected_without_changing_state() {
+        let mut sim = Simulation::new_default();
+        sim.set_manual_thrust([0.0, 0.5, 0.0]).unwrap();
+        let before = serde_json::to_value(sim.snapshot()).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(sim.set_manual_thrust([invalid, 0.0, 0.0]).is_err());
+            assert!(sim.set_command([invalid, 0.0, 0.0], [0.0; 3]).is_err());
+            assert!(sim.set_command([0.0; 3], [0.0, invalid, 0.0]).is_err());
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn manual_fuel_uses_component_magnitudes_while_center_keeps_resultant_accounting() {
+        let cfg = settings().lander;
+        let dt = settings().integration.fixed_step_s;
+        let mut fuel = [0.0; 2];
+        for (index, manual) in [false, true].into_iter().enumerate() {
+            let mut sim = Simulation::new_default();
+            if manual {
+                sim.set_manual_thrust([0.5, -0.5, 0.0]).unwrap();
+            } else {
+                sim.set_command([0.5, -0.5, 0.0], [0.0; 3]).unwrap();
+            }
+            let force = lander(&sim).thrust_n;
+            let fuel_force = if manual {
+                force.into_iter().map(f64::abs).sum::<f64>()
+            } else {
+                norm(force)
+            };
+            sim.advance(dt);
+            fuel[index] = sim.state.mission.fuel_used_kg;
+            assert!(
+                (fuel[index]
+                    - fuel_force * dt / (cfg.specific_impulse_s * cfg.standard_gravity_mps2))
+                    .abs()
+                    < 1e-12
+            );
+        }
+        assert!((fuel[1] / fuel[0] - 2.0_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn manual_mode_and_forces_round_trip_entirely_through_the_snapshot() {
+        let mut original = Simulation::new_default();
+        original.set_manual_thrust([0.0, 0.3, 0.4]).unwrap();
+        let exported = serde_json::to_value(original.snapshot()).unwrap();
+        let state: Snapshot = serde_json::from_value(exported.clone()).unwrap();
+        assert_eq!(
+            state
+                .assets
+                .iter()
+                .find(|e| e.id == EntityId::Lander)
+                .unwrap()
+                .thrust_application,
+            ThrustApplication::ManualNozzles
+        );
+        let mut restored = Simulation::new_default();
+        restored
+            .execute(PhysicsCommand::Restore {
+                state: Box::new(state),
+            })
+            .unwrap();
+        assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
+
+        let dt = settings().integration.fixed_step_s;
+        original.advance(dt);
+        restored.advance(dt);
+        let expected = lander(&original);
+        let actual = lander(&restored);
+        assert_eq!(actual.thrust_application, ThrustApplication::ManualNozzles);
+        assert_eq!(actual.thrust_n, expected.thrust_n);
+        assert_eq!(actual.torque_nm, expected.torque_nm);
+        assert_eq!(actual.position, expected.position);
+        assert_eq!(actual.rotation, expected.rotation);
+        assert_eq!(actual.velocity, expected.velocity);
+        assert_eq!(
+            actual.angular_velocity_rad_s,
+            expected.angular_velocity_rad_s
+        );
+        assert_eq!(
+            restored.state.mission.fuel_used_kg,
+            original.state.mission.fuel_used_kg
+        );
+        assert_vector_close(
+            rigid_body(&restored).user_torque(),
+            rigid_body(&original).user_torque(),
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_defaults_to_center_and_reconciles_optional_wrench_reports() {
+        let mut sim = Simulation::new_default();
+        sim.set_command([0.0, 0.3, 0.4], [0.01, 0.0, 0.0]).unwrap();
+        let mut legacy = serde_json::to_value(sim.snapshot()).unwrap();
+        for asset in legacy["assets"].as_array_mut().unwrap() {
+            asset.as_object_mut().unwrap().remove("thrust_application");
+        }
+        let state: Snapshot = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(
+            state
+                .assets
+                .iter()
+                .all(|e| e.thrust_application == ThrustApplication::CenterOfMass)
+        );
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(state),
+        })
+        .unwrap();
+        assert_eq!(lander(&sim).commanded_accel_mps2, [0.0, 0.3, 0.4]);
+
+        // These fields were already optional before nozzle mode existed. Their
+        // absence must not leave a displayed jet that physics never applies.
+        for asset in legacy["assets"].as_array_mut().unwrap() {
+            let object = asset.as_object_mut().unwrap();
+            object.remove("commanded_accel_mps2");
+            object.remove("commanded_angular_accel_rad_s2");
+            object.remove("torque_nm");
+        }
+        let state = serde_json::from_value(legacy).unwrap();
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(state),
+        })
+        .unwrap();
+        assert_eq!(
+            lander(&sim).thrust_application,
+            ThrustApplication::CenterOfMass
+        );
+        assert_eq!(lander(&sim).thrust_n, [0.0; 3]);
+        assert_eq!(lander(&sim).torque_nm, [0.0; 3]);
+        assert!(applied_jets(lander(&sim)).is_empty());
+        sim.set_manual_thrust([0.0, 0.5, 0.0]).unwrap();
+        sim.execute(PhysicsCommand::Reset { seed: None }).unwrap();
+        assert_eq!(
+            lander(&sim).thrust_application,
+            ThrustApplication::CenterOfMass
+        );
+    }
+
+    #[test]
+    fn restore_rejects_wrong_manual_owner_inconsistent_wrench_and_direct_angular_request() {
+        let mut sim = Simulation::new_default();
+        sim.set_manual_thrust([0.0, 0.5, 0.0]).unwrap();
+        let valid = sim.snapshot();
+        validate(&valid).unwrap();
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).thrust_n[1] *= 0.5;
+        assert!(validate(&invalid).is_err());
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).torque_nm[0] *= 2.0;
+        assert!(validate(&invalid).is_err());
+        let before = serde_json::to_value(sim.snapshot()).unwrap();
+        assert!(
+            sim.execute(PhysicsCommand::Restore {
+                state: Box::new(invalid)
+            })
+            .is_err()
+        );
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).commanded_angular_accel_rad_s2[0] = 0.01;
+        assert!(validate(&invalid).is_err());
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).commanded_accel_mps2[1] = 1.0;
+        assert!(validate(&invalid).is_err());
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).torque_nm[0] = f64::NAN;
+        assert!(validate(&invalid).is_err());
+        for kind in [
+            EntityKind::ReturnShip,
+            EntityKind::LandingPad,
+            EntityKind::Debris,
+        ] {
+            let mut invalid = valid.clone();
+            invalid
+                .assets
+                .iter_mut()
+                .find(|e| e.kind == kind)
+                .unwrap()
+                .thrust_application = ThrustApplication::ManualNozzles;
+            assert!(validate(&invalid).is_err());
+        }
+
+        // Natural angular response is not an angular-control request or capped
+        // angular velocity. Such a finite state must remain restorable.
+        let mut spinning = valid;
+        lander_mut(&mut spinning).angular_velocity_rad_s = [1.0, -2.0, 3.0];
+        validate(&spinning).unwrap();
+    }
 }

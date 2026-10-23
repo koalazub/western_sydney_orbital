@@ -37,7 +37,16 @@
     "hull_half_extents_m": [1.8, 1.8, 1.8],
     "leg_positions_m": [[-2.5,-2.5,-2.55],[2.5,-2.5,-2.55],[-2.5,2.5,-2.55],[2.5,2.5,-2.55]],
     "leg_half_extents_m": [0.22,0.22,1.0],
-    "foot_radius_m": 0.25
+    "foot_radius_m": 0.25,
+    "manual_nozzles_body_m": [[-2.5,0.0,-2.55],[2.5,0.0,-2.55],[0.0,-2.5,-2.55],[0.0,2.5,-2.55],[0.0,0.0,-1.8],[0.0,0.0,1.8]]
+  },
+  "debug_thrust": {
+    "max_particles": 512,
+    "particles_per_second_per_jet": 90.0,
+    "particle_lifetime_s": 0.35,
+    "exhaust_speed_mps": 18.0,
+    "particle_radius_m": 0.12,
+    "spread_rad": 0.12
   },
   "pad": { "half_extents_m": [20.0,20.0,1.0], "lander_clearance_m": 5.85,"fixed_mass_kg":1.0e12 },
   "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 1.15, "nominal_time_s": 120.0,"score_offset":0.5 },

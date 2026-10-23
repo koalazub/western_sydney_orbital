@@ -12,6 +12,7 @@ mod mission;
 pub mod model;
 mod navigation;
 mod physics;
+mod propulsion;
 mod runtime;
 pub mod scenario;
 mod scene;

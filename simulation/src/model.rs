@@ -1,6 +1,7 @@
 use crate::domain::{
     EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus,
 };
+pub use crate::propulsion::ThrustApplication;
 pub use crate::terrain::{LandingSite, landing_site, phobos_geometry};
 use serde::{Deserialize, Serialize};
 pub fn phobos_radii_m() -> [f64; 3] {
@@ -125,6 +126,8 @@ pub struct EntityState {
     pub fuel_kg: f64,
     pub max_thrust_n: f64,
     pub thrust_n: [f64; 3],
+    #[serde(default)]
+    pub thrust_application: ThrustApplication,
     pub status: EntityStatus,
     #[serde(default)]
     pub torque_nm: [f64; 3],
