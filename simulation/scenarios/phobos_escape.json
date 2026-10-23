@@ -48,6 +48,10 @@
     "particle_radius_m": 0.12,
     "spread_rad": 0.12
   },
+  "practice": {
+    "space_lift_accel_mps2": 2.0,
+    "space_boost_enabled": true
+  },
   "pad": { "half_extents_m": [20.0,20.0,1.0], "lander_clearance_m": 5.85,"fixed_mass_kg":1.0e12 },
   "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 1.15, "nominal_time_s": 120.0,"score_offset":0.5 },
   "debris": { "count": 500, "x_min_m": 13600.0, "x_span_m": 5000.0, "y_half_width_m": 450.0, "z_half_width_m": 450.0, "speed_min_mps": 0.25, "speed_span_mps": 0.65, "radius_min_m": 0.4, "radius_span_m": 40.0, "density_kg_m3": 500.0, "spin_max_rad_s": 0.2, "radar_count": 200, "diameter_noise_fraction": 0.05 },

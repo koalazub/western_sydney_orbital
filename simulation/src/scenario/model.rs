@@ -12,6 +12,7 @@ pub struct Scenario {
     pub path_planning: PathPlanning,
     pub lander: Lander,
     pub debug_thrust: DebugThrust,
+    pub practice: Practice,
     pub pad: Pad,
     pub mission: Mission,
     pub debris: Debris,
@@ -93,6 +94,13 @@ pub struct DebugThrust {
     pub exhaust_speed_mps: f64,
     pub particle_radius_m: f64,
     pub spread_rad: f64,
+}
+
+/// Local keyboard assistance, separate from the reference controller API limits.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Practice {
+    pub space_lift_accel_mps2: f64,
+    pub space_boost_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

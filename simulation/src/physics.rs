@@ -5,7 +5,10 @@ use crate::mission::{self, FlightMetrics};
 use crate::model::{
     EntityState, Event, MissionState, Observation, PrimaryBody, Snapshot, ThrustApplication,
 };
-use crate::propulsion::{applied_jets, applied_wrench};
+use crate::propulsion::{
+    accel_limit, accel_within_limits, applied_jets, applied_wrench, local_max_thrust_n,
+    space_shape_is_valid,
+};
 use crate::scenario::settings;
 use rapier3d_f64::prelude::*;
 use serde_json::{Value, json};
@@ -52,16 +55,19 @@ impl Simulation {
         sim
     }
     fn from_state(mut state: Snapshot) -> Self {
-        if let Some(lander) = state.assets.iter_mut().find(|e| e.id == EntityId::Lander)
-            && lander.thrust_application == ThrustApplication::CenterOfMass
-        {
-            // Older center snapshots can omit command/torque fields. Preserve
-            // their command-driven dynamics and reconcile the reported wrench.
-            let cfg = settings().lander;
-            let a = lander.commanded_angular_accel_rad_s2;
-            let i = cfg.inertia_kg_m2;
-            lander.thrust_n = scale(lander.commanded_accel_mps2, cfg.mass_kg);
-            lander.torque_nm = [dot(i[0], a), dot(i[1], a), dot(i[2], a)];
+        if let Some(lander) = state.assets.iter_mut().find(|e| e.id == EntityId::Lander) {
+            if has_legacy_lander_thrust_cap(lander) {
+                lander.max_thrust_n = local_max_thrust_n();
+            }
+            if lander.thrust_application == ThrustApplication::CenterOfMass {
+                // Older center snapshots can omit command/torque fields. Preserve
+                // their command-driven dynamics and reconcile the reported wrench.
+                let cfg = settings().lander;
+                let a = lander.commanded_angular_accel_rad_s2;
+                let i = cfg.inertia_kg_m2;
+                lander.thrust_n = scale(lander.commanded_accel_mps2, cfg.mass_kg);
+                lander.torque_nm = [dot(i[0], a), dot(i[1], a), dot(i[2], a)];
+            }
         }
         let rng = if state.rng_state == 0 {
             state.seed.max(1)
@@ -203,24 +209,46 @@ impl Simulation {
         }
         let a = clamp_vec(accel, cfg.max_accel_mps2);
         let aa = clamp_vec(angular_accel, cfg.max_angular_accel_rad_s2);
-        if self.state.mission.status.is_terminal() && (norm(a) > 0.0 || norm(aa) > 0.0) {
+        self.apply_command(a, aa, ThrustApplication::CenterOfMass)
+    }
+    fn apply_command(
+        &mut self,
+        accel: [f64; 3],
+        angular_accel: [f64; 3],
+        application: ThrustApplication,
+    ) -> Result<(), String> {
+        if self.state.mission.status.is_terminal()
+            && (norm(accel) > 0.0 || norm(angular_accel) > 0.0)
+        {
             return Err("Mission finished. Reset before commanding another flight.".into());
         }
+        let cfg = settings().lander;
         let e = self
             .state
             .assets
             .iter_mut()
             .find(|e| e.id == EntityId::Lander)
             .ok_or("controlled Shuttle missing")?;
-        e.commanded_accel_mps2 = a;
-        e.commanded_angular_accel_rad_s2 = aa;
-        e.thrust_application = ThrustApplication::CenterOfMass;
-        e.thrust_n = scale(a, settings().lander.mass_kg);
-        let i = cfg.inertia_kg_m2;
-        e.torque_nm = [dot(i[0], aa), dot(i[1], aa), dot(i[2], aa)];
-        e.status = if norm(a) > 0.0 {
+        e.commanded_accel_mps2 = accel;
+        e.commanded_angular_accel_rad_s2 = angular_accel;
+        e.thrust_application = application;
+        e.thrust_n = scale(accel, cfg.mass_kg);
+        e.torque_nm = match application {
+            ThrustApplication::CenterOfMass => {
+                let i = cfg.inertia_kg_m2;
+                [
+                    dot(i[0], angular_accel),
+                    dot(i[1], angular_accel),
+                    dot(i[2], angular_accel),
+                ]
+            }
+            ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
+                applied_wrench(&applied_jets(e)).torque_body_nm
+            }
+        };
+        e.status = if norm(accel) > 0.0 {
             EntityStatus::Thrusting
-        } else if norm(aa) > 0.0 {
+        } else if norm(angular_accel) > 0.0 {
             EntityStatus::Rotating
         } else {
             EntityStatus::Coasting
@@ -240,6 +268,24 @@ impl Simulation {
         lander.thrust_application = ThrustApplication::ManualNozzles;
         lander.torque_nm = applied_wrench(&applied_jets(lander)).torque_body_nm;
         Ok(())
+    }
+    pub(crate) fn set_space_thrust(&mut self, accel: [f64; 3]) -> Result<(), String> {
+        // The input adapter has already scaled positive body-Z. This method must
+        // never amplify horizontal motion or admit a boosted downward request.
+        if !accel.iter().all(|v| v.is_finite()) {
+            return Err("command values must be finite".into());
+        }
+        if !space_shape_is_valid(accel) {
+            return Err(format!(
+                "practice Space thrust requires nonnegative body-Z and horizontal acceleration at most {} m/s²",
+                settings().lander.max_accel_mps2
+            ));
+        }
+        self.apply_command(
+            clamp_vec(accel, accel_limit(ThrustApplication::PracticeBoost)),
+            [0.0; 3],
+            ThrustApplication::PracticeBoost,
+        )
     }
     pub fn execute(&mut self, command: PhysicsCommand) -> Result<Snapshot, String> {
         match command {
@@ -304,7 +350,7 @@ impl Simulation {
                                 rb.add_force(q * accel * rb.mass(), true);
                                 accel.length() * cfg.mass_kg
                             }
-                            ThrustApplication::ManualNozzles => {
+                            ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
                                 let jets = applied_jets(e);
                                 for jet in &jets {
                                     let force_world = q * Vector::from_array(jet.force_body_n);
@@ -664,7 +710,7 @@ fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f
         mass_kg: m,
         fuel_kg: 0.0,
         max_thrust_n: if id == EntityId::Lander {
-            settings().lander.mass_kg * settings().lander.max_accel_mps2
+            local_max_thrust_n()
         } else {
             0.0
         },
@@ -680,6 +726,17 @@ fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f
         commanded_accel_mps2: [0.0; 3],
         commanded_angular_accel_rad_s2: [0.0; 3],
     }
+}
+fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
+    // Only pre-assist lander snapshots used this exact cap. A boost-mode
+    // snapshot or another actor cannot opt into migration with an arbitrary cap.
+    e.id == EntityId::Lander
+        && e.kind == EntityKind::Lander
+        && matches!(
+            e.thrust_application,
+            ThrustApplication::CenterOfMass | ThrustApplication::ManualNozzles
+        )
+        && e.max_thrust_n == settings().lander.mass_kg * settings().lander.max_accel_mps2
 }
 fn validate(s: &Snapshot) -> Result<(), String> {
     if !s.time_s.is_finite()
@@ -760,7 +817,11 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             || e.radius_m <= 0.0
             || e.radius_m > settings().limits.radius_m
             || !(0.99..=1.01).contains(&qn)
-            || norm(e.commanded_accel_mps2) > settings().lander.max_accel_mps2 + 1e-9
+            || !accel_within_limits(e.thrust_application, e.commanded_accel_mps2)
+            || !accel_within_limits(
+                e.thrust_application,
+                scale(e.thrust_n, 1.0 / settings().lander.mass_kg),
+            )
             || norm(e.commanded_angular_accel_rad_s2)
                 > settings().lander.max_angular_accel_rad_s2 + 1e-9
             || !e.fuel_kg.is_finite()
@@ -778,7 +839,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         if fixed.mass_kg != e.mass_kg
             || fixed.radius_m != e.radius_m
             || fixed.kind != e.kind
-            || fixed.max_thrust_n != e.max_thrust_n
+            || (fixed.max_thrust_n != e.max_thrust_n && !has_legacy_lander_thrust_cap(e))
             || fixed.name != e.name
         {
             return Err(format!(
@@ -796,12 +857,12 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             // Keep legacy center snapshots compatible, including the historically
             // optional fields. from_state reconciles reports with the commands.
             ThrustApplication::CenterOfMass => {}
-            ThrustApplication::ManualNozzles => {
+            ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
                 if e.id != EntityId::Lander || e.kind != EntityKind::Lander {
-                    return Err("only the lander can use manual nozzles".into());
+                    return Err("only the lander can use manual or practice-boost nozzles".into());
                 }
                 if e.commanded_angular_accel_rad_s2 != [0.0; 3] {
-                    return Err("manual nozzles cannot include a direct angular command".into());
+                    return Err("nozzle modes cannot include a direct angular command".into());
                 }
                 let force = scale(e.commanded_accel_mps2, settings().lander.mass_kg);
                 let wrench = applied_wrench(&applied_jets(e));
@@ -809,7 +870,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                     || !vectors_match(wrench.force_body_n, force)
                     || !vectors_match(e.torque_nm, wrench.torque_body_nm)
                 {
-                    return Err("manual nozzle wrench differs from its applied forces".into());
+                    return Err("nozzle wrench differs from its applied forces".into());
                 }
             }
         }
@@ -1131,6 +1192,242 @@ mod tests {
     }
 
     #[test]
+    fn practice_space_lift_has_four_times_the_force_and_more_real_upward_velocity() {
+        let cfg = settings().lander;
+        let lift = settings().practice.space_lift_accel_mps2;
+        assert_eq!(cfg.max_accel_mps2, 0.5);
+        assert_eq!(lift, 2.0);
+        let mut reference = Simulation::new_default();
+        let mut boosted = Simulation::new_default();
+        let before = lander(&boosted).clone();
+        let mass_properties = rigid_body(&boosted).mass_properties().local_mprops;
+        let up = rotation(&before) * Vector::Z;
+        let gravity = crate::astrophysics::acceleration(
+            Vector::from_array(before.position),
+            Vector::from_array(before.velocity),
+            settings().gravity,
+        );
+        reference
+            .set_manual_thrust([0.0, 0.0, cfg.max_accel_mps2])
+            .unwrap();
+        boosted.set_space_thrust([0.0, 0.0, lift]).unwrap();
+        assert_eq!(
+            lander(&boosted).thrust_application,
+            ThrustApplication::PracticeBoost
+        );
+        assert!(
+            (lander(&boosted).thrust_n[2] / lander(&reference).thrust_n[2] - 4.0).abs() < 1e-12
+        );
+        assert_eq!(lander(&boosted).max_thrust_n, cfg.mass_kg * lift);
+        assert_eq!(lander(&boosted).mass_kg, before.mass_kg);
+        assert_eq!(lander(&boosted).torque_nm, [0.0; 3]);
+        assert!(
+            boosted
+                .state
+                .assets
+                .iter()
+                .filter(|e| e.id != EntityId::Lander)
+                .all(|e| e.max_thrust_n == 0.0)
+        );
+
+        let dt = settings().integration.fixed_step_s;
+        for _ in 0..4 {
+            reference.advance(dt);
+            boosted.advance(dt);
+        }
+        let elapsed = 4.0 * dt;
+        let reference_speed = rigid_body(&reference).linvel().dot(up);
+        let boosted_speed = rigid_body(&boosted).linvel().dot(up);
+        assert!(reference_speed > 0.0);
+        assert!(boosted_speed > reference_speed * 3.9);
+        assert!(
+            (boosted_speed - reference_speed - (lift - cfg.max_accel_mps2) * elapsed).abs() < 1e-3
+        );
+        assert!(boosted_speed >= (lift - gravity.length()) * elapsed - 1e-4);
+        assert_eq!(
+            rigid_body(&boosted).mass_properties().local_mprops,
+            mass_properties
+        );
+        assert_eq!(
+            rigid_body(&reference).mass_properties().local_mprops,
+            mass_properties
+        );
+        assert_vector_close(rigid_body(&boosted).angvel(), Vector::ZERO, 1e-9);
+
+        // The larger local hardware report never changes either reference path.
+        for manual in [false, true] {
+            if manual {
+                boosted.set_manual_thrust([0.0, 0.0, 2.0]).unwrap();
+            } else {
+                boosted.set_command([0.0, 0.0, 2.0], [0.0; 3]).unwrap();
+            }
+            assert_eq!(lander(&boosted).commanded_accel_mps2, [0.0, 0.0, 0.5]);
+            assert_eq!(lander(&boosted).thrust_n, [0.0, 0.0, cfg.mass_kg * 0.5]);
+            assert_eq!(lander(&boosted).max_thrust_n, cfg.mass_kg * lift);
+        }
+    }
+
+    #[test]
+    fn mixed_space_lift_preserves_horizontal_force_and_applies_nozzle_torque_once() {
+        let cfg = settings().lander;
+        let lift = settings().practice.space_lift_accel_mps2;
+        let component = cfg.max_accel_mps2 / 2.0_f64.sqrt();
+        let mut sim = Simulation::new_default();
+        sim.set_manual_thrust([component, 0.0, component]).unwrap();
+        let reference = lander(&sim).clone();
+        sim.set_command([0.0; 3], [cfg.max_angular_accel_rad_s2, 0.0, 0.0])
+            .unwrap();
+        sim.set_space_thrust([component, 0.0, lift / 2.0_f64.sqrt()])
+            .unwrap();
+        let commanded = lander(&sim).clone();
+        let q = rotation(&commanded);
+        assert_eq!(
+            commanded.commanded_accel_mps2[0],
+            reference.commanded_accel_mps2[0]
+        );
+        assert_eq!(commanded.thrust_n[0], reference.thrust_n[0]);
+        assert_eq!(commanded.torque_nm, reference.torque_nm);
+        assert_eq!(commanded.commanded_angular_accel_rad_s2, [0.0; 3]);
+        assert_eq!(commanded.velocity, reference.velocity);
+        assert_eq!(
+            commanded.angular_velocity_rad_s,
+            reference.angular_velocity_rad_s
+        );
+        assert!(norm(commanded.commanded_accel_mps2) < lift);
+        assert!(norm(commanded.commanded_accel_mps2) > cfg.max_accel_mps2);
+        let gravity = crate::astrophysics::acceleration(
+            Vector::from_array(commanded.position),
+            Vector::from_array(commanded.velocity),
+            settings().gravity,
+        );
+        let dt = settings().integration.fixed_step_s;
+        sim.advance(dt);
+        assert_vector_close(
+            rigid_body(&sim).user_force(),
+            q * Vector::from_array(commanded.thrust_n) + gravity * rigid_body(&sim).mass(),
+            1e-7,
+        );
+        assert_vector_close(
+            rigid_body(&sim).user_torque(),
+            q * Vector::from_array(commanded.torque_nm),
+            1e-6,
+        );
+        let fuel_force_n = commanded.thrust_n.into_iter().map(f64::abs).sum::<f64>();
+        assert!(
+            (sim.state.mission.fuel_used_kg
+                - fuel_force_n * dt / (cfg.specific_impulse_s * cfg.standard_gravity_mps2))
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn space_inputs_cap_total_acceleration_and_reject_unsafe_shapes_without_mutation() {
+        let cfg = settings().lander;
+        let lift = settings().practice.space_lift_accel_mps2;
+        let mut sim = Simulation::new_default();
+        sim.set_space_thrust([0.0, 0.0, lift * 10.0]).unwrap();
+        assert_eq!(lander(&sim).commanded_accel_mps2, [0.0, 0.0, lift]);
+        sim.set_space_thrust([0.0, 0.0, f64::MAX]).unwrap();
+        assert!((norm(lander(&sim).commanded_accel_mps2) - lift).abs() < 1e-12);
+        sim.set_space_thrust([0.2, 0.0, lift * 2.0]).unwrap();
+        assert!((norm(lander(&sim).commanded_accel_mps2) - lift).abs() < 1e-12);
+        assert!(lander(&sim).commanded_accel_mps2[0] <= 0.2);
+        let before = serde_json::to_value(sim.snapshot()).unwrap();
+        for invalid in [
+            [f64::NAN, 0.0, lift],
+            [0.0, f64::INFINITY, lift],
+            [0.0, 0.0, f64::NEG_INFINITY],
+            [cfg.max_accel_mps2 + 0.01, 0.0, lift],
+            [cfg.max_accel_mps2, cfg.max_accel_mps2, lift],
+            [f64::MAX, 0.0, f64::MAX],
+            [0.0, 0.0, -0.1],
+            [0.0, 0.0, -lift],
+        ] {
+            assert!(
+                sim.set_space_thrust(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn space_release_and_reference_handoffs_cancel_boost_without_braking() {
+        let cfg = settings().lander;
+        let lift = settings().practice.space_lift_accel_mps2;
+        let dt = settings().integration.fixed_step_s;
+        for handoff in 0..6 {
+            let mut sim = Simulation::new_default();
+            sim.set_space_thrust([
+                0.0,
+                cfg.max_accel_mps2 / 2.0_f64.sqrt(),
+                lift / 2.0_f64.sqrt(),
+            ])
+            .unwrap();
+            sim.advance(dt);
+            let thrusting = lander(&sim).clone();
+            let momentum = angular_momentum(&sim);
+            assert!(momentum.length() > 0.0);
+            let fuel = sim.state.mission.fuel_used_kg;
+            match handoff {
+                0 => {
+                    sim.execute(PhysicsCommand::Stop).unwrap();
+                }
+                1 => sim.set_manual_thrust([0.0; 3]).unwrap(),
+                2 => sim.set_space_thrust([0.0; 3]).unwrap(),
+                3 => sim.set_command([0.0; 3], [0.0; 3]).unwrap(),
+                4 => sim
+                    .set_manual_thrust([0.0, 0.0, cfg.max_accel_mps2])
+                    .unwrap(),
+                5 => sim
+                    .set_command([0.0, 0.0, cfg.max_accel_mps2], [0.0; 3])
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let released = lander(&sim).clone();
+            assert!(norm(released.commanded_accel_mps2) <= cfg.max_accel_mps2);
+            assert_eq!(released.torque_nm, [0.0; 3]);
+            assert_eq!(released.commanded_angular_accel_rad_s2, [0.0; 3]);
+            assert_eq!(released.velocity, thrusting.velocity);
+            assert_eq!(
+                released.angular_velocity_rad_s,
+                thrusting.angular_velocity_rad_s
+            );
+            assert_eq!(released.position, thrusting.position);
+            assert_eq!(released.rotation, thrusting.rotation);
+            assert_vector_close(angular_momentum(&sim), momentum, 1e-12);
+            if handoff < 4 {
+                assert_eq!(released.thrust_n, [0.0; 3]);
+                assert!(applied_jets(&released).is_empty());
+            }
+            let rb = rigid_body(&sim);
+            let expected_force = rotation(&released) * Vector::from_array(released.thrust_n)
+                + crate::astrophysics::acceleration(
+                    rb.translation(),
+                    rb.linvel(),
+                    settings().gravity,
+                ) * rb.mass();
+            sim.advance(dt);
+            assert_vector_close(rigid_body(&sim).user_force(), expected_force, 1e-8);
+            // A nonzero collinear nozzle force is transformed at kilometre-scale
+            // world coordinates. Allow point-subtraction roundoff, but keep the
+            // fully released, zero-force cases at the stricter zero tolerance.
+            let torque_tolerance = if handoff < 4 { 1e-12 } else { 1e-8 };
+            assert_vector_close(
+                rigid_body(&sim).user_torque(),
+                Vector::ZERO,
+                torque_tolerance,
+            );
+            assert_vector_close(angular_momentum(&sim), momentum, momentum.length() * 1e-4);
+            if handoff < 4 {
+                assert_eq!(sim.state.mission.fuel_used_kg, fuel);
+            }
+            assert!(norm(lander(&sim).velocity) > 0.0);
+        }
+    }
+
+    #[test]
     fn release_clears_force_and_moment_without_braking_or_erasing_angular_momentum() {
         for release_with_manual_zero in [false, true] {
             let mut sim = Simulation::new_default();
@@ -1310,10 +1607,212 @@ mod tests {
     }
 
     #[test]
+    fn practice_boost_mode_full_wrench_and_future_dynamics_round_trip_through_json() {
+        let mut original = Simulation::new_default();
+        original.set_space_thrust([0.2, -0.3, 1.5]).unwrap();
+        let exported = serde_json::to_value(original.snapshot()).unwrap();
+        let asset = exported["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|asset| asset["id"] == "Shuttle")
+            .unwrap();
+        assert_eq!(asset["thrust_application"], "practice_boost");
+        let state: Snapshot = serde_json::from_value(exported.clone()).unwrap();
+        let mut restored = Simulation::new_default();
+        restored
+            .execute(PhysicsCommand::Restore {
+                state: Box::new(state),
+            })
+            .unwrap();
+        assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
+        assert_eq!(
+            lander(&restored).thrust_application,
+            ThrustApplication::PracticeBoost
+        );
+        assert!(
+            norm(lander(&restored).thrust_n)
+                > settings().lander.mass_kg * settings().lander.max_accel_mps2
+        );
+
+        let dt = settings().integration.fixed_step_s;
+        original.advance(dt);
+        restored.advance(dt);
+        assert_eq!(
+            serde_json::to_value(restored.snapshot()).unwrap(),
+            serde_json::to_value(original.snapshot()).unwrap()
+        );
+        assert_vector_close(
+            rigid_body(&restored).user_force(),
+            rigid_body(&original).user_force(),
+            1e-9,
+        );
+        assert_vector_close(
+            rigid_body(&restored).user_torque(),
+            rigid_body(&original).user_torque(),
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn only_the_known_legacy_lander_cap_is_migrated_for_reference_modes() {
+        let cfg = settings().lander;
+        for manual in [false, true] {
+            let mut original = Simulation::new_default();
+            if manual {
+                original.set_manual_thrust([0.0, 0.3, 0.4]).unwrap();
+            } else {
+                original
+                    .set_command([0.0, 0.3, 0.4], [0.01, 0.0, 0.0])
+                    .unwrap();
+            }
+            let current = serde_json::to_value(original.snapshot()).unwrap();
+            let mut legacy = original.snapshot();
+            lander_mut(&mut legacy).max_thrust_n = cfg.mass_kg * cfg.max_accel_mps2;
+            validate(&legacy).unwrap();
+            let mut restored = Simulation::new_default();
+            restored
+                .execute(PhysicsCommand::Restore {
+                    state: Box::new(legacy),
+                })
+                .unwrap();
+            assert_eq!(lander(&restored).max_thrust_n, local_max_thrust_n());
+            assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), current);
+        }
+
+        let mut sim = Simulation::new_default();
+        sim.set_space_thrust([0.0, 0.0, settings().practice.space_lift_accel_mps2])
+            .unwrap();
+        let boost = sim.snapshot();
+        let mut invalid = boost.clone();
+        lander_mut(&mut invalid).max_thrust_n = cfg.mass_kg * cfg.max_accel_mps2;
+        assert!(validate(&invalid).is_err());
+        for mode in [
+            ThrustApplication::CenterOfMass,
+            ThrustApplication::ManualNozzles,
+            ThrustApplication::PracticeBoost,
+        ] {
+            let mut baseline = Simulation::new_default();
+            match mode {
+                ThrustApplication::CenterOfMass => {
+                    baseline.set_command([0.0; 3], [0.0; 3]).unwrap()
+                }
+                ThrustApplication::ManualNozzles => baseline.set_manual_thrust([0.0; 3]).unwrap(),
+                ThrustApplication::PracticeBoost => baseline.set_space_thrust([0.0; 3]).unwrap(),
+            }
+            for cap in [
+                0.0,
+                -1.0,
+                cfg.mass_kg * cfg.max_accel_mps2 + 1.0,
+                local_max_thrust_n() + 1.0,
+                f64::NAN,
+                f64::INFINITY,
+            ] {
+                let mut invalid = baseline.snapshot();
+                lander_mut(&mut invalid).max_thrust_n = cap;
+                assert!(
+                    validate(&invalid).is_err(),
+                    "accepted cap {cap} in {mode:?}"
+                );
+            }
+        }
+        for kind in [
+            EntityKind::ReturnShip,
+            EntityKind::LandingPad,
+            EntityKind::Debris,
+        ] {
+            let mut invalid = boost.clone();
+            invalid
+                .assets
+                .iter_mut()
+                .find(|e| e.kind == kind)
+                .unwrap()
+                .max_thrust_n = cfg.mass_kg * cfg.max_accel_mps2;
+            assert!(validate(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn boost_restore_rejects_tampered_wrench_angular_control_and_component_limits() {
+        let cfg = settings().lander;
+        let lift = settings().practice.space_lift_accel_mps2;
+        let mut sim = Simulation::new_default();
+        sim.set_space_thrust([0.2, 0.3, 1.5]).unwrap();
+        let valid = sim.snapshot();
+        validate(&valid).unwrap();
+        let before = serde_json::to_value(valid.clone()).unwrap();
+        let mut invalid_states = Vec::new();
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).thrust_n[0] *= 0.5;
+        invalid_states.push(invalid);
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).torque_nm[0] *= 2.0;
+        invalid_states.push(invalid);
+        let mut invalid = valid.clone();
+        lander_mut(&mut invalid).commanded_angular_accel_rad_s2[0] = 0.01;
+        invalid_states.push(invalid);
+        for accel in [
+            [0.0, 0.0, lift + 0.01],
+            [cfg.max_accel_mps2 + 0.01, 0.0, 1.0],
+            [cfg.max_accel_mps2, cfg.max_accel_mps2, 1.0],
+            [0.0, 0.0, -0.1],
+            [0.0, 0.0, -lift],
+        ] {
+            let mut invalid = valid.clone();
+            let lander = lander_mut(&mut invalid);
+            lander.commanded_accel_mps2 = accel;
+            lander.thrust_n = scale(accel, cfg.mass_kg);
+            invalid_states.push(invalid);
+        }
+        for mode in [
+            ThrustApplication::CenterOfMass,
+            ThrustApplication::ManualNozzles,
+        ] {
+            let mut invalid = valid.clone();
+            lander_mut(&mut invalid).thrust_application = mode;
+            invalid_states.push(invalid);
+            let mut invalid = Simulation::new_default().snapshot();
+            let lander = lander_mut(&mut invalid);
+            lander.thrust_application = mode;
+            lander.thrust_n = [0.0, 0.0, cfg.mass_kg * lift];
+            invalid_states.push(invalid);
+        }
+        for kind in [
+            EntityKind::ReturnShip,
+            EntityKind::LandingPad,
+            EntityKind::Debris,
+        ] {
+            let mut invalid = valid.clone();
+            invalid
+                .assets
+                .iter_mut()
+                .find(|e| e.kind == kind)
+                .unwrap()
+                .thrust_application = ThrustApplication::PracticeBoost;
+            invalid_states.push(invalid);
+        }
+        for invalid in invalid_states {
+            assert!(
+                sim.execute(PhysicsCommand::Restore {
+                    state: Box::new(invalid)
+                })
+                .is_err()
+            );
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+        }
+        let mut unknown_mode = serde_json::to_value(valid).unwrap();
+        unknown_mode["assets"][0]["thrust_application"] = json!("unbounded_boost");
+        assert!(serde_json::from_value::<Snapshot>(unknown_mode).is_err());
+    }
+
+    #[test]
     fn legacy_snapshot_defaults_to_center_and_reconciles_optional_wrench_reports() {
         let mut sim = Simulation::new_default();
         sim.set_command([0.0, 0.3, 0.4], [0.01, 0.0, 0.0]).unwrap();
-        let mut legacy = serde_json::to_value(sim.snapshot()).unwrap();
+        let mut state = sim.snapshot();
+        lander_mut(&mut state).max_thrust_n =
+            settings().lander.mass_kg * settings().lander.max_accel_mps2;
+        let mut legacy = serde_json::to_value(state).unwrap();
         for asset in legacy["assets"].as_array_mut().unwrap() {
             asset.as_object_mut().unwrap().remove("thrust_application");
         }
@@ -1329,6 +1828,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(lander(&sim).commanded_accel_mps2, [0.0, 0.3, 0.4]);
+        assert_eq!(lander(&sim).max_thrust_n, local_max_thrust_n());
 
         // These fields were already optional before nozzle mode existed. Their
         // absence must not leave a displayed jet that physics never applies.

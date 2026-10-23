@@ -9,6 +9,7 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_path_planning(s)?;
     validate_lander(s)?;
     validate_debug_thrust(s)?;
+    validate_practice(s)?;
     validate_pad(s)?;
     validate_mission(s)?;
     validate_debris(s)?;
@@ -159,6 +160,15 @@ fn validate_debug_thrust(s: &Scenario) -> Result<(), &'static str> {
         || !(0.0..=0.8).contains(&visuals.spread_rad)
     {
         return Err("debug exhaust settings must be finite and bounded");
+    }
+    Ok(())
+}
+
+fn validate_practice(s: &Scenario) -> Result<(), &'static str> {
+    if !bounded_positive(&[s.practice.space_lift_accel_mps2], 20.0)
+        || s.practice.space_lift_accel_mps2 < s.lander.max_accel_mps2
+    {
+        return Err("practice Space assistance must be finite and at least the reference limit");
     }
     Ok(())
 }
@@ -424,6 +434,16 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn practice_lift_is_bounded_and_cannot_silently_lower_the_reference_limit() {
+        let mut scenario = crate::scenario::settings().clone();
+        assert!(validate_practice(&scenario).is_ok());
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, 0.1, 20.1] {
+            scenario.practice.space_lift_accel_mps2 = invalid;
+            assert!(validate_practice(&scenario).is_err());
+        }
+    }
 
     #[test]
     fn nozzle_points_and_debug_exhaust_cannot_be_nonfinite_or_unbounded() {

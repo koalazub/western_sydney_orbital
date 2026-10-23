@@ -124,6 +124,8 @@ pub struct EntityState {
     pub radius_m: f64,
     pub mass_kg: f64,
     pub fuel_kg: f64,
+    /// Local hardware maximum, including practice assist. API/manual commands
+    /// retain the separate reference acceleration limit in scenario settings.
     pub max_thrust_n: f64,
     pub thrust_n: [f64; 3],
     #[serde(default)]

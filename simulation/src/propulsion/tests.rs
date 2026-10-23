@@ -78,6 +78,84 @@ fn manual_diagonal_uses_three_real_components_with_the_existing_norm_limit() {
 }
 
 #[test]
+fn practice_boost_uses_the_same_mounts_and_keeps_horizontal_force_and_moment_unchanged() {
+    let cfg = settings().lander;
+    let lift = settings().practice.space_lift_accel_mps2;
+    let component = cfg.max_accel_mps2 / 2.0_f64.sqrt();
+    let mut sim = Simulation::new_default();
+    sim.set_manual_thrust([component, 0.0, component]).unwrap();
+    let reference = lander(&sim);
+    let reference_jets = applied_jets(&reference);
+
+    sim.set_space_thrust([component, 0.0, lift / 2.0_f64.sqrt()])
+        .unwrap();
+    let boosted = lander(&sim);
+    let jets = applied_jets(&boosted);
+    assert_eq!(jets.len(), 2);
+    assert_eq!(jets[0].point_body_m, cfg.manual_nozzles_body_m[0]);
+    assert_eq!(jets[1].point_body_m, cfg.manual_nozzles_body_m[4]);
+    assert_eq!(jets[0].force_body_n, reference_jets[0].force_body_n);
+    assert_eq!(jets[0].point_body_m, reference_jets[0].point_body_m);
+    assert_eq!(jets[1].point_body_m, reference_jets[1].point_body_m);
+    let wrench = applied_wrench(&jets);
+    assert_vector_close(wrench.force_body_n, boosted.thrust_n);
+    assert_vector_close(wrench.torque_body_nm, reference.torque_nm);
+    assert_vector_close(wrench.torque_body_nm, boosted.torque_nm);
+    assert!((jets[1].force_body_n[2] / reference_jets[1].force_body_n[2] - 4.0).abs() < 1e-12);
+    assert!((wrench.propellant_force_n - boosted.thrust_n[0] - boosted.thrust_n[2]).abs() < 1e-9);
+}
+
+#[test]
+fn practice_boost_force_bounds_reject_horizontal_downward_and_over_limit_forces() {
+    let cfg = settings().lander;
+    let lift = settings().practice.space_lift_accel_mps2;
+    assert_eq!(accel_limit(ThrustApplication::CenterOfMass), 0.5);
+    assert_eq!(accel_limit(ThrustApplication::ManualNozzles), 0.5);
+    assert_eq!(accel_limit(ThrustApplication::PracticeBoost), 2.0);
+    let mut sim = Simulation::new_default();
+    sim.set_space_thrust([0.0, 0.0, lift]).unwrap();
+    let original = lander(&sim);
+    let jets = applied_jets(&original);
+    assert_eq!(jets.len(), 1);
+    assert_eq!(jets[0].point_body_m, cfg.manual_nozzles_body_m[4]);
+    assert_eq!(jets[0].force_body_n, [0.0, 0.0, cfg.mass_kg * lift]);
+    assert_eq!(applied_wrench(&jets).torque_body_nm, [0.0; 3]);
+    assert_eq!(
+        original.max_thrust_n,
+        cfg.mass_kg * lift.max(cfg.max_accel_mps2)
+    );
+
+    for accel in [
+        [0.0, 0.0, lift + 0.01],
+        [cfg.max_accel_mps2 + 0.01, 0.0, 1.0],
+        [cfg.max_accel_mps2, cfg.max_accel_mps2, 1.0],
+        [0.0, 0.0, -0.1],
+        [f64::NAN, 0.0, lift],
+        [0.0, 0.0, f64::INFINITY],
+    ] {
+        let mut invalid = original.clone();
+        invalid.thrust_n = accel.map(|component| component * cfg.mass_kg);
+        assert!(!accel_within_limits(
+            ThrustApplication::PracticeBoost,
+            accel
+        ));
+        assert!(applied_jets(&invalid).is_empty());
+    }
+    for application in [
+        ThrustApplication::CenterOfMass,
+        ThrustApplication::ManualNozzles,
+    ] {
+        let mut invalid = original.clone();
+        invalid.thrust_application = application;
+        assert!(applied_jets(&invalid).is_empty());
+    }
+    let mut other = original;
+    other.id = EntityId::ReturnShip;
+    other.kind = EntityKind::ReturnShip;
+    assert!(applied_jets(&other).is_empty());
+}
+
+#[test]
 fn center_force_is_one_jet_and_never_fabricates_an_angular_control_jet() {
     let mut sim = Simulation::new_default();
     sim.set_command([0.1, -0.2, 0.3], [0.01, 0.02, 0.03])

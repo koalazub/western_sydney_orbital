@@ -197,7 +197,10 @@ pub(super) fn prepare(
         let to = from + radial_velocity * config.forecast_horizon_s;
         // A thrust-sized allowance for backdating the observer, not a bound
         // on gravity, contacts or future asteroid accelerations.
-        let observer_accel_allowance = settings().lander.max_accel_mps2;
+        let observer_accel_allowance = settings()
+            .lander
+            .max_accel_mps2
+            .max(settings().practice.space_lift_accel_mps2);
         let uncertainty = config.sigma_multiplier * settings().sensors.range_noise_m
             + 0.5 * observer_accel_allowance * age * age
             + (config.unknown_tangential_speed_mps
