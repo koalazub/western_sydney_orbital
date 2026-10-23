@@ -72,11 +72,11 @@ pub fn setup(
     ));
     commands.spawn((
         Mesh3d(
-            meshes_assets.add(
+            meshes_assets.add(meshes::untextured(
                 Sphere::new(RenderScale::metres(snapshot.environment.mars_radius_m))
                     .mesh()
                     .uv(48, 32),
-            ),
+            )),
         ),
         MeshMaterial3d(materials.add(rock_material(lighting.mars_surface))),
         Transform::from_translation(RenderScale::position(snapshot.environment.mars_position_m)),
@@ -90,11 +90,11 @@ pub fn setup(
         lighting.sun_proxy_distance_m * f64::from(lighting.sun_angular_radius_rad).sin();
     commands.spawn((
         Mesh3d(
-            meshes_assets.add(
+            meshes_assets.add(meshes::untextured(
                 Sphere::new(RenderScale::metres(sun_radius_m))
                     .mesh()
                     .uv(48, 32),
-            ),
+            )),
         ),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
