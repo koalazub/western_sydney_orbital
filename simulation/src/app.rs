@@ -34,6 +34,7 @@ use wasm_bindgen::prelude::*;
 pub(crate) enum EngineSet {
     Input,
     Runtime,
+    Planning,
     Camera,
     Scene,
     Hud,
@@ -349,6 +350,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
             (
                 EngineSet::Input,
                 EngineSet::Runtime,
+                EngineSet::Planning,
                 EngineSet::Camera,
                 EngineSet::Scene,
                 EngineSet::Hud,
@@ -363,6 +365,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
         .add_systems(Update, crate::scene::sync_scene.in_set(EngineSet::Scene));
     crate::camera::install(&mut app);
     crate::sensors::install(&mut app);
+    crate::navigation::install(&mut app);
     crate::hud::install(&mut app);
     let render_app = app.sub_app_mut(RenderApp);
     // Keep Bevy's material draw unchanged, then observe only successful opaque

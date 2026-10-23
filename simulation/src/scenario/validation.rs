@@ -6,6 +6,7 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_gravity(s)?;
     validate_integration(s)?;
     validate_guidance(s)?;
+    validate_path_planning(s)?;
     validate_lander(s)?;
     validate_pad(s)?;
     validate_mission(s)?;
@@ -32,6 +33,37 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
         || s.frame_description.trim().is_empty()
     {
         return Err("invalid scenario limits or metadata");
+    }
+    Ok(())
+}
+
+fn validate_path_planning(s: &Scenario) -> Result<(), &'static str> {
+    let p = s.path_planning;
+    if !bounded_positive(
+        &[
+            p.replan_interval_s,
+            p.cell_size_m,
+            p.corridor_half_width_m,
+            p.forecast_horizon_s,
+            p.max_measurement_age_s,
+            p.sigma_multiplier,
+        ],
+        1.0e6,
+    ) || !p.clearance_m.is_finite()
+        || !(0.0..=1000.0).contains(&p.clearance_m)
+        || !p.unknown_tangential_speed_mps.is_finite()
+        || !(0.0..=1000.0).contains(&p.unknown_tangential_speed_mps)
+        || p.corridor_half_width_m < p.cell_size_m
+        || p.max_nodes == 0
+        || p.max_nodes > 1_000_000
+        || p.max_expansions == 0
+        || p.max_expansions > p.max_nodes
+        || p.expansions_per_frame == 0
+        || p.expansions_per_frame > 4096
+        || p.replan_interval_s > p.forecast_horizon_s
+        || p.sigma_multiplier * s.debris.diameter_noise_fraction >= 1.0
+    {
+        return Err("advisory path search settings must be finite and bounded");
     }
     Ok(())
 }
@@ -371,6 +403,27 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advisory_search_rejects_nonfinite_geometry_and_unbounded_work() {
+        let base = crate::scenario::settings().clone();
+        assert!(validate_path_planning(&base).is_ok());
+        let mut scenario = base.clone();
+        scenario.path_planning.cell_size_m = f64::NAN;
+        assert!(validate_path_planning(&scenario).is_err());
+        scenario = base.clone();
+        scenario.path_planning.max_nodes = 1_000_001;
+        assert!(validate_path_planning(&scenario).is_err());
+        scenario = base.clone();
+        scenario.path_planning.expansions_per_frame = 4097;
+        assert!(validate_path_planning(&scenario).is_err());
+        scenario = base.clone();
+        scenario.path_planning.sigma_multiplier = 1.0 / scenario.debris.diameter_noise_fraction;
+        assert!(validate_path_planning(&scenario).is_err());
+        scenario = base;
+        scenario.path_planning.max_expansions = scenario.path_planning.max_nodes + 1;
+        assert!(validate_path_planning(&scenario).is_err());
+    }
 
     #[test]
     fn camera_fov_rejects_nonfinite_zero_and_out_of_range_angles() {

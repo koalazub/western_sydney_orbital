@@ -9,6 +9,7 @@ pub struct Scenario {
     pub gravity: Gravity,
     pub integration: Integration,
     pub guidance: Guidance,
+    pub path_planning: PathPlanning,
     pub lander: Lander,
     pub pad: Pad,
     pub mission: Mission,
@@ -44,6 +45,23 @@ pub struct Guidance {
     pub velocity_gain_s: f64,
     pub avoidance_range_m: f64,
     pub avoidance_accel_mps2: f64,
+}
+
+/// Advisory search settings. These never set vehicle speed, force or attributes.
+/// Unobserved velocity is an explicit planning allowance, not a measured bound.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct PathPlanning {
+    pub replan_interval_s: f64,
+    pub cell_size_m: f64,
+    pub corridor_half_width_m: f64,
+    pub max_nodes: usize,
+    pub max_expansions: usize,
+    pub expansions_per_frame: usize,
+    pub clearance_m: f64,
+    pub forecast_horizon_s: f64,
+    pub max_measurement_age_s: f64,
+    pub unknown_tangential_speed_mps: f64,
+    pub sigma_multiplier: f64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

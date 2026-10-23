@@ -9,6 +9,7 @@ mod guidance;
 mod hud;
 mod mission;
 pub mod model;
+mod navigation;
 mod physics;
 mod runtime;
 pub mod scenario;
@@ -51,6 +52,12 @@ pub fn camera_status() -> String {
 #[wasm_bindgen]
 pub fn ship_camera_status() -> String {
     sensors::status()
+}
+
+/// Read-only pathway preview. This never dispatches a simulation command.
+#[wasm_bindgen]
+pub fn navigation_status() -> String {
+    navigation::status()
 }
 
 #[wasm_bindgen]

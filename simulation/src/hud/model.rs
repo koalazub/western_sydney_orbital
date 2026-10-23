@@ -60,6 +60,8 @@ pub(super) enum HudAction {
 pub(super) enum Readout {
     Static,
     Summary,
+    PathBrief,
+    PathDetails,
     Mission,
     Environment,
     CameraMode,

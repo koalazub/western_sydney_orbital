@@ -487,6 +487,8 @@ fn update_readouts(
     for (mut text, readout, parent) in &mut reads {
         let value = match readout {
             Readout::Summary => summary_readout(&snapshot, &playback),
+            Readout::PathBrief => crate::navigation::brief(),
+            Readout::PathDetails => crate::navigation::details(),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),

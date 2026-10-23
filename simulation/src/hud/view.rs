@@ -41,7 +41,10 @@ pub(super) fn setup(mut commands: Commands) {
                     (
                         panel_style(),
                         BackgroundColor(PANEL),
-                        children![(text("Phobos practice | T+00:00:00 | paused", CAPTION_SIZE_PX, TEXT), Readout::Summary)],
+                        children![
+                            (text("Phobos practice | T+00:00:00 | paused", CAPTION_SIZE_PX, TEXT), Readout::Summary),
+                            (text("Path preview | waiting for radar", CAPTION_SIZE_PX, MUTED), Readout::PathBrief),
+                        ],
                     ),
                     (
                         Node {
@@ -144,6 +147,7 @@ pub(super) fn setup(mut commands: Commands) {
                             (text("", COPY_SIZE_PX, TEXT), Readout::Mission),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::Environment),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::Authority),
+                            (text("", CAPTION_SIZE_PX, MUTED), Readout::PathDetails),
                         ],
                     ),
                     (text("Focus: Lander", COPY_SIZE_PX, TEXT), Readout::Focus),
@@ -174,6 +178,7 @@ pub(super) fn setup(mut commands: Commands) {
                             text("Space run/pause | . step | R reset | T rate", COPY_SIZE_PX, MUTED),
                             text("1-5 viewer cameras | 6 top sensor | 7 bottom sensor", COPY_SIZE_PX, MUTED),
                             text("Ship sensors: 512 x 512, RGB8 per channel, fixed exposure and configured field of view. No debug markers or contrast boost.", COPY_SIZE_PX, MUTED),
+                            text("Amber line: advisory path preview in debug views only. Cyan sphere: waypoint arrival region. Radar covers only part of the debris. The preview does not control the ship or feed the example controller.", COPY_SIZE_PX, MUTED),
                             text(", / change focus | L capture or release", COPY_SIZE_PX, MUTED),
                             text("Drag to orbit; wheel or trackpad pinch zooms viewer cameras. Ship sensor optics stay fixed.", COPY_SIZE_PX, MUTED),
                             text("Arrows orbit | WASD/QE fly | Tab moves focus | Enter or Space activates a button", COPY_SIZE_PX, MUTED),
