@@ -4,6 +4,7 @@ use crate::{
     model::Snapshot,
 };
 use bevy::{
+    camera::visibility::RenderLayers,
     ecs::system::SystemParam,
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
     input_focus::InputFocus,
@@ -87,7 +88,10 @@ struct CameraInput<'w, 's> {
 
 fn update_camera(
     input: CameraInput,
-    mut cameras: Query<(&Camera, &GlobalTransform, &mut Transform), With<SimulationCamera>>,
+    mut cameras: Query<
+        (&Camera, &GlobalTransform, &mut Transform, &mut RenderLayers),
+        With<SimulationCamera>,
+    >,
     mut rig: ResMut<CameraRig>,
     mut gesture: Local<PointerGesture>,
 ) {
@@ -131,7 +135,7 @@ fn update_camera(
         gesture.blocked = false;
     }
 
-    let Ok((camera, global, mut transform)) = cameras.single_mut() else {
+    let Ok((camera, global, mut transform, mut layers)) = cameras.single_mut() else {
         return;
     };
     if mode_changed && rig.mode == CameraMode::FreeFlight {
@@ -188,22 +192,28 @@ fn update_camera(
             rig.mode = CameraMode::Overview;
             rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode);
         }
+        if keys.just_pressed(KeyCode::Digit6) {
+            rig.mode = CameraMode::ShipTop;
+        }
+        if keys.just_pressed(KeyCode::Digit7) {
+            rig.mode = CameraMode::ShipBottom;
+        }
         if keys.just_pressed(KeyCode::KeyF) {
             rig.pan_offset = Vec3::ZERO;
             rig.mode = CameraMode::Orbit;
             rig.zoom = 1.0;
             rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode);
         }
-        if !button_focused && keys.pressed(KeyCode::ArrowLeft) {
+        if rig.mode.sensor().is_none() && keys.pressed(KeyCode::ArrowLeft) {
             rig.yaw += dt;
         }
-        if !button_focused && keys.pressed(KeyCode::ArrowRight) {
+        if rig.mode.sensor().is_none() && keys.pressed(KeyCode::ArrowRight) {
             rig.yaw -= dt;
         }
-        if !button_focused && keys.pressed(KeyCode::ArrowUp) {
+        if rig.mode.sensor().is_none() && keys.pressed(KeyCode::ArrowUp) {
             rig.pitch = (rig.pitch + dt).clamp(-1.52, 1.52);
         }
-        if !button_focused && keys.pressed(KeyCode::ArrowDown) {
+        if rig.mode.sensor().is_none() && keys.pressed(KeyCode::ArrowDown) {
             rig.pitch = (rig.pitch - dt).clamp(-1.52, 1.52);
         }
     }
@@ -226,7 +236,11 @@ fn update_camera(
                     gesture.dragged = true;
                 }
                 if buttons.just_released(MouseButton::Left) {
-                    if !gesture.dragged && !gesture.blocked && !over_ui {
+                    if !gesture.dragged
+                        && !gesture.blocked
+                        && !over_ui
+                        && rig.mode.sensor().is_none()
+                    {
                         pick_focus(camera, global, cursor, &snapshot, &mut rig);
                     }
                     gesture.start = None;
@@ -267,7 +281,7 @@ fn update_camera(
             }
         }
 
-        if !over_ui && scroll.delta.y != 0.0 {
+        if !over_ui && scroll.delta.y != 0.0 && rig.mode.sensor().is_none() {
             let lines = match scroll.unit {
                 MouseScrollUnit::Line => scroll.delta.y,
                 MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
@@ -328,6 +342,11 @@ fn update_camera(
     }
 
     target = focus_position(rig.focus, &snapshot) + rig.pan_offset;
+    *layers = if rig.mode.sensor().is_some() {
+        RenderLayers::none()
+    } else {
+        RenderLayers::layer(0).with(1)
+    };
     match rig.mode {
         CameraMode::FreeFlight => transform.rotation = look_rotation(rig.yaw, rig.pitch),
         CameraMode::FirstPerson => {
@@ -363,12 +382,25 @@ fn update_camera(
             transform.translation = outside_mars(transform.translation, &snapshot);
             transform.look_at(target, Vec3::Y);
         }
+        CameraMode::ShipTop | CameraMode::ShipBottom => {}
     }
     STATUS.with(|status| {
+        let sensor_pose = rig
+            .mode
+            .sensor()
+            .map(|id| crate::sensors::pose(id, &snapshot));
+        let view = sensor_pose.as_ref().unwrap_or(&transform);
         let next = CameraStatus::from_view(
             &rig,
-            &transform,
-            focus_position(rig.focus, &snapshot),
+            view,
+            focus_position(
+                if sensor_pose.is_some() {
+                    EntityId::Lander
+                } else {
+                    rig.focus
+                },
+                &snapshot,
+            ),
             gate.active,
             gate.locked,
         );

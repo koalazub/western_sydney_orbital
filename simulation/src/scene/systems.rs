@@ -1,12 +1,17 @@
 use super::{
     meshes,
-    model::{AssetVisual, RenderScale, SceneAssets, SceneState},
+    model::{AssetVisual, CelestialSphere, RenderScale, SceneAssets, SceneState},
 };
 use crate::{
     camera::{CameraRig, SimulationCamera},
     domain::{CameraMode, EntityId, EntityKind},
 };
-use bevy::{core_pipeline::tonemapping::Tonemapping, prelude::*};
+use bevy::{
+    camera::{Exposure, visibility::RenderLayers},
+    core_pipeline::tonemapping::Tonemapping,
+    light::{GlobalAmbientLight, NotShadowCaster},
+    prelude::*,
+};
 use std::collections::{HashMap, HashSet};
 
 const TRAIL_LIMIT: usize = 256;
@@ -17,6 +22,9 @@ pub fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let snapshot = crate::snapshot();
+    let lighting = crate::scenario::settings().lighting;
+    let direction_to_sun = Vec3::from_array(lighting.direction_to_sun).normalize();
+    commands.insert_resource(GlobalAmbientLight::NONE);
     commands.insert_resource(SceneState {
         seed: snapshot.seed,
         time_s: snapshot.time_s,
@@ -24,12 +32,10 @@ pub fn setup(
     });
     commands.spawn((
         Mesh3d(meshes_assets.add(meshes::phobos())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.38, 0.35, 0.31),
-            perceptual_roughness: 1.0,
-            ..default()
-        })),
+        MeshMaterial3d(materials.add(rock_material(lighting.phobos_surface))),
         Transform::default(),
+        RenderLayers::layer(0),
+        Visibility::Visible,
     ));
     let lander_position = snapshot
         .assets
@@ -52,15 +58,17 @@ pub fn setup(
             ..default()
         }),
         Tonemapping::None,
+        Exposure::SUNLIGHT,
         AmbientLight {
             color: Color::WHITE,
-            brightness: 500.0,
+            brightness: lighting.debug_ambient_brightness,
             ..default()
         },
         Transform::from_translation(lander_position + up * 0.18 + Vec3::new(0.1, 0.1, 0.0))
             .looking_at(lander_position, up),
         SimulationCamera,
         IsDefaultUiCamera,
+        RenderLayers::from_layers(&[0, 1]),
     ));
     commands.spawn((
         Mesh3d(
@@ -70,19 +78,45 @@ pub fn setup(
                     .uv(48, 32),
             ),
         ),
+        MeshMaterial3d(materials.add(rock_material(lighting.mars_surface))),
+        Transform::from_translation(RenderScale::position(snapshot.environment.mars_position_m)),
+        CelestialSphere::Mars,
+        RenderLayers::layer(0),
+        Visibility::Visible,
+    ));
+    // This proxy represents a direction on the background, not the Sun's real position.
+    // Following the lander keeps its angular radius stable in both mounted cameras.
+    let sun_radius_m =
+        lighting.sun_proxy_distance_m * f64::from(lighting.sun_angular_radius_rad).sin();
+    commands.spawn((
+        Mesh3d(
+            meshes_assets.add(
+                Sphere::new(RenderScale::metres(sun_radius_m))
+                    .mesh()
+                    .uv(48, 32),
+            ),
+        ),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.39, 0.16, 0.085),
-            perceptual_roughness: 1.0,
+            base_color: Color::WHITE,
+            unlit: true,
             ..default()
         })),
-        Transform::from_translation(RenderScale::position(snapshot.environment.mars_position_m)),
+        Transform::from_translation(
+            lander_position + direction_to_sun * RenderScale::metres(lighting.sun_proxy_distance_m),
+        ),
+        CelestialSphere::Sun,
+        NotShadowCaster,
+        RenderLayers::layer(0),
+        Visibility::Visible,
     ));
     commands.spawn((
         DirectionalLight {
-            illuminance: 8_000.0,
+            illuminance: lighting.illuminance_lux,
             ..default()
         },
-        Transform::from_xyz(-25.0, 30.0, -40.0).looking_at(Vec3::ZERO, Vec3::Y),
+        // Bevy emits rays along local -Z, away from the configured solar direction.
+        Transform::default().looking_to(-direction_to_sun, Vec3::Y),
+        RenderLayers::from_layers(&[0, 2]),
     ));
     let assets = SceneAssets {
         lander: meshes_assets.add(meshes::lander()),
@@ -106,18 +140,14 @@ pub fn setup(
             perceptual_roughness: 0.9,
             ..default()
         }),
-        rock_material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.45, 0.4, 0.34),
-            perceptual_roughness: 1.0,
-            ..default()
-        }),
+        rock_material: materials.add(rock_material(lighting.debris_surface)),
     };
     for asset in snapshot
         .assets
         .iter()
         .filter(|asset| asset.id != EntityId::Phobos && asset.id != EntityId::Mars)
     {
-        spawn_asset(&mut commands, &assets, asset);
+        spawn_asset(&mut commands, &assets, asset, RenderLayers::layer(0));
     }
     commands.insert_resource(assets);
 }
@@ -126,14 +156,38 @@ pub fn sync_scene(
     mut commands: Commands,
     assets: Res<SceneAssets>,
     mut visuals: Query<
-        (Entity, &AssetVisual, &mut Transform, &mut Visibility),
+        (
+            Entity,
+            &AssetVisual,
+            &mut Transform,
+            &mut Visibility,
+            &mut RenderLayers,
+        ),
         Without<SimulationCamera>,
     >,
+    mut celestials: Query<(&CelestialSphere, &mut Transform), Without<AssetVisual>>,
     mut state: ResMut<SceneState>,
     mut gizmos: Gizmos,
     rig: Res<CameraRig>,
 ) {
     let snapshot = crate::snapshot();
+    let lighting = crate::scenario::settings().lighting;
+    let lander_position = snapshot
+        .assets
+        .iter()
+        .find(|asset| asset.id == EntityId::Lander)
+        .map(|asset| RenderScale::position(asset.position))
+        .unwrap_or(Vec3::ZERO);
+    for (sphere, mut transform) in &mut celestials {
+        transform.translation = match sphere {
+            CelestialSphere::Mars => RenderScale::position(snapshot.environment.mars_position_m),
+            CelestialSphere::Sun => {
+                lander_position
+                    + Vec3::from_array(lighting.direction_to_sun).normalize()
+                        * RenderScale::metres(lighting.sun_proxy_distance_m)
+            }
+        };
+    }
     if snapshot.seed != state.seed || snapshot.time_s < state.time_s {
         state.trails.clear();
         state.seed = snapshot.seed;
@@ -145,17 +199,14 @@ pub fn sync_scene(
         .map(|a| (a.id, a))
         .collect();
     let mut existing = HashSet::new();
-    for (entity, tag, mut transform, mut visibility) in &mut visuals {
+    for (entity, tag, mut transform, mut visibility, mut layers) in &mut visuals {
         if let Some(asset) = by_id.get(&tag.id).filter(|asset| asset.kind == tag.kind) {
             existing.insert(tag.id);
             transform.translation = RenderScale::position(asset.position);
             transform.rotation = rotation(asset.rotation);
             transform.scale = meshes::scale(asset);
-            *visibility = if rig.mode == CameraMode::FirstPerson && rig.focus == asset.id {
-                Visibility::Hidden
-            } else {
-                Visibility::Visible
-            };
+            *visibility = Visibility::Visible;
+            *layers = asset_render_layers(&rig, asset.id);
         } else {
             commands.entity(entity).despawn();
         }
@@ -166,7 +217,12 @@ pub fn sync_scene(
         .filter(|a| a.id != EntityId::Phobos && a.id != EntityId::Mars)
     {
         if !existing.contains(&asset.id) {
-            spawn_asset(&mut commands, &assets, asset);
+            spawn_asset(
+                &mut commands,
+                &assets,
+                asset,
+                asset_render_layers(&rig, asset.id),
+            );
         }
     }
     let mut trail_entities: Vec<_> = snapshot
@@ -265,7 +321,12 @@ pub fn sync_scene(
     state.time_s = snapshot.time_s;
 }
 
-fn spawn_asset(commands: &mut Commands, assets: &SceneAssets, asset: &crate::model::EntityState) {
+fn spawn_asset(
+    commands: &mut Commands,
+    assets: &SceneAssets,
+    asset: &crate::model::EntityState,
+    layers: RenderLayers,
+) {
     let (mesh, material) = match asset.kind {
         EntityKind::Lander => (assets.lander.clone(), assets.lander_material.clone()),
         EntityKind::ReturnShip => (assets.target.clone(), assets.target_material.clone()),
@@ -290,7 +351,28 @@ fn spawn_asset(commands: &mut Commands, assets: &SceneAssets, asset: &crate::mod
             id: asset.id,
             kind: asset.kind,
         },
+        layers,
+        Visibility::Visible,
     ));
+}
+
+fn asset_render_layers(rig: &CameraRig, id: EntityId) -> RenderLayers {
+    if rig.mode == CameraMode::FirstPerson && rig.focus == id {
+        // The debug first-person view hides its subject without changing sensor content.
+        RenderLayers::layer(2)
+    } else {
+        RenderLayers::layer(0)
+    }
+}
+
+fn rock_material(surface: crate::scenario::RockSurface) -> StandardMaterial {
+    let [r, g, b] = surface.base_color_srgb;
+    StandardMaterial {
+        base_color: Color::srgb(r, g, b),
+        metallic: 0.0,
+        perceptual_roughness: surface.perceptual_roughness,
+        ..default()
+    }
 }
 
 fn rotation(q: [f64; 4]) -> Quat {

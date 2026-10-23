@@ -8,6 +8,12 @@ pub(crate) struct AssetVisual {
     pub(crate) kind: EntityKind,
 }
 
+#[derive(Component)]
+pub(crate) enum CelestialSphere {
+    Mars,
+    Sun,
+}
+
 #[derive(Resource)]
 pub(crate) struct SceneAssets {
     pub(crate) lander: Handle<Mesh>,

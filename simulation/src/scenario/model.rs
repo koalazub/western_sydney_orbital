@@ -1,4 +1,4 @@
-use crate::domain::LagrangeRegion;
+use crate::domain::{LagrangeRegion, ShipCameraId};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -14,6 +14,8 @@ pub struct Scenario {
     pub mission: Mission,
     pub debris: Debris,
     pub sensors: Sensors,
+    pub ship_cameras: ShipCameras,
+    pub lighting: Lighting,
     pub terrain: Terrain,
     pub limits: Limits,
     pub contacts: Contacts,
@@ -103,6 +105,51 @@ pub struct Sensors {
     pub range_rate_noise_mps: f64,
     pub cadence_hz: f64,
     pub minimum_reported_diameter_m: f64,
+}
+
+/// Fixed optics for two RGB8 sensors. Each color channel has eight bits.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct ShipCameras {
+    pub resolution_px: [u32; 2],
+    /// Vertical field of view. The initial 90 degrees is a practice-scenario choice.
+    pub field_of_view_deg: f32,
+    pub near_clip_m: f64,
+    pub far_clip_m: f64,
+    pub cadence_hz: f64,
+    /// Fixed exposure. The initial 15.0 is Bevy's Exposure::SUNLIGHT EV100.
+    pub exposure_ev100: f32,
+    pub ambient_brightness: f32,
+    pub mounts: [CameraMount; 2],
+}
+
+/// Mount pose in the lander body frame, whose +Z axis points out from the pad.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct CameraMount {
+    pub id: ShipCameraId,
+    pub position_m: [f64; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Lighting {
+    /// Fixed unit direction toward the Sun in the rotating world frame, not an ephemeris.
+    pub direction_to_sun: [f32; 3],
+    pub illuminance_lux: f32,
+    /// At mean Mars distance, asin(695_700 km / 227_940_000 km) is about 0.175 degrees.
+    pub sun_angular_radius_rad: f32,
+    /// Background rendering distance, not an astrophysical Sun position.
+    pub sun_proxy_distance_m: f64,
+    pub debug_ambient_brightness: f32,
+    pub mars_surface: RockSurface,
+    pub phobos_surface: RockSurface,
+    pub debris_surface: RockSurface,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct RockSurface {
+    pub base_color_srgb: [f32; 3],
+    pub perceptual_roughness: f32,
 }
 
 #[derive(Clone, Debug, Deserialize)]

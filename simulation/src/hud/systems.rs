@@ -201,13 +201,43 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
 
 fn update_layout(
     windows: Query<&Window, With<PrimaryWindow>>,
+    hud: Res<HudState>,
+    mut input_focus: ResMut<InputFocus>,
+    mut previous_sensor: Local<bool>,
     mut previous_compact: Local<Option<bool>>,
-    mut layout: Query<(&mut Node, &LayoutPart), Without<Overlay>>,
+    mut layout: Query<(&mut Node, &mut Visibility, &LayoutPart), Without<Overlay>>,
 ) {
+    let sensor = camera::status().mode.sensor().is_some();
+    if *previous_sensor != sensor {
+        // The clicked view button may now be hidden with its toolbar. Keep
+        // keyboard navigation on the canvas rather than on an invisible button.
+        input_focus.clear();
+        *previous_sensor = sensor;
+    }
+    for (mut node, mut visibility, part) in &mut layout {
+        let shown = match part {
+            LayoutPart::MetricsPanel => !sensor || hud.inspector_open,
+            LayoutPart::CameraPanel => !sensor,
+            LayoutPart::SensorActions => sensor,
+            LayoutPart::TopRow | LayoutPart::MissionActions | LayoutPart::BottomRow => true,
+        };
+        let display = if shown { Display::Flex } else { Display::None };
+        let next_visibility = if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        if *visibility != next_visibility {
+            *visibility = next_visibility;
+        }
+    }
     let compact = windows.single().map(Window::width).unwrap_or(800.0) < 640.0;
 
     if previous_compact.is_none_or(|previous| previous != compact) {
-        for (mut node, part) in &mut layout {
+        for (mut node, _, part) in &mut layout {
             match part {
                 LayoutPart::TopRow => {
                     node.width = percent(100.0);
@@ -234,6 +264,7 @@ fn update_layout(
                     node.max_width = percent(100.0);
                 }
                 LayoutPart::CameraPanel => {
+                    node.margin.left = if compact { px(0.0) } else { auto() };
                     node.max_width = if compact { percent(100.0) } else { px(330.0) };
                     node.width = if compact { percent(100.0) } else { auto() };
                     node.align_items = if compact {
@@ -241,6 +272,9 @@ fn update_layout(
                     } else {
                         AlignItems::FlexEnd
                     };
+                }
+                LayoutPart::SensorActions => {
+                    node.width = percent(100.0);
                 }
             }
         }
@@ -515,6 +549,11 @@ fn cycle_focus(snapshot: &Snapshot, forward: bool) {
         (current + choices.len() - 1) % choices.len()
     };
     let _ = camera::request_view(CameraRequest {
+        mode: camera::status()
+            .mode
+            .sensor()
+            .is_some()
+            .then_some(crate::domain::CameraMode::Orbit),
         focus: Some(choices[next]),
         ..default()
     });

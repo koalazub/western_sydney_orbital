@@ -16,6 +16,44 @@ pub enum CameraMode {
     FreeFlight,
     #[serde(alias = "top")]
     Overview,
+    ShipTop,
+    ShipBottom,
+}
+
+impl CameraMode {
+    pub const fn sensor(self) -> Option<ShipCameraId> {
+        match self {
+            Self::ShipTop => Some(ShipCameraId::Top),
+            Self::ShipBottom => Some(ShipCameraId::Bottom),
+            Self::Orbit
+            | Self::FirstPerson
+            | Self::ThirdPerson
+            | Self::FreeFlight
+            | Self::Overview => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipCameraId {
+    Top,
+    Bottom,
+}
+
+impl ShipCameraId {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Top => 0,
+            Self::Bottom => 1,
+        }
+    }
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        }
+    }
 }
 
 impl fmt::Display for CameraMode {
@@ -26,6 +64,8 @@ impl fmt::Display for CameraMode {
             Self::ThirdPerson => "Third person",
             Self::FreeFlight => "Free flight",
             Self::Overview => "Overview",
+            Self::ShipTop => "Ship top",
+            Self::ShipBottom => "Ship bottom",
         })
     }
 }

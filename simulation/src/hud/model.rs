@@ -61,13 +61,17 @@ pub(super) enum Overlay {
 }
 
 #[derive(Component, Clone, Copy)]
-pub(super) enum LayoutPart {
+pub(crate) enum LayoutPart {
     TopRow,
     MissionActions,
     BottomRow,
     MetricsPanel,
     CameraPanel,
+    SensorActions,
 }
+
+pub(crate) const SCREEN_PADDING_PX: f32 = 10.0;
+pub(crate) const PANEL_GAP_PX: f32 = 8.0;
 
 #[derive(Clone, Copy)]
 pub(super) struct FocusItem<'a> {

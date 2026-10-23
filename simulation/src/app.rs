@@ -333,6 +333,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
         )
         .add_systems(Update, crate::scene::sync_scene.in_set(EngineSet::Scene));
     crate::camera::install(&mut app);
+    crate::sensors::install(&mut app);
     crate::hud::install(&mut app);
     let render_app = app.sub_app_mut(RenderApp);
     // Keep Bevy's material draw unchanged, then observe only successful opaque

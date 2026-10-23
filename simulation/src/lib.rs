@@ -13,6 +13,7 @@ mod physics;
 mod runtime;
 pub mod scenario;
 mod scene;
+mod sensors;
 mod session;
 pub mod terrain;
 
@@ -45,6 +46,18 @@ pub fn renderer_status() -> String {
 #[wasm_bindgen]
 pub fn camera_status() -> String {
     serde_json::to_string(&camera::status()).expect("camera reports contain finite values")
+}
+
+#[wasm_bindgen]
+pub fn ship_camera_status() -> String {
+    sensors::status()
+}
+
+#[wasm_bindgen]
+pub fn ship_camera_capture(camera: &str) -> Result<js_sys::Promise, JsValue> {
+    let id = serde_json::from_value(serde_json::Value::String(camera.to_owned()))
+        .map_err(|error| JsValue::from_str(&format!("Unknown ship camera: {error}")))?;
+    Ok(sensors::request_capture(id))
 }
 
 #[wasm_bindgen]

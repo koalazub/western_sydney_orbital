@@ -70,7 +70,11 @@ impl CameraStatus {
         let rotation = transform.rotation;
         Self {
             mode: rig.mode,
-            focus: rig.focus,
+            focus: if rig.mode.sensor().is_some() {
+                EntityId::Lander
+            } else {
+                rig.focus
+            },
             position_m: [position.x, position.y, position.z],
             rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
             distance_m: transform.translation.distance(target) as f64 / 0.001,

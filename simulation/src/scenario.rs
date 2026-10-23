@@ -3,8 +3,8 @@ mod model;
 mod validation;
 
 pub use model::{
-    Contacts, Crater, Debris, Gravity, Guidance, Integration, Lander, Limits, Mission, Pad,
-    Scenario, Sensors, Terrain,
+    CameraMount, Contacts, Crater, Debris, Gravity, Guidance, Integration, Lander, Lighting,
+    Limits, Mission, Pad, RockSurface, Scenario, Sensors, ShipCameras, Terrain,
 };
 
 use std::sync::OnceLock;

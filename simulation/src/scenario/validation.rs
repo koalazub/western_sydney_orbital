@@ -1,4 +1,5 @@
 use super::model::{Scenario, Terrain};
+use crate::domain::ShipCameraId;
 
 pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_limits(s)?;
@@ -10,6 +11,8 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_mission(s)?;
     validate_debris(s)?;
     validate_sensors(s)?;
+    validate_ship_cameras(s)?;
+    validate_lighting(s)?;
     validate_terrain(&s.terrain, s.gravity.phobos_radii_m)?;
     validate_contacts(s)?;
     Ok(())
@@ -211,6 +214,99 @@ fn validate_sensors(s: &Scenario) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_ship_cameras(s: &Scenario) -> Result<(), &'static str> {
+    let cameras = s.ship_cameras;
+    if cameras.resolution_px != [512, 512]
+        || !cameras.field_of_view_deg.is_finite()
+        || cameras.field_of_view_deg <= 0.0
+        || cameras.field_of_view_deg >= 179.0
+        || !bounded_positive(&[cameras.near_clip_m], 1_000.0)
+        || !bounded_positive(&[cameras.far_clip_m], 1.0e8)
+        || cameras.far_clip_m <= cameras.near_clip_m
+        || !bounded_positive(&[cameras.cadence_hz], 1_000.0)
+        || !cameras.exposure_ev100.is_finite()
+        || !(-10.0..=25.0).contains(&cameras.exposure_ev100)
+        || !cameras.ambient_brightness.is_finite()
+        || !(0.0..=1.0).contains(&cameras.ambient_brightness)
+    {
+        return Err("ship camera optics, fixed exposure, or cadence are outside configured bounds");
+    }
+    for (mount, expected) in cameras
+        .mounts
+        .iter()
+        .zip([ShipCameraId::Top, ShipCameraId::Bottom])
+    {
+        let forward = mount.forward.map(f64::from);
+        let up = mount.up.map(f64::from);
+        let forward_length_squared = dot(forward, forward);
+        let up_length_squared = dot(up, up);
+        if mount.id != expected
+            || !mount
+                .position_m
+                .iter()
+                .all(|value| value.is_finite() && value.abs() <= 1_000.0)
+            || !forward
+                .iter()
+                .chain(&up)
+                .all(|value| value.is_finite() && value.abs() <= 1_000.0)
+            || forward_length_squared <= 1.0e-12
+            || up_length_squared <= 1.0e-12
+            || dot(forward, up).abs() > 1.0e-5 * (forward_length_squared * up_length_squared).sqrt()
+        {
+            return Err(
+                "ship camera mounts must be ordered top/bottom with finite orthogonal axes",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_lighting(s: &Scenario) -> Result<(), &'static str> {
+    let lighting = s.lighting;
+    let direction = lighting.direction_to_sun.map(f64::from);
+    if !finite(&direction)
+        || (dot(direction, direction) - 1.0).abs() > 1.0e-5
+        || !bounded_positive(&[f64::from(lighting.illuminance_lux)], 200_000.0)
+        || !bounded_positive(&[f64::from(lighting.sun_angular_radius_rad)], 0.05)
+        || !bounded_positive(&[lighting.sun_proxy_distance_m], 1.0e8)
+        || !lighting.debug_ambient_brightness.is_finite()
+        || !(0.0..=100_000.0).contains(&lighting.debug_ambient_brightness)
+    {
+        return Err("solar direction, illuminance, angular radius, or debug ambient is invalid");
+    }
+    let proxy_radius_m =
+        lighting.sun_proxy_distance_m * f64::from(lighting.sun_angular_radius_rad).sin();
+    let maximum_mount_offset_m = s
+        .ship_cameras
+        .mounts
+        .iter()
+        .map(|mount| dot(mount.position_m, mount.position_m).sqrt())
+        .fold(0.0_f64, f64::max);
+    if lighting.sun_proxy_distance_m - proxy_radius_m - maximum_mount_offset_m
+        <= s.gravity.separation_m + s.gravity.mars_radius_m
+        || lighting.sun_proxy_distance_m + proxy_radius_m + maximum_mount_offset_m
+            >= s.ship_cameras.far_clip_m
+    {
+        return Err("Sun background proxy must sit beyond Mars and inside both sensors' far clip");
+    }
+    for surface in [
+        lighting.mars_surface,
+        lighting.phobos_surface,
+        lighting.debris_surface,
+    ] {
+        if !surface
+            .base_color_srgb
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            || !surface.perceptual_roughness.is_finite()
+            || !(0.7..=1.0).contains(&surface.perceptual_roughness)
+        {
+            return Err("rock surface colors and roughness are outside configured bounds");
+        }
+    }
+    Ok(())
+}
+
 fn validate_contacts(s: &Scenario) -> Result<(), &'static str> {
     if !finite(&[s.contacts.friction, s.contacts.restitution])
         || s.contacts.friction < 0.0
@@ -261,4 +357,8 @@ fn positive(values: &[f64]) -> bool {
 
 fn bounded_positive(values: &[f64], maximum: f64) -> bool {
     positive(values) && values.iter().all(|value| *value <= maximum)
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a.into_iter().zip(b).map(|(a, b)| a * b).sum()
 }

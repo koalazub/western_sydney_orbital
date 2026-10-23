@@ -30,6 +30,29 @@
   "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 1.15, "nominal_time_s": 120.0,"score_offset":0.5 },
   "debris": { "count": 500, "x_min_m": 13600.0, "x_span_m": 5000.0, "y_half_width_m": 450.0, "z_half_width_m": 450.0, "speed_min_mps": 0.25, "speed_span_mps": 0.65, "radius_min_m": 0.4, "radius_span_m": 40.0, "density_kg_m3": 500.0, "spin_max_rad_s": 0.2, "radar_count": 200, "diameter_noise_fraction": 0.05 },
   "sensors": { "range_noise_m": 2.0, "range_rate_noise_mps": 0.02, "cadence_hz": 10.0, "minimum_reported_diameter_m": 0.01 },
+  "ship_cameras": {
+    "resolution_px": [512, 512],
+    "field_of_view_deg": 90.0,
+    "near_clip_m": 0.05,
+    "far_clip_m": 20000000.0,
+    "cadence_hz": 10.0,
+    "exposure_ev100": 15.0,
+    "ambient_brightness": 0.0,
+    "mounts": [
+      { "id": "top", "position_m": [0.0, 0.0, 2.0], "forward": [0.0, 0.0, 1.0], "up": [0.0, 1.0, 0.0] },
+      { "id": "bottom", "position_m": [0.0, 0.0, -1.95], "forward": [0.0, 0.0, -1.0], "up": [0.0, 1.0, 0.0] }
+    ]
+  },
+  "lighting": {
+    "direction_to_sun": [-1.0, 0.0, 0.0],
+    "illuminance_lux": 59000.0,
+    "sun_angular_radius_rad": 0.0030521237,
+    "sun_proxy_distance_m": 18000000.0,
+    "debug_ambient_brightness": 500.0,
+    "mars_surface": { "base_color_srgb": [0.72, 0.69, 0.63], "perceptual_roughness": 1.0 },
+    "phobos_surface": { "base_color_srgb": [0.38, 0.35, 0.31], "perceptual_roughness": 1.0 },
+    "debris_surface": { "base_color_srgb": [0.69, 0.68, 0.65], "perceptual_roughness": 1.0 }
+  },
   "terrain": { "radii_m": [13000.0,11400.0,9100.0], "latitude_segments": 32, "longitude_segments": 64, "relief_amplitude":0.006,"relief_longitude_frequency":7.0,"relief_latitude_frequency":5.0,"relief_longitude_phase":0.3,"crater_rim_fraction":0.88,"crater_rim_width":0.11,"crater_rim_depth":0.025,"craters":[{"center":[-0.078,0.011,-0.996],"width_rad":0.34,"depth":0.15},{"center":[0.35,0.81,-0.46],"width_rad":0.14,"depth":0.12},{"center":[0.78,-0.32,-0.53],"width_rad":0.10,"depth":0.09},{"center":[0.25,0.35,0.9],"width_rad":0.24,"depth":0.08}] },
   "limits": { "events": 200, "contacts": 4096, "observations": 200, "position_m": 10000000.0, "velocity_mps": 10000.0, "mass_kg": 1.0e15, "radius_m": 100000.0 },
   "contacts": { "friction": 0.8, "restitution": 0.05 }
