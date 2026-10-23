@@ -1,7 +1,9 @@
 """Western Sydney Orbital practice simulations.
 
 Practice simulations, paired strategy comparisons, reports and team notes.
-This package does not include the Space Teams PRO runtime or a live STP adapter.
+This package does not include the Space Teams PRO runtime or SDK. The optional
+stp_api adapter calls the real SDK inside a licensed ControllerSystem process;
+the browser practice engine remains separate.
 """
 
 from importlib.metadata import version
