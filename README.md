@@ -10,9 +10,11 @@ The Fall 2026 challenge is **Escape from Phobos**. An autonomous crew shuttle mu
 
 Our practice game starts a lander on a landing pad on Phobos. The objective is to cross the debris field and reach a return ship near the Mars–Phobos L2 point. The rotating-frame model accounts for both bodies' gravity, Coriolis and centrifugal effects, and calculates L1 and L2 from the same force model.
 
+Top and bottom ship cameras provide fixed 512×512 images with eight bits per RGB channel and fixed exposure. Sun backlighting and similar-lit debris against Mars limit what those feeds reveal. Separate debug views let us inspect the world without changing the ship cameras or their pixels.
+
 Each teammate can run an independent browser instance. Scenario inputs live in [`simulation/scenarios/`](simulation/scenarios/), so proposed changes can be reviewed in the repository and discussed through NotebookLM before publishing a shared release.
 
-This is a circular, point-mass practice model with synthetic terrain and approximate contacts, fuel, damage and radar. It does not reproduce the proprietary STP physics, jet allocator or camera sensors. Practice results are not official competition scores. Earlier Lunar SAR and rover experiments remain in the repository for reference.
+This is a circular, point-mass practice model with synthetic terrain and approximate contacts, fuel, damage and radar. Its physics and camera settings are our game model, not validated Space Teams PRO equivalence. Practice results are not official competition scores. Earlier Lunar SAR and rover experiments remain in the repository for reference.
 
 ## Team members
 
