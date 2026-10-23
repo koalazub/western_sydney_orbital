@@ -6,6 +6,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #simulation-canvas:focus-visible { outline: 2px solid #94d9f5; outline-offset: -3px; }
 #simulation-viewport.windowed { inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(1440px, calc(100% - 32px)); height: min(86dvh, 900px); border: 1px solid #526374; }
 #simulation-viewport:fullscreen { inset: 0; transform: none; width: 100%; height: 100dvh; border: 0; }
+#simulation-viewport:-webkit-full-screen { inset: 0; transform: none; width: 100%; height: 100dvh; border: 0; }
 .boot-screen { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: stretch; padding: max(24px, calc((100% - 440px) / 2)); background: #070b10; }
 .boot-screen h1 { margin: 0 0 16px; font-size: 1.5rem; line-height: 1.3; }
 .boot-screen p { margin: 8px 0; overflow-wrap: anywhere; }

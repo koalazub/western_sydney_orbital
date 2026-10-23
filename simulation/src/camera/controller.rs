@@ -1,4 +1,5 @@
 use super::model::{CameraError, CameraRig, CameraStatus};
+use super::zoom::{self, MAX_DISTANCE_KM, MIN_DISTANCE_KM};
 use crate::{
     domain::{CameraMode, CameraRequest, EngineAction, EntityId, EntityKind, ViewportAction},
     model::Snapshot,
@@ -6,18 +7,22 @@ use crate::{
 use bevy::{
     camera::visibility::RenderLayers,
     ecs::system::SystemParam,
-    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    input::{
+        gestures::PinchGesture,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
+    },
     input_focus::InputFocus,
     picking::hover::Hovered,
     prelude::*,
     ui::Pressed,
-    ui_widgets::Button as UiButton,
+    ui_widgets::{Button as UiButton, ScrollArea},
 };
-use std::{cell::RefCell, collections::VecDeque};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+};
 
 const KM: f32 = 0.001;
-const MIN_DISTANCE_KM: f32 = 0.025;
-const MAX_DISTANCE_KM: f32 = 20_000.0;
 
 #[derive(Component)]
 pub(crate) struct SimulationCamera;
@@ -39,6 +44,7 @@ thread_local! {
     static COMMANDS: RefCell<VecDeque<CameraRequest>> = const { RefCell::new(VecDeque::new()) };
     static GATE: RefCell<InputGate> = const { RefCell::new(InputGate { active: false, locked: false }) };
     static STATUS: RefCell<CameraStatus> = RefCell::new(CameraStatus::default());
+    static PINCH_ZOOM: Cell<f32> = const { Cell::new(0.0) };
 }
 
 pub(super) fn install(app: &mut App) {
@@ -48,10 +54,20 @@ pub(super) fn install(app: &mut App) {
 
 pub(super) fn set_input_active(active: bool, locked: bool) {
     GATE.with(|gate| *gate.borrow_mut() = InputGate { active, locked });
+    if !active {
+        PINCH_ZOOM.with(|pending| pending.set(0.0));
+    }
 }
 
 pub(super) fn input_active() -> bool {
     GATE.with(|gate| gate.borrow().active)
+}
+
+pub(super) fn pinch_zoom(log_distance_delta: f32) {
+    if input_active() && log_distance_delta.is_finite() {
+        PINCH_ZOOM
+            .with(|pending| pending.set((pending.get() + log_distance_delta).clamp(-1.5, 1.5)));
+    }
 }
 
 pub(super) fn status() -> CameraStatus {
@@ -74,6 +90,9 @@ pub(super) fn request_view(request: CameraRequest) -> Result<(), CameraError> {
     Ok(())
 }
 
+type UiHover = (Entity, &'static Hovered, Has<Pressed>);
+type CameraUi = Or<(With<UiButton>, With<ScrollArea>)>;
+
 #[derive(SystemParam)]
 struct CameraInput<'w, 's> {
     time: Res<'w, Time>,
@@ -82,14 +101,21 @@ struct CameraInput<'w, 's> {
     input_focus: Res<'w, InputFocus>,
     motion: Res<'w, AccumulatedMouseMotion>,
     scroll: Res<'w, AccumulatedMouseScroll>,
+    pinches: MessageReader<'w, 's, PinchGesture>,
     windows: Query<'w, 's, &'static Window>,
-    ui: Query<'w, 's, (Entity, &'static Hovered, Has<Pressed>), With<UiButton>>,
+    ui: Query<'w, 's, UiHover, CameraUi>,
 }
 
 fn update_camera(
     input: CameraInput,
     mut cameras: Query<
-        (&Camera, &GlobalTransform, &mut Transform, &mut RenderLayers),
+        (
+            &Camera,
+            &GlobalTransform,
+            &mut Transform,
+            &mut RenderLayers,
+            &mut Projection,
+        ),
         With<SimulationCamera>,
     >,
     mut rig: ResMut<CameraRig>,
@@ -102,9 +128,16 @@ fn update_camera(
         input_focus,
         motion,
         scroll,
+        mut pinches,
         windows,
         ui,
     } = input;
+    let pinch_delta = PINCH_ZOOM.with(|pending| pending.replace(0.0))
+        - pinches
+            .read()
+            .map(|gesture| gesture.0)
+            .filter(|delta| delta.is_finite())
+            .sum::<f32>();
     let mut focus_changed = false;
     let mut mode_changed = false;
     let mut zoom_changed = false;
@@ -135,7 +168,8 @@ fn update_camera(
         gesture.blocked = false;
     }
 
-    let Ok((camera, global, mut transform, mut layers)) = cameras.single_mut() else {
+    let Ok((camera, global, mut transform, mut layers, mut projection)) = cameras.single_mut()
+    else {
         return;
     };
     if mode_changed && rig.mode == CameraMode::FreeFlight {
@@ -295,6 +329,18 @@ fn update_camera(
                 rig.zoom = (rig.distance_km / base_distance_km(rig.focus, &snapshot, rig.mode))
                     .clamp(0.0001, 10_000.0);
             }
+        }
+
+        if !over_ui && pinch_delta != 0.0 {
+            let base_distance = base_distance_km(rig.focus, &snapshot, rig.mode);
+            zoom::apply_pinch(
+                &mut rig,
+                &mut transform,
+                &mut projection,
+                target,
+                base_distance,
+                pinch_delta,
+            );
         }
 
         let moving = !button_focused

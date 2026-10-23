@@ -2,6 +2,7 @@
 
 mod controller;
 mod model;
+mod zoom;
 
 pub(crate) use controller::SimulationCamera;
 pub(crate) use model::CameraRig;
@@ -20,6 +21,10 @@ pub fn set_input_active(active: bool, locked: bool) {
 
 pub fn input_active() -> bool {
     controller::input_active()
+}
+
+pub(crate) fn pinch_zoom(log_distance_delta: f32) {
+    controller::pinch_zoom(log_distance_delta);
 }
 
 /// Validate a typed request and enqueue it for the camera system.

@@ -71,6 +71,21 @@ pub fn set_viewport_input(active: bool, locked: bool) {
 }
 
 #[wasm_bindgen]
+pub fn pinch_zoom(log_distance_delta: f32) {
+    camera::pinch_zoom(log_distance_delta);
+}
+
+#[wasm_bindgen]
+pub fn fullscreen_button_at(x: f32, y: f32) -> bool {
+    hud::fullscreen_button_at(x, y)
+}
+
+#[wasm_bindgen]
+pub fn fullscreen_button_focused() -> bool {
+    hud::fullscreen_button_focused()
+}
+
+#[wasm_bindgen]
 pub fn platform_state(fullscreen: bool, maximized: bool, message: &str) {
     session::set_viewport(fullscreen, maximized, message);
 }

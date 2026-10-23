@@ -1,15 +1,17 @@
 use bevy::{
+    a11y::AccessibilityNode,
+    input::{ButtonState, keyboard::KeyboardInput},
     input_focus::{
-        FocusCause, InputFocus,
+        FocusCause, FocusedInput, InputFocus,
         tab_navigation::{TabGroup, TabNavigationPlugin},
     },
     picking::hover::Hovered,
     prelude::*,
-    ui::{InteractionDisabled, Pressed},
-    ui_widgets::{Activate, Button},
+    ui::{InteractionDisabled, Pressed, UiSystems},
+    ui_widgets::{Activate, Button, ScrollIntoView},
 };
 
-use super::{model::*, view};
+use super::{input, model::*, view};
 use crate::{
     EngineSet, PlaybackState, camera,
     domain::{CameraRequest, EngineAction, EntityId, EntityKind, LagrangeRegion, ViewportAction},
@@ -34,7 +36,12 @@ pub(super) fn install(app: &mut App) {
             )
                 .chain()
                 .in_set(EngineSet::Hud),
+        )
+        .add_systems(
+            PostUpdate,
+            scroll_focused_control_into_view.after(UiSystems::PostLayout),
         );
+    input::install(app);
 }
 
 pub(super) fn activate_button(
@@ -49,6 +56,10 @@ pub(super) fn activate_button(
     let Ok(action) = actions.get(activate.entity) else {
         return;
     };
+    if hud.reset_confirm_open && !matches!(action, HudAction::ConfirmReset | HudAction::CancelReset)
+    {
+        return;
+    }
     activate_action(*action, &mut hud, &playback);
 }
 
@@ -64,7 +75,10 @@ fn interactions(
         .is_some_and(|entity| buttons.contains(entity));
     let shortcuts_active = (camera::input_active() && !button_focused)
         || (keys.just_pressed(KeyCode::Escape)
-            && (hud.help_open || hud.inspector_open || hud.reset_confirm_open));
+            && (hud.controls.expanded()
+                || hud.help_open
+                || hud.inspector_open
+                || hud.reset_confirm_open));
     if !shortcuts_active {
         return;
     }
@@ -105,6 +119,7 @@ fn interactions(
     if keys.just_pressed(KeyCode::KeyM) {
         crate::request_action(EngineAction::Viewport(ViewportAction::Maximize));
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if keys.just_pressed(KeyCode::KeyX) {
         crate::request_action(EngineAction::Viewport(ViewportAction::Fullscreen));
     }
@@ -118,9 +133,15 @@ fn interactions(
     }
     if keys.just_pressed(KeyCode::KeyH) {
         hud.help_open = !hud.help_open;
+        if hud.help_open {
+            hud.controls = ControlsState::Expanded;
+        }
     }
     if keys.just_pressed(KeyCode::KeyI) {
         hud.inspector_open = !hud.inspector_open;
+        if hud.inspector_open {
+            hud.controls = ControlsState::Expanded;
+        }
     }
     if keys.just_pressed(KeyCode::Escape) {
         if hud.reset_confirm_open {
@@ -129,6 +150,8 @@ fn interactions(
             hud.help_open = false;
         } else if hud.inspector_open {
             hud.inspector_open = false;
+        } else if hud.controls.expanded() {
+            hud.controls = ControlsState::Compact;
         }
     }
     if hud.reset_confirm_open && keys.just_pressed(KeyCode::Enter) && playback.can_control {
@@ -167,7 +190,10 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
             crate::request_action(EngineAction::ToggleAutopilot)
         }
         HudAction::Fullscreen => {
-            crate::request_action(EngineAction::Viewport(ViewportAction::Fullscreen))
+            // Web fullscreen must be requested by the trusted DOM event adapter,
+            // using the actual native hit/focus target before Bevy's next frame.
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::request_action(EngineAction::Viewport(ViewportAction::Fullscreen));
         }
         HudAction::Maximize => {
             crate::request_action(EngineAction::Viewport(ViewportAction::Maximize))
@@ -180,8 +206,28 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
             };
             crate::request_action(EngineAction::Viewport(action));
         }
-        HudAction::ToggleHelp => hud.help_open = !hud.help_open,
-        HudAction::ToggleInspector => hud.inspector_open = !hud.inspector_open,
+        HudAction::ToggleControls => {
+            hud.controls = match hud.controls {
+                ControlsState::Compact => ControlsState::Expanded,
+                ControlsState::Expanded => ControlsState::Compact,
+            };
+            if !hud.controls.expanded() {
+                hud.help_open = false;
+                hud.inspector_open = false;
+            }
+        }
+        HudAction::ToggleHelp => {
+            hud.help_open = !hud.help_open;
+            if hud.help_open {
+                hud.controls = ControlsState::Expanded;
+            }
+        }
+        HudAction::ToggleInspector => {
+            hud.inspector_open = !hud.inspector_open;
+            if hud.inspector_open {
+                hud.controls = ControlsState::Expanded;
+            }
+        }
         HudAction::FocusNext => {
             cycle_focus(&crate::snapshot(), true);
         }
@@ -204,8 +250,8 @@ fn update_layout(
     hud: Res<HudState>,
     mut input_focus: ResMut<InputFocus>,
     mut previous_sensor: Local<bool>,
-    mut previous_compact: Local<Option<bool>>,
-    mut layout: Query<(&mut Node, &mut Visibility, &LayoutPart), Without<Overlay>>,
+    mut layout: Query<(&mut Node, &mut Visibility, &ComputedNode, &LayoutPart), Without<Overlay>>,
+    mut details: Query<&mut Node, (With<DetailsPanel>, Without<LayoutPart>)>,
 ) {
     let sensor = camera::status().mode.sensor().is_some();
     if *previous_sensor != sensor {
@@ -214,9 +260,24 @@ fn update_layout(
         input_focus.clear();
         *previous_sensor = sensor;
     }
-    for (mut node, mut visibility, part) in &mut layout {
+    let (width, height) = windows
+        .single()
+        .map(|window| (window.width(), window.height()))
+        .unwrap_or((800.0, 800.0));
+    let mut top = SCREEN_PADDING_PX + PANEL_GAP_PX;
+    let mut bottom = SCREEN_PADDING_PX + PANEL_GAP_PX;
+    for (mut node, mut visibility, computed, part) in &mut layout {
+        let height = computed.size().y * computed.inverse_scale_factor();
+        match part {
+            LayoutPart::TopRow => top += height,
+            LayoutPart::BottomRow => bottom += height,
+            LayoutPart::MissionActions
+            | LayoutPart::MetricsPanel
+            | LayoutPart::CameraPanel
+            | LayoutPart::SensorActions => {}
+        }
         let shown = match part {
-            LayoutPart::MetricsPanel => !sensor || hud.inspector_open,
+            LayoutPart::MetricsPanel => hud.controls.expanded(),
             LayoutPart::CameraPanel => !sensor,
             LayoutPart::SensorActions => sensor,
             LayoutPart::TopRow | LayoutPart::MissionActions | LayoutPart::BottomRow => true,
@@ -234,51 +295,20 @@ fn update_layout(
             *visibility = next_visibility;
         }
     }
-    let compact = windows.single().map(Window::width).unwrap_or(800.0) < 640.0;
-
-    if previous_compact.is_none_or(|previous| previous != compact) {
-        for (mut node, _, part) in &mut layout {
-            match part {
-                LayoutPart::TopRow => {
-                    node.width = percent(100.0);
-                    node.flex_direction = if compact {
-                        FlexDirection::Column
-                    } else {
-                        FlexDirection::Row
-                    };
-                }
-                LayoutPart::MissionActions => {
-                    node.max_width = percent(if compact { 100.0 } else { 72.0 });
-                    node.width = if compact { percent(100.0) } else { auto() };
-                }
-                LayoutPart::BottomRow => {
-                    node.width = percent(100.0);
-                    node.flex_direction = if compact {
-                        FlexDirection::Column
-                    } else {
-                        FlexDirection::Row
-                    };
-                }
-                LayoutPart::MetricsPanel => {
-                    node.width = if compact { percent(100.0) } else { auto() };
-                    node.max_width = percent(100.0);
-                }
-                LayoutPart::CameraPanel => {
-                    node.margin.left = if compact { px(0.0) } else { auto() };
-                    node.max_width = if compact { percent(100.0) } else { px(330.0) };
-                    node.width = if compact { percent(100.0) } else { auto() };
-                    node.align_items = if compact {
-                        AlignItems::FlexStart
-                    } else {
-                        AlignItems::FlexEnd
-                    };
-                }
-                LayoutPart::SensorActions => {
-                    node.width = percent(100.0);
-                }
-            }
+    for mut node in &mut details {
+        // Fit disclosed content between the real top and bottom strips. Keep
+        // overflow scrollable instead of pushing controls off a narrow canvas.
+        let panel_width = px((width - 2.0 * SCREEN_PADDING_PX).clamp(0.0, 440.0));
+        let panel_height = px((height - top - bottom).max(0.0));
+        if node.width != panel_width {
+            node.width = panel_width;
         }
-        *previous_compact = Some(compact);
+        if node.top != px(top) {
+            node.top = px(top);
+        }
+        if node.max_height != panel_height {
+            node.max_height = panel_height;
+        }
     }
 }
 
@@ -288,6 +318,7 @@ type OverlayVisual = (
     &'static mut Visibility,
     &'static Overlay,
     Has<TabGroup>,
+    &'static mut ScrollPosition,
 );
 
 fn update_overlays(
@@ -295,6 +326,7 @@ fn update_overlays(
     hud: Res<HudState>,
     mut input_focus: ResMut<InputFocus>,
     buttons: Query<(Entity, &HudAction), With<Button>>,
+    parents: Query<&ChildOf>,
     mut modal: Local<ModalFocus>,
     mut overlays: Query<OverlayVisual, Without<LayoutPart>>,
 ) {
@@ -314,18 +346,34 @@ fn update_overlays(
         }
         modal.open = hud.reset_confirm_open;
     }
-    for (entity, mut node, mut visibility, overlay, modal_group) in &mut overlays {
+    let mut hidden_focus = false;
+    for (entity, mut node, mut visibility, overlay, modal_group, mut position) in &mut overlays {
+        let was_shown = node.display != Display::None;
         node.display = match overlay {
+            Overlay::Controls if hud.controls.expanded() => Display::Flex,
             Overlay::Help if hud.help_open => Display::Flex,
             Overlay::Reset if hud.reset_confirm_open => Display::Flex,
             Overlay::Inspector if hud.inspector_open => Display::Flex,
             _ => Display::None,
         };
+        if matches!(overlay, Overlay::Controls) && !was_shown && node.display != Display::None {
+            position.y = 0.0;
+        }
         *visibility = if node.display == Display::None {
             Visibility::Hidden
         } else {
-            Visibility::Visible
+            Visibility::Inherited
         };
+        if node.display == Display::None
+            && input_focus.get().is_some_and(|focused| {
+                focused == entity
+                    || parents
+                        .iter_ancestors(focused)
+                        .any(|parent| parent == entity)
+            })
+        {
+            hidden_focus = true;
+        }
         let needs_modal_group = matches!(overlay, Overlay::Reset) && hud.reset_confirm_open;
         if needs_modal_group != modal_group {
             if needs_modal_group {
@@ -333,6 +381,16 @@ fn update_overlays(
             } else {
                 commands.entity(entity).remove::<TabGroup>();
             }
+        }
+    }
+    if hidden_focus && !hud.reset_confirm_open {
+        if let Some((entity, _)) = buttons
+            .iter()
+            .find(|(_, action)| matches!(action, HudAction::ToggleControls))
+        {
+            input_focus.set(entity, FocusCause::Navigated);
+        } else {
+            input_focus.clear();
         }
     }
 }
@@ -344,6 +402,8 @@ type ButtonVisual = (
     Has<Pressed>,
     Has<InteractionDisabled>,
     &'static mut BackgroundColor,
+    &'static mut AccessibilityNode,
+    &'static mut Outline,
 );
 
 fn update_buttons(
@@ -355,7 +415,9 @@ fn update_buttons(
 ) {
     let snapshot = crate::snapshot();
     let camera_status = camera::status();
-    for (entity, action, hovered, pressed, disabled, mut background) in &mut button_views {
+    for (entity, action, hovered, pressed, disabled, mut background, mut accessible, mut outline) in
+        &mut button_views
+    {
         let should_disable = hud.reset_confirm_open
             && !matches!(action, HudAction::ConfirmReset | HudAction::CancelReset)
             || is_control(*action)
@@ -375,6 +437,22 @@ fn update_buttons(
             HudAction::ChangeCamera(mode) => *mode == camera_status.mode,
             _ => false,
         };
+        let expanded = match action {
+            HudAction::ToggleControls => Some(hud.controls.expanded()),
+            HudAction::ToggleHelp => Some(hud.help_open),
+            HudAction::ToggleInspector => Some(hud.inspector_open),
+            _ => None,
+        };
+        if let Some(expanded) = expanded
+            && accessible.is_expanded() != Some(expanded)
+        {
+            accessible.set_expanded(expanded);
+        }
+        if matches!(action, HudAction::ChangeCamera(_))
+            && accessible.is_selected() != Some(selected)
+        {
+            accessible.set_selected(selected);
+        }
         let keyboard_focused = input_focus.get() == Some(entity);
         let color = if should_disable {
             DISABLED
@@ -390,26 +468,43 @@ fn update_buttons(
         if background.0 != color {
             background.0 = color;
         }
+        let focus_color = if keyboard_focused { TEXT } else { Color::NONE };
+        if outline.color != focus_color {
+            outline.color = focus_color;
+        }
     }
 }
 
-fn update_readouts(playback: Res<PlaybackState>, mut reads: Query<(&mut Text, &Readout)>) {
+fn update_readouts(
+    playback: Res<PlaybackState>,
+    hud: Res<HudState>,
+    mut reads: Query<(&mut Text, &Readout, &ChildOf)>,
+    mut buttons: Query<&mut AccessibilityNode, With<Button>>,
+) {
     let snapshot = crate::snapshot();
     let camera_status = camera::status();
     let focus = focused_item(&snapshot, camera_status.focus);
-    for (mut text, readout) in &mut reads {
+    for (mut text, readout, parent) in &mut reads {
         let value = match readout {
+            Readout::Summary => summary_readout(&snapshot, &playback),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
             Readout::Focus => format!("Focus: {}", focus_label(focus)),
             Readout::Camera => camera_readout(camera_status),
             Readout::Inspector => inspector_readout(&snapshot, focus),
-            Readout::Authority => authority_readout(
-                playback.can_control,
-                playback.running,
-                snapshot.mission.status.is_terminal(),
-            ),
+            Readout::Authority => {
+                let restriction = authority_readout(
+                    playback.can_control,
+                    playback.running,
+                    snapshot.mission.status.is_terminal(),
+                );
+                if restriction.is_empty() {
+                    playback.message.clone()
+                } else {
+                    restriction
+                }
+            }
             Readout::Playback => {
                 if snapshot.mission.status.is_terminal() {
                     snapshot.mission.status.to_string()
@@ -429,9 +524,9 @@ fn update_readouts(playback: Res<PlaybackState>, mut reads: Query<(&mut Text, &R
             }
             Readout::Fullscreen => {
                 if playback.fullscreen {
-                    "Exit full [X]".into()
+                    "Exit fullscreen [X]".into()
                 } else {
-                    "Full [X]".into()
+                    "Fullscreen [X]".into()
                 }
             }
             Readout::Maximize => {
@@ -448,12 +543,75 @@ fn update_readouts(playback: Res<PlaybackState>, mut reads: Query<(&mut Text, &R
                     "Capture [L]".into()
                 }
             }
+            Readout::Controls => if hud.controls.expanded() {
+                "Details -"
+            } else {
+                "Details +"
+            }
+            .into(),
+            Readout::HelpToggle => if hud.help_open {
+                "Close help [H]"
+            } else {
+                "Help [H]"
+            }
+            .into(),
+            Readout::InspectorToggle => if hud.inspector_open {
+                "Close inspector [I]"
+            } else {
+                "Inspect [I]"
+            }
+            .into(),
             Readout::Static => continue,
         };
         if text.0 != value {
+            if let Ok(mut accessible) = buttons.get_mut(parent.parent()) {
+                accessible.set_label(value.clone());
+            }
             text.0 = value;
         }
     }
+}
+
+pub(super) fn scroll_details(
+    mut event: On<FocusedInput<KeyboardInput>>,
+    mut panels: Query<(&ComputedNode, &mut ScrollPosition), With<DetailsPanel>>,
+) {
+    if event.input.state != ButtonState::Pressed {
+        return;
+    }
+    let Ok((computed, mut position)) = panels.single_mut() else {
+        return;
+    };
+    let visible = computed.size().y * computed.inverse_scale_factor();
+    let content = computed.content_size().y * computed.inverse_scale_factor();
+    let max_scroll = (content - visible).max(0.0);
+    let next = match event.input.key_code {
+        KeyCode::ArrowUp => position.y - BUTTON_HEIGHT_PX,
+        KeyCode::ArrowDown => position.y + BUTTON_HEIGHT_PX,
+        KeyCode::PageUp => position.y - visible * 0.8,
+        KeyCode::PageDown => position.y + visible * 0.8,
+        KeyCode::Home => 0.0,
+        KeyCode::End => max_scroll,
+        _ => return,
+    };
+    event.propagate(false);
+    position.y = next.clamp(0.0, max_scroll);
+}
+
+fn scroll_focused_control_into_view(
+    mut commands: Commands,
+    input_focus: Res<InputFocus>,
+    buttons: Query<(), With<Button>>,
+    mut previous: Local<Option<Entity>>,
+) {
+    let focused = input_focus.get();
+    if *previous != focused
+        && let Some(entity) = focused
+        && buttons.contains(entity)
+    {
+        commands.trigger(ScrollIntoView { entity });
+    }
+    *previous = focused;
 }
 
 fn is_control(action: HudAction) -> bool {
@@ -498,6 +656,22 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         snapshot.active_contacts.len(),
         snapshot.assets.len(),
         terminal_score,
+    )
+}
+
+fn summary_readout(snapshot: &Snapshot, playback: &PlaybackState) -> String {
+    let state = if snapshot.mission.status.is_terminal() {
+        snapshot.mission.status.to_string()
+    } else if !playback.can_control {
+        "view only".into()
+    } else if playback.running {
+        "running".into()
+    } else {
+        "paused".into()
+    };
+    format!(
+        "Phobos practice | T+{} | {state}",
+        duration(snapshot.time_s)
     )
 }
 

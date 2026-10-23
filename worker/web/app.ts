@@ -8,6 +8,9 @@ type Engine = {
   runtime_status: () => string;
   command: (json: string) => string;
   set_viewport_input: (active: boolean, locked: boolean) => void;
+  pinch_zoom: (logDistanceDelta: number) => void;
+  fullscreen_button_at: (x: number, y: number) => boolean;
+  fullscreen_button_focused: () => boolean;
   platform_state: (fullscreen: boolean, maximized: boolean, message: string) => void;
 };
 type StartupStage = "initializing" | "preparing_view" | "drawing_world" | "presenting" | "waiting_for_gpu" | "ready" | "failed";
@@ -38,6 +41,15 @@ let platformMessage = "WebGPU · Click the scene to activate camera controls";
 let startupPhase = "checking_graphics";
 let startupVisibleWait = 0;
 let lastRendererStatus: RendererStatus | undefined;
+let fullscreenPending = false;
+let fullscreenPress: number | null = null;
+let gestureScale: number | null = null;
+
+type WebKitDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void | Promise<void> };
+type WebKitElement = HTMLElement & { webkitRequestFullscreen?: () => void | Promise<void> };
+type ScaleGesture = Event & { scale: number };
+
+function fullscreenElement() { return document.fullscreenElement || (document as WebKitDocument).webkitFullscreenElement || null; }
 
 function errorMessage(value: unknown) { return value instanceof Error ? value.message : String(value); }
 function announce(message: string) { byId("viewport-announcement").textContent = message; }
@@ -59,7 +71,7 @@ function recordStartup(error?: string) {
 }
 function publishPlatform(message = platformMessage) {
   platformMessage = message;
-  engine?.platform_state(!!document.fullscreenElement, !viewport.classList.contains("windowed"), message);
+  engine?.platform_state(!!fullscreenElement(), !viewport.classList.contains("windowed"), message);
 }
 function inputState() {
   const locked = document.pointerLockElement === canvas;
@@ -85,19 +97,56 @@ function maximize() {
   window.dispatchEvent(new Event("resize"));
 }
 async function fullscreen() {
+  if (fullscreenPending) return;
+  fullscreenPending = true;
+  (globalThis as any).__wsorbFullscreenFailure = null;
   const activation = navigator.userActivation?.isActive;
+  const exiting = !!fullscreenElement();
   try {
+    // The native API call must happen in this trusted DOM event, before any
+    // await or Bevy animation-frame queue consumes Safari's user activation.
     if (document.fullscreenElement) await document.exitFullscreen();
-    else if (viewport.requestFullscreen) await viewport.requestFullscreen({ navigationUI: "hide" });
+    else if (exiting) {
+      if (!(document as WebKitDocument).webkitExitFullscreen) throw new Error("This browser does not expose fullscreen exit");
+      await (document as WebKitDocument).webkitExitFullscreen!();
+    }
+    else if (viewport.requestFullscreen) await viewport.requestFullscreen();
+    else if ((viewport as WebKitElement).webkitRequestFullscreen) await (viewport as WebKitElement).webkitRequestFullscreen!();
     else throw new Error("This browser does not expose fullscreen");
     canvas.focus({ preventScroll: true });
-    publishPlatform(document.fullscreenElement ? "Fullscreen · Escape exits" : "Fullscreen closed");
+    publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : exiting ? "Fullscreen closed" : "Fullscreen requested");
   } catch (error) {
     (globalThis as any).__wsorbFullscreenFailure = { activation, name: error instanceof DOMException ? error.name : "Error", message: errorMessage(error) };
-    viewport.classList.remove("windowed");
-    publishPlatform(`Fullscreen unavailable: ${errorMessage(error)}. The game is maximized within this window.`);
+    publishPlatform(`Fullscreen could not be ${exiting ? "closed" : "entered"}: ${errorMessage(error)}. Click Fullscreen or press X in the game.`);
     announce(platformMessage);
+  } finally {
+    fullscreenPending = false;
   }
+}
+
+function fullscreenButtonAt(event: PointerEvent) {
+  const rect = canvas.getBoundingClientRect();
+  if (!ready || !engine || rect.width <= 0 || rect.height <= 0) return false;
+  return engine.fullscreen_button_at(
+    (event.clientX - rect.left) * canvas.clientWidth / rect.width,
+    (event.clientY - rect.top) * canvas.clientHeight / rect.height,
+  );
+}
+
+function pinch(logDistanceDelta: number) {
+  if (!ready || !document.hasFocus() || !Number.isFinite(logDistanceDelta)) return;
+  canvas.focus({ preventScroll: true });
+  inputState();
+  engine!.pinch_zoom(logDistanceDelta);
+}
+
+function changeGesture(event: Event) {
+  const scale = (event as ScaleGesture).scale;
+  if (!ready || gestureScale === null || !Number.isFinite(scale) || scale <= 0) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  pinch(Math.log(gestureScale / scale));
+  gestureScale = scale;
 }
 async function captureMouse() {
   try { await canvas.requestPointerLock(); publishPlatform("Mouse captured · Escape releases it"); }
@@ -120,7 +169,8 @@ function exportFlight() {
   publishPlatform("Flight state exported");
 }
 (globalThis as any).__wsorbPlatformAction = (action: string) => {
-  // Fullscreen/pointer lock keep the original input's transient user activation.
+  // Native HUD fullscreen input uses the trusted DOM handlers below. Other
+  // platform commands can arrive from Bevy's simulation-frame action queue.
   if (action === "fullscreen") void fullscreen();
   else if (action === "maximize") maximize();
   else if (action === "capture") void captureMouse();
@@ -129,14 +179,62 @@ function exportFlight() {
   else if (action === "notebook") window.open("https://notebooklm.google.com/", "_blank", "noopener,noreferrer");
 };
 (globalThis as any).__wsorbEngineError = (message: string) => fail(message);
-canvas.addEventListener("pointerdown", () => { if (ready) { canvas.focus({ preventScroll: true }); inputState(); } });
-canvas.addEventListener("focus", inputState); canvas.addEventListener("blur", inputState);
+canvas.addEventListener("pointerdown", event => {
+  if (!ready) return;
+  canvas.focus({ preventScroll: true }); inputState();
+  fullscreenPress = event.button === 0 && fullscreenButtonAt(event) ? event.pointerId : null;
+}, { capture: true });
+canvas.addEventListener("pointerup", event => {
+  const activate = fullscreenPress === event.pointerId && fullscreenButtonAt(event);
+  fullscreenPress = null;
+  if (activate) void fullscreen();
+}, { capture: true });
+canvas.addEventListener("pointercancel", () => { fullscreenPress = null; });
+canvas.addEventListener("focus", inputState);
+canvas.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; inputState(); });
 canvas.addEventListener("contextmenu", event => event.preventDefault());
-canvas.addEventListener("wheel", event => { if (ready && document.activeElement === canvas && !event.ctrlKey && !event.metaKey) event.preventDefault(); }, { passive: false });
+canvas.addEventListener("wheel", event => {
+  if (!ready || event.metaKey) return;
+  if (event.ctrlKey) {
+    // Trackpad pinch is ctrl-wheel in browsers without WebKit GestureEvents.
+    // Keep it out of both page zoom and Winit's ordinary wheel accumulator.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (gestureScale === null) {
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? canvas.clientHeight : 1;
+      pinch(event.deltaY * unit * 0.01);
+    }
+  } else if (document.activeElement === canvas) event.preventDefault();
+}, { passive: false, capture: true });
+canvas.addEventListener("gesturestart", event => {
+  if (!ready || !document.hasFocus()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const scale = (event as ScaleGesture).scale;
+  gestureScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+}, { passive: false, capture: true });
+canvas.addEventListener("gesturechange", changeGesture, { passive: false, capture: true });
+canvas.addEventListener("gestureend", event => {
+  changeGesture(event);
+  gestureScale = null;
+}, { passive: false, capture: true });
+window.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; });
 window.addEventListener("blur", inputState); window.addEventListener("focus", inputState);
 document.addEventListener("visibilitychange", inputState);
 document.addEventListener("pointerlockchange", () => { inputState(); publishPlatform(document.pointerLockElement === canvas ? "Mouse captured · Escape releases it" : "Mouse released"); });
-document.addEventListener("fullscreenchange", () => { publishPlatform(document.fullscreenElement ? "Fullscreen · Escape exits" : "Fullscreen closed"); inputState(); window.dispatchEvent(new Event("resize")); });
+for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
+  document.addEventListener(name, () => { publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : "Fullscreen closed"); inputState(); window.dispatchEvent(new Event("resize")); });
+}
+window.addEventListener("keydown", event => {
+  if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
+    || document.activeElement !== canvas) return;
+  const buttonActivation = ["Enter", "Space"].includes(event.code) && engine.fullscreen_button_focused();
+  if (event.code !== "KeyX" && !buttonActivation) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (!event.repeat) void fullscreen();
+}, { capture: true });
 window.addEventListener("keydown", event => {
   if (ready && document.activeElement === canvas && !event.ctrlKey && !event.metaKey && ["Tab", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
 });
@@ -241,7 +339,8 @@ async function start() {
     const manifest = await fetch("/sim/manifest.json", { cache: "no-cache" });
     if (!manifest.ok) throw new Error(`Engine manifest returned HTTP ${manifest.status}`);
     const metadata = await manifest.json();
-    const [module, bytes] = await Promise.all([import("/sim/wsorb_bevy.js"), download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes)]);
+    const moduleUrl = `/sim/wsorb_bevy.js?v=${metadata.sha256}`;
+    const [module, bytes] = await Promise.all([import(moduleUrl), download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes)]);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     if (Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("") !== metadata.sha256) throw new Error("Engine integrity check failed. Reload to get the current build.");
     progress.removeAttribute("value");
