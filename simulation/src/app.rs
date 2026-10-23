@@ -366,6 +366,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
     crate::camera::install(&mut app);
     crate::sensors::install(&mut app);
     crate::navigation::install(&mut app);
+    crate::telemetry::install(&mut app);
     crate::thrusters::install(&mut app);
     crate::hud::install(&mut app);
     let render_app = app.sub_app_mut(RenderApp);

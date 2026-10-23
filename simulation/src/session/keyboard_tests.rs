@@ -23,11 +23,16 @@ fn fresh_app() -> App {
     crate::camera::set_input_active(true, false);
 
     let mut app = App::new();
-    app.insert_resource(Time::<()>::default())
-        .insert_resource(ButtonInput::<KeyCode>::default())
-        .insert_resource(PlaybackState::default())
-        .insert_resource(HudState::default())
-        .add_systems(Update, advance_world);
+    app.configure_sets(
+        Update,
+        (crate::EngineSet::Runtime, crate::EngineSet::Planning).chain(),
+    )
+    .insert_resource(Time::<()>::default())
+    .insert_resource(ButtonInput::<KeyCode>::default())
+    .insert_resource(PlaybackState::default())
+    .insert_resource(HudState::default())
+    .add_systems(Update, advance_world.in_set(crate::EngineSet::Runtime));
+    crate::telemetry::install(&mut app);
     app
 }
 
@@ -469,7 +474,11 @@ fn fresh_space_launches_a_paused_lander_with_real_upward_thrust() {
     assert!(keyboard_owns_command());
     assert_eq!(
         ship(&snapshot()).commanded_accel_mps2,
-        [0.0, 0.0, scenario::settings().lander.max_accel_mps2]
+        [
+            0.0,
+            0.0,
+            scenario::settings().practice.space_lift_accel_mps2
+        ]
     );
     for _ in 0..9 {
         frame(&mut app, STEP);
@@ -515,4 +524,69 @@ fn space_never_cancels_an_explicit_pause_or_launches_from_debug_or_view_only_inp
     frame(&mut app, STEP);
     assert!(!app.world().resource::<PlaybackState>().running);
     assert_eq!(snapshot().time_s, paused);
+}
+
+#[test]
+fn practice_space_boost_is_explicit_reversible_and_does_not_boost_side_keys() {
+    let mut app = fresh_app();
+    assert!(app.world().resource::<PlaybackState>().practice_boost);
+    press(&mut app, &[KeyCode::Space, KeyCode::KeyW]);
+    frame(&mut app, STEP);
+    let boosted = snapshot();
+    let force = ship(&boosted).commanded_accel_mps2;
+    let reference = scenario::settings().lander.max_accel_mps2;
+    assert!(force[0] > 0.0 && force[0] <= reference);
+    assert!(force[2] > reference);
+    assert_eq!(
+        ship(&boosted).thrust_application,
+        crate::model::ThrustApplication::PracticeBoost
+    );
+    request_action(EngineAction::TogglePracticeBoost);
+    frame(&mut app, Duration::ZERO);
+    assert!(!app.world().resource::<PlaybackState>().practice_boost);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(ship(&snapshot()).velocity, ship(&boosted).velocity);
+    frame(&mut app, STEP);
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        [0.0; 3],
+        "profile switch requires release"
+    );
+    release(&mut app, &[KeyCode::Space, KeyCode::KeyW]);
+    frame(&mut app, Duration::ZERO);
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        [0.0, 0.0, reference]
+    );
+    assert_eq!(
+        ship(&snapshot()).thrust_application,
+        crate::model::ThrustApplication::ManualNozzles
+    );
+}
+
+#[test]
+fn flight_telemetry_api_reports_actual_boosted_motion_after_runtime_update() {
+    let mut app = fresh_app();
+    frame(&mut app, Duration::ZERO);
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    let report: serde_json::Value = serde_json::from_str(&crate::telemetry::status()).unwrap();
+    let metrics = &report["metrics"];
+    assert_eq!(report["source_time_s"], snapshot().time_s);
+    assert_eq!(report["units"]["speed"], "m/s");
+    assert_eq!(report["actuation"]["practice_boost_active"], true);
+    assert_eq!(
+        metrics["applied_thrust_accel_mps2"],
+        scenario::settings().practice.space_lift_accel_mps2
+    );
+    assert!(metrics["speed_mps"].as_f64().unwrap() > 0.0);
+    assert!(metrics["radial_climb_mps"].as_f64().unwrap() > 0.0);
+    assert!(
+        metrics["thrust_force_n"].as_f64().unwrap()
+            > scenario::settings().lander.mass_kg * scenario::settings().lander.max_accel_mps2
+    );
+    assert_eq!(report["provenance"]["hidden_debris_truth_used"], false);
+    assert_eq!(report["caveats"]["stp_parity"], false);
 }

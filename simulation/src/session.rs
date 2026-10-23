@@ -91,7 +91,7 @@ pub(crate) fn runtime_report() -> String {
     RUNTIME.with(|state| {
         let state = state.borrow();
         let keyboard_thrust = KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command()) && state.running;
-        serde_json::json!({"running":state.running,"autopilot":state.autopilot,"keyboard_thrust":keyboard_thrust,"keyboard_requires_release":keyboard_requires_release(),"rate":state.rate.factor(),"can_control":state.can_control,"fullscreen":state.fullscreen,"maximized":state.maximized,"message":state.message}).to_string()
+        serde_json::json!({"running":state.running,"autopilot":state.autopilot,"practice_boost":state.practice_boost,"reference_accel_limit_mps2":scenario::settings().lander.max_accel_mps2,"practice_space_accel_mps2":scenario::settings().practice.space_lift_accel_mps2,"keyboard_thrust":keyboard_thrust,"keyboard_requires_release":keyboard_requires_release(),"rate":state.rate.factor(),"can_control":state.can_control,"fullscreen":state.fullscreen,"maximized":state.maximized,"message":state.message}).to_string()
     })
 }
 
@@ -181,7 +181,11 @@ pub(crate) fn advance_world(
         )
     });
     for action in actions {
-        if matches!(action, EngineAction::ToggleAutopilot) && state.can_control {
+        if matches!(
+            action,
+            EngineAction::ToggleAutopilot | EngineAction::TogglePracticeBoost
+        ) && state.can_control
+        {
             let owned = KEYBOARD_PILOT.with(|pilot| {
                 let mut pilot = pilot.borrow_mut();
                 let owned = pilot.has_installed_command();
@@ -295,8 +299,9 @@ fn update_keyboard_pilot(state: &mut PlaybackState, movement: Movement, modal: b
             scenario::settings().lander.max_accel_mps2,
         )
     });
-    let changed =
-        SIMULATION.with(|sim| apply_keyboard_effect(&mut sim.borrow_mut(), state, effect));
+    let space_down = SPACE_HELD.with(Cell::get);
+    let changed = SIMULATION
+        .with(|sim| apply_keyboard_effect(&mut sim.borrow_mut(), state, effect, space_down));
     if changed {
         refresh();
     }
@@ -308,15 +313,26 @@ fn apply_keyboard_effect(
     sim: &mut Simulation,
     state: &mut PlaybackState,
     effect: PilotEffect,
+    space_down: bool,
 ) -> bool {
     match effect {
         PilotEffect::None => false,
-        PilotEffect::SetCommand(accel)
+        PilotEffect::SetCommand(mut accel)
             if state.can_control
                 && state.running
                 && sim.mission_status() == MissionStatus::Running =>
         {
-            if sim.set_manual_thrust(accel).is_err() {
+            let boosted = space_down && state.practice_boost && accel[2] > 0.0;
+            let result = if boosted {
+                // Only the positive lift component changes. Side keys, E alone,
+                // Ctrl/Meta/Alt routing and the standard command API keep their limits.
+                accel[2] *= scenario::settings().practice.space_lift_accel_mps2
+                    / scenario::settings().lander.max_accel_mps2;
+                sim.set_space_thrust(accel)
+            } else {
+                sim.set_manual_thrust(accel)
+            };
+            if result.is_err() {
                 return false;
             }
             *state = runtime::transition(
@@ -365,7 +381,8 @@ mod tests {
         assert!(apply_keyboard_effect(
             &mut simulation,
             &mut playback,
-            effect
+            effect,
+            false
         ));
         assert!(!playback.autopilot);
         let after = simulation.snapshot();
@@ -406,7 +423,8 @@ mod tests {
         assert!(apply_keyboard_effect(
             &mut simulation,
             &mut playback,
-            release
+            release,
+            false
         ));
         let stopped_thrust = simulation.snapshot();
         let ship = stopped_thrust
@@ -444,7 +462,8 @@ mod tests {
         assert!(!apply_keyboard_effect(
             &mut simulation,
             &mut playback,
-            effect
+            effect,
+            false
         ));
         assert!(playback.autopilot);
         assert_eq!(
@@ -466,7 +485,8 @@ mod tests {
             assert!(!apply_keyboard_effect(
                 &mut simulation,
                 &mut playback,
-                PilotEffect::SetCommand([0.5, 0.0, 0.0])
+                PilotEffect::SetCommand([0.5, 0.0, 0.0]),
+                false
             ));
             assert!(playback.autopilot);
             assert_eq!(

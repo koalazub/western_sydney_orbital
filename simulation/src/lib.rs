@@ -18,6 +18,7 @@ pub mod scenario;
 mod scene;
 mod sensors;
 mod session;
+mod telemetry;
 pub mod terrain;
 mod thrusters;
 
@@ -61,6 +62,12 @@ pub fn ship_camera_status() -> String {
 #[wasm_bindgen]
 pub fn navigation_status() -> String {
     navigation::status()
+}
+
+/// Local practice telemetry with explicit units/frame, not an STP SDK endpoint.
+#[wasm_bindgen]
+pub fn telemetry_status() -> String {
+    telemetry::status()
 }
 
 #[wasm_bindgen]

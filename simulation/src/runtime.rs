@@ -5,6 +5,7 @@ use crate::domain::{EngineAction, MissionStatus, PlaybackRate, ViewportAction};
 pub(crate) struct PlaybackState {
     pub running: bool,
     pub autopilot: bool,
+    pub practice_boost: bool,
     pub rate: PlaybackRate,
     pub can_control: bool,
     pub fullscreen: bool,
@@ -21,6 +22,7 @@ impl Default for PlaybackState {
         Self {
             running: false,
             autopilot: true,
+            practice_boost: crate::scenario::settings().practice.space_boost_enabled,
             rate: PlaybackRate::RealTime,
             can_control: true,
             fullscreen: false,
@@ -91,6 +93,10 @@ pub(crate) fn transition(
             state.autopilot = false;
             Effect::None
         }
+        EngineAction::TogglePracticeBoost if state.can_control => {
+            state.practice_boost = !state.practice_boost;
+            Effect::None
+        }
         EngineAction::CycleRate if state.can_control => {
             state.rate = state.rate.next();
             Effect::None
@@ -101,7 +107,42 @@ pub(crate) fn transition(
         | EngineAction::Step
         | EngineAction::Reset
         | EngineAction::ToggleAutopilot
+        | EngineAction::TogglePracticeBoost
         | EngineAction::CycleRate => Effect::None,
     };
     Transition { state, effect }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn practice_profile_switch_is_authorized_and_does_not_enable_autopilot_or_playback() {
+        let state = PlaybackState {
+            running: false,
+            autopilot: false,
+            practice_boost: true,
+            ..Default::default()
+        };
+        let changed = transition(
+            state.clone(),
+            EngineAction::TogglePracticeBoost,
+            MissionStatus::Running,
+        );
+        assert!(!changed.state.practice_boost);
+        assert!(!changed.state.running);
+        assert!(!changed.state.autopilot);
+        assert_eq!(changed.effect, Effect::None);
+        let locked = PlaybackState {
+            can_control: false,
+            ..state
+        };
+        let denied = transition(
+            locked,
+            EngineAction::TogglePracticeBoost,
+            MissionStatus::Running,
+        );
+        assert!(denied.state.practice_boost);
+    }
 }

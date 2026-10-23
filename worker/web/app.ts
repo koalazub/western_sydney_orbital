@@ -6,6 +6,7 @@ type Engine = {
   renderer_status: () => string;
   camera_status: () => string;
   runtime_status: () => string;
+  telemetry_status: () => string;
   command: (json: string) => string;
   set_viewport_input: (active: boolean, locked: boolean) => void;
   set_movement_keys: (mask: number) => void;
@@ -36,6 +37,7 @@ const viewport = byId<HTMLElement>("simulation-viewport");
 const boot = byId<HTMLElement>("boot-screen");
 const progress = byId<HTMLProgressElement>("wasm-progress");
 let engine: Engine | undefined;
+let engineBuild: { bytes: number; sha256: string } | undefined;
 let ready = false;
 let failed = false;
 let platformMessage = "WebGPU · Click the scene to activate ship and debug controls";
@@ -218,8 +220,9 @@ function exportFlight() {
   if (!engine) return;
   const result = JSON.parse(engine.command(JSON.stringify({ op: "observe" })));
   if (!result.ok) { publishPlatform("Could not export the current mission"); return; }
-  const record = { exported_at: new Date().toISOString(), state: result.state,
+  const record = { exported_at: new Date().toISOString(), engine_build: engineBuild, state: result.state,
     camera: JSON.parse(engine.camera_status()), runtime: JSON.parse(engine.runtime_status()),
+    telemetry: JSON.parse(engine.telemetry_status()),
     model_limitations: result.state.model };
   const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: "application/json" }));
   const link = document.createElement("a"); link.href = url; link.download = `phobos-flight-${result.state.seed}.json`; link.click();
@@ -409,6 +412,7 @@ async function start() {
     const [module, bytes] = await Promise.all([import(moduleUrl), download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes)]);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     if (Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("") !== metadata.sha256) throw new Error("Engine integrity check failed. Reload to get the current build.");
+    engineBuild = { bytes: metadata.bytes, sha256: metadata.sha256 };
     progress.removeAttribute("value");
     byId("sim-status").textContent = "Starting Bevy 0.20";
     byId("wasm-progress-text").textContent = `Downloaded ${megabytes(bytes.byteLength)}. Compiling WebAssembly and WebGPU pipelines.`;

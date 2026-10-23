@@ -207,6 +207,9 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
         HudAction::ToggleAutopilot if playback.can_control => {
             crate::request_action(EngineAction::ToggleAutopilot)
         }
+        HudAction::TogglePracticeBoost if playback.can_control => {
+            crate::request_action(EngineAction::TogglePracticeBoost)
+        }
         HudAction::Fullscreen => {
             // Web fullscreen must be requested by the trusted DOM event adapter,
             // using the actual native hit/focus target before Bevy's next frame.
@@ -508,6 +511,16 @@ fn update_readouts(
             Readout::PathBrief => crate::navigation::brief(),
             Readout::PathDetails => crate::navigation::details(),
             Readout::FlightControls => flight_controls_readout(&playback),
+            Readout::TelemetryBrief => crate::telemetry::brief(),
+            Readout::TelemetryDetails => crate::telemetry::details(),
+            Readout::ThrustProfile => thrust_profile_readout(&playback),
+            Readout::BoostToggle => {
+                if playback.practice_boost {
+                    "Use reference Space thrust".into()
+                } else {
+                    "Use practice Space boost".into()
+                }
+            }
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
@@ -645,6 +658,7 @@ fn is_control(action: HudAction) -> bool {
             | HudAction::Export
             | HudAction::CycleRate
             | HudAction::ToggleAutopilot
+            | HudAction::TogglePracticeBoost
     )
 }
 
@@ -721,6 +735,22 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
     format!(
         "{state}\nLander: W/S forward/back, A/D left/right, Space/E lift, Q down.\nSide jets apply forces below the centre of mass, so they can roll or topple the lander. Debug exhaust streams show the opposite force direction.\nAlt/Option + movement keys: debug camera only. Shift boosts debug movement only.\nRelease keys to stop thrust, not linear or angular momentum. P pauses or resumes."
     )
+}
+
+fn thrust_profile_readout(playback: &PlaybackState) -> String {
+    let settings = crate::scenario::settings();
+    if playback.practice_boost {
+        format!(
+            "Space: PRACTICE BOOST {:.1} m/s² | {:.0}x reference\nNot competition thrust. Reset before comparing profiles.",
+            settings.practice.space_lift_accel_mps2,
+            settings.practice.space_lift_accel_mps2 / settings.lander.max_accel_mps2
+        )
+    } else {
+        format!(
+            "Space: reference limit {:.2} m/s²\nPractice dynamics, not an STP-equivalent simulator.",
+            settings.lander.max_accel_mps2
+        )
+    }
 }
 
 fn camera_readout(camera: crate::camera::CameraStatus) -> String {
