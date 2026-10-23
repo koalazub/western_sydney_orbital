@@ -64,6 +64,8 @@ The official actuator contains Isp 80 and g₀ 9.8, but its fuel accumulation us
 
 ## Local practice boundary
 
+The repository now also contains a separate [SDK-backed adapter](../../src/wsorb/stp_api.py) and [ControllerSystem entry point](../../examples/stp_controller.py). Its `SetCommand`, public radar, frame-qualified state, pan/tilt and capture functions delegate to the actual corroborated `spaceteams` methods. It imports the licensed SDK only when connecting, fails clearly when it is unavailable and contains no fake SDK backend. The entry point requests public radar rows and sends a zero-command placeholder until a reviewed policy replaces it. Syntax, lint and pure vector-validation checks do not establish live STP execution. The [README](../../README.md) explains runtime configuration and the single-command-writer requirement.
+
 These names belong to our WASM facade. They are not aliases for official SDK calls.
 
 | Local entry point | Use |
