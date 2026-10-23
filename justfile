@@ -48,6 +48,9 @@ format-module path:
 compile:
     nix shell --impure .#rust --command cargo check --manifest-path simulation/Cargo.toml --target wasm32-unknown-unknown --lib
 
+unit-check:
+    nix shell --impure .#game --command cargo test --manifest-path simulation/Cargo.toml --locked --lib
+
 # Compile and lint the actual engine and bundle the thin browser launcher.
 check:
     nix shell --impure .#rust --command cargo fmt --manifest-path simulation/Cargo.toml -- --check
@@ -92,6 +95,21 @@ local-check:
 # Observe real mouse, keyboard, native HUD and fullscreen behavior in Chrome.
 preview:
     PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-controls" nix shell --impure .#game --command npm --prefix worker run preview -- --controls --headed
+
+startup-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-startup" nix shell --impure .#game --command npm --prefix worker run preview -- --view=orbit
+
+hardware-startup-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hardware-startup" nix shell --impure .#game --command npm --prefix worker run preview -- --view=orbit --hardware --headed
+
+sensor-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors
+
+small-sensor-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-small-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --width=320 --height=600 --sensors
+
+hardware-sensor-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hardware-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors --hardware --headed
 
 platform-browser-check:
     PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-platform" nix shell --impure .#game --command npm --prefix worker run preview -- --platform
@@ -149,6 +167,9 @@ hosted-check:
 
 hosted-mission-check:
     PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-mission" nix shell --impure .#game --command npm --prefix worker run preview -- --run-mission --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
+
+hosted-sensor-check:
+    PREVIEW_OUTPUT_DIR="${TMPDIR:-/tmp}/opencode/wso-hosted-sensors" nix shell --impure .#game --command npm --prefix worker run preview -- --sensors --hardware --headed --url=https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/
 
 disable-ci:
     gh api --method PUT repos/koalazub/western_sydney_orbital/actions/permissions -F enabled=false

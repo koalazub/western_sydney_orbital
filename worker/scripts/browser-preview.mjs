@@ -13,9 +13,10 @@ const width = optionNumber("width", 1440, 320, 3840);
 const height = optionNumber("height", 1000, 240, 2160);
 const block = optionValue("block") || (process.argv.includes("--blockwasm") || process.argv.includes("--block-wasm") ? "wasm" : undefined);
 const view = optionValue("view");
-if (view && !["1", "2", "3", "4", "5", "orbit", "first_person", "third_person", "free", "overview"].includes(view)) throw new Error("--view must select 1/orbit, 2/first_person, 3/third_person, 4/free or 5/overview.");
+if (view && !["1", "2", "3", "4", "5", "6", "7", "orbit", "first_person", "third_person", "free", "overview", "ship_top", "ship_bottom"].includes(view)) throw new Error("--view must select debug view 1-5 or ship sensor 6/7.");
 const runMission = process.argv.includes("--run-mission") || process.argv.includes("--run-strategy");
 const doControls = process.argv.includes("--controls");
+const doSensors = process.argv.includes("--sensors");
 const doPlatform = process.argv.includes("--platform");
 const doStep = process.argv.includes("--step");
 const missionTimeout = optionNumber("mission-timeout", 120, 1, 600) * 1000;
@@ -45,7 +46,8 @@ const server = createServer(async (request, response) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const supplied = optionValue("url");
 const url = supplied || `http://127.0.0.1:${server.address().port}/`;
-const child = spawn(chrome, [...(process.argv.includes("--headed") ? [] : ["--headless=new"]), "--force-device-scale-factor=1", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--enable-unsafe-webgpu", "--enable-dawn-features=allow_unsafe_apis", "--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+const graphicsFlags = process.argv.includes("--hardware") ? [] : ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"];
+const child = spawn(chrome, [...(process.argv.includes("--headed") ? [] : ["--headless=new"]), "--force-device-scale-factor=1", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1", "--enable-unsafe-webgpu", "--enable-dawn-features=allow_unsafe_apis", ...graphicsFlags, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
 process.once("SIGTERM", () => { child.kill("SIGKILL"); process.exit(143); });
 let browserError = "";
 child.stderr.on("data", data => { browserError = (browserError + data).slice(-12_000); });
@@ -167,10 +169,11 @@ try {
   }
   let mission = { requested: runMission, status: null, timedOut: false, passed: false };
   if (runMission && ready) mission = await exerciseMission({ evaluate, readRuntime, input, delay, timeout: missionTimeout });
+  const sensors = doSensors && ready ? await exerciseSensors({ evaluate, readRuntime, input, capture }) : null;
   let selectedView = null;
   if (view && ready) {
-    const viewKey = ({ orbit:"1", first_person:"2", third_person:"3", free:"4", overview:"5" })[view] || view;
-    const expected = ({ "1":"orbit", "2":"first_person", "3":"third_person", "4":"free", "5":"overview" })[viewKey];
+    const viewKey = ({ orbit:"1", first_person:"2", third_person:"3", free:"4", overview:"5", ship_top:"6", ship_bottom:"7" })[view] || view;
+    const expected = ({ "1":"orbit", "2":"first_person", "3":"third_person", "4":"free", "5":"overview", "6":"ship_top", "7":"ship_bottom" })[viewKey];
     await input.focusScene();
     await input.pressKey(viewKey);
     const actual = (await readRuntime())?.camera?.mode;
@@ -199,8 +202,9 @@ try {
   if (runMission && !mission.passed) failed = true;
   if (view && !selectedView?.passed) failed = true;
   if (doControls && (!controls || controls.result !== "PASS")) failed = true;
+  if (doSensors && sensors?.result !== "PASS") failed = true;
   if (doPlatform && (!platform?.maximize?.passed || !platform?.fullscreen?.passed)) failed = true;
-  report = { url: redactUrl(url), viewport: { width, height }, requested: { block, view, step: doStep, runMission, controls: doControls, platform: doPlatform }, engine, gpu, softwareRenderer: gpu?.isFallbackAdapter === true || /swiftshader|software|llvmpipe/i.test(JSON.stringify(gpu?.info)), state: { before, after }, canvasOnly, runtime: { readable: runtimeReadable, before: runtimeBefore, after: runtimeAfter, motion: { shuttlePoseChanged: poseChanged, simulationTimeChanged } }, selectedView, controls, platform, mission, step, blockedOutcomeObserved: block ? expectedBlockedOutcome : null, messages: messages.slice(-200), networkFailures: requests.slice(-200), result: failed ? "FAIL" : "PASS" };
+  report = { url: redactUrl(url), viewport: { width, height }, requested: { block, view, step: doStep, runMission, controls: doControls, sensors: doSensors, platform: doPlatform }, engine, gpu, softwareRenderer: gpu?.isFallbackAdapter === true || /swiftshader|software|llvmpipe/i.test(JSON.stringify(gpu?.info)), startup: await evaluate("globalThis.__wsorbStartup || null"), state: { before, after }, canvasOnly, runtime: { readable: runtimeReadable, before: runtimeBefore, after: runtimeAfter, motion: { shuttlePoseChanged: poseChanged, simulationTimeChanged } }, selectedView, controls, sensors, platform, mission, step, blockedOutcomeObserved: block ? expectedBlockedOutcome : null, messages: messages.slice(-200), networkFailures: requests.slice(-200), result: failed ? "FAIL" : "PASS" };
   await writeFile(join(output, "preview.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   console.log(`Screenshots: ${join(output, "before.png")} and ${join(output, "preview.png")}`);
@@ -641,6 +645,122 @@ async function exerciseMission({ evaluate, readRuntime, input, delay, timeout })
   const result = { requested: true, status, phase: terminal?.phase, score: terminal?.score, timedOut, timeoutSeconds: timeout / 1000, wallElapsedSeconds: (Date.now() - start) / 1000, simulatedElapsedSeconds, samples, phases, initial: { runtime: initial.runtime, time_s: initial.snapshot?.time_s, mission: initial.snapshot?.mission, shuttle: initial.snapshot?.shuttle }, terminal: { runtime: latest.runtime, time_s: latest.snapshot?.time_s, mission: terminal, shuttle: latest.snapshot?.shuttle, target: latest.snapshot?.target }, motion: { maximumDisplacementM, sampledPathLengthM: pathLengthM, shuttlePoseChanged: maximumDisplacementM > .01 }, pausedAfter, error: latest.error || null };
   result.passed = !timedOut && !latest.error && initial.snapshot?.mission?.phase === "on_pad" && initial.runtime?.autopilot === true && status === "success" && terminal?.phase === "arrived" && Number.isFinite(terminal?.score) && simulatedElapsedSeconds > 0 && maximumDisplacementM > .01 && pausedAfter;
   return result;
+}
+
+async function exerciseSensors({ evaluate, readRuntime, input, capture }) {
+  const result = { views: {}, captures: {}, fixedPose: false, debugIsolation: false, lighting: null, result: "FAIL" };
+  const pixels = async (id, name) => {
+    const frame = await evaluate(`(${sensorPixels})(${JSON.stringify(id)})`, 30_000);
+    if (frame.error) throw new Error(frame.error);
+    await writeFile(join(output, `${name}.png`), Buffer.from(frame.png, "base64"));
+    delete frame.png;
+    result.captures[name] = frame;
+    return frame;
+  };
+  const restore = async (kind, occluded) => {
+    await evaluate(`(${sensorScene})(${JSON.stringify(kind)},${JSON.stringify(occluded)})`);
+    await input.waitFrames(4, 350);
+  };
+  try {
+    await input.focusScene({ preserveFocus: true });
+    await evaluate(`(async()=>{const m=await import('/sim/wsorb_bevy.js');globalThis.__previewSensorOriginal=JSON.parse(m.command(JSON.stringify({op:'observe'}))).state;return true})()`);
+    await input.waitFrames(4, 350);
+    const before = await readRuntime({ physics: true });
+    for (const [key, id, mode] of [["6", "top", "ship_top"], ["7", "bottom", "ship_bottom"]]) {
+      await input.pressKey(key);
+      const state = await readRuntime({ physics: true });
+      result.views[id] = { mode: state.camera?.mode, position_m: state.camera?.position_m, passed: state.camera?.mode === mode && samePhysics(before, state) && state.renderer?.ready === true };
+      await capture(`ship-${id}-view.png`);
+      const frame = await pixels(id, `ship-${id}-raw`);
+      if (frame.width !== 512 || frame.height !== 512 || frame.channels !== 3 || frame.bits_per_channel !== 8 || frame.byteLength !== 512 * 512 * 3 || frame.debug_overlays !== false) throw new Error(`Invalid ${id} sensor format: ${JSON.stringify(frame)}`);
+    }
+    await input.pressKey("6");
+    const mounted = (await readRuntime({ statusOnly: true })).camera;
+    await input.drag("left", 36, 8);
+    const point = await input.moveToScene();
+    await input.mouse("mouseWheel", point.x, point.y, { deltaY: -120 });
+    const afterDrag = (await readRuntime({ statusOnly: true })).camera;
+    result.fixedPose = sameCamera(mounted, afterDrag);
+    const beforeDebug = await pixels("top", "ship-top-before-debug");
+    await input.pressKey("4");
+    const debugBefore = (await readRuntime({ statusOnly: true })).camera;
+    await input.keyDown("KeyW");
+    await delay(200);
+    await input.keyUp("KeyW");
+    const debugAfter = (await readRuntime({ statusOnly: true })).camera;
+    const afterDebug = await pixels("top", "ship-top-after-debug");
+    result.debugIsolation = beforeDebug.sha256 === afterDebug.sha256 && debugAfter?.mode === "free" && vectorDistance(debugBefore?.position_m, debugAfter?.position_m) > .01 && samePhysics(before, await readRuntime({ physics: true }));
+    await restore("mars", false);
+    const marsBackground = await pixels("top", "mars-background");
+    await restore("mars", true);
+    const marsDebris = await pixels("top", "mars-debris");
+    await restore("sun", false);
+    const sunBackground = await pixels("top", "sun-background");
+    await restore("sun", true);
+    const sunDebris = await pixels("top", "sun-silhouette");
+    const contrast = Math.abs(marsBackground.centerMean - marsDebris.centerMean) / Math.max(1, marsBackground.centerMean + marsDebris.centerMean);
+    result.mountFollowsShip = vectorDistance(marsBackground.position_m, [2, 0, 60000]) < .01 && vectorDistance(sunBackground.position_m, [-2, 0, 60000]) < .01;
+    result.lighting = { marsBackground, marsDebris, sunBackground, sunDebris, marsContrast: contrast,
+      passed: sunBackground.centerPeak > 200 && sunDebris.centerPeak < 10 && marsBackground.centerMean > 10 && marsDebris.centerMean > 10 && contrast < .45 };
+    result.rgb8ColorDiversity = Math.max(...Object.values(result.captures).map(frame => frame.uniqueColors)) > 256;
+    result.result = Object.values(result.views).every(view => view.passed) && result.fixedPose && result.mountFollowsShip && result.debugIsolation && result.rgb8ColorDiversity && result.lighting.passed ? "PASS" : "FAIL";
+  } catch (error) { result.error = error.stack || String(error); }
+  finally {
+    await evaluate(`(async()=>{if(!globalThis.__previewSensorOriginal)return;const m=await import('/sim/wsorb_bevy.js');const r=JSON.parse(m.command(JSON.stringify({op:'restore',state:globalThis.__previewSensorOriginal})));delete globalThis.__previewSensorOriginal;if(!r.ok)throw new Error(r.error)})()`).catch(error => { result.restoreError = String(error); result.result = "FAIL"; });
+    await input.focusScene({ preserveFocus: true }).catch(() => {});
+    await input.pressKey("1").catch(() => {});
+  }
+  return result;
+}
+
+// A paused, browser-local optical fixture. It only moves existing dynamic
+// bodies; scenario geometry, material, lighting and physical parameters stay fixed.
+async function sensorScene(kind, occluded) {
+  const m = await import("/sim/wsorb_bevy.js");
+  const state = structuredClone(globalThis.__previewSensorOriginal);
+  if (!state) throw new Error("Original optical fixture state is missing");
+  const ship = state.assets.find(asset => asset.id === "Shuttle");
+  const debris = state.assets.filter(asset => asset.kind === "asteroid");
+  const largest = debris.reduce((a, b) => a.radius_m > b.radius_m ? a : b);
+  for (let i = 0; i < debris.length; i++) {
+    debris[i].position = [50000 + i % 25 * 2000, 200000 + Math.floor(i / 25) * 2000, 300000];
+    debris[i].velocity = [0, 0, 0]; debris[i].angular_velocity_rad_s = [0, 0, 0];
+  }
+  const sign = kind === "mars" ? 1 : -1;
+  ship.position = [0, 0, 60000]; ship.velocity = [0, 0, 0]; ship.angular_velocity_rad_s = [0, 0, 0];
+  ship.rotation = [0, sign * Math.SQRT1_2, 0, Math.SQRT1_2];
+  ship.commanded_accel_mps2 = [0, 0, 0]; ship.commanded_angular_accel_rad_s2 = [0, 0, 0];
+  if (occluded) largest.position = [sign * 1000, 0, 60000];
+  const response = JSON.parse(m.command(JSON.stringify({ op: "restore", state })));
+  if (!response.ok) throw new Error(`Optical fixture restore failed: ${response.error}`);
+}
+
+async function sensorPixels(id) {
+  try {
+    const m = await import("/sim/wsorb_bevy.js");
+    const { rgb, ...metadata } = await m.ship_camera_capture(id);
+    if (!(rgb instanceof Uint8Array)) throw new Error("Ship capture did not return RGB bytes");
+    const rgba = new Uint8ClampedArray(metadata.width * metadata.height * 4);
+    const colors = new Set(); let black = 0, bright = 0, centerMean = 0, centerPeak = 0, count = 0;
+    for (let i = 0; i < rgb.length / 3; i++) {
+      const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+      rgba.set([r, g, b, 255], i * 4); colors.add(r << 16 | g << 8 | b);
+      const luma = .2126 * r + .7152 * g + .0722 * b;
+      if (Math.max(r, g, b) < 4) black++;
+      if (Math.min(r, g, b) > 240) bright++;
+      const x = i % metadata.width, y = Math.floor(i / metadata.width);
+      if (Math.abs(x - metadata.width / 2) < 4 && Math.abs(y - metadata.height / 2) < 4) {
+        centerMean += luma; centerPeak = Math.max(centerPeak, r, g, b); count++;
+      }
+    }
+    const canvas = new OffscreenCanvas(metadata.width, metadata.height), context = canvas.getContext("2d", { colorSpace: "srgb" });
+    context.putImageData(new ImageData(rgba, metadata.width, metadata.height), 0, 0);
+    const png = new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
+    let binary = ""; for (let i = 0; i < png.length; i += 32768) binary += String.fromCharCode(...png.subarray(i, i + 32768));
+    const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", rgb));
+    return { ...metadata, byteLength: rgb.length, uniqueColors: colors.size, blackPixels: black, brightPixels: bright,
+      centerMean: centerMean / count, centerPeak, sha256: Array.from(hash, b => b.toString(16).padStart(2, "0")).join(""), png: btoa(binary) };
+  } catch (error) { return { error: String(error) }; }
 }
 
 function vectorDistance(a, b) {
