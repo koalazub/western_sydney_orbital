@@ -67,11 +67,12 @@ function inputState() {
   engine?.set_viewport_input(active, locked);
 }
 function fail(message: string) {
+  if (failed) return;
   ready = false; failed = true;
   recordStartup(message);
   boot.hidden = false;
   byId("sim-status").textContent = "3D unavailable";
-  byId("world-message").textContent = `${message} Check WebGPU support and graphics acceleration, then reload.`;
+  byId("world-message").textContent = message;
   byId("wasm-progress-text").textContent = "Simulation could not start.";
   progress.removeAttribute("value");
   byId("retry-world").hidden = false;
@@ -234,7 +235,7 @@ async function start() {
     const gpu = (navigator as any).gpu;
     if (!gpu) throw new Error("WebGPU is required. Use a current browser with WebGPU enabled.");
     const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (!adapter) throw new Error("No WebGPU adapter is available. Enable graphics acceleration.");
+    if (!adapter) throw new Error("The browser did not provide a WebGPU adapter.");
     (globalThis as any).__wsorbGPU = { backend: "WebGPU", vendor: adapter.info?.vendor || "", architecture: adapter.info?.architecture || "", device: adapter.info?.device || "", description: adapter.info?.description || "", fallback: adapter.isFallbackAdapter ?? adapter.info?.isFallbackAdapter ?? false };
     startupPhase = "downloading_engine"; recordStartup();
     const manifest = await fetch("/sim/manifest.json", { cache: "no-cache" });

@@ -5,7 +5,7 @@ use bevy::{
     pbr::DrawMaterial,
     prelude::*,
     render::{
-        Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
+        Extract, ExtractSchedule, Render, RenderApp, RenderPlugin, RenderStartup, RenderSystems,
         camera::ExtractedCamera,
         error_handler::{RenderErrorHandler, RenderErrorPolicy},
         render_phase::{
@@ -13,7 +13,8 @@ use bevy::{
             RenderCommandState, TrackedRenderPass,
         },
         render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor},
-        renderer::{RenderAdapterInfo, RenderQueue},
+        renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
+        settings::{WgpuFeatures, WgpuSettings, WgpuSettingsPriority},
         sync_world::{MainEntity, RenderEntity},
         view::{ExtractedWindow, ViewTarget},
     },
@@ -57,6 +58,7 @@ struct AdapterState {
     backend: String,
     device_type: String,
     driver: String,
+    features: String,
 }
 
 #[derive(Default, serde::Serialize)]
@@ -80,6 +82,16 @@ struct RendererState {
 }
 
 impl RendererState {
+    fn record_failure(&mut self, message: String) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        self.ready = false;
+        self.stage = StartupStage::Failed;
+        self.error = Some(message);
+        true
+    }
+
     fn refresh_ready(&mut self) {
         self.completed_primary_frame = self.completion.load(Ordering::Acquire);
         if self.error.is_some() {
@@ -105,12 +117,11 @@ pub fn status() -> String {
 }
 
 fn fail(message: String) {
-    RENDERER.with(|state| {
-        let mut state = state.borrow_mut();
-        state.ready = false;
-        state.stage = StartupStage::Failed;
-        state.error = Some(message.clone());
-    });
+    // A rejected shader can cause several later "module is invalid" errors.
+    // Keep the first compiler/device error instead of replacing it with fallout.
+    if !RENDERER.with(|state| state.borrow_mut().record_failure(message.clone())) {
+        return;
+    }
     #[cfg(target_arch = "wasm32")]
     if let Ok(callback) = js_sys::Reflect::get(&js_sys::global(), &"__wsorbEngineError".into())
         && let Some(callback) = callback.dyn_ref::<js_sys::Function>()
@@ -175,7 +186,7 @@ fn pipeline_label(descriptor: &PipelineDescriptor) -> &str {
     .unwrap_or("unnamed pipeline")
 }
 
-fn observe_device(adapter: Res<RenderAdapterInfo>) {
+fn observe_device(adapter: Res<RenderAdapterInfo>, device: Res<RenderDevice>) {
     RENDERER.with(|state| {
         let mut state = state.borrow_mut();
         state.adapter = Some(AdapterState {
@@ -183,6 +194,7 @@ fn observe_device(adapter: Res<RenderAdapterInfo>) {
             backend: format!("{:?}", adapter.backend),
             device_type: format!("{:?}", adapter.device_type),
             driver: adapter.driver.clone(),
+            features: format!("{:?}", device.features()),
         });
         if !state.ready && state.error.is_none() {
             state.stage = StartupStage::PreparingView;
@@ -290,6 +302,16 @@ fn observe_frame(
     });
 }
 
+fn browser_render_settings() -> WgpuSettings {
+    // Request the common WebGPU baseline, not every optional feature advertised
+    // by one adapter. Bevy selects its supported shader paths from this device.
+    WgpuSettings {
+        priority: WgpuSettingsPriority::WebGPU,
+        features: WgpuFeatures::empty(),
+        ..default()
+    }
+}
+
 pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
     let already_started =
         RENDERER.with(|state| std::mem::replace(&mut state.borrow_mut().started, true));
@@ -301,15 +323,22 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::BLACK))
         .init_resource::<crate::PlaybackState>()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                canvas: Some(canvas_selector.into()),
-                fit_canvas_to_parent: true,
-                prevent_default_event_handling: false,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(RenderPlugin {
+                    render_creation: browser_render_settings().into(),
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        canvas: Some(canvas_selector.into()),
+                        fit_canvas_to_parent: true,
+                        prevent_default_event_handling: false,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .insert_resource(RenderErrorHandler(|error, main_world, _| {
             fail(format!("WebGPU {:?}: {}", error.ty, error.description));
             main_world.write_message(AppExit::error());
@@ -359,6 +388,28 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_renderer_does_not_enable_optional_adapter_features() {
+        let settings = browser_render_settings();
+        assert!(matches!(settings.priority, WgpuSettingsPriority::WebGPU));
+        assert!(settings.features.is_empty());
+        assert!(settings.adapter_name.is_none());
+        assert!(!settings.force_fallback_adapter);
+    }
+
+    #[test]
+    fn first_shader_error_is_not_replaced_by_invalid_module_fallout() {
+        let mut state = RendererState::default();
+        assert!(state.record_failure("WGSL compiler: unsupported declaration".into()));
+        assert!(!state.record_failure("Fragment module is invalid".into()));
+        assert_eq!(
+            state.error.as_deref(),
+            Some("WGSL compiler: unsupported declaration")
+        );
+        assert!(!state.ready);
+        assert!(state.stage == StartupStage::Failed);
+    }
 
     #[test]
     fn readiness_requires_gpu_completion_not_pipeline_or_frame_counts() {
