@@ -1,6 +1,7 @@
 //! Fixed-resolution ship sensors, separate from the unrestricted debug viewer.
 mod capture;
 mod model;
+mod optics;
 mod systems;
 mod view;
 

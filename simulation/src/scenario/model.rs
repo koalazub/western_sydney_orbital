@@ -1,5 +1,5 @@
 use crate::domain::{LagrangeRegion, ShipCameraId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Scenario {
@@ -108,11 +108,14 @@ pub struct Sensors {
 }
 
 /// Fixed optics for two RGB8 sensors. Each color channel has eight bits.
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ShipCameras {
     pub resolution_px: [u32; 2],
-    /// Vertical field of view. The initial 90 degrees is a practice-scenario choice.
+    /// Full angle, not the half-angle from the optical axis to an image edge.
     pub field_of_view_deg: f32,
+    pub field_of_view_convention: FieldOfViewConvention,
+    pub field_of_view_source: CameraSource,
+    pub mount_source: CameraSource,
     pub near_clip_m: f64,
     pub far_clip_m: f64,
     pub cadence_hz: f64,
@@ -122,13 +125,39 @@ pub struct ShipCameras {
     pub mounts: [CameraMount; 2],
 }
 
-/// Mount pose in the lander body frame, whose +Z axis points out from the pad.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldOfViewConvention {
+    VerticalFullAngle,
+    HorizontalFullAngle,
+    DiagonalFullAngle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraSourceStatus {
+    PracticeUnverified,
+    DocumentedExample,
+    DocumentedStp,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CameraSource {
+    pub status: CameraSourceStatus,
+    pub url: String,
+    pub note: String,
+}
+
+/// STP body frame: +X forward, +Y left, +Z up. The lander's +Z launch axis is unchanged.
+/// Aim follows the documented passive body-to-camera Euler 3-2-1 transform, with zero roll.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct CameraMount {
     pub id: ShipCameraId,
     pub position_m: [f64; 3],
-    pub forward: [f32; 3],
-    pub up: [f32; 3],
+    pub yaw_limits_deg: [f32; 2],
+    pub pitch_limits_deg: [f32; 2],
+    pub aim_yaw_deg: f32,
+    pub aim_pitch_deg: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

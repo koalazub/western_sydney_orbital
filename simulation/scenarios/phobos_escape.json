@@ -32,15 +32,26 @@
   "sensors": { "range_noise_m": 2.0, "range_rate_noise_mps": 0.02, "cadence_hz": 10.0, "minimum_reported_diameter_m": 0.01 },
   "ship_cameras": {
     "resolution_px": [512, 512],
-    "field_of_view_deg": 90.0,
+    "field_of_view_deg": 60.0,
+    "field_of_view_convention": "vertical_full_angle",
+    "field_of_view_source": {
+      "status": "documented_example",
+      "url": "https://github.com/SimDynamX/STU4-Solution/blob/8545c085426a71c39cbe1d544a844b3edb757007/UserAPI.py#L124-L132",
+      "note": "The official starter captures a 512x512 image with FOV=60 degrees. Use that published example as the local default, not as a mandatory competition limit. The API exposes configurable FOV without an axis/full-half-angle specification. This local projection uses a vertical full angle; horizontal equals vertical for the square image. Fixed EV100 15 remains the practice exposure setting, not the example's exposure."
+    },
+    "mount_source": {
+      "status": "documented_stp",
+      "url": "https://github.com/SimDynamX/STU4-Solution/wiki/1.-Vehicle-Specs-and-Model-Details#cameras",
+      "note": "Positions and yaw/pitch limits follow the official table. Aim uses the documented zero-roll Euler 3-2-1 command, positive yaw left and positive pitch down, with camera +X forward and +Z up. Both feeds are held at the allowed yaw=0, pitch=0 command. This does not claim to reproduce the initial simconf camera rotations or STP rendering."
+    },
     "near_clip_m": 0.05,
     "far_clip_m": 20000000.0,
     "cadence_hz": 10.0,
     "exposure_ev100": 15.0,
     "ambient_brightness": 0.0,
     "mounts": [
-      { "id": "top", "position_m": [0.0, 0.0, 2.0], "forward": [0.0, 0.0, 1.0], "up": [0.0, 1.0, 0.0] },
-      { "id": "bottom", "position_m": [0.0, 0.0, -1.95], "forward": [0.0, 0.0, -1.0], "up": [0.0, 1.0, 0.0] }
+      { "id": "top", "position_m": [1.27, 0.0, 0.9], "yaw_limits_deg": [-89.0, 89.0], "pitch_limits_deg": [-50.0, 0.0], "aim_yaw_deg": 0.0, "aim_pitch_deg": 0.0 },
+      { "id": "bottom", "position_m": [1.675, 0.0, -1.025], "yaw_limits_deg": [-89.0, 89.0], "pitch_limits_deg": [0.0, 50.0], "aim_yaw_deg": 0.0, "aim_pitch_deg": 0.0 }
     ]
   },
   "lighting": {

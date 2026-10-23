@@ -1,4 +1,4 @@
-use super::{capture, model::*};
+use super::{capture, model::*, optics};
 use crate::{
     camera::SimulationCamera,
     domain::{EntityId, ShipCameraId},
@@ -38,10 +38,9 @@ pub(crate) fn pose(id: ShipCameraId, state: &Snapshot) -> Transform {
     let attitude = Quat::from_array(ship.rotation.map(|value| value as f32)).normalize();
     let position = Vec3::from_array(ship.position.map(|value| (value * 0.001) as f32));
     let offset = Vec3::from_array(mount.position_m.map(|value| (value * 0.001) as f32));
-    Transform::from_translation(position + attitude * offset).looking_to(
-        attitude * Vec3::from_array(mount.forward),
-        attitude * Vec3::from_array(mount.up),
-    )
+    let (forward, up) = optics::body_axes(mount);
+    Transform::from_translation(position + attitude * offset)
+        .looking_to(attitude * forward, attitude * up)
 }
 
 pub(super) fn setup(
@@ -71,13 +70,7 @@ pub(super) fn setup(
                 ..default()
             },
             RenderTarget::Image(handle.clone().into()),
-            Projection::Perspective(PerspectiveProjection {
-                fov: config.field_of_view_deg.to_radians(),
-                near: (config.near_clip_m * 0.001) as f32,
-                far: (config.far_clip_m * 0.001) as f32,
-                aspect_ratio: 1.0,
-                ..default()
-            }),
+            Projection::Perspective(optics::projection(config)),
             Exposure {
                 ev100: config.exposure_ev100,
             },
@@ -113,6 +106,9 @@ pub(super) fn setup(
 
 fn info(id: ShipCameraId, transform: Transform, time_s: f64, sequence: u64) -> FrameInfo {
     let config = &settings().ship_cameras;
+    let angles = optics::field_of_view(config);
+    let mount = &config.mounts[id.index()];
+    let (forward, up) = optics::body_axes(mount);
     FrameInfo {
         camera: id,
         sequence,
@@ -123,6 +119,12 @@ fn info(id: ShipCameraId, transform: Transform, time_s: f64, sequence: u64) -> F
         color_space: ColorSpace::Srgb,
         render_format: RenderFormat::Rgba8UnormSrgb,
         field_of_view_deg: config.field_of_view_deg,
+        field_of_view_convention: config.field_of_view_convention,
+        field_of_view_status: config.field_of_view_source.status,
+        field_of_view_source_url: config.field_of_view_source.url.clone(),
+        horizontal_field_of_view_deg: angles.horizontal_deg,
+        vertical_field_of_view_deg: angles.vertical_deg,
+        diagonal_field_of_view_deg: angles.diagonal_deg,
         exposure_ev100: config.exposure_ev100,
         ambient_brightness: config.ambient_brightness,
         simulation_time_s: time_s,
@@ -132,6 +134,14 @@ fn info(id: ShipCameraId, transform: Transform, time_s: f64, sequence: u64) -> F
             .to_array()
             .map(|value| value * 1000.0),
         rotation: transform.rotation.to_array(),
+        mount_source_url: config.mount_source.url.clone(),
+        mount_position_body_m: mount.position_m,
+        mount_forward_body: forward.to_array(),
+        mount_up_body: up.to_array(),
+        mount_yaw_deg: mount.aim_yaw_deg,
+        mount_pitch_deg: mount.aim_pitch_deg,
+        mount_yaw_limits_deg: mount.yaw_limits_deg,
+        mount_pitch_limits_deg: mount.pitch_limits_deg,
         fixed_ship_mount: true,
         debug_overlays: false,
     }

@@ -215,7 +215,7 @@ fn validate_sensors(s: &Scenario) -> Result<(), &'static str> {
 }
 
 fn validate_ship_cameras(s: &Scenario) -> Result<(), &'static str> {
-    let cameras = s.ship_cameras;
+    let cameras = &s.ship_cameras;
     if cameras.resolution_px != [512, 512]
         || !cameras.field_of_view_deg.is_finite()
         || cameras.field_of_view_deg <= 0.0
@@ -231,34 +231,39 @@ fn validate_ship_cameras(s: &Scenario) -> Result<(), &'static str> {
     {
         return Err("ship camera optics, fixed exposure, or cadence are outside configured bounds");
     }
+    for source in [&cameras.field_of_view_source, &cameras.mount_source] {
+        if !source.url.starts_with("https://") || source.note.trim().is_empty() {
+            return Err("ship camera parameters must identify their source and limitations");
+        }
+    }
     for (mount, expected) in cameras
         .mounts
         .iter()
         .zip([ShipCameraId::Top, ShipCameraId::Bottom])
     {
-        let forward = mount.forward.map(f64::from);
-        let up = mount.up.map(f64::from);
-        let forward_length_squared = dot(forward, forward);
-        let up_length_squared = dot(up, up);
         if mount.id != expected
             || !mount
                 .position_m
                 .iter()
                 .all(|value| value.is_finite() && value.abs() <= 1_000.0)
-            || !forward
-                .iter()
-                .chain(&up)
-                .all(|value| value.is_finite() && value.abs() <= 1_000.0)
-            || forward_length_squared <= 1.0e-12
-            || up_length_squared <= 1.0e-12
-            || dot(forward, up).abs() > 1.0e-5 * (forward_length_squared * up_length_squared).sqrt()
+            || !valid_camera_aim(mount.aim_yaw_deg, mount.yaw_limits_deg, 180.0)
+            || !valid_camera_aim(mount.aim_pitch_deg, mount.pitch_limits_deg, 90.0)
         {
             return Err(
-                "ship camera mounts must be ordered top/bottom with finite orthogonal axes",
+                "ship camera mounts must be ordered top/bottom with finite positions and bounded aim",
             );
         }
     }
     Ok(())
+}
+
+fn valid_camera_aim(angle: f32, limits: [f32; 2], maximum: f32) -> bool {
+    angle.is_finite()
+        && limits
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= maximum)
+        && limits[0] < limits[1]
+        && (limits[0]..=limits[1]).contains(&angle)
 }
 
 fn validate_lighting(s: &Scenario) -> Result<(), &'static str> {
@@ -361,4 +366,44 @@ fn bounded_positive(values: &[f64], maximum: f64) -> bool {
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a.into_iter().zip(b).map(|(a, b)| a * b).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_fov_rejects_nonfinite_zero_and_out_of_range_angles() {
+        let mut scenario = crate::scenario::settings().clone();
+        for angle in [0.0, -1.0, 179.0, 180.0, f32::NAN, f32::INFINITY] {
+            scenario.ship_cameras.field_of_view_deg = angle;
+            assert!(validate_ship_cameras(&scenario).is_err());
+        }
+    }
+
+    #[test]
+    fn camera_aim_must_be_finite_and_inside_its_declared_limits() {
+        assert!(valid_camera_aim(-50.0, [-50.0, 0.0], 90.0));
+        assert!(valid_camera_aim(0.0, [-50.0, 0.0], 90.0));
+        assert!(!valid_camera_aim(0.1, [-50.0, 0.0], 90.0));
+        assert!(!valid_camera_aim(-50.1, [-50.0, 0.0], 90.0));
+        assert!(!valid_camera_aim(f32::NAN, [-50.0, 0.0], 90.0));
+        assert!(!valid_camera_aim(0.0, [f32::NEG_INFINITY, 0.0], 90.0));
+        assert!(!valid_camera_aim(0.0, [0.0, -50.0], 90.0));
+        assert!(!valid_camera_aim(0.0, [-91.0, 0.0], 90.0));
+    }
+
+    #[test]
+    fn camera_mount_order_aim_and_capture_dimensions_are_validated() {
+        let mut scenario = crate::scenario::settings().clone();
+        assert!(validate_ship_cameras(&scenario).is_ok());
+        scenario.ship_cameras.resolution_px = [512, 256];
+        assert!(validate_ship_cameras(&scenario).is_err());
+        scenario.ship_cameras.resolution_px = [512, 512];
+        scenario.ship_cameras.mounts[0].aim_pitch_deg = 1.0;
+        assert!(validate_ship_cameras(&scenario).is_err());
+        scenario.ship_cameras.mounts[0].aim_pitch_deg = 0.0;
+        scenario.ship_cameras.mounts.swap(0, 1);
+        assert!(validate_ship_cameras(&scenario).is_err());
+    }
 }
