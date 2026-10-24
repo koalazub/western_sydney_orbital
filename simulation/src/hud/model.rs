@@ -10,8 +10,15 @@ pub(crate) struct HudState {
 
 impl HudState {
     pub(crate) fn movement_blocked(&self) -> bool {
-        self.reset_confirm_open
+        self.reset_confirm_open || crate::controls::manual_input_blocked()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InteractionMode {
+    Ready,
+    ResetConfirmation,
+    Rebinding,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,8 +59,20 @@ pub(super) struct HudRoot;
 #[derive(Component)]
 pub(super) struct DetailsPanel;
 
-#[derive(Component)]
-pub(super) struct FullscreenButton;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PlatformButton {
+    Fullscreen,
+    Notebook,
+}
+
+impl PlatformButton {
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::Fullscreen => 0,
+            Self::Notebook => 1,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ModalFocus {
@@ -61,7 +80,7 @@ pub(super) struct ModalFocus {
     pub previous: Option<Entity>,
 }
 
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug)]
 pub(super) enum HudAction {
     TogglePlayback,
     Step,
@@ -72,6 +91,9 @@ pub(super) enum HudAction {
     Export,
     CycleRate,
     Fullscreen,
+    Notebook,
+    ChangeBinding(crate::controls::Action),
+    RestoreBindings,
     Maximize,
     ToggleCapture,
     ToggleDetails,
@@ -94,6 +116,10 @@ pub(super) enum Readout {
     TelemetryDetails,
     ReferenceThrust,
     InputSettings,
+    BindingStatus,
+    Binding(crate::controls::Action),
+    FlightHint,
+    Notebook,
     Mission,
     Environment,
     CameraMode,

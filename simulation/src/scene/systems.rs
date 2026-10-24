@@ -28,6 +28,7 @@ pub fn setup(
     commands.insert_resource(SceneState {
         seed: snapshot.seed,
         time_s: snapshot.time_s,
+        experiment_settings: snapshot.experiment_settings,
         ..default()
     });
     commands.spawn((
@@ -188,9 +189,13 @@ pub fn sync_scene(
             }
         };
     }
-    if snapshot.seed != state.seed || snapshot.time_s < state.time_s {
+    if snapshot.seed != state.seed
+        || snapshot.time_s < state.time_s
+        || snapshot.experiment_settings != state.experiment_settings
+    {
         state.trails.clear();
         state.seed = snapshot.seed;
+        state.experiment_settings = snapshot.experiment_settings;
     }
     let by_id: HashMap<EntityId, _> = snapshot
         .assets
@@ -261,11 +266,6 @@ pub fn sync_scene(
         }
     }
     state.trails.retain(|id, _| active.contains(id));
-    state.last_positions = snapshot
-        .assets
-        .iter()
-        .map(|a| (a.id, RenderScale::position(a.position)))
-        .collect();
     for (id, path) in &state.trails {
         let color = if *id == EntityId::Lander {
             Color::srgb(0.98, 0.66, 0.28)

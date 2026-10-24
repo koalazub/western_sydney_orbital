@@ -13,6 +13,7 @@ await mkdir(output, { recursive: true });
 await rm(resolve(output, "python-worker.js"), { force: true });
 await Promise.all([
   copyFile(resolve(source, "index.html"), resolve(output, "index.html")),
+  copyFile(resolve(source, "notebook.html"), resolve(output, "notebook.html")),
   copyFile(resolve(source, "styles.css"), resolve(output, "styles.css")),
   copyFile(resolve(source, ".assetsignore"), resolve(output, ".assetsignore")),
 ]);

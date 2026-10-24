@@ -11,9 +11,13 @@ type Engine = {
   command: (json: string) => string;
   set_viewport_input: (active: boolean, locked: boolean) => void;
   set_movement_keys: (mask: number) => void;
+  key_bindings_status: () => string;
+  set_key_bindings: (json: string) => string;
   pinch_zoom: (logDistanceDelta: number) => void;
   fullscreen_button_at: (x: number, y: number) => boolean;
   fullscreen_button_focused: () => boolean;
+  notebook_button_at: (x: number, y: number) => boolean;
+  notebook_button_focused: () => boolean;
   platform_state: (fullscreen: boolean, maximized: boolean, message: string) => void;
 };
 type StartupStage =
@@ -96,7 +100,8 @@ let startupPhase = "checking_graphics";
 let startupVisibleWait = 0;
 let lastRendererStatus: RendererStatus | undefined;
 let fullscreenPending = false;
-let fullscreenPress: number | null = null;
+type TrustedAction = "fullscreen" | "notebook";
+let platformPress: { pointerId: number; action: TrustedAction } | null = null;
 let gestureScale: number | null = null;
 let pointerLockExitPending = false;
 const movementBits = new Map([
@@ -109,6 +114,47 @@ const movementBits = new Map([
   ["Space", 1 << 9],
 ]);
 const movementHeld = new Set<string>();
+const BINDINGS_STORAGE = "wsorb.ship-bindings.v1";
+let bindingRevision: number | undefined;
+let bindingsCapturing = false;
+
+function syncBindings(persist = true) {
+  if (!engine) return;
+  const status = JSON.parse(engine.key_bindings_status());
+  bindingsCapturing = status.capture.active;
+  if (status.revision === bindingRevision) return;
+  clearMovementKeys();
+  movementBits.clear();
+  for (const [action, code] of Object.entries(status.bindings)) {
+    movementBits.set(code as string, status.action_bits[action]);
+  }
+  bindingRevision = status.revision;
+  if (persist) {
+    try {
+      localStorage.setItem(BINDINGS_STORAGE, JSON.stringify({ version: 1, bindings: status.bindings }));
+    } catch {
+      // Restricted browser storage must not disable this page's working keys.
+    }
+  }
+}
+
+function restoreBindings() {
+  if (!engine) return;
+  try {
+    const stored = localStorage.getItem(BINDINGS_STORAGE);
+    if (stored && JSON.parse(engine.set_key_bindings(stored)).ok !== true) {
+      localStorage.removeItem(BINDINGS_STORAGE);
+    }
+  } catch {
+    // The native defaults remain available when storage is unavailable.
+  }
+  syncBindings(false);
+}
+
+function scheduleBindingsSync() {
+  // Native widgets apply in Bevy's frame, not in the earlier DOM handler.
+  requestAnimationFrame(() => requestAnimationFrame(() => syncBindings()));
+}
 
 function pageBackgroundFocused() {
   return document.activeElement === document.body || document.activeElement === document.documentElement;
@@ -127,6 +173,14 @@ function clearMovementKeys() {
 
 function movementKey(event: KeyboardEvent, down: boolean) {
   if (!ready || !engine) return;
+  syncBindings();
+  scheduleBindingsSync();
+  if (bindingsCapturing) {
+    clearMovementKeys();
+    if (!event.ctrlKey && !event.metaKey) event.preventDefault();
+    inputState();
+    return;
+  }
   if (!viewportInputActive() || event.code === "Escape") {
     clearMovementKeys();
     return;
@@ -152,7 +206,9 @@ function movementKey(event: KeyboardEvent, down: boolean) {
   if (ownsMovement) {
     event.preventDefault();
     // Publish the raw source first, then keep Space out of Winit's button input.
-    if (event.code === "Space") event.stopImmediatePropagation();
+    // A captured Space must still reach Bevy on key-up, even after capture
+    // completed. Otherwise its native held state could never rearm safely.
+    if (down && event.code === "Space") event.stopImmediatePropagation();
   }
 }
 
@@ -206,7 +262,7 @@ function inputState() {
 
 function resetViewportInput() {
   gestureScale = null;
-  fullscreenPress = null;
+  platformPress = null;
   clearMovementKeys();
   inputState();
 }
@@ -268,13 +324,37 @@ async function fullscreen() {
   }
 }
 
-function fullscreenButtonAt(event: PointerEvent) {
+function platformButtonAt(event: PointerEvent): TrustedAction | null {
   const rect = canvas.getBoundingClientRect();
-  if (!ready || !engine || rect.width <= 0 || rect.height <= 0) return false;
-  return engine.fullscreen_button_at(
-    (event.clientX - rect.left) * canvas.clientWidth / rect.width,
-    (event.clientY - rect.top) * canvas.clientHeight / rect.height,
-  );
+  if (!ready || !engine || rect.width <= 0 || rect.height <= 0) return null;
+  const x = (event.clientX - rect.left) * canvas.clientWidth / rect.width;
+  const y = (event.clientY - rect.top) * canvas.clientHeight / rect.height;
+  if (engine.fullscreen_button_at(x, y)) return "fullscreen";
+  if (engine.notebook_button_at(x, y)) return "notebook";
+  return null;
+}
+
+function openNotebook() {
+  // Open a stable same-origin page in this trusted event. The local server can
+  // resolve private Marimo authentication after navigation, without exposing a
+  // token in the hosted app or awaiting a fetch before Safari opens the tab.
+  if (navigator.userActivation?.isActive === false) {
+    publishPlatform("Use Open notebook in the game to open the flight lab.");
+    announce(platformMessage);
+    return;
+  }
+  try {
+    window.open("/notebook.html", "_blank", "noopener,noreferrer");
+    publishPlatform("Opening the flight lab in a new tab. If it does not appear, allow popups for this game.");
+  } catch {
+    publishPlatform("The notebook could not open. Allow popups for this game and use Open notebook again.");
+  }
+  announce(platformMessage);
+}
+
+function trustedAction(action: TrustedAction) {
+  if (action === "fullscreen") void fullscreen();
+  else openNotebook();
 }
 
 function pinch(logDistanceDelta: number) {
@@ -346,20 +426,24 @@ function platformAction(action: string) {
   else if (action === "capture") void captureMouse();
   else if (action === "release") releaseMouse();
   else if (action === "export") queueMicrotask(exportFlight);
-  else if (action === "notebook") window.open("https://notebooklm.google.com/", "_blank", "noopener,noreferrer");
+  else if (action === "notebook") openNotebook();
 }
 
-function pressFullscreenButton(event: PointerEvent) {
+function pressPlatformButton(event: PointerEvent) {
   if (!ready) return;
   canvas.focus({ preventScroll: true });
   inputState();
-  fullscreenPress = event.button === 0 && fullscreenButtonAt(event) ? event.pointerId : null;
+  const action = event.button === 0 ? platformButtonAt(event) : null;
+  platformPress = action ? { pointerId: event.pointerId, action } : null;
 }
 
-function releaseFullscreenButton(event: PointerEvent) {
-  const activate = fullscreenPress === event.pointerId && fullscreenButtonAt(event);
-  fullscreenPress = null;
-  if (activate) void fullscreen();
+function releasePlatformButton(event: PointerEvent) {
+  if (ready) scheduleBindingsSync();
+  const press = platformPress;
+  platformPress = null;
+  if (press && press.pointerId === event.pointerId && platformButtonAt(event) === press.action) {
+    trustedAction(press.action);
+  }
 }
 
 function wheelZoom(event: WheelEvent) {
@@ -404,14 +488,18 @@ function fullscreenChanged() {
   window.dispatchEvent(new Event("resize"));
 }
 
-function fullscreenKey(event: KeyboardEvent) {
+function platformKey(event: KeyboardEvent) {
   if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
-    || document.activeElement !== canvas) return;
-  const buttonActivation = event.code === "Enter" && engine.fullscreen_button_focused();
-  if (event.code !== "KeyX" && !buttonActivation) return;
+    || bindingsCapturing || document.activeElement !== canvas) return;
+  let action: TrustedAction | null = event.code === "KeyX" ? "fullscreen" : null;
+  if (event.code === "Enter") {
+    if (engine.fullscreen_button_focused()) action = "fullscreen";
+    else if (engine.notebook_button_focused()) action = "notebook";
+  }
+  if (!action) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-  if (!event.repeat) void fullscreen();
+  if (!event.repeat) trustedAction(action);
 }
 
 function preventViewportScroll(event: KeyboardEvent) {
@@ -433,10 +521,10 @@ function unhandledRejection(event: PromiseRejectionEvent) {
 
 browserGlobals.__wsorbPlatformAction = platformAction;
 browserGlobals.__wsorbEngineError = fail;
-canvas.addEventListener("pointerdown", pressFullscreenButton, { capture: true });
-canvas.addEventListener("pointerup", releaseFullscreenButton, { capture: true });
+canvas.addEventListener("pointerdown", pressPlatformButton, { capture: true });
+canvas.addEventListener("pointerup", releasePlatformButton, { capture: true });
 canvas.addEventListener("pointercancel", () => {
-  fullscreenPress = null;
+  platformPress = null;
 });
 canvas.addEventListener("focus", inputState);
 canvas.addEventListener("blur", resetViewportInput);
@@ -456,7 +544,7 @@ for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
 }
 window.addEventListener("keydown", event => movementKey(event, true), { capture: true });
 window.addEventListener("keyup", event => movementKey(event, false), { capture: true });
-window.addEventListener("keydown", fullscreenKey, { capture: true });
+window.addEventListener("keydown", platformKey, { capture: true });
 window.addEventListener("keydown", preventViewportScroll);
 window.addEventListener("error", windowError);
 window.addEventListener("unhandledrejection", unhandledRejection);
@@ -646,6 +734,7 @@ async function start() {
     await waitForRenderer();
     if (failed) return;
     ready = true;
+    restoreBindings();
     statusText.textContent = "3D ready";
     boot.hidden = true;
     publishPlatform("WebGPU · Lander ready on Phobos. P runs the mission; H opens controls.");

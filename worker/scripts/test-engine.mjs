@@ -2,6 +2,8 @@
 // No renderer, DOM, SDK or sensor/physics substitute is installed.
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+// Parse the real bridge without invoking it or installing a substitute DOM.
+import "../web/local-api.js";
 
 const api = await import("../public/sim/wsorb_bevy.js");
 await api.default({ module_or_path: readFileSync(new URL("../public/sim/wsorb_bevy_bg.wasm", import.meta.url)) });
@@ -12,6 +14,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     let value;
     if (request.method === "observation") value = JSON.parse(api.observation());
     else if (request.method === "navigation") value = JSON.parse(api.navigation_status());
+    else if (request.method === "cameras") value = JSON.parse(api.ship_camera_status());
+    else if (request.method === "pan_tilt") value = JSON.parse(api.pan_tilt_camera(request.camera, request.yaw, request.pitch));
+    else if (request.method === "bindings") value = JSON.parse(api.key_bindings_status());
+    else if (request.method === "set_bindings") value = JSON.parse(api.set_key_bindings(JSON.stringify(request.settings)));
     else if (request.method === "preview") {
       value = JSON.parse(api.set_navigation_preview(JSON.stringify(request.preview)));
     } else if (request.method === "command") {

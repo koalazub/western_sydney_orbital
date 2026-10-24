@@ -153,4 +153,30 @@ mod tests {
             mesh.indices().unwrap().iter().collect::<Vec<_>>(),
         );
     }
+
+    #[test]
+    fn configured_physical_bodies_supply_their_actual_radius_to_rendering() {
+        let mut settings = crate::model::ExperimentSettings::default();
+        settings.debris.count = 31;
+        settings.debris.radius_min_m = 0.5;
+        settings.debris.radius_max_m = 75.0;
+        let simulation = crate::physics::Simulation::with_experiment(17, settings).unwrap();
+        let snapshot = simulation.snapshot();
+        let debris: Vec<_> = snapshot
+            .assets
+            .iter()
+            .filter(|asset| asset.kind == crate::domain::EntityKind::Debris)
+            .collect();
+        assert_eq!(debris.len(), settings.debris.count);
+        for asset in debris {
+            assert_eq!(
+                scale(asset),
+                Vec3::splat(RenderScale::metres(asset.radius_m))
+            );
+        }
+        for seed in 1..=4 {
+            let mesh = asteroid(seed);
+            assert!(mesh.count_vertices() > 0);
+        }
+    }
 }

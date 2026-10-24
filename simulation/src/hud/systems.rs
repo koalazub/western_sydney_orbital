@@ -1,8 +1,8 @@
 use bevy::{
     a11y::AccessibilityNode,
-    input::{ButtonState, keyboard::KeyboardInput},
+    input::{ButtonState, InputSystems, keyboard::KeyboardInput},
     input_focus::{
-        FocusCause, FocusedInput, InputFocus,
+        FocusCause, FocusedInput, InputFocus, InputFocusSystems,
         tab_navigation::{TabGroup, TabNavigationPlugin},
     },
     picking::hover::Hovered,
@@ -11,9 +11,9 @@ use bevy::{
     ui_widgets::{Activate, Button, ScrollIntoView},
 };
 
-use super::{input, model::*, view};
+use super::{input, model::*, policy::action_enabled, view};
 use crate::{
-    EngineSet, PlaybackState, camera,
+    EngineSet, PlaybackState, camera, controls,
     domain::{CameraRequest, EngineAction, EntityId, EntityKind, LagrangeRegion, ViewportAction},
     model::Snapshot,
 };
@@ -25,6 +25,12 @@ pub(super) fn install(app: &mut App) {
     }
     app.init_resource::<HudState>()
         .add_systems(Startup, view::setup.after(crate::scene::setup))
+        .add_systems(
+            PreUpdate,
+            capture_binding_input
+                .after(InputSystems)
+                .before(InputFocusSystems::Dispatch),
+        )
         .add_systems(Update, interactions.in_set(EngineSet::Input))
         .add_systems(
             Update,
@@ -57,7 +63,44 @@ pub(super) fn activate_button(
     let Ok(action) = actions.get(activate.entity) else {
         return;
     };
-    activate_action(*action, &mut hud, &playback);
+    let mode = interaction_mode(&hud);
+    activate_action(*action, mode, &mut hud, &playback);
+}
+
+/// Read the physical event before native widgets see Enter or Space. Capture
+/// keeps an action guard through the successful key and the final key-up frame.
+pub(super) fn capture_binding_input(
+    mut events: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    hud: Res<HudState>,
+) {
+    controls::begin_input_frame();
+    if controls::binding_capture_active()
+        && (!camera::input_active() || hud.reset_confirm_open || hud.panel != SidePanel::Controls)
+    {
+        controls::cancel_capture();
+    }
+    for input in events.read() {
+        if controls::binding_capture_active()
+            && input.state == ButtonState::Pressed
+            && !input.repeat
+        {
+            let modified = [
+                KeyCode::AltLeft,
+                KeyCode::AltRight,
+                KeyCode::ShiftLeft,
+                KeyCode::ShiftRight,
+                KeyCode::ControlLeft,
+                KeyCode::ControlRight,
+                KeyCode::SuperLeft,
+                KeyCode::SuperRight,
+            ]
+            .into_iter()
+            .any(|key| keys.pressed(key));
+            controls::capture_key(input.key_code, modified);
+        }
+    }
+    controls::observe_input_release(&keys);
 }
 
 pub(super) fn interactions(
@@ -67,11 +110,15 @@ pub(super) fn interactions(
     mut hud: ResMut<HudState>,
     playback: Res<PlaybackState>,
 ) {
+    let mode = interaction_mode(&hud);
+    if mode == InteractionMode::Rebinding {
+        return;
+    }
     let button_focused = input_focus
         .get()
         .is_some_and(|entity| buttons.contains(entity));
     if keys.just_pressed(KeyCode::Escape) {
-        if hud.reset_confirm_open {
+        if mode == InteractionMode::ResetConfirmation {
             hud.reset_confirm_open = false;
         } else {
             hud.panel = hud.panel.close_top();
@@ -81,9 +128,9 @@ pub(super) fn interactions(
     if !camera::input_active() {
         return;
     }
-    if hud.reset_confirm_open {
+    if mode == InteractionMode::ResetConfirmation {
         if !button_focused && plain_key_pressed(&keys, KeyCode::Enter) {
-            activate_action(HudAction::ConfirmReset, &mut hud, &playback);
+            activate_action(HudAction::ConfirmReset, mode, &mut hud, &playback);
         }
         return;
     }
@@ -105,7 +152,12 @@ pub(super) fn interactions(
         if (!button_focused || matches!(key, KeyCode::KeyP | KeyCode::KeyH))
             && plain_key_pressed(&keys, key)
         {
-            activate_action(action, &mut hud, &playback);
+            activate_action(action, mode, &mut hud, &playback);
+            // Opening the modal invalidates the Ready snapshot. No remaining
+            // shortcut in this frame may act through the newly opened modal.
+            if hud.reset_confirm_open {
+                return;
+            }
         }
     }
 }
@@ -124,10 +176,25 @@ fn plain_key_pressed(keys: &ButtonInput<KeyCode>, key: KeyCode) -> bool {
         .any(|key| keys.pressed(key))
 }
 
-fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackState) {
+fn interaction_mode(hud: &HudState) -> InteractionMode {
+    if controls::binding_actions_blocked() {
+        InteractionMode::Rebinding
+    } else if hud.reset_confirm_open {
+        InteractionMode::ResetConfirmation
+    } else {
+        InteractionMode::Ready
+    }
+}
+
+fn activate_action(
+    action: HudAction,
+    mode: InteractionMode,
+    hud: &mut HudState,
+    playback: &PlaybackState,
+) {
     if !action_enabled(
         action,
-        hud,
+        mode,
         playback,
         crate::snapshot().mission.status.is_terminal(),
     ) {
@@ -151,6 +218,13 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
             #[cfg(not(target_arch = "wasm32"))]
             crate::request_action(EngineAction::Viewport(ViewportAction::Fullscreen));
         }
+        HudAction::Notebook => {
+            // Like fullscreen, browser window.open belongs to trusted DOM input.
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::request_action(EngineAction::Viewport(ViewportAction::Notebook));
+        }
+        HudAction::ChangeBinding(action) => controls::begin_capture(action),
+        HudAction::RestoreBindings => controls::restore_defaults(),
         HudAction::Maximize => {
             crate::request_action(EngineAction::Viewport(ViewportAction::Maximize))
         }
@@ -299,13 +373,13 @@ pub(super) fn update_overlays(
     let mut hidden_focus = false;
     for (entity, mut node, mut visibility, overlay, modal_group, mut position) in &mut overlays {
         let was_shown = node.display != Display::None;
-        node.display = match overlay {
-            Overlay::Details if hud.panel.details_open() => Display::Flex,
-            Overlay::Controls if hud.panel == SidePanel::Controls => Display::Flex,
-            Overlay::Reset if hud.reset_confirm_open => Display::Flex,
-            Overlay::Inspector if hud.panel == SidePanel::Inspector => Display::Flex,
-            _ => Display::None,
+        let shown = match overlay {
+            Overlay::Details => hud.panel.details_open(),
+            Overlay::Controls => hud.panel == SidePanel::Controls,
+            Overlay::Reset => hud.reset_confirm_open,
+            Overlay::Inspector => hud.panel == SidePanel::Inspector,
         };
+        node.display = if shown { Display::Flex } else { Display::None };
         if matches!(overlay, Overlay::Details | Overlay::Controls)
             && !was_shown
             && node.display != Display::None
@@ -359,7 +433,7 @@ type ButtonVisual = (
     &'static mut Outline,
 );
 
-fn update_buttons(
+pub(super) fn update_buttons(
     mut commands: Commands,
     input_focus: Res<InputFocus>,
     playback: Res<PlaybackState>,
@@ -368,12 +442,13 @@ fn update_buttons(
 ) {
     let snapshot = crate::snapshot();
     let camera_status = camera::status();
+    let mode = interaction_mode(&hud);
     for (entity, action, hovered, pressed, disabled, mut background, mut accessible, mut outline) in
         &mut button_views
     {
         let should_disable = !action_enabled(
             *action,
-            &hud,
+            mode,
             &playback,
             snapshot.mission.status.is_terminal(),
         );
@@ -384,22 +459,35 @@ fn update_buttons(
                 commands.entity(entity).remove::<InteractionDisabled>();
             }
         }
-        let selected = match action {
-            HudAction::ChangeCamera(mode) => *mode == camera_status.mode,
-            _ => false,
-        };
-        let expanded = match action {
-            HudAction::ToggleDetails => Some(hud.panel.details_open()),
-            HudAction::ToggleControls => Some(hud.panel == SidePanel::Controls),
-            HudAction::ToggleInspector => Some(hud.panel == SidePanel::Inspector),
-            _ => None,
+        let (selected, expanded) = match *action {
+            HudAction::ChangeCamera(mode) => (Some(mode == camera_status.mode), None),
+            HudAction::ToggleDetails => (None, Some(hud.panel.details_open())),
+            HudAction::ToggleControls => (None, Some(hud.panel == SidePanel::Controls)),
+            HudAction::ToggleInspector => (None, Some(hud.panel == SidePanel::Inspector)),
+            HudAction::TogglePlayback
+            | HudAction::Step
+            | HudAction::AskReset
+            | HudAction::ConfirmReset
+            | HudAction::CancelReset
+            | HudAction::DebugUpright
+            | HudAction::Export
+            | HudAction::CycleRate
+            | HudAction::Fullscreen
+            | HudAction::Notebook
+            | HudAction::ChangeBinding(_)
+            | HudAction::RestoreBindings
+            | HudAction::Maximize
+            | HudAction::ToggleCapture
+            | HudAction::FollowLander
+            | HudAction::FocusNext
+            | HudAction::FocusPrevious => (None, None),
         };
         if let Some(expanded) = expanded
             && accessible.is_expanded() != Some(expanded)
         {
             accessible.set_expanded(expanded);
         }
-        if matches!(action, HudAction::ChangeCamera(_))
+        if let Some(selected) = selected
             && accessible.is_selected() != Some(selected)
         {
             accessible.set_selected(selected);
@@ -409,7 +497,7 @@ fn update_buttons(
             DISABLED
         } else if keyboard_focused {
             FOCUSED
-        } else if pressed || selected {
+        } else if pressed || selected == Some(true) {
             SELECTED
         } else if hovered.get() {
             HOVERED
@@ -446,6 +534,21 @@ pub(super) fn update_readouts(
             Readout::TelemetryDetails => crate::telemetry::details(),
             Readout::ReferenceThrust => reference_thrust_brief(),
             Readout::InputSettings => input_settings_readout(&playback, &keys),
+            Readout::BindingStatus => controls::capture_message(),
+            Readout::Binding(action) => format!(
+                "{}: {} · change",
+                action.label(),
+                controls::key_label(*action)
+            ),
+            Readout::FlightHint => format!(
+                "{}/{} fire front/back | {}/{} fire left/right | {} lift | Alt/Option debug",
+                controls::key_label(controls::Action::Front),
+                controls::key_label(controls::Action::Back),
+                controls::key_label(controls::Action::Left),
+                controls::key_label(controls::Action::Right),
+                controls::key_label(controls::Action::Lift),
+            ),
+            Readout::Notebook => "Open notebook · new tab".into(),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
@@ -528,6 +631,10 @@ pub(super) fn scroll_details(
     mut event: On<FocusedInput<KeyboardInput>>,
     mut panels: Query<(&Node, &ComputedNode, &mut ScrollPosition), With<DetailsPanel>>,
 ) {
+    if controls::binding_actions_blocked() {
+        event.propagate(false);
+        return;
+    }
     if event.input.state != ButtonState::Pressed {
         return;
     }
@@ -553,7 +660,7 @@ pub(super) fn scroll_details(
     position.y = next.clamp(0.0, max_scroll);
 }
 
-fn scroll_focused_control_into_view(
+pub(super) fn scroll_focused_control_into_view(
     mut commands: Commands,
     input_focus: Res<InputFocus>,
     buttons: Query<(), With<Button>>,
@@ -567,38 +674,6 @@ fn scroll_focused_control_into_view(
         commands.trigger(ScrollIntoView { entity });
     }
     *previous = focused;
-}
-
-fn action_enabled(
-    action: HudAction,
-    hud: &HudState,
-    playback: &PlaybackState,
-    terminal: bool,
-) -> bool {
-    if hud.reset_confirm_open && !matches!(action, HudAction::ConfirmReset | HudAction::CancelReset)
-    {
-        return false;
-    }
-    match action {
-        HudAction::TogglePlayback => playback.can_control && !terminal,
-        HudAction::Step => playback.can_control && !playback.running && !terminal,
-        HudAction::ConfirmReset => playback.can_control && hud.reset_confirm_open,
-        HudAction::AskReset
-        | HudAction::DebugUpright
-        | HudAction::Export
-        | HudAction::CycleRate => playback.can_control,
-        HudAction::CancelReset
-        | HudAction::Fullscreen
-        | HudAction::Maximize
-        | HudAction::ToggleCapture
-        | HudAction::ToggleDetails
-        | HudAction::ToggleControls
-        | HudAction::FollowLander
-        | HudAction::ToggleInspector
-        | HudAction::FocusNext
-        | HudAction::FocusPrevious
-        | HudAction::ChangeCamera(_) => true,
-    }
 }
 
 fn mission_readout(snapshot: &Snapshot) -> String {
@@ -659,10 +734,16 @@ fn environment_readout(snapshot: &Snapshot) -> String {
 }
 
 fn flight_controls_readout(playback: &PlaybackState) -> String {
+    if controls::binding_capture_active() {
+        return "Changing a key. Manual flight is blocked; press one key or Esc to cancel.".into();
+    }
     let state = if !playback.can_control {
         "Ship controls unavailable in view-only mode."
     } else if !playback.running {
-        "Lander paused. Space launches; P or Run resumes playback."
+        return format!(
+            "Lander paused. {} launches; P or Run resumes playback.",
+            controls::key_label(controls::Action::Lift)
+        );
     } else if !camera::input_active() {
         "Click the scene or focus the canvas to enable movement keys."
     } else if crate::session::keyboard_requires_release() {
@@ -675,14 +756,17 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
 
 fn reference_thrust_readout() -> String {
     format!(
-        "Space and E: reference limit {:.2} m/s²\nLocal nozzle physics, not an STP-equivalent allocator.",
+        "{} and {}: reference limit {:.2} m/s²\nLocal nozzle physics, not an STP-equivalent allocator.",
+        controls::key_label(controls::Action::Lift),
+        controls::key_label(controls::Action::Up),
         crate::scenario::settings().lander.max_accel_mps2
     )
 }
 
 pub(super) fn reference_thrust_brief() -> String {
     format!(
-        "Space reference {:.2} m/s² | local model",
+        "{} reference {:.2} m/s² | local model",
+        controls::key_label(controls::Action::Lift),
         crate::scenario::settings().lander.max_accel_mps2
     )
 }
@@ -973,92 +1057,5 @@ mod interaction_tests {
                 assert!(!plain_key_pressed(&keys, key));
             }
         }
-    }
-
-    #[test]
-    fn buttons_and_shortcuts_share_authority_and_modal_rules() {
-        let mut hud = HudState::default();
-        let mut playback = PlaybackState::default();
-        assert!(action_enabled(HudAction::Step, &hud, &playback, false));
-        assert!(!action_enabled(
-            HudAction::ConfirmReset,
-            &hud,
-            &playback,
-            false
-        ));
-        playback.running = true;
-        assert!(!action_enabled(HudAction::Step, &hud, &playback, false));
-        assert!(!action_enabled(
-            HudAction::TogglePlayback,
-            &hud,
-            &playback,
-            true
-        ));
-        assert!(action_enabled(
-            HudAction::DebugUpright,
-            &hud,
-            &playback,
-            true
-        ));
-        playback.can_control = false;
-        for action in [
-            HudAction::TogglePlayback,
-            HudAction::AskReset,
-            HudAction::DebugUpright,
-            HudAction::Export,
-            HudAction::CycleRate,
-        ] {
-            assert!(!action_enabled(action, &hud, &playback, false));
-        }
-        assert!(action_enabled(
-            HudAction::ToggleControls,
-            &hud,
-            &playback,
-            false
-        ));
-        assert!(action_enabled(
-            HudAction::FollowLander,
-            &hud,
-            &playback,
-            false
-        ));
-        hud.reset_confirm_open = true;
-        assert!(!action_enabled(
-            HudAction::DebugUpright,
-            &hud,
-            &playback,
-            false
-        ));
-        assert!(!action_enabled(
-            HudAction::ToggleControls,
-            &hud,
-            &playback,
-            false
-        ));
-        assert!(!action_enabled(
-            HudAction::FollowLander,
-            &hud,
-            &playback,
-            false
-        ));
-        assert!(!action_enabled(
-            HudAction::ConfirmReset,
-            &hud,
-            &playback,
-            false
-        ));
-        assert!(action_enabled(
-            HudAction::CancelReset,
-            &hud,
-            &playback,
-            false
-        ));
-        playback.can_control = true;
-        assert!(action_enabled(
-            HudAction::ConfirmReset,
-            &hud,
-            &playback,
-            false
-        ));
     }
 }

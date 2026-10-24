@@ -80,11 +80,13 @@ fn record(
                     (Some(Readout::TelemetryBrief), _) => Some("flight_metrics"),
                     (Some(Readout::Summary), _) => Some("mission_summary"),
                     (Some(Readout::InputSettings), _) => Some("input_settings"),
+                    (Some(Readout::Notebook), _) => Some("notebook_label"),
                     (_, Some(HudAction::TogglePlayback)) => Some("run_pause"),
                     (_, Some(HudAction::ToggleDetails)) => Some("details"),
                     (_, Some(HudAction::ToggleControls)) => Some("controls_help"),
                     (_, Some(HudAction::FollowLander)) => Some("follow_lander"),
                     (_, Some(HudAction::DebugUpright)) => Some("debug_upright"),
+                    (_, Some(HudAction::Notebook)) => Some("open_notebook"),
                     _ => None,
                 }
             };

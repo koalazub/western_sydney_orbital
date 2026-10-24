@@ -369,6 +369,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
     crate::telemetry::install(&mut app);
     crate::thrusters::install(&mut app);
     crate::hud::install(&mut app);
+    crate::scene::install_body_axes(&mut app);
     let render_app = app.sub_app_mut(RenderApp);
     // Keep Bevy's material draw unchanged, then observe only successful opaque
     // world draws. Rebind its public draw-function key before materials queue.

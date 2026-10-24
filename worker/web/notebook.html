@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Open the flight lab · Western Sydney Orbital</title>
+    <style>
+      :root { color-scheme: dark; font: 1rem/1.6 system-ui, sans-serif; background: #101923; color: #edf3f7; }
+      body { margin: 0; padding: 2rem 1rem; }
+      main { max-width: 42rem; margin-inline: auto; }
+      h1 { line-height: 1.2; }
+      a { color: #9edaff; text-underline-offset: .2em; }
+      a:focus-visible { outline: 2px solid #9edaff; outline-offset: 4px; }
+      pre { padding: 1rem; background: #1c2a39; border-radius: .4rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+      code { font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Open the flight lab</h1>
+      <p>The editable Marimo notebook runs on your machine. The hosted game does not contain a shared Python kernel.</p>
+      <ol>
+        <li>From your repository directory, start the lab and local game:</li>
+      </ol>
+      <pre><code>devenv up lab simulation</code></pre>
+      <ol start="2">
+        <li>Open the <a href="http://127.0.0.1:61829/">local game</a>, or the game address printed by Devenv if you changed its port.</li>
+        <li>Use <strong>Open notebook</strong> in that game. It opens the authenticated local editor when the lab is ready.</li>
+      </ol>
+      <p>Keep the game visible in a separate window while running an experiment. In the notebook, connect, choose a controller, then arm <strong>Apply and run</strong>.</p>
+      <p>If the editor is still unavailable, check its output with <code>devenv processes logs lab</code>. Keep its login token private.</p>
+      <p>You can return to your existing game window without closing or resetting its simulation.</p>
+    </main>
+  </body>
+</html>

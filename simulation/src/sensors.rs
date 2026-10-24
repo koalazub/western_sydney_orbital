@@ -1,4 +1,4 @@
-//! Fixed-resolution ship sensors, separate from the unrestricted debug viewer.
+//! Fixed-optics, steerable ship sensors, separate from the debug viewer.
 mod capture;
 mod model;
 mod optics;
@@ -6,7 +6,7 @@ mod systems;
 mod view;
 
 pub(crate) use capture::request_capture;
-pub(crate) use systems::{pose, status};
+pub(crate) use systems::{pan_tilt, pose, status};
 
 pub(crate) fn install(app: &mut bevy::prelude::App) {
     use bevy::prelude::*;

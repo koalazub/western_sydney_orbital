@@ -1,5 +1,6 @@
 //! Pinhole projection and the documented STP zero-roll pan/tilt convention.
-use crate::scenario::{CameraMount, FieldOfViewConvention, ShipCameras};
+use super::model::PanTiltAim;
+use crate::scenario::{FieldOfViewConvention, ShipCameras};
 use bevy::prelude::*;
 
 pub(super) struct FieldOfView {
@@ -35,27 +36,24 @@ pub(super) fn projection(config: &ShipCameras) -> PerspectiveProjection {
     }
 }
 
-pub(super) fn body_axes(mount: &CameraMount) -> (Vec3, Vec3) {
-    let yaw = mount
-        .aim_yaw_deg
-        .clamp(mount.yaw_limits_deg[0], mount.yaw_limits_deg[1])
-        .to_radians();
-    let pitch = mount
-        .aim_pitch_deg
-        .clamp(mount.pitch_limits_deg[0], mount.pitch_limits_deg[1])
-        .to_radians();
+pub(super) fn body_axes(aim: PanTiltAim) -> (Vec3, Vec3) {
+    let yaw = aim.yaw_deg.to_radians();
+    let pitch = aim.pitch_deg.to_radians();
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
-    // Rows 1 and 3 of the documented passive body-to-camera DCM, expressed in body axes.
+    // Rows 1 and 3 of the official passive body-to-camera DCM, in body axes.
+    // STU4-Solution wiki revision 6448d700a6146da6e3284b383cad715af6e2b99e,
+    // Cameras. The SDK also calls Euler321_to_DCM passive, not active.
     // At zero aim the optical axis is +X, not the ship's +Z launch axis.
-    let forward = Vec3::new(cp * cy, cp * sy, -sp);
-    let up = Vec3::new(sp * cy, sp * sy, cp);
+    let forward = Vec3::new((cp * cy) as f32, (cp * sy) as f32, -sp as f32);
+    let up = Vec3::new((sp * cy) as f32, (sp * sy) as f32, cp as f32);
     (forward, up)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ShipCameraId;
     use bevy::camera::CameraProjection;
 
     fn close(actual: f32, expected: f32) {
@@ -117,7 +115,8 @@ mod tests {
     #[test]
     fn both_zero_angle_feeds_look_along_body_x_with_body_z_up() {
         for mount in &crate::scenario::settings().ship_cameras.mounts {
-            let (forward, up) = body_axes(mount);
+            let aim = PanTiltAim::clipped(mount.id, 0.0, 0.0).unwrap();
+            let (forward, up) = body_axes(aim);
             assert_eq!(forward, Vec3::X);
             assert_eq!(up, Vec3::Z);
             let adapter = Transform::IDENTITY.looking_to(forward, up);
@@ -128,11 +127,8 @@ mod tests {
 
     #[test]
     fn positive_yaw_turns_left_and_pitch_uses_the_documented_asymmetric_limits() {
-        let mounts = &crate::scenario::settings().ship_cameras.mounts;
-        let mut top = mounts[0];
-        top.aim_yaw_deg = 1000.0;
-        top.aim_pitch_deg = -1000.0;
-        let (forward, up) = body_axes(&top);
+        let top = PanTiltAim::clipped(ShipCameraId::Top, 1000.0, -1000.0).unwrap();
+        let (forward, up) = body_axes(top);
         let yaw = 89_f32.to_radians();
         let pitch = (-50_f32).to_radians();
         close(forward.y, pitch.cos() * yaw.sin());
@@ -140,13 +136,11 @@ mod tests {
         close(forward.dot(up), 0.0);
         close(forward.length(), 1.0);
         close(up.length(), 1.0);
-        top.aim_yaw_deg = 0.0;
-        top.aim_pitch_deg = 50.0;
-        assert_eq!(body_axes(&top).0, Vec3::X);
-        let mut bottom = mounts[1];
-        bottom.aim_pitch_deg = 1000.0;
-        close(body_axes(&bottom).0.z, -50_f32.to_radians().sin());
-        bottom.aim_pitch_deg = -50.0;
-        assert_eq!(body_axes(&bottom).0, Vec3::X);
+        let top = PanTiltAim::clipped(ShipCameraId::Top, 0.0, 50.0).unwrap();
+        assert_eq!(body_axes(top).0, Vec3::X);
+        let bottom = PanTiltAim::clipped(ShipCameraId::Bottom, 0.0, 1000.0).unwrap();
+        close(body_axes(bottom).0.z, -50_f32.to_radians().sin());
+        let bottom = PanTiltAim::clipped(ShipCameraId::Bottom, 0.0, -50.0).unwrap();
+        assert_eq!(body_axes(bottom).0, Vec3::X);
     }
 }

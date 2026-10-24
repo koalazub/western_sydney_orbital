@@ -3,6 +3,7 @@
 mod diagnostics;
 mod input;
 mod model;
+mod policy;
 mod systems;
 mod view;
 
@@ -23,6 +24,14 @@ pub(crate) fn fullscreen_button_at(x: f32, y: f32) -> bool {
 /// Native keyboard focus, independent of pointer position.
 pub(crate) fn fullscreen_button_focused() -> bool {
     input::fullscreen_button_focused()
+}
+
+pub(crate) fn notebook_button_at(x: f32, y: f32) -> bool {
+    input::notebook_button_at(x, y)
+}
+
+pub(crate) fn notebook_button_focused() -> bool {
+    input::notebook_button_focused()
 }
 
 pub(crate) fn status() -> String {

@@ -42,6 +42,20 @@ pub enum ShipCameraId {
 }
 
 impl ShipCameraId {
+    /// Pinned STP UserAPI.PanTiltCamera limits, in shuttle-body degrees.
+    pub const fn yaw_limits_deg(self) -> [f64; 2] {
+        match self {
+            Self::Top | Self::Bottom => [-89.0, 89.0],
+        }
+    }
+
+    pub const fn pitch_limits_deg(self) -> [f64; 2] {
+        match self {
+            Self::Top => [-50.0, 0.0],
+            Self::Bottom => [0.0, 50.0],
+        }
+    }
+
     pub const fn index(self) -> usize {
         match self {
             Self::Top => 0,

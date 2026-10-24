@@ -30,7 +30,7 @@ pub(crate) struct SceneAssets {
 pub(crate) struct SceneState {
     pub(crate) seed: u64,
     pub(crate) time_s: f64,
-    pub(crate) last_positions: HashMap<EntityId, Vec3>,
+    pub(crate) experiment_settings: Option<crate::model::ExperimentSettings>,
     pub(crate) trails: HashMap<EntityId, VecDeque<Vec3>>,
 }
 

@@ -11,6 +11,7 @@ import json
 import selectors
 import shutil
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -151,3 +152,51 @@ def test_actual_upright_reset_records_the_intervention_without_teleporting_or_br
     assert abs(
         np.dot(after["shuttle"]["rotation"], initial["shuttle"]["rotation"])
     ) == pytest.approx(1.0)
+
+
+def test_actual_world_configuration_changes_mass_inertia_and_worldwide_sensor_population(engine):
+    before = engine.query("observation")
+    settings = deepcopy(before["experiment_settings"])
+    settings["ship"]["mass_kg"] *= 1.25
+    settings["ship"]["inertia_scale"] = 1.5
+    settings["debris"]["count"] = 64
+    engine.command(op="configure_experiment", settings=settings, seed=100)
+    after = engine.query("observation")
+    assert after["experiment_settings"] == settings
+    assert after["shuttle"]["mass_kg"] == settings["ship"]["mass_kg"]
+    np.testing.assert_allclose(
+        after["shuttle"]["inertia_kg_m2"], np.asarray(before["shuttle"]["inertia_kg_m2"]) * 1.875
+    )
+    assert after["geometry"]["debris_count"] == len(after["radar"]) == 64
+    assert after["max_accel_mps2"] == before["max_accel_mps2"] == 0.5
+    assert after["max_angular_accel_rad_s2"] == 0.05
+    positions = np.asarray([row[0] for row in after["radar"]]) + np.asarray(
+        after["shuttle"]["position"]
+    )
+    assert np.all(positions.min(axis=0) < 0) and np.all(positions.max(axis=0) > 0)
+
+
+def test_actual_camera_aims_are_independent_clipped_and_do_not_change_ship_physics(engine):
+    before = engine.query("observation")
+    assert engine.query("pan_tilt", camera="top", yaw=1000, pitch=-1000)["ok"] is True
+    assert engine.query("pan_tilt", camera="bottom", yaw=-1000, pitch=1000)["ok"] is True
+    cameras = {camera["camera"]: camera for camera in engine.query("cameras")["cameras"]}
+    assert (cameras["top"]["yaw_deg"], cameras["top"]["pitch_deg"]) == (89, -50)
+    assert (cameras["bottom"]["yaw_deg"], cameras["bottom"]["pitch_deg"]) == (-89, 50)
+    for camera in cameras.values():
+        assert camera["field_of_view_locked"] is True
+        assert camera["horizontal_field_of_view_deg"] == camera["vertical_field_of_view_deg"] == 60
+        assert (camera["width"], camera["height"]) == (512, 512)
+        assert camera["debug_overlays"] is False
+    assert engine.query("observation") == before
+
+
+def test_actual_key_configuration_cannot_replace_an_external_flight_command(engine):
+    engine.command(op="set_command", accel=[0.1, 0, 0], angular_accel=[0, 0, 0])
+    before = engine.query("observation")
+    bindings = engine.query("bindings")
+    settings = {"version": 1, "bindings": dict(bindings["bindings"])}
+    settings["bindings"]["front"] = "KeyJ"
+    assert engine.query("set_bindings", settings=settings)["ok"] is True
+    assert engine.query("bindings")["bindings"]["front"] == "KeyJ"
+    assert engine.query("observation") == before

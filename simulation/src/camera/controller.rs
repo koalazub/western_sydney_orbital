@@ -1,5 +1,6 @@
 use super::model::{CameraError, CameraRig, CameraStatus};
 use super::movement::DebugFlight;
+use super::overview;
 use super::zoom::{self, MAX_DISTANCE_KM, MIN_DISTANCE_KM};
 use crate::{
     domain::{CameraMode, CameraRequest, EngineAction, EntityId, EntityKind, ViewportAction},
@@ -154,6 +155,7 @@ fn update_camera(
         return;
     };
     let snapshot = crate::snapshot();
+    let previous_mode = rig.mode;
     if !rig.initialized {
         flight.preserve_pose(&mut rig, transform.rotation);
         rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
@@ -181,7 +183,9 @@ fn update_camera(
     let button_focused = input_focus.get().is_some_and(|entity| ui.contains(entity));
     let cursor = windows.single().ok().and_then(Window::cursor_position);
     let dt = time.delta_secs().min(0.1);
-    if gate.active && !button_focused {
+    let binding_actions_blocked = crate::controls::binding_actions_blocked();
+    let keyboard_blocked = hud.movement_blocked() || binding_actions_blocked;
+    if gate.active && !button_focused && !keyboard_blocked {
         if keys.just_pressed(KeyCode::Escape) {
             crate::request_action(EngineAction::Viewport(ViewportAction::Release));
             set_input_active(false, false);
@@ -204,8 +208,7 @@ fn update_camera(
             rig.mode = CameraMode::FreeFlight;
         }
         if keys.just_pressed(KeyCode::Digit5) {
-            rig.mode = CameraMode::Overview;
-            rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode);
+            overview::frame(&mut rig, &snapshot);
         }
         if keys.just_pressed(KeyCode::Digit6) {
             rig.mode = CameraMode::ShipTop;
@@ -227,7 +230,7 @@ fn update_camera(
         }
     }
 
-    if gate.active {
+    if gate.active && !hud.movement_blocked() {
         if buttons.just_pressed(MouseButton::Left)
             || buttons.just_pressed(MouseButton::Right)
             || buttons.just_pressed(MouseButton::Middle)
@@ -329,13 +332,19 @@ fn update_camera(
         );
     }
 
-    // Dedicated follow ignores stale button focus, but not browser chords or a modal.
-    if let Some(request) = frame_shortcut(&keys, input_active(), hud.movement_blocked(), rig.focus)
-    {
+    // Dedicated follow ignores stale button focus, but not browser chords,
+    // a modal or the rest of a consumed binding-input frame.
+    if let Some(request) = frame_shortcut(&keys, input_active(), keyboard_blocked, rig.focus) {
         apply_view_request(&mut rig, request, &snapshot);
     }
 
     target = focus_target(&rig, &snapshot);
+    if previous_mode == CameraMode::Overview
+        && rig.mode != CameraMode::Overview
+        && let Projection::Perspective(lens) = &mut *projection
+    {
+        lens.fov = 60.0_f32.to_radians();
+    }
     *layers = if rig.mode.sensor().is_some() {
         RenderLayers::none()
     } else {
@@ -366,9 +375,9 @@ fn update_camera(
             transform.look_at(target, Vec3::Y);
         }
         CameraMode::Overview => {
-            let center = rig.pan_offset;
-            transform.translation = outside_body(orbit_position(center, &rig));
-            transform.look_at(center, Vec3::Y);
+            let view = overview::view(&rig, &snapshot, &mut projection);
+            transform.translation = view.translation;
+            transform.rotation = view.rotation;
         }
         CameraMode::Orbit => {
             let view = orbit_view(&rig, &snapshot);
@@ -435,6 +444,14 @@ fn frame_shortcut(
 }
 
 fn apply_view_request(rig: &mut CameraRig, request: CameraRequest, snapshot: &Snapshot) {
+    if request.mode == Some(CameraMode::Overview) {
+        overview::frame(rig, snapshot);
+        if let Some(zoom) = request.zoom {
+            rig.zoom = zoom;
+            rig.distance_km = (rig.distance_km * zoom).clamp(MIN_DISTANCE_KM, MAX_DISTANCE_KM);
+        }
+        return;
+    }
     if let Some(focus) = request.focus
         && request.mode == Some(CameraMode::Orbit)
         && request.zoom == Some(1.0)
@@ -533,7 +550,7 @@ fn focus_target(rig: &CameraRig, snapshot: &Snapshot) -> Vec3 {
 
 fn base_distance_km(focus: EntityId, snapshot: &Snapshot, mode: CameraMode) -> f32 {
     if mode == CameraMode::Overview {
-        return 45.0;
+        return overview::base_distance_km(snapshot);
     }
     match focus {
         EntityId::Phobos => {
@@ -795,6 +812,178 @@ mod tests {
         );
     }
 
+    fn camera_app(mode: CameraMode) -> App {
+        crate::controls::reset_for_tests();
+        COMMANDS.with(|commands| commands.borrow_mut().clear());
+        PINCH_ZOOM.with(|pending| pending.set(0.0));
+        STATUS.with(|status| *status.borrow_mut() = CameraStatus::default());
+        set_input_active(true, false);
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<InputFocus>()
+            .init_resource::<crate::hud::HudState>()
+            .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<AccumulatedMouseScroll>()
+            .add_message::<PinchGesture>()
+            .insert_resource(CameraRig {
+                mode,
+                focus: EntityId::Mars,
+                yaw: 0.3,
+                pitch: -0.2,
+                distance_km: 42.0,
+                zoom: 2.0,
+                pan_offset: Vec3::ONE,
+                initialized: true,
+                ..default()
+            });
+        install(&mut app);
+        app.world_mut().spawn((
+            SimulationCamera,
+            Camera::default(),
+            GlobalTransform::default(),
+            Transform::default(),
+            RenderLayers::layer(0).with(1),
+            Projection::Perspective(PerspectiveProjection::default()),
+        ));
+        app
+    }
+
+    fn capture_cancel_and_release(app: &mut App, key: KeyCode) {
+        crate::controls::begin_capture(crate::controls::Action::Front);
+        crate::controls::begin_input_frame();
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        if key != KeyCode::Escape {
+            keys.press(key);
+            crate::controls::capture_key(key, false);
+            assert!(crate::controls::binding_capture_active());
+            keys.release(key);
+        }
+        keys.press(KeyCode::Escape);
+        crate::controls::capture_key(KeyCode::Escape, false);
+        keys.release(KeyCode::Escape);
+        crate::controls::observe_input_release(&keys);
+        assert!(!crate::controls::manual_input_blocked());
+        assert!(crate::controls::binding_actions_blocked());
+        assert!(keys.just_pressed(key));
+        assert!(keys.just_released(key));
+    }
+
+    #[test]
+    fn scheduled_camera_consumes_shortcuts_after_same_frame_capture_cancel_and_release() {
+        for (key, next_mode) in [
+            (KeyCode::KeyF, CameraMode::Orbit),
+            (KeyCode::Digit1, CameraMode::Orbit),
+            (KeyCode::Digit2, CameraMode::FirstPerson),
+            (KeyCode::Digit3, CameraMode::ThirdPerson),
+            (KeyCode::Digit4, CameraMode::FreeFlight),
+            (KeyCode::Digit5, CameraMode::Overview),
+            (KeyCode::Digit6, CameraMode::ShipTop),
+            (KeyCode::Digit7, CameraMode::ShipBottom),
+            (KeyCode::Escape, CameraMode::FreeFlight),
+        ] {
+            let initial_mode = if key == KeyCode::Digit4 {
+                CameraMode::Orbit
+            } else {
+                CameraMode::FreeFlight
+            };
+            let mut app = camera_app(initial_mode);
+            let queued = crate::session::queued_actions_for_tests();
+            capture_cancel_and_release(&mut app, key);
+            assert!(
+                !app.world()
+                    .resource::<crate::hud::HudState>()
+                    .movement_blocked()
+            );
+
+            app.update();
+            let rig = app.world().resource::<CameraRig>();
+            assert_eq!(
+                rig.mode, initial_mode,
+                "captured {key:?} changed the camera mode"
+            );
+            assert_eq!(rig.focus, EntityId::Mars);
+            assert_eq!(rig.pan_offset, Vec3::ONE);
+            assert_eq!(rig.zoom, 2.0);
+            assert_eq!(rig.distance_km, 42.0);
+            assert_eq!((rig.yaw, rig.pitch), (0.3, -0.2));
+            assert!(
+                input_active(),
+                "captured Escape must not release camera input"
+            );
+            assert_eq!(crate::session::queued_actions_for_tests(), queued);
+
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            crate::controls::begin_input_frame();
+            assert!(!crate::controls::binding_actions_blocked());
+            if key == KeyCode::Escape {
+                continue;
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(key);
+            app.update();
+            let rig = app.world().resource::<CameraRig>();
+            assert_eq!(
+                rig.mode, next_mode,
+                "a fresh {key:?} must work after the consumed frame"
+            );
+            if key == KeyCode::KeyF {
+                assert_eq!(rig.focus, EntityId::Lander);
+                assert_eq!(rig.pan_offset, Vec3::ZERO);
+                assert_eq!(rig.zoom, 1.0);
+                assert_eq!(rig.distance_km, 0.12);
+            }
+        }
+        crate::controls::reset_for_tests();
+    }
+
+    #[test]
+    fn consumed_keyboard_frame_keeps_mouse_navigation_and_explicit_view_requests() {
+        let mut app = camera_app(CameraMode::Orbit);
+        let before = crate::snapshot();
+        let sensors =
+            [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| crate::sensors::pose(id, &before));
+        let queued = crate::session::queued_actions_for_tests();
+        capture_cancel_and_release(&mut app, KeyCode::Escape);
+        request_view(CameraRequest {
+            mode: Some(CameraMode::FirstPerson),
+            focus: Some(EntityId::ReturnShip),
+            zoom: Some(1.5),
+        })
+        .unwrap();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        app.world_mut()
+            .resource_mut::<AccumulatedMouseMotion>()
+            .delta = Vec2::new(25.0, -10.0);
+
+        app.update();
+        let rig = app.world().resource::<CameraRig>();
+        assert_eq!(rig.mode, CameraMode::FirstPerson);
+        assert_eq!(rig.focus, EntityId::ReturnShip);
+        assert_eq!(rig.zoom, 1.5);
+        assert!((rig.yaw + 0.1).abs() < 1e-6);
+        assert!((rig.pitch + 0.04).abs() < 1e-6);
+        assert!(input_active());
+        assert_eq!(crate::session::queued_actions_for_tests(), queued);
+        let after = crate::snapshot();
+        assert_eq!(
+            serde_json::to_value(after.as_ref()).unwrap(),
+            serde_json::to_value(before.as_ref()).unwrap()
+        );
+        assert_eq!(
+            [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| crate::sensors::pose(id, &after)),
+            sensors
+        );
+        crate::controls::reset_for_tests();
+    }
+
     #[test]
     fn f_always_relocks_the_lander_from_every_mode_and_focus() {
         let snapshot = Simulation::new_default().snapshot();
@@ -951,6 +1140,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overview_requests_frame_phobos_and_mars_without_replacing_the_close_f_shortcut() {
+        let simulation = Simulation::new_default();
+        let snapshot = simulation.snapshot();
+        let before = serde_json::to_value(&snapshot).unwrap();
+        let mut expected = CameraRig::default();
+        overview::frame(&mut expected, &snapshot);
+        let mut rig = CameraRig {
+            mode: CameraMode::FreeFlight,
+            focus: EntityId::Mars,
+            ..default()
+        };
+        apply_view_request(
+            &mut rig,
+            CameraRequest {
+                mode: Some(CameraMode::Overview),
+                ..default()
+            },
+            &snapshot,
+        );
+        assert_eq!(rig.mode, expected.mode);
+        assert_eq!(rig.focus, EntityId::Phobos);
+        assert_eq!(rig.yaw, expected.yaw);
+        assert_eq!(rig.pitch, expected.pitch);
+        assert_eq!(rig.distance_km, expected.distance_km);
+        let request = frame_shortcut(&keys(&[KeyCode::KeyF]), true, false, rig.focus).unwrap();
+        apply_view_request(&mut rig, request, &snapshot);
+        assert_eq!(rig.mode, CameraMode::Orbit);
+        assert_eq!(rig.focus, EntityId::Lander);
+        assert_eq!(rig.distance_km, 0.12);
+        assert_eq!(serde_json::to_value(simulation.snapshot()).unwrap(), before);
     }
 
     #[test]

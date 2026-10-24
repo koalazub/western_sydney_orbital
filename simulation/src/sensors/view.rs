@@ -134,11 +134,12 @@ pub(super) fn update(
         CameraSourceStatus::DocumentedStp => "documented STP",
     };
     for (mut text, _) in &mut captions {
-        let sampled_time = images.frames[id.index()]
-            .as_ref()
-            .map_or(0.0, |frame| frame.simulation_time_s);
+        let sample = images.frames[id.index()].as_ref();
+        let sampled_time = sample.map_or(0.0, |frame| frame.simulation_time_s);
+        let sampled_yaw = sample.map_or(0.0, |frame| frame.mount_yaw_deg);
+        let sampled_pitch = sample.map_or(0.0, |frame| frame.mount_pitch_deg);
         let value = format!(
-            "Ship {} | {}×{} RGB8/ch | T+{:.1}s\nFOV H{:.0}° V{:.0}° | EV{:.1} | {}",
+            "Ship {} | {}×{} RGB8/ch | T+{:.1}s\nFixed FOV H{:.0}° V{:.0}° | EV{:.1} | {}\nSample yaw {:+.1}° | pitch {:+.1}°",
             id.label(),
             config.resolution_px[0],
             config.resolution_px[1],
@@ -147,6 +148,8 @@ pub(super) fn update(
             angles.vertical_deg,
             config.exposure_ev100,
             fov_status,
+            sampled_yaw,
+            sampled_pitch,
         );
         if text.0 != value {
             text.0 = value;
