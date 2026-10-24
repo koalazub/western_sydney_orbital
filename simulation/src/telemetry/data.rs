@@ -1,5 +1,6 @@
 use crate::{domain::EntityId, model::ThrustApplication};
 use serde::Serialize;
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,9 +107,9 @@ pub(super) struct Actuation {
     pub practice_boost_active: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct FrameMetadata {
-    pub snapshot_description: Option<String>,
+    pub snapshot_description: Option<Cow<'static, str>>,
     pub recognized: bool,
     pub terrain_recognized: bool,
     pub origin: &'static str,
@@ -116,7 +117,7 @@ pub(super) struct FrameMetadata {
     pub speed_basis: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct Provenance {
     pub own_ship_id: Option<EntityId>,
     pub target_id: Option<EntityId>,
@@ -141,7 +142,7 @@ pub(super) struct Units {
     pub simulation_time: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct Caveats {
     pub local_practice_only: bool,
     pub stp_parity: bool,
@@ -163,7 +164,7 @@ pub(super) struct Caveats {
     pub restore_detection: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct Report {
     pub schema_version: u32,
     pub status: ReportStatus,
@@ -175,9 +176,9 @@ pub(super) struct Report {
     pub observed_frame_acceleration: ObservedFrameAcceleration,
     pub peaks: Peaks,
     pub actuation: Actuation,
-    pub units: Units,
+    pub units: &'static Units,
     pub provenance: Provenance,
-    pub caveats: Caveats,
+    pub caveats: &'static Caveats,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,7 +195,6 @@ pub(super) struct Measurement {
     pub kinematics: Option<Kinematics>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Reference {
     pub seed: u64,
     pub frame: String,

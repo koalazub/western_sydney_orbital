@@ -139,7 +139,13 @@ fn known_vectors_use_actual_si_state_not_configuration_maxima_or_cached_range() 
     let json = finite_report(&report);
     assert_eq!(json["units"]["angular_speed"], "rad/s");
     assert_eq!(json["caveats"]["stp_parity"], false);
-    assert_eq!(presentation::compact(&report).lines().count(), 2);
+    assert_eq!(
+        presentation::compact(&report),
+        format!(
+            "Speed 5.00 m/s | radial climb 3.00 m/s\nTerrain-center {:.1} m | thrust 5.00 m/s²",
+            20_000.0 - crate::terrain::surface_radius_m(DVec3::X),
+        )
+    );
     assert!(presentation::expanded(&report).contains("28.65 deg/s"));
 }
 
@@ -544,6 +550,10 @@ fn missing_actors_bad_frame_and_unknown_terrain_do_not_fabricate_measurements() 
     state.frame = "inertial or unknown".into();
     let report = measure(&state).report;
     assert_eq!(report.status, ReportStatus::Unavailable);
+    assert_eq!(
+        report.frame.snapshot_description.as_deref(),
+        Some(state.frame.as_str())
+    );
     assert!(report.metrics.speed_mps.is_none());
     assert!(report.metrics.terrain_center_clearance_m.is_none());
     state = template;
@@ -710,10 +720,30 @@ fn waiting_report_has_no_fake_measurements_and_compact_si_labels() {
     assert_eq!(report.status, ReportStatus::WaitingForSnapshot);
     assert!(report.source_time_s.is_none());
     let text = presentation::compact(&report);
-    assert_eq!(text.lines().count(), 2);
-    assert!(text.contains("Speed n/a m/s"));
-    assert!(text.contains("radial climb n/a m/s"));
-    assert!(text.contains("Terrain-center n/a m"));
-    assert!(text.contains("thrust n/a m/s²"));
+    assert_eq!(
+        text,
+        "Speed n/a m/s | radial climb n/a m/s\nTerrain-center n/a m | thrust n/a m/s²"
+    );
     finite_report(&report);
+}
+
+#[test]
+fn real_samples_preserve_fixed_metadata_and_leave_the_waiting_report_unchanged() {
+    let waiting = finite_report(&waiting_report());
+    let mut simulation = Simulation::new_default();
+    let mut tracker = Tracker::default();
+    for _ in 0..3 {
+        let state = simulation.snapshot();
+        let report = advance(&mut tracker, &state);
+        let json = finite_report(&report);
+        assert_eq!(
+            report.frame.snapshot_description.as_deref(),
+            Some(state.frame.as_str())
+        );
+        for field in ["schema_version", "units", "caveats"] {
+            assert_eq!(json[field], waiting[field]);
+        }
+        simulation.advance(settings().integration.fixed_step_s);
+    }
+    assert_eq!(finite_report(&waiting_report()), waiting);
 }

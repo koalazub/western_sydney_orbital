@@ -1,24 +1,30 @@
 use super::{
-    calculations::{finite, magnitude, measure, nonnegative, vector},
+    calculations::{magnitude, measure, nonnegative, positive},
     data::*,
 };
 use crate::model::Snapshot;
 
 /// One kinematic baseline and three maxima are the entire retained history.
 pub(super) fn advance(tracker: &mut Tracker, snapshot: &Snapshot) -> Report {
+    let measurement = measure(snapshot);
+    let reset = reset_reason(tracker, snapshot, &measurement);
     let Measurement {
         mut report,
         kinematics,
-    } = measure(snapshot);
-    let reference = Reference {
-        seed: snapshot.seed,
-        frame: snapshot.frame.clone(),
-        terrain_recognized: report.frame.terrain_recognized,
-        own_ship_id: snapshot.mission.shuttle_id,
-        target_id: snapshot.mission.target_id,
-    };
-    let reset = reset_reason(tracker, &reference, report.source_time_s, kinematics);
+    } = measurement;
     if let Some(reason) = reset {
+        if matches!(
+            reason,
+            EpochReset::InitialSample | EpochReset::SeedChanged | EpochReset::ReferenceChanged
+        ) {
+            tracker.reference = Some(Reference {
+                seed: snapshot.seed,
+                frame: snapshot.frame.clone(),
+                terrain_recognized: report.frame.terrain_recognized,
+                own_ship_id: snapshot.mission.shuttle_id,
+                target_id: snapshot.mission.target_id,
+            });
+        }
         tracker.epoch = Epoch {
             index: tracker.epoch.index.saturating_add(1),
             seed: Some(snapshot.seed),
@@ -63,8 +69,7 @@ pub(super) fn advance(tracker: &mut Tracker, snapshot: &Snapshot) -> Report {
                 },
                 ..tracker.acceleration
             },
-            (None, Some(_)) => ObservedFrameAcceleration::default(),
-            (Some(_), None) | (None, None) => ObservedFrameAcceleration {
+            _ => ObservedFrameAcceleration {
                 status: AccelerationStatus::Unavailable,
                 ..ObservedFrameAcceleration::default()
             },
@@ -85,7 +90,6 @@ pub(super) fn advance(tracker: &mut Tracker, snapshot: &Snapshot) -> Report {
         .source_time_s
         .zip(tracker.epoch.started_at_time_s)
         .and_then(|(now, start)| nonnegative(now - start));
-    tracker.reference = Some(reference);
     tracker.previous_time_s = report.source_time_s;
     tracker.previous = kinematics;
     report.epoch = tracker.epoch.clone();
@@ -96,26 +100,31 @@ pub(super) fn advance(tracker: &mut Tracker, snapshot: &Snapshot) -> Report {
 
 fn reset_reason(
     tracker: &Tracker,
-    current: &Reference,
-    time_s: Option<f64>,
-    kinematics: Option<Kinematics>,
+    snapshot: &Snapshot,
+    measurement: &Measurement,
 ) -> Option<EpochReset> {
     let Some(previous) = &tracker.reference else {
         return Some(EpochReset::InitialSample);
     };
-    if previous.seed != current.seed {
+    if previous.seed != snapshot.seed {
         return Some(EpochReset::SeedChanged);
     }
-    if previous != current {
+    if previous.frame != snapshot.frame
+        || previous.terrain_recognized != measurement.report.frame.terrain_recognized
+        || previous.own_ship_id != snapshot.mission.shuttle_id
+        || previous.target_id != snapshot.mission.target_id
+    {
         return Some(EpochReset::ReferenceChanged);
     }
-    if time_s
+    if measurement
+        .report
+        .source_time_s
         .zip(tracker.previous_time_s)
         .is_some_and(|(now, before)| now < before)
     {
         return Some(EpochReset::TimeRewound);
     }
-    match (tracker.previous, kinematics) {
+    match (tracker.previous, measurement.kinematics) {
         (Some(before), Some(now)) if now.time_s == before.time_s && now != before => {
             Some(EpochReset::SameTimeKinematicsChanged)
         }
@@ -128,9 +137,7 @@ fn reset_reason(
 fn maximum(previous: Option<f64>, current: Option<f64>) -> Option<f64> {
     match (previous, current) {
         (Some(previous), Some(current)) => Some(previous.max(current)),
-        (Some(previous), None) => Some(previous),
-        (None, Some(current)) => Some(current),
-        (None, None) => None,
+        (value, None) | (None, value) => value,
     }
 }
 
@@ -139,14 +146,12 @@ fn observed_acceleration(before: Kinematics, now: Kinematics) -> ObservedFrameAc
         status: AccelerationStatus::Unavailable,
         ..ObservedFrameAcceleration::default()
     };
-    let Some(interval_s) = finite(now.time_s - before.time_s).filter(|dt| *dt > 0.0) else {
+    let Some(interval_s) = positive(now.time_s - before.time_s) else {
         return unavailable;
     };
-    let Some(value) = vector(std::array::from_fn(|axis| {
+    let value = std::array::from_fn(|axis| {
         (now.velocity_mps[axis] - before.velocity_mps[axis]) / interval_s
-    })) else {
-        return unavailable;
-    };
+    });
     let Some(norm) = magnitude(value) else {
         return unavailable;
     };

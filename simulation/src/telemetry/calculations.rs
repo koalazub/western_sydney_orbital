@@ -5,6 +5,7 @@ use crate::{
     scenario::settings,
 };
 use bevy::math::DVec3;
+use std::{borrow::Cow, sync::LazyLock};
 
 pub(super) fn finite(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
@@ -14,11 +15,11 @@ pub(super) fn nonnegative(value: f64) -> Option<f64> {
     finite(value).filter(|value| *value >= 0.0)
 }
 
-fn positive(value: f64) -> Option<f64> {
+pub(super) fn positive(value: f64) -> Option<f64> {
     finite(value).filter(|value| *value > 0.0)
 }
 
-pub(super) fn vector(value: [f64; 3]) -> Option<[f64; 3]> {
+fn vector(value: [f64; 3]) -> Option<[f64; 3]> {
     value.iter().all(|value| value.is_finite()).then_some(value)
 }
 
@@ -55,47 +56,20 @@ fn selected(snapshot: &Snapshot, id: EntityId, kind: EntityKind) -> Option<&Enti
 }
 
 pub(super) fn waiting_report() -> Report {
-    let config = settings();
-    Report {
-        schema_version: 1,
-        status: ReportStatus::WaitingForSnapshot,
-        input_issues: Vec::new(),
-        source_time_s: None,
-        epoch: Epoch::default(),
-        frame: FrameMetadata {
-            snapshot_description: None,
-            recognized: false,
-            terrain_recognized: false,
-            origin: "Phobos center",
-            axes: "+X toward Mars; +Y orbit normal; +Z right-handed",
-            speed_basis: "Phobos-centered Mars-Phobos circular rotating frame, not inertial",
-        },
-        metrics: FlightMetrics::default(),
-        observed_frame_acceleration: ObservedFrameAcceleration::default(),
-        peaks: Peaks::default(),
-        actuation: Actuation::default(),
-        units: Units {
-            distance: "m",
-            speed: "m/s",
-            acceleration: "m/s^2",
-            force: "N",
-            torque: "N m",
-            angular_speed: "rad/s",
-            mass: "kg",
-            energy: "J",
-            simulation_time: "s",
-        },
-        provenance: Provenance {
-            own_ship_id: None,
-            target_id: None,
-            own_state: "immutable snapshot actor selected by mission.shuttle_id and lander kind",
-            target_state: "immutable snapshot actor selected by mission.target_id and return-ship kind",
-            terrain: "versioned local terrain::surface_radius_m mesh intersection",
-            fuel_and_damage: "snapshot mission accumulators, local model estimates",
-            hidden_debris_truth_used: false,
-            camera_state_used: false,
-        },
-        caveats: Caveats {
+    static UNITS: Units = Units {
+        distance: "m",
+        speed: "m/s",
+        acceleration: "m/s^2",
+        force: "N",
+        torque: "N m",
+        angular_speed: "rad/s",
+        mass: "kg",
+        energy: "J",
+        simulation_time: "s",
+    };
+    static CAVEATS: LazyLock<Caveats> = LazyLock::new(|| {
+        let config = settings();
+        Caveats {
             local_practice_only: true,
             stp_parity: false,
             read_only: true,
@@ -114,17 +88,53 @@ pub(super) fn waiting_report() -> Report {
             damage: "Existing estimated accumulated contact closing energy, not an STP damage measurement.",
             peaks: "Maxima of telemetry samples within this epoch, not every internal physics substep. Climb is a signed maximum, not maximum descent magnitude.",
             restore_detection: "Seed changes, time rewinds, frame/identity changes and same-time own-kinematic changes reset history. A forward-time restore indistinguishable from flight cannot be identified from snapshots alone.",
+        }
+    });
+    Report {
+        schema_version: 1,
+        status: ReportStatus::WaitingForSnapshot,
+        input_issues: Vec::new(),
+        source_time_s: None,
+        epoch: Epoch::default(),
+        frame: FrameMetadata {
+            snapshot_description: None,
+            recognized: false,
+            terrain_recognized: false,
+            origin: "Phobos center",
+            axes: "+X toward Mars; +Y orbit normal; +Z right-handed",
+            speed_basis: "Phobos-centered Mars-Phobos circular rotating frame, not inertial",
         },
+        metrics: FlightMetrics::default(),
+        observed_frame_acceleration: ObservedFrameAcceleration::default(),
+        peaks: Peaks::default(),
+        actuation: Actuation::default(),
+        units: &UNITS,
+        provenance: Provenance {
+            own_ship_id: None,
+            target_id: None,
+            own_state: "immutable snapshot actor selected by mission.shuttle_id and lander kind",
+            target_state: "immutable snapshot actor selected by mission.target_id and return-ship kind",
+            terrain: "versioned local terrain::surface_radius_m mesh intersection",
+            fuel_and_damage: "snapshot mission accumulators, local model estimates",
+            hidden_debris_truth_used: false,
+            camera_state_used: false,
+        },
+        caveats: &CAVEATS,
     }
 }
 
 pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
     let mut report = waiting_report();
+    let config = settings();
     report.source_time_s = nonnegative(snapshot.time_s);
-    report.frame.snapshot_description = Some(snapshot.frame.clone());
-    report.frame.recognized = snapshot.frame == settings().frame_description;
+    report.frame.recognized = snapshot.frame == config.frame_description;
+    report.frame.snapshot_description = Some(if report.frame.recognized {
+        Cow::Borrowed(config.frame_description.as_str())
+    } else {
+        Cow::Owned(snapshot.frame.clone())
+    });
     report.frame.terrain_recognized =
-        snapshot.body.name == "Phobos" && snapshot.body.radii_m == settings().terrain.radii_m;
+        snapshot.body.name == "Phobos" && snapshot.body.radii_m == config.terrain.radii_m;
     let own = selected(snapshot, snapshot.mission.shuttle_id, EntityKind::Lander);
     let target = selected(snapshot, snapshot.mission.target_id, EntityKind::ReturnShip);
     report.provenance.own_ship_id = own.map(|actor| actor.id);
@@ -166,11 +176,15 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
 
     let metrics = &mut report.metrics;
     let issues = &mut report.input_issues;
-    let position = vector(own.position).filter(|value| magnitude(*value).is_some());
-    let velocity = vector(own.velocity).filter(|value| magnitude(*value).is_some());
+    let radius = magnitude(own.position);
+    let position = radius.map(|_| own.position);
+    metrics.speed_mps = magnitude(own.velocity);
+    let velocity = metrics.speed_mps.map(|_| own.velocity);
     let orientation = rotation(own.rotation);
-    let angular_velocity =
-        vector(own.angular_velocity_rad_s).filter(|value| magnitude(*value).is_some());
+    metrics.angular_speed_rad_s = magnitude(own.angular_velocity_rad_s);
+    let angular_velocity = metrics
+        .angular_speed_rad_s
+        .map(|_| own.angular_velocity_rad_s);
     if position.is_none() {
         issues.push(InputIssue::InvalidOwnPosition);
     }
@@ -183,9 +197,7 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
     if angular_velocity.is_none() {
         issues.push(InputIssue::InvalidAngularVelocity);
     }
-    metrics.speed_mps = velocity.and_then(magnitude);
-    metrics.angular_speed_rad_s = angular_velocity.and_then(magnitude);
-    if let Some((position, radius)) = position.zip(position.and_then(magnitude)) {
+    if let Some((position, radius)) = position.zip(radius) {
         if radius > 0.0 {
             let up = position.map(|coordinate| coordinate / radius);
             metrics.radial_climb_mps = velocity.and_then(|velocity| projection(velocity, up));
@@ -278,18 +290,20 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
     } else {
         ReportStatus::Partial
     };
-    let kinematics = position
-        .zip(velocity)
-        .zip(orientation)
-        .zip(angular_velocity)
-        .map(
-            |(((position_m, velocity_mps), rotation_xyzw), angular_velocity_rad_s)| Kinematics {
-                time_s,
-                position_m,
-                velocity_mps,
-                rotation_xyzw,
-                angular_velocity_rad_s,
-            },
-        );
+    let kinematics = match (position, velocity, orientation, angular_velocity) {
+        (
+            Some(position_m),
+            Some(velocity_mps),
+            Some(rotation_xyzw),
+            Some(angular_velocity_rad_s),
+        ) => Some(Kinematics {
+            time_s,
+            position_m,
+            velocity_mps,
+            rotation_xyzw,
+            angular_velocity_rad_s,
+        }),
+        _ => None,
+    };
     Measurement { report, kinematics }
 }
