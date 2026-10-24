@@ -30,6 +30,45 @@ PORT=0 just --no-deps local
 
 This serves the existing build. It does not rebuild changes or deploy anything. Keep the server process running while you use the game; Ctrl+C stops it.
 
+## Inspect and experiment in Marimo
+
+The [Marimo flight lab](notebooks/flight_lab.py) is where the team develops debris prediction, path planning, controller logic and experiment scheduling. Those algorithms are Python, with editable notebook functions and shared [Python modules](src/wsorb/flight/). Bevy/Rapier runs the physical world and sensors; it does not choose routes or run an autonomous controller. It only displays the route Python sends it.
+
+From the repository root, build once and start the two Devenv processes:
+
+```sh
+just build
+devenv up lab simulation
+```
+
+Devenv manages the game at `http://127.0.0.1:61829/` and Marimo at port `2718`. Open the token-protected editor URL printed by the lab process. Keep one game tab open and visible, ideally in a separate window. In Marimo:
+
+1. Connect and refresh to inspect real public observations, radar and flight metrics.
+2. Edit the prediction, planning and controller functions and their parameters in Python. **Plan and show route** runs the Python planner without steering. The initial controller requests zero acceleration. Editing functions or refreshing measurements does not apply thrust.
+3. Select a controller and arm **Apply and run** to run the visible simulation while Python supplies commands. Change parameters and apply again to start a new run with those changes. A read-only monitor shows the latest real observations and run status. **Run one policy step** remains available for bounded, paused experiments.
+4. Use Stop or Reset when needed. **Upright lander** pauses, aligns it with the launch pad and clears spin/thrust without moving or braking it. This local test intervention is recorded and stops a notebook run; it is not an STP maneuver. A failed connection cannot guarantee delivery of a notebook Stop request.
+
+The notebook is a normal `.py` file, so teammates can read, change and review it in the private repository. Its controller loop starts only on an explicit armed run action. Python decides when to sample, predict, plan and command. Use one command writer; do not run another controller against the same game. Displaying an A* route never makes Bevy follow it.
+
+Use `devenv up -d lab simulation` for background processes, `devenv processes logs lab` for the editor URL and `devenv processes down` to stop them. `WSORB_GAME_PORT` and `WSORB_LAB_PORT` override the defaults. `just format` formats Python and Rust; `just check` checks Python/Marimo, Rust and the web build; `just unit-check` runs both test suites. No inline Python probes are needed.
+
+| Code | What to change there |
+| --- | --- |
+| [`notebooks/flight_lab.py`](notebooks/flight_lab.py) | Python policy, experiment controls and analysis cells. |
+| [`src/wsorb/local_api.py`](src/wsorb/local_api.py) | Python access to the local game. |
+| [`src/wsorb/flight/`](src/wsorb/flight/) | Pure Python prediction, collision geometry, A* and controller functions, with no simulator or notebook dependency. |
+| [`simulation/src/navigation/`](simulation/src/navigation/) | Validation and drawing of Python's route preview, with no planner or tracker. |
+| [`simulation/src/physics.rs`](simulation/src/physics.rs) | The actual local Rapier physics and command implementation. |
+| [`src/wsorb/stp_api.py`](src/wsorb/stp_api.py) | The separate adapter for licensed STP execution. |
+
+Python cell changes do not require a WASM rebuild. Rust and versioned scenario changes require `just build` and a game-page reload.
+
+`SetCommand(accelCommand, angAccelCommand)` and `GetNearestDebrisLocations(N)` use the official helper names, body-frame SI vectors and 3×3 radar matrices. The local client and the genuine STP adapter keep transport details outside the algorithms. Pause, manual stepping and route drawing are local experiment tools, not claimed STP SDK methods. The licensed adapter preserves the SDK's passive quaternion and radar timestamps; align frames and clock origins explicitly when moving an experiment to STP.
+
+The local connection is opt-in, loopback-only and bearer-authenticated. Its private connection file lives at `.devenv/wsorb-local.json`, or `WSORB_LOCAL_CONNECTION` when set. Do not publish that file or its token. Without a ready browser, the lab reports an error rather than returning sample results. Public observations exclude hidden debris truth; report timestamps can differ because telemetry and sensors have their own cadence. The ordinary local server remains read-only when `WSORB_LAB` is unset.
+
+For teammates, the simplest setup is to clone the private repository and run their own game/lab pair. Use private screen sharing for a shared demo. Do not expose the Marimo editor publicly: it can execute Python on its host. Remote access needs an owner-approved authenticated tailnet setup, not Tailscale Funnel. Nothing is published or deployed automatically.
+
 ## Controls and following the lander
 
 Click the scene, or focus the canvas with Tab, before using game keys. **H** opens controls/settings and shows held input, controller mode and thrust limits. **F** follows the lander again if you lose it.
@@ -53,7 +92,7 @@ Click the scene, or focus the canvas with Tab, before using game keys. **H** ope
 | L / X / M | Mouse capture or release / browser fullscreen / window maximize. |
 | Tab / Enter / Esc | Select a control / activate it / close a panel or release the view. |
 
-Manual thrust takes over from the example controller. Releasing keys stops thrust, **not velocity or spin**. Use opposite thrust to slow down. Controls/settings can re-enable the example controller. After pause, focus loss, a modal or an external-command handoff, release movement keys before pressing them again if the HUD requests rearming.
+Releasing keys stops thrust, **not velocity or spin**. Use opposite thrust to slow down. Autonomous control belongs to Python, not the game. After pause, focus loss, a modal or an external-command handoff, release movement keys before pressing them again if the HUD requests rearming.
 
 The controls panel does not pause flight. Blue-white debug streams follow the actual applied jet forces in the opposite direction. They are a visual cue, not a calibrated gas or light simulation.
 
@@ -61,13 +100,13 @@ The controls panel does not pause flight. Blue-white debug streams follow the ac
 
 The flight HUD shows actual speed and radial climb in m/s, terrain-centre clearance in metres, and thrust acceleration in m/s². Details includes target range/closing speed, force in N, torque in N·m, spin, fuel/damage estimates, sampled peaks and simulation time. These are lander measurements, not debug-camera speed. Terrain-centre clearance is not landing-foot or pad clearance.
 
-Space defaults to **2.0 m/s² practice boost**, four times the official reference command limit. In Details or Controls, select **Use reference Space thrust** for 0.5 m/s². E, side keys and the normal command API retain reference limits. Switching profiles stops keyboard-owned thrust and requires key release; it does not brake the lander.
+Space, E, side keys and the normal command API use the **0.5 m/s² reference limit**. There is no live practice-boost switch. Older exported runs may record a boost profile; do not compare those directly with current reference-limit experiments.
 
 For paired comparisons:
 
-1. Select reference thrust and reset. Use the same seed, scenario and step schedule for each strategy.
-2. Measure arrival time, speed/closing conditions, fuel and damage together. Do not compare boosted takeoff directly with reference-limit runs.
-3. Export the run from Details. JSON includes telemetry, selected profile and the verified engine-build SHA-256.
+1. Reset and use the same seed, scenario and step schedule for each Python strategy.
+2. Measure arrival time, speed/closing conditions, fuel and damage together.
+3. Export the run from Details. JSON includes telemetry and the verified engine-build SHA-256.
 4. Use only public observations for the planner. Radar covers a configured subset; unobserved rocks are not clear space. The amber path is advisory and never drives the lander.
 5. Validate promising policies in licensed STP using its actual sensors, actuation and scoring.
 
