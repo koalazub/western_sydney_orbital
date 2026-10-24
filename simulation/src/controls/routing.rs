@@ -1,18 +1,18 @@
-use super::{Movement, MovementTarget};
+use super::{Action, Movement, MovementTarget};
 use bevy::prelude::{ButtonInput, KeyCode};
 use std::cell::Cell;
 
-const W: u16 = 1 << 0;
-const A: u16 = 1 << 1;
-const S: u16 = 1 << 2;
-const D: u16 = 1 << 3;
-const Q: u16 = 1 << 4;
-const E: u16 = 1 << 5;
-const ALT: u16 = 1 << 6;
-const SHIFT: u16 = 1 << 7;
-const BLOCKED_CTRL_META: u16 = 1 << 8;
-const SPACE: u16 = 1 << 9;
-const TRANSLATION_KEYS: u16 = W | A | S | D | Q | E | SPACE;
+const W: u16 = Action::Front.bit();
+const A: u16 = Action::Left.bit();
+const S: u16 = Action::Back.bit();
+const D: u16 = Action::Right.bit();
+const Q: u16 = Action::Down.bit();
+const E: u16 = Action::Up.bit();
+pub(super) const ALT: u16 = 1 << 6;
+pub(super) const SHIFT: u16 = 1 << 7;
+pub(super) const BLOCKED_CTRL_META: u16 = 1 << 8;
+const SPACE: u16 = Action::Lift.bit();
+pub(super) const TRANSLATION_KEYS: u16 = W | A | S | D | Q | E | SPACE;
 const KNOWN_KEYS: u16 = TRANSLATION_KEYS | ALT | SHIFT | BLOCKED_CTRL_META;
 
 thread_local! {
@@ -30,15 +30,8 @@ pub(super) fn key_mask(_keys: &ButtonInput<KeyCode>) -> u16 {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn key_mask(keys: &ButtonInput<KeyCode>) -> u16 {
-    let mut mask = 0;
+    let mut mask = super::bindings::native_mask(keys);
     for (key, bit) in [
-        (KeyCode::KeyW, W),
-        (KeyCode::KeyA, A),
-        (KeyCode::KeyS, S),
-        (KeyCode::KeyD, D),
-        (KeyCode::KeyQ, Q),
-        (KeyCode::KeyE, E),
-        (KeyCode::Space, SPACE),
         (KeyCode::AltLeft, ALT),
         (KeyCode::AltRight, ALT),
         (KeyCode::ShiftLeft, SHIFT),
@@ -72,7 +65,14 @@ pub(super) fn decode(mask: u16) -> Movement {
     };
     Movement {
         target,
-        axes: [axis(mask, W, S), axis(mask, A, D), axis(mask, E | SPACE, Q)],
+        axes: match target {
+            // Horizontal actions name the firing side, not desired travel.
+            MovementTarget::Ship => [axis(mask, S, W), axis(mask, D, A), axis(mask, E | SPACE, Q)],
+            MovementTarget::DebugCamera => {
+                [axis(mask, W, S), axis(mask, A, D), axis(mask, E | SPACE, Q)]
+            }
+            MovementTarget::Suppressed => [0.0; 3],
+        },
         held,
         boost: target == MovementTarget::DebugCamera && mask & SHIFT != 0,
     }
@@ -89,23 +89,23 @@ mod tests {
 
     #[test]
     fn plain_and_alt_option_keys_choose_mutually_exclusive_targets() {
-        for (mask, axes) in [
-            (W, [1.0, 0.0, 0.0]),
-            (S, [-1.0, 0.0, 0.0]),
-            (A, [0.0, 1.0, 0.0]),
-            (D, [0.0, -1.0, 0.0]),
-            (E, [0.0, 0.0, 1.0]),
-            (SPACE, [0.0, 0.0, 1.0]),
-            (Q, [0.0, 0.0, -1.0]),
-            (W | A | E, [1.0, 1.0, 1.0]),
-            (W | A | SPACE, [1.0, 1.0, 1.0]),
+        for (mask, ship_axes, camera_axes) in [
+            (W, [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            (S, [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+            (A, [0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+            (D, [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]),
+            (E, [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]),
+            (SPACE, [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]),
+            (Q, [0.0, 0.0, -1.0], [0.0, 0.0, -1.0]),
+            (W | A | E, [-1.0, -1.0, 1.0], [1.0, 1.0, 1.0]),
+            (W | A | SPACE, [-1.0, -1.0, 1.0], [1.0, 1.0, 1.0]),
         ] {
             let ship = decode(mask);
             let camera = decode(mask | ALT);
             assert_eq!(ship.target, MovementTarget::Ship);
             assert_eq!(camera.target, MovementTarget::DebugCamera);
-            assert_eq!(ship.axes, axes);
-            assert_eq!(camera.axes, axes);
+            assert_eq!(ship.axes, ship_axes);
+            assert_eq!(camera.axes, camera_axes);
             assert!(ship.held && camera.held);
             assert!(!ship.boost && !camera.boost);
         }
@@ -128,7 +128,7 @@ mod tests {
             }
         }
         assert_eq!(decode(W | S | E).axes, [0.0, 0.0, 1.0]);
-        assert_eq!(decode(Q | E | D).axes, [0.0, -1.0, 0.0]);
+        assert_eq!(decode(Q | E | D).axes, [0.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -200,7 +200,10 @@ mod tests {
             assert_eq!(camera.target, MovementTarget::DebugCamera);
             assert!(!ship.boost);
             assert!(camera.boost);
-            assert_eq!(ship.axes, camera.axes);
+            assert_eq!(
+                ship.axes,
+                [-camera.axes[0], -camera.axes[1], camera.axes[2]]
+            );
             assert_eq!(ship.held, mask != 0);
             assert_eq!(camera.held, mask != 0);
         }
@@ -246,6 +249,7 @@ mod tests {
         use crate::controls::{movement, set_movement_keys};
         use bevy::prelude::{ButtonInput, KeyCode};
 
+        crate::controls::reset_for_tests();
         let mut keys = ButtonInput::default();
         for key in [KeyCode::KeyW, KeyCode::KeyA, KeyCode::KeyE] {
             keys.press(key);
@@ -256,7 +260,7 @@ mod tests {
         for _ in 0..2 {
             let sample = movement(&keys);
             assert_eq!(sample.target, MovementTarget::Ship);
-            assert_eq!(sample.axes, [1.0; 3]);
+            assert_eq!(sample.axes, [-1.0, -1.0, 1.0]);
             assert!(sample.held);
         }
         for key in [KeyCode::KeyW, KeyCode::KeyA, KeyCode::KeyE] {
@@ -274,11 +278,12 @@ mod tests {
         use crate::controls::movement;
         use bevy::prelude::{ButtonInput, KeyCode};
 
+        crate::controls::reset_for_tests();
         for (key, axes) in [
-            (KeyCode::KeyW, [1.0, 0.0, 0.0]),
-            (KeyCode::KeyS, [-1.0, 0.0, 0.0]),
-            (KeyCode::KeyA, [0.0, 1.0, 0.0]),
-            (KeyCode::KeyD, [0.0, -1.0, 0.0]),
+            (KeyCode::KeyW, [-1.0, 0.0, 0.0]),
+            (KeyCode::KeyS, [1.0, 0.0, 0.0]),
+            (KeyCode::KeyA, [0.0, -1.0, 0.0]),
+            (KeyCode::KeyD, [0.0, 1.0, 0.0]),
             (KeyCode::KeyE, [0.0, 0.0, 1.0]),
             (KeyCode::Space, [0.0, 0.0, 1.0]),
             (KeyCode::KeyQ, [0.0, 0.0, -1.0]),
@@ -299,6 +304,7 @@ mod tests {
         use crate::controls::movement;
         use bevy::prelude::{ButtonInput, KeyCode};
 
+        crate::controls::reset_for_tests();
         for alt in [KeyCode::AltLeft, KeyCode::AltRight] {
             let mut keys = ButtonInput::default();
             keys.press(KeyCode::Space);
@@ -326,6 +332,7 @@ mod tests {
         use crate::controls::movement;
         use bevy::prelude::{ButtonInput, KeyCode};
 
+        crate::controls::reset_for_tests();
         for modifier in [KeyCode::AltLeft, KeyCode::AltRight] {
             let mut keys = ButtonInput::default();
             keys.press(KeyCode::KeyQ);
@@ -365,6 +372,7 @@ mod tests {
         use crate::controls::{movement, set_movement_keys};
         use bevy::prelude::{ButtonInput, KeyCode};
 
+        crate::controls::reset_for_tests();
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::KeyW);
         set_movement_keys(D | SPACE | ALT | SHIFT);

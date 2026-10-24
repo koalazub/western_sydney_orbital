@@ -10,6 +10,7 @@ use crate::{
 use std::time::Duration;
 
 const STEP: Duration = Duration::from_millis(50);
+const DEFAULT_BINDINGS: &str = r#"{"version":1,"bindings":{"front":"KeyW","back":"KeyS","left":"KeyA","right":"KeyD","up":"KeyE","down":"KeyQ","lift":"Space"}}"#;
 
 fn fresh_app() -> App {
     SIMULATION.with(|sim| *sim.borrow_mut() = Simulation::new_default());
@@ -19,6 +20,7 @@ fn fresh_app() -> App {
     VIEWPORT.with(|viewport| *viewport.borrow_mut() = ViewportState::default());
     KEYBOARD_PILOT.with(|pilot| *pilot.borrow_mut() = KeyboardPilot::default());
     SPACE_HELD.with(|held| held.set(false));
+    crate::controls::reset_for_tests();
     crate::controls::set_movement_keys(0);
     crate::camera::set_input_active(true, false);
 
@@ -169,7 +171,7 @@ fn native_upright_action_and_json_api_pause_before_advance_and_require_key_relea
         assert!(keyboard_owns_command());
         assert_eq!(
             ship(&snapshot()).commanded_accel_mps2,
-            [0.0, scenario::settings().lander.max_accel_mps2, 0.0]
+            [0.0, -scenario::settings().lander.max_accel_mps2, 0.0]
         );
     }
 }
@@ -343,7 +345,11 @@ fn runtime_playback_only_advances_physics_with_the_installed_command() {
 fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost() {
     let max_accel = scenario::settings().lander.max_accel_mps2;
     for (key, shift, command) in [
-        (KeyCode::KeyW, false, [max_accel, 0.0, 0.0]),
+        (KeyCode::KeyW, false, [-max_accel, 0.0, 0.0]),
+        (KeyCode::KeyS, false, [max_accel, 0.0, 0.0]),
+        (KeyCode::KeyA, false, [0.0, -max_accel, 0.0]),
+        (KeyCode::KeyD, false, [0.0, max_accel, 0.0]),
+        (KeyCode::KeyQ, false, [0.0, 0.0, -max_accel]),
         (KeyCode::KeyE, false, [0.0, 0.0, max_accel]),
         (KeyCode::KeyE, true, [0.0, 0.0, max_accel]),
         (KeyCode::Space, false, [0.0, 0.0, max_accel]),
@@ -395,6 +401,182 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
             );
         }
     }
+}
+
+#[test]
+fn native_side_keys_fire_the_existing_opposite_force_indexed_mounts() {
+    use bevy::math::DVec3;
+
+    let reference = scenario::settings().lander.max_accel_mps2;
+    for (key, mount, point, axis, sign) in [
+        (KeyCode::KeyW, 1, [2.5, 0.0, -2.55], 0, -1.0),
+        (KeyCode::KeyS, 0, [-2.5, 0.0, -2.55], 0, 1.0),
+        (KeyCode::KeyA, 3, [0.0, 2.5, -2.55], 1, -1.0),
+        (KeyCode::KeyD, 2, [0.0, -2.5, -2.55], 1, 1.0),
+    ] {
+        let mut app = running_app();
+        let before = snapshot();
+        press(&mut app, &[key]);
+        frame(&mut app, Duration::ZERO);
+        let thrusting = snapshot();
+        let lander = ship(&thrusting);
+        let jets = crate::propulsion::applied_jets(lander);
+        assert_eq!(jets.len(), 1);
+        assert_eq!(
+            scenario::settings().lander.manual_nozzles_body_m[mount],
+            point
+        );
+        assert_eq!(jets[0].point_body_m, point);
+        let mut command = [0.0; 3];
+        command[axis] = sign * reference;
+        assert_eq!(lander.commanded_accel_mps2, command);
+        assert_eq!(
+            jets[0].force_body_n,
+            command.map(|accel| accel * lander.mass_kg)
+        );
+        let moment = DVec3::from_array(point).cross(DVec3::from_array(jets[0].force_body_n));
+        assert_eq!(lander.torque_nm, moment.to_array());
+        assert!(
+            moment.length() > 0.0,
+            "offset side jets have a real moment arm"
+        );
+        assert_eq!(lander.position, ship(&before).position);
+        assert_eq!(lander.velocity, ship(&before).velocity);
+        frame(&mut app, STEP);
+        assert!(snapshot().mission.fuel_used_kg > before.mission.fuel_used_kg);
+        assert_ne!(ship(&snapshot()).angular_velocity_rad_s, [0.0; 3]);
+    }
+}
+
+#[test]
+fn rebinding_releases_owned_thrust_once_and_waits_for_old_and_new_physical_keys() {
+    let mut app = running_app();
+    press(&mut app, &[KeyCode::KeyW]);
+    frame(&mut app, STEP);
+    let before = snapshot();
+    assert!(keyboard_owns_command());
+    crate::controls::set_bindings(&DEFAULT_BINDINGS.replace("KeyW", "KeyB")).unwrap();
+    assert!(keyboard_requires_release());
+    frame(&mut app, Duration::ZERO);
+    let released = snapshot();
+    assert_eq!(ship(&released).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(ship(&released).velocity, ship(&before).velocity);
+    assert_eq!(ship(&released).position, ship(&before).position);
+    assert_eq!(released.manual_interventions, before.manual_interventions);
+    frame(&mut app, Duration::ZERO);
+    assert_eq!(
+        serde_json::to_value(snapshot().as_ref()).unwrap(),
+        serde_json::to_value(released.as_ref()).unwrap(),
+        "only one owned-command release is applied"
+    );
+    press(&mut app, &[KeyCode::KeyB]);
+    release(&mut app, &[KeyCode::KeyW]);
+    frame(&mut app, Duration::ZERO);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert!(
+        keyboard_requires_release(),
+        "the newly configured key was already held"
+    );
+    release(&mut app, &[KeyCode::KeyB]);
+    frame(&mut app, Duration::ZERO);
+    assert!(!keyboard_requires_release());
+    press(&mut app, &[KeyCode::KeyW]);
+    frame(&mut app, Duration::ZERO);
+    assert!(
+        !keyboard_owns_command(),
+        "the removed physical binding no longer fires"
+    );
+    release(&mut app, &[KeyCode::KeyW]);
+    press(&mut app, &[KeyCode::KeyB]);
+    frame(&mut app, STEP);
+    assert!(keyboard_owns_command());
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        [-scenario::settings().lander.max_accel_mps2, 0.0, 0.0]
+    );
+
+    press(&mut app, &[KeyCode::AltLeft]);
+    let debug = crate::controls::movement(app.world().resource::<ButtonInput<KeyCode>>());
+    assert_eq!(debug.target, MovementTarget::DebugCamera);
+    assert_eq!(
+        debug.axes,
+        [1.0, 0.0, 0.0],
+        "configured Front remains intuitive camera-forward under Alt"
+    );
+    frame(&mut app, Duration::ZERO);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(snapshot().manual_interventions, 0);
+}
+
+#[test]
+fn capture_and_binding_changes_never_clear_external_thrust_even_after_authority_handoffs() {
+    for lose_authority in [false, true] {
+        let mut app = running_app();
+        press(&mut app, &[KeyCode::KeyW]);
+        frame(&mut app, STEP);
+        crate::controls::begin_capture(crate::controls::Action::Front);
+        if lose_authority {
+            app.world_mut().resource_mut::<PlaybackState>().can_control = false;
+            frame(&mut app, Duration::ZERO);
+        }
+        let command = [0.0, 0.0, scenario::settings().lander.max_accel_mps2 * 0.25];
+        dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+            accel: command,
+            angular_accel: [0.0; 3],
+        }))
+        .unwrap();
+        let external = serde_json::to_value(snapshot().as_ref()).unwrap();
+        crate::controls::capture_key(KeyCode::KeyH, false);
+        assert!(crate::controls::binding_capture_active());
+        frame(&mut app, Duration::ZERO);
+        assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), external);
+        crate::controls::capture_key(KeyCode::KeyB, false);
+        assert!(!crate::controls::binding_capture_active());
+        crate::controls::restore_defaults();
+        app.world_mut().resource_mut::<PlaybackState>().can_control = true;
+        frame(&mut app, Duration::ZERO);
+        assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), external);
+        release(&mut app, &[KeyCode::KeyW]);
+        frame(&mut app, Duration::ZERO);
+        assert_eq!(
+            serde_json::to_value(snapshot().as_ref()).unwrap(),
+            external,
+            "late release cannot zero the notebook's force"
+        );
+        assert_eq!(snapshot().manual_interventions, 0);
+        assert!(!keyboard_owns_command());
+    }
+}
+
+#[test]
+fn capture_space_cannot_launch_and_a_remapped_lift_still_requires_a_fresh_press() {
+    let mut app = fresh_app();
+    crate::controls::begin_capture(crate::controls::Action::Lift);
+    press(&mut app, &[KeyCode::Space]);
+    crate::controls::capture_key(KeyCode::Space, false);
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    assert_eq!(snapshot().time_s, 0.0);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    release(&mut app, &[KeyCode::Space]);
+    frame(&mut app, Duration::ZERO);
+    crate::controls::set_bindings(&DEFAULT_BINDINGS.replace("Space", "KeyB")).unwrap();
+    frame(&mut app, Duration::ZERO);
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    release(&mut app, &[KeyCode::Space]);
+    frame(&mut app, Duration::ZERO);
+    press(&mut app, &[KeyCode::KeyB]);
+    frame(&mut app, STEP);
+    assert!(app.world().resource::<PlaybackState>().running);
+    assert!(keyboard_owns_command());
+    assert!(snapshot().time_s > 0.0);
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        [0.0, 0.0, scenario::settings().lander.max_accel_mps2]
+    );
+    assert_eq!(snapshot().manual_interventions, 0);
 }
 
 #[test]

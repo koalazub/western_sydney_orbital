@@ -209,3 +209,44 @@ fn propellant_force_sums_individual_magnitudes_even_when_the_wrench_cancels() {
     assert_eq!(wrench.torque_body_nm, [0.0; 3]);
     assert_eq!(wrench.propellant_force_n, settings().lander.mass_kg);
 }
+
+#[test]
+fn configured_mass_drives_the_same_real_nozzle_map_and_reference_acceleration_cap() {
+    let mut experiment = crate::model::ExperimentSettings::default();
+    experiment.ship.mass_kg = 100_000.0;
+    experiment.ship.inertia_scale = 3.0;
+    experiment.debris.count = 0;
+    let mut sim = Simulation::with_experiment(5, experiment).unwrap();
+    sim.set_manual_thrust([0.3, -0.4, 0.0]).unwrap();
+    let ship = lander(&sim);
+    assert_eq!(ship.thrust_n, [30_000.0, -40_000.0, 0.0]);
+    let jets = applied_jets(&ship);
+    assert_eq!(jets.len(), 2);
+    assert_eq!(
+        jets[0].point_body_m,
+        settings().lander.manual_nozzles_body_m[0]
+    );
+    assert_eq!(
+        jets[1].point_body_m,
+        settings().lander.manual_nozzles_body_m[3]
+    );
+    let wrench = applied_wrench(&jets);
+    assert_eq!(wrench.force_body_n, ship.thrust_n);
+    assert_eq!(wrench.torque_body_nm, ship.torque_nm);
+    assert_eq!(wrench.propellant_force_n, 70_000.0);
+    let dt = settings().integration.fixed_step_s;
+    sim.advance(dt);
+    let fuel = sim.snapshot().mission.fuel_used_kg;
+    assert!(
+        (fuel
+            - 70_000.0 * dt
+                / (settings().lander.specific_impulse_s * settings().lander.standard_gravity_mps2))
+            .abs()
+            < 1e-12
+    );
+    for invalid_mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut invalid = ship.clone();
+        invalid.mass_kg = invalid_mass;
+        assert!(applied_jets(&invalid).is_empty());
+    }
+}

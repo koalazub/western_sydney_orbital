@@ -72,6 +72,16 @@ impl KeyboardPilot {
         self.state = PilotState::AwaitingKeyRelease;
     }
 
+    /// Rebinding suspends manual input but does not forget an installed force.
+    /// The next authorized runtime update releases only our own command once.
+    pub(crate) fn block_until_release(&mut self) {
+        self.state = if self.has_installed_command() {
+            PilotState::PendingCommandRelease
+        } else {
+            PilotState::AwaitingKeyRelease
+        };
+    }
+
     pub(crate) fn owns_command(&self) -> bool {
         matches!(self.state, PilotState::CommandOwned)
     }
@@ -210,7 +220,7 @@ mod tests {
         ] {
             assert_eq!(
                 pilot.update(movement, ready(), 10.0),
-                PilotEffect::SetCommand([10.0, 0.0, 0.0])
+                PilotEffect::SetCommand([-10.0, 0.0, 0.0])
             );
             assert!(pilot.owns_command());
         }
@@ -244,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             pilot.update(decode(W | SHIFT), ready(), 10.0),
-            PilotEffect::SetCommand([10.0, 0.0, 0.0])
+            PilotEffect::SetCommand([-10.0, 0.0, 0.0])
         );
     }
 
@@ -277,7 +287,7 @@ mod tests {
             assert_eq!(pilot.update(decode(0), ready(), 10.0), PilotEffect::None);
             assert_eq!(
                 pilot.update(decode(W), ready(), 10.0),
-                PilotEffect::SetCommand([10.0, 0.0, 0.0])
+                PilotEffect::SetCommand([-10.0, 0.0, 0.0])
             );
         }
     }
@@ -315,7 +325,7 @@ mod tests {
             assert_eq!(pilot.update(decode(0), ready(), 10.0), PilotEffect::None);
             assert_eq!(
                 pilot.update(decode(W), ready(), 10.0),
-                PilotEffect::SetCommand([10.0, 0.0, 0.0])
+                PilotEffect::SetCommand([-10.0, 0.0, 0.0])
             );
         }
     }
@@ -423,7 +433,7 @@ mod tests {
             assert_eq!(
                 pilot.update(decode(W), ready(), 10.0),
                 if rearmed {
-                    PilotEffect::SetCommand([10.0, 0.0, 0.0])
+                    PilotEffect::SetCommand([-10.0, 0.0, 0.0])
                 } else {
                     PilotEffect::None
                 }
@@ -446,6 +456,41 @@ mod tests {
             assert_eq!(pilot.update(decode(0), ready(), 10.0), PilotEffect::None);
             command(pilot.update(decode(W), ready(), 10.0));
         }
+    }
+
+    #[test]
+    fn rebinding_releases_only_an_installed_keyboard_command_once() {
+        for owned in [false, true] {
+            let mut pilot = KeyboardPilot::default();
+            if owned {
+                command(pilot.update(decode(W), ready(), 10.0));
+            }
+            pilot.block_until_release();
+            assert!(pilot.requires_release());
+            assert_eq!(
+                pilot.update(decode(W), ready(), 10.0),
+                if owned {
+                    PilotEffect::ReleaseCommand
+                } else {
+                    PilotEffect::None
+                }
+            );
+            assert_eq!(pilot.update(decode(W), ready(), 10.0), PilotEffect::None);
+            pilot.update(decode(0), ready(), 10.0);
+            assert_eq!(
+                pilot.update(decode(W), ready(), 10.0),
+                PilotEffect::SetCommand([-10.0, 0.0, 0.0])
+            );
+        }
+        let mut pilot = KeyboardPilot::default();
+        command(pilot.update(decode(W), ready(), 10.0));
+        pilot.block_until_release();
+        pilot.cancel_until_release();
+        assert_eq!(
+            pilot.update(decode(0), ready(), 10.0),
+            PilotEffect::None,
+            "an external replacement discards the pending keyboard release"
+        );
     }
 
     #[test]
@@ -561,7 +606,7 @@ mod tests {
         let first = pilot.update(movement, context, max_accel);
         assert_eq!(pilot.update(movement, context, max_accel), first);
         assert_eq!(movement.target, MovementTarget::Ship);
-        assert_eq!(movement.axes, [1.0; 3]);
+        assert_eq!(movement.axes, [-1.0, -1.0, 1.0]);
         assert!(movement.held);
         assert!(!movement.boost);
         assert!(

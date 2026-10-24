@@ -3,11 +3,15 @@ use crate::domain::{
 };
 use crate::mission::{self, FlightMetrics};
 use crate::model::{
-    EntityState, Event, MissionState, Observation, PrimaryBody, Snapshot, ThrustApplication,
+    DebrisExperimentSettings, EntityState, Event, ExperimentSettings, MissionState, Observation,
+    PrimaryBody, Snapshot, ThrustApplication,
 };
 #[cfg(test)]
 use crate::propulsion::{accel_limit, space_shape_is_valid};
-use crate::propulsion::{accel_within_limits, applied_jets, applied_wrench, local_max_thrust_n};
+use crate::propulsion::{
+    accel_within_limits, applied_jets, applied_wrench, local_max_thrust_for_mass_n,
+    local_max_thrust_n,
+};
 use crate::scenario::settings;
 use rapier3d_f64::prelude::*;
 use serde_json::{Value, json};
@@ -48,12 +52,30 @@ impl Simulation {
         Self::new(settings().default_seed)
     }
     pub fn new(seed: u64) -> Self {
-        let mut sim = Self::from_state(initial(seed));
+        Self::with_experiment(seed, ExperimentSettings::default())
+            .expect("validated default experiment must admit its bounded initial population")
+    }
+    pub fn with_experiment(seed: u64, experiment: ExperimentSettings) -> Result<Self, String> {
+        validate_seed(seed)?;
+        experiment.validate()?;
+        Self::with_profile(seed, Some(experiment))
+    }
+    fn with_profile(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Self, String> {
+        let mut sim = Self::from_state(initial(seed, experiment)?);
         sim.sample_radar();
         sim.state.rng_state = sim.rng;
-        sim
+        Ok(sim)
+    }
+    /// Repeat the active trial, including an archived corridor profile when None.
+    /// The replacement is constructed first, so invalid input cannot clear a run.
+    pub fn reset(&mut self, seed: u64) -> Result<(), String> {
+        validate_seed(seed)?;
+        let replacement = Self::with_profile(seed, self.state.experiment_settings)?;
+        *self = replacement;
+        Ok(())
     }
     fn from_state(mut state: Snapshot) -> Self {
+        let inertia = ship_inertia_for_profile(state.experiment_settings);
         if let Some(lander) = state.assets.iter_mut().find(|e| e.id == EntityId::Lander) {
             if has_legacy_lander_thrust_cap(lander) {
                 lander.max_thrust_n = local_max_thrust_n();
@@ -61,11 +83,9 @@ impl Simulation {
             if lander.thrust_application == ThrustApplication::CenterOfMass {
                 // Older center snapshots can omit command/torque fields. Preserve
                 // their command-driven dynamics and reconcile the reported wrench.
-                let cfg = settings().lander;
                 let a = lander.commanded_angular_accel_rad_s2;
-                let i = cfg.inertia_kg_m2;
-                lander.thrust_n = scale(lander.commanded_accel_mps2, cfg.mass_kg);
-                lander.torque_nm = [dot(i[0], a), dot(i[1], a), dot(i[2], a)];
+                lander.thrust_n = scale(lander.commanded_accel_mps2, lander.mass_kg);
+                lander.torque_nm = [dot(inertia[0], a), dot(inertia[1], a), dot(inertia[2], a)];
             }
         }
         let rng = if state.rng_state == 0 {
@@ -124,7 +144,7 @@ impl Simulation {
                 .restitution(settings().contacts.restitution)
                 .active_events(ActiveEvents::COLLISION_EVENTS);
             if e.kind == EntityKind::Lander {
-                let i = settings().lander.inertia_kg_m2;
+                let i = inertia;
                 let inertia = Matrix::from_cols(
                     Vector::new(i[0][0], i[1][0], i[2][0]),
                     Vector::new(i[0][1], i[1][1], i[2][1]),
@@ -132,7 +152,7 @@ impl Simulation {
                 );
                 collider = collider.mass_properties(MassProperties::with_inertia_matrix(
                     Vector::ZERO,
-                    settings().lander.mass_kg,
+                    e.mass_kg,
                     inertia,
                 ));
             } else if matches!(e.kind, EntityKind::Debris) {
@@ -168,6 +188,14 @@ impl Simulation {
     pub(crate) fn manual_interventions(&self) -> u32 {
         self.state.manual_interventions
     }
+    pub fn ship_inertia_kg_m2(&self) -> [[f64; 3]; 3] {
+        let matrix = self.bodies[self.handles[&EntityId::Lander]]
+            .mass_properties()
+            .local_mprops
+            .reconstruct_inertia_matrix()
+            .to_cols_array_2d();
+        std::array::from_fn(|row| std::array::from_fn(|column| matrix[column][row]))
+    }
     pub fn observation(&self) -> Value {
         let shuttle = self
             .state
@@ -196,6 +224,18 @@ impl Simulation {
                 .try_normalize()
                 .map(crate::terrain::surface_radius_m)
         });
+        let shuttle_report = shuttle.map(|ship| {
+            let mut report = json!(ship);
+            report["inertia_kg_m2"] = json!(self.ship_inertia_kg_m2());
+            report["inertia_frame"] = json!("body");
+            report
+        });
+        let debris_count = self
+            .state
+            .assets
+            .iter()
+            .filter(|asset| asset.kind == EntityKind::Debris)
+            .count();
         json!({
             "time_s": self.state.time_s,
             "seed": self.state.seed,
@@ -204,7 +244,8 @@ impl Simulation {
             "rotation_convention": "active_xyzw",
             "radar_clock": "simulation_elapsed_seconds",
             "environment": self.state.environment,
-            "shuttle": shuttle,
+            "experiment_settings": self.state.experiment_settings,
+            "shuttle": shuttle_report,
             "target": target,
             "mission": self.state.mission,
             "radar": radar,
@@ -212,7 +253,7 @@ impl Simulation {
                 "phobos_enclosing_radius_m": crate::model::phobos_enclosing_radius_m(),
                 "terrain_radius_at_shuttle_m": surface_radius,
                 "arrival_radius_m": config.mission.arrival_radius_m,
-                "debris_count": config.debris.count,
+                "debris_count": debris_count,
             },
             "sensor_model": {
                 "range_noise_m": config.sensors.range_noise_m,
@@ -256,7 +297,7 @@ impl Simulation {
         {
             return Err("Mission finished. Reset before commanding another flight.".into());
         }
-        let cfg = settings().lander;
+        let inertia = ship_inertia_for_profile(self.state.experiment_settings);
         let e = self
             .state
             .assets
@@ -266,10 +307,10 @@ impl Simulation {
         e.commanded_accel_mps2 = accel;
         e.commanded_angular_accel_rad_s2 = angular_accel;
         e.thrust_application = application;
-        e.thrust_n = scale(accel, cfg.mass_kg);
+        e.thrust_n = scale(accel, e.mass_kg);
         e.torque_nm = match application {
             ThrustApplication::CenterOfMass => {
-                let i = cfg.inertia_kg_m2;
+                let i = inertia;
                 [
                     dot(i[0], angular_accel),
                     dot(i[1], angular_accel),
@@ -379,11 +420,15 @@ impl Simulation {
     pub fn execute(&mut self, command: PhysicsCommand) -> Result<Snapshot, String> {
         match command {
             PhysicsCommand::Reset { seed } => {
-                let seed = seed.unwrap_or(settings().default_seed);
-                if seed > u32::MAX as u64 {
-                    return Err("seed must be a whole number from 0 to 4294967295".into());
-                }
-                *self = Self::new(seed);
+                self.reset(seed.unwrap_or(self.state.seed))?;
+            }
+            PhysicsCommand::ConfigureExperiment {
+                settings: experiment,
+                seed,
+            } => {
+                let replacement =
+                    Self::with_experiment(seed.unwrap_or(self.state.seed), experiment)?;
+                *self = replacement;
             }
             PhysicsCommand::Observe => {}
             PhysicsCommand::Restore { state } => {
@@ -419,6 +464,7 @@ impl Simulation {
         let n = (seconds / dt).ceil().max(1.0) as usize;
         let h = seconds / n as f64;
         self.integration.dt = h;
+        let ship_inertia = ship_inertia_for_profile(self.state.experiment_settings);
         for _ in 0..n {
             if self.state.mission.status.is_terminal() {
                 break;
@@ -438,7 +484,7 @@ impl Simulation {
                             ThrustApplication::CenterOfMass => {
                                 let accel = Vector::from_array(e.commanded_accel_mps2);
                                 rb.add_force(q * accel * rb.mass(), true);
-                                accel.length() * cfg.mass_kg
+                                accel.length() * rb.mass()
                             }
                             ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
                                 let jets = applied_jets(e);
@@ -455,7 +501,7 @@ impl Simulation {
                         // add_force_at_point already supplies every r × F moment.
                         // Only an explicit angular request contributes direct torque.
                         let x = e.commanded_angular_accel_rad_s2;
-                        let i = cfg.inertia_kg_m2;
+                        let i = ship_inertia;
                         let torque = q * Vector::new(dot(i[0], x), dot(i[1], x), dot(i[2], x));
                         rb.add_torque(torque, true);
                         self.state.mission.fuel_used_kg +=
@@ -515,10 +561,17 @@ impl Simulation {
                                 .map(|e| Vector::new(e.velocity[0], e.velocity[1], e.velocity[2]))
                                 .unwrap_or(Vector::ZERO);
                             let m2 = other_entity.map(|e| e.mass_kg).unwrap_or(f64::INFINITY);
+                            let ship_mass = self
+                                .state
+                                .assets
+                                .iter()
+                                .find(|entity| entity.id == EntityId::Lander)
+                                .map(|entity| entity.mass_kg)
+                                .expect("scenario has a lander");
                             let reduced = if m2.is_finite() {
-                                settings().lander.mass_kg * m2 / (settings().lander.mass_kg + m2)
+                                ship_mass * m2 / (ship_mass + m2)
                             } else {
-                                settings().lander.mass_kg
+                                ship_mass
                             };
                             let relative = if a == EntityId::Lander {
                                 ship_v - other_v
@@ -552,15 +605,76 @@ impl Simulation {
                     e.angular_velocity_rad_s = [w.x, w.y, w.z];
                 }
             }
+            self.recycle_debris();
             let before = self.state.time_s;
             self.state.time_s += h;
             self.update_mission();
             let cadence = settings().sensors.cadence_hz;
             if (self.state.time_s * cadence).floor() > (before * cadence).floor() {
                 self.sample_radar();
-                self.state.rng_state = self.rng;
             }
+            // Birth/recycle draws also happen between sensor ticks.
+            self.state.rng_state = self.rng;
         }
+    }
+
+    fn recycle_debris(&mut self) {
+        let Some(experiment) = self.state.experiment_settings else {
+            // Archived corridor runs never recycled bodies or consumed birth RNG.
+            return;
+        };
+        let cfg = experiment.debris;
+        let half_extent = flow_half_extent_m(cfg);
+        let count = self.state.assets.len();
+        // Bound inlet work even after restoring a run with every body outside.
+        // Derive the scan start from persisted RNG without drawing extra noise.
+        let start = (self.rng % count as u64) as usize;
+        let mut budget = MAX_RECYCLES_PER_STEP;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            let entity = &self.state.assets[index];
+            if entity.kind != EntityKind::Debris
+                || entity
+                    .position
+                    .iter()
+                    .all(|value| value.abs() <= half_extent)
+            {
+                continue;
+            }
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            let id = entity.id;
+            let radius = entity.radius_m;
+            let Some(position) = debris_birth_position(
+                &mut self.rng,
+                cfg,
+                radius,
+                &self.state.assets,
+                Some(id),
+                DebrisBirth::UpstreamInlet,
+            ) else {
+                // A blocked inlet retries next step. Never place an overlapping
+                // body or reduce the requested physical population to make room.
+                continue;
+            };
+            let velocity = debris_birth_velocity(&mut self.rng, cfg);
+            let angular_velocity = debris_birth_spin(&mut self.rng);
+            let body = &mut self.bodies[self.handles[&id]];
+            body.set_translation(Vector::from_array(position), true);
+            body.set_linvel(Vector::from_array(velocity), true);
+            body.set_angvel(Vector::from_array(angular_velocity), true);
+            body.reset_forces(false);
+            body.reset_torques(false);
+            let entity = &mut self.state.assets[index];
+            entity.position = position;
+            entity.velocity = velocity;
+            entity.angular_velocity_rad_s = angular_velocity;
+            self.touching.retain(|pair| !pair.contains(&id));
+        }
+        self.state.active_contacts = self.touching.iter().copied().collect();
+        self.state.active_contacts.sort();
     }
 
     fn update_mission(&mut self) {
@@ -641,8 +755,8 @@ impl Simulation {
         };
         let cfg = settings();
         let mut rows = Vec::with_capacity(cfg.debris.radar_count);
-        // The checked-in Radar system scans the first 200 of the 500 spawned
-        // bodies. Preserve that published configuration discrepancy explicitly.
+        // Preserve the reference scan cap, without inventing rows when the
+        // local experiment contains fewer physical bodies, including zero.
         for debris in self
             .state
             .assets
@@ -684,7 +798,7 @@ impl Simulation {
     }
 }
 
-fn initial(seed: u64) -> Snapshot {
+fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot, String> {
     let mut rng = seed.max(1);
     let mut assets = vec![];
     let site = crate::model::landing_site();
@@ -695,7 +809,7 @@ fn initial(seed: u64) -> Snapshot {
         site.lander_position_m,
         [0.0; 3],
         cfg.lander.proxy_radius_m,
-        cfg.lander.mass_kg,
+        experiment.map_or(cfg.lander.mass_kg, |settings| settings.ship.mass_kg),
     );
     ship.name = "Lander".into();
     ship.rotation = site.rotation;
@@ -727,42 +841,75 @@ fn initial(seed: u64) -> Snapshot {
     pad.name = "Phobos landing pad".into();
     pad.rotation = site.rotation;
     assets.push(pad);
-    // Seeded debris corridor connects the surface launch region to the L2 marker.
-    for i in 0..cfg.debris.count {
-        let u = uniform(&mut rng);
-        let x = -cfg.debris.x_min_m - u * cfg.debris.x_span_m;
-        let y = (uniform(&mut rng) * 2.0 - 1.0) * cfg.debris.y_half_width_m;
-        let z = (uniform(&mut rng) * 2.0 - 1.0) * cfg.debris.z_half_width_m;
-        let pos = [x, y, z];
-        let tangent = Vector::new(gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng))
-            .normalize_or_zero();
-        let speed = cfg.debris.speed_min_mps + uniform(&mut rng) * cfg.debris.speed_span_mps;
-        let vel = [tangent.x * speed, tangent.y * speed, tangent.z * speed];
-        let radius = cfg.debris.radius_min_m + uniform(&mut rng) * cfg.debris.radius_span_m;
-        let mass = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) * cfg.debris.density_kg_m3;
-        let mut e = entity(
-            EntityId::Debris((i + 1) as u16),
-            EntityKind::Debris,
-            pos,
-            vel,
-            radius,
-            mass,
-        );
-        e.name = format!("Debris {}", i + 1);
-        let axis = Vector::new(gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng))
-            .normalize_or_zero();
-        let angular_velocity = axis * uniform(&mut rng) * cfg.debris.spin_max_rad_s;
-        e.angular_velocity_rad_s = angular_velocity.to_array();
-        assets.push(e);
+    if let Some(experiment) = experiment {
+        // The initial shell is an already-streaming population around every
+        // side of Phobos, not a batch emitted at the launch pad. Later births
+        // occur only at the upstream plane after leaving the bounded flow box.
+        // No velocity is imposed again while a body remains inside that box:
+        // gravity, spin and every mutual/terrain/ship contact are Rapier physics.
+        for i in 0..experiment.debris.count {
+            let debris = experiment.debris;
+            // A quadratic size sample keeps plenty of small rocks without
+            // excluding the large end of the configured physical radius range.
+            let size = uniform(&mut rng);
+            let radius =
+                debris.radius_min_m + (debris.radius_max_m - debris.radius_min_m) * size * size;
+            let position = debris_birth_position(
+                &mut rng, debris, radius, &assets, None, DebrisBirth::InitialShell,
+            ).ok_or("experiment shell cannot safely place its population within the bounded birth budget")?;
+            let velocity = debris_birth_velocity(&mut rng, debris);
+            let mut asteroid = entity(
+                EntityId::Debris((i + 1) as u16),
+                EntityKind::Debris,
+                position,
+                velocity,
+                radius,
+                debris_mass_kg(radius),
+            );
+            asteroid.name = format!("Debris {}", i + 1);
+            asteroid.angular_velocity_rad_s = debris_birth_spin(&mut rng);
+            assets.push(asteroid);
+        }
+    } else {
+        // Archive-only branch. Keep the original draw order and fixed corridor,
+        // including seeded radii, so new stream defaults cannot bless altered saves.
+        for i in 0..cfg.debris.count {
+            let u = uniform(&mut rng);
+            let x = -cfg.debris.x_min_m - u * cfg.debris.x_span_m;
+            let y = (uniform(&mut rng) * 2.0 - 1.0) * cfg.debris.y_half_width_m;
+            let z = (uniform(&mut rng) * 2.0 - 1.0) * cfg.debris.z_half_width_m;
+            let pos = [x, y, z];
+            let tangent = Vector::new(gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng))
+                .normalize_or_zero();
+            let speed = cfg.debris.speed_min_mps + uniform(&mut rng) * cfg.debris.speed_span_mps;
+            let vel = [tangent.x * speed, tangent.y * speed, tangent.z * speed];
+            let radius = cfg.debris.radius_min_m + uniform(&mut rng) * cfg.debris.radius_span_m;
+            let mass = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) * cfg.debris.density_kg_m3;
+            let mut e = entity(
+                EntityId::Debris((i + 1) as u16),
+                EntityKind::Debris,
+                pos,
+                vel,
+                radius,
+                mass,
+            );
+            e.name = format!("Debris {}", i + 1);
+            let axis = Vector::new(gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng))
+                .normalize_or_zero();
+            let angular_velocity = axis * uniform(&mut rng) * cfg.debris.spin_max_rad_s;
+            e.angular_velocity_rad_s = angular_velocity.to_array();
+            assets.push(e);
+        }
     }
     let initial_distance = norm(sub(site.lander_position_m, target_position));
-    Snapshot {
-        model: cfg.description.clone(),
+    Ok(Snapshot {
+        model: profile_description(experiment),
         time_s: 0.0,
         seed,
         frame: cfg.frame_description.clone(),
         body: body(),
         environment: env,
+        experiment_settings: experiment,
         assets,
         events: vec![],
         collisions: 0,
@@ -784,8 +931,135 @@ fn initial(seed: u64) -> Snapshot {
         observations: vec![],
         rng_state: rng,
         active_contacts: vec![],
+    })
+}
+
+const MAX_BIRTH_ATTEMPTS: usize = 64;
+const MAX_RECYCLES_PER_STEP: usize = 4;
+const BIRTH_CLEARANCE_M: f64 = 1.0;
+
+#[derive(Clone, Copy)]
+enum DebrisBirth {
+    InitialShell,
+    UpstreamInlet,
+}
+
+fn flow_half_extent_m(cfg: DebrisExperimentSettings) -> f64 {
+    crate::model::phobos_enclosing_radius_m() + cfg.shell_outer_m + cfg.radius_max_m + 100.0
+}
+
+fn random_direction(rng: &mut u64) -> [f64; 3] {
+    let z = uniform(rng) * 2.0 - 1.0;
+    let longitude = uniform(rng) * std::f64::consts::TAU;
+    let equatorial = (1.0 - z * z).sqrt();
+    [
+        equatorial * longitude.cos(),
+        equatorial * longitude.sin(),
+        z,
+    ]
+}
+
+fn debris_birth_position(
+    rng: &mut u64,
+    cfg: DebrisExperimentSettings,
+    radius: f64,
+    assets: &[EntityState],
+    ignored: Option<EntityId>,
+    birth: DebrisBirth,
+) -> Option<[f64; 3]> {
+    // At most 64 terrain queries and 64 * 1003 actor checks per birth. An
+    // impossible arrangement is an atomic configure error, never an endless loop.
+    let shape = phobos_shape();
+    for _ in 0..MAX_BIRTH_ATTEMPTS {
+        let position = match birth {
+            DebrisBirth::InitialShell => {
+                let direction = random_direction(rng);
+                let terrain_radius =
+                    crate::terrain::surface_radius_m(bevy::math::DVec3::from_array(direction));
+                let margin =
+                    cfg.shell_inner_m + uniform(rng) * (cfg.shell_outer_m - cfg.shell_inner_m);
+                scale(direction, terrain_radius + radius + margin)
+            }
+            DebrisBirth::UpstreamInlet => {
+                let extent = flow_half_extent_m(cfg) - radius - BIRTH_CLEARANCE_M;
+                let axis = cfg.stream_axis.index();
+                let mut position = [0.0; 3];
+                for (index, component) in position.iter_mut().enumerate() {
+                    *component = if index == axis {
+                        -f64::from(cfg.stream_sign) * extent
+                    } else {
+                        (uniform(rng) * 2.0 - 1.0) * extent
+                    };
+                }
+                position
+            }
+        };
+        let point = Vector::from_array(position);
+        let direction = bevy::math::DVec3::from_array(position).normalize();
+        if norm(position) <= crate::terrain::surface_radius_m(direction)
+            || shape.distance_to_local_point(point, false) <= radius + BIRTH_CLEARANCE_M
+        {
+            continue;
+        }
+        let clear = assets
+            .iter()
+            .filter(|asset| Some(asset.id) != ignored)
+            .all(|asset| {
+                let other_radius = match asset.kind {
+                    EntityKind::LandingPad => norm(settings().pad.half_extents_m),
+                    EntityKind::Lander => settings().lander.proxy_radius_m * 2.0,
+                    EntityKind::ReturnShip | EntityKind::Debris => asset.radius_m,
+                };
+                norm(sub(position, asset.position)) > radius + other_radius + BIRTH_CLEARANCE_M
+            });
+        if clear {
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn debris_birth_velocity(rng: &mut u64, cfg: DebrisExperimentSettings) -> [f64; 3] {
+    let mut velocity = scale(random_direction(rng), uniform(rng) * cfg.speed_spread_mps);
+    velocity[cfg.stream_axis.index()] += f64::from(cfg.stream_sign) * cfg.speed_mps;
+    velocity
+}
+
+fn debris_birth_spin(rng: &mut u64) -> [f64; 3] {
+    scale(
+        random_direction(rng),
+        uniform(rng) * settings().debris.spin_max_rad_s,
+    )
+}
+
+fn debris_mass_kg(radius: f64) -> f64 {
+    4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) * settings().debris.density_kg_m3
+}
+
+fn ship_inertia_for_profile(experiment: Option<ExperimentSettings>) -> [[f64; 3]; 3] {
+    experiment.map_or(settings().lander.inertia_kg_m2, |settings| {
+        settings.ship.inertia_kg_m2()
+    })
+}
+
+fn profile_description(experiment: Option<ExperimentSettings>) -> String {
+    match experiment {
+        None => settings().description.clone(),
+        Some(experiment) if experiment == settings().experiment_settings => {
+            settings().experiment_description.clone()
+        }
+        Some(_) => format!("{} [custom settings]", settings().experiment_description),
     }
 }
+
+fn validate_seed(seed: u64) -> Result<(), String> {
+    if seed > u32::MAX as u64 {
+        Err("seed must be a whole number from 0 to 4294967295".into())
+    } else {
+        Ok(())
+    }
+}
+
 fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f64) -> EntityState {
     EntityState {
         id,
@@ -798,7 +1072,7 @@ fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f
         mass_kg: m,
         fuel_kg: 0.0,
         max_thrust_n: if id == EntityId::Lander {
-            local_max_thrust_n()
+            local_max_thrust_for_mass_n(m)
         } else {
             0.0
         },
@@ -820,6 +1094,7 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
     // snapshot or another actor cannot opt into migration with an arbitrary cap.
     e.id == EntityId::Lander
         && e.kind == EntityKind::Lander
+        && e.mass_kg == settings().lander.mass_kg
         && matches!(
             e.thrust_application,
             ThrustApplication::CenterOfMass | ThrustApplication::ManualNozzles
@@ -827,19 +1102,36 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
         && e.max_thrust_n == settings().lander.mass_kg * settings().lander.max_accel_mps2
 }
 fn validate(s: &Snapshot) -> Result<(), String> {
+    if let Some(experiment) = s.experiment_settings {
+        experiment.validate()?;
+    }
+    let debris_count = s
+        .experiment_settings
+        .map_or(settings().debris.count, |config| config.debris.count);
+    let radar_count = settings().debris.radar_count.min(debris_count);
+    // Every possible unordered pair is bounded by the validated physical count.
+    // Keep full contact history, rather than truncating it and double-counting
+    // real contacts after restoring a dense population.
+    let contact_limit = if s.experiment_settings.is_some() {
+        let bodies = debris_count + 4;
+        bodies * (bodies - 1) / 2
+    } else {
+        settings().limits.contacts
+    };
     if !s.time_s.is_finite()
         || s.time_s < 0.0
         || s.seed > u32::MAX as u64
-        || s.assets.len() != settings().debris.count + 3
+        || s.assets.len() != debris_count + 3
         || s.events.len() > settings().limits.events
-        || s.observations.len() > settings().limits.observations
-        || s.active_contacts.len() > settings().limits.contacts
+        || s.observations.len() > radar_count
+        || s.active_contacts.len() > contact_limit
+        || (s.experiment_settings.is_some() && s.rng_state == 0)
         || s.body.name != "Phobos"
         || s.body.radii_m != settings().gravity.phobos_radii_m
         || s.body.mu_m3_s2 != settings().gravity.phobos_mu_m3_s2
         || s.body.rotation_period_s != settings().gravity.phobos_rotation_period_s
         || s.frame != settings().frame_description
-        || s.model != settings().description
+        || s.model != profile_description(s.experiment_settings)
         || s.environment.mars_position_m
             != crate::astrophysics::environment(settings().gravity).mars_position_m
         || s.environment.mars_mu_m3_s2 != settings().gravity.mars_mu_m3_s2
@@ -871,13 +1163,14 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         return Err("invalid or client-modified fixed configuration".into());
     }
     let mut ids = HashSet::new();
-    let fixed = initial(s.seed);
+    let fixed = initial(s.seed, s.experiment_settings)?;
     if s.mission.initial_distance_m != fixed.mission.initial_distance_m {
         return Err("mission initial range differs from the configured launch and target".into());
     }
     let expected: HashMap<EntityId, &EntityState> =
         fixed.assets.iter().map(|e| (e.id, e)).collect();
-    let (mut shuttle, mut target, mut pad, mut debris) = (0, 0, 0, 0);
+    // The exact population length was checked above. Unique IDs, all present in
+    // this seeded map, prove every configured actor and mission ID is included.
     for e in &s.assets {
         let qn = e.rotation.iter().map(|v| v * v).sum::<f64>().sqrt();
         if !ids.insert(e.id)
@@ -906,10 +1199,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             || e.radius_m > settings().limits.radius_m
             || !(0.99..=1.01).contains(&qn)
             || !accel_within_limits(e.thrust_application, e.commanded_accel_mps2)
-            || !accel_within_limits(
-                e.thrust_application,
-                scale(e.thrust_n, 1.0 / settings().lander.mass_kg),
-            )
+            || !accel_within_limits(e.thrust_application, scale(e.thrust_n, 1.0 / e.mass_kg))
             || norm(e.commanded_angular_accel_rad_s2)
                 > settings().lander.max_angular_accel_rad_s2 + 1e-9
             || !e.fuel_kg.is_finite()
@@ -952,7 +1242,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                 if e.commanded_angular_accel_rad_s2 != [0.0; 3] {
                     return Err("nozzle modes cannot include a direct angular command".into());
                 }
-                let force = scale(e.commanded_accel_mps2, settings().lander.mass_kg);
+                let force = scale(e.commanded_accel_mps2, e.mass_kg);
                 let wrench = applied_wrench(&applied_jets(e));
                 if !vectors_match(e.thrust_n, force)
                     || !vectors_match(wrench.force_body_n, force)
@@ -961,23 +1251,6 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                     return Err("nozzle wrench differs from its applied forces".into());
                 }
             }
-        }
-        match (e.id, e.kind) {
-            (EntityId::Lander, EntityKind::Lander) if e.mass_kg == settings().lander.mass_kg => {
-                shuttle += 1
-            }
-            (EntityId::ReturnShip, EntityKind::ReturnShip)
-                if e.mass_kg == settings().mission.target_mass_kg =>
-            {
-                target += 1
-            }
-            (EntityId::LandingPad, EntityKind::LandingPad)
-                if e.mass_kg == settings().pad.fixed_mass_kg =>
-            {
-                pad += 1
-            }
-            (EntityId::Debris(_), EntityKind::Debris) => debris += 1,
-            _ => return Err("entity violates fixed scene configuration".into()),
         }
         let valid_status = match e.kind {
             EntityKind::Lander => matches!(
@@ -998,17 +1271,10 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             ));
         }
     }
-    if shuttle != 1
-        || target != 1
-        || pad != 1
-        || debris != settings().debris.count
-        || !ids.contains(&s.mission.shuttle_id)
-        || !ids.contains(&s.mission.target_id)
-    {
-        return Err("mission entity ids or counts invalid".into());
-    }
+    let mut contact_ids = HashSet::new();
     if s.active_contacts.iter().any(|pair| {
         pair[0] >= pair[1]
+            || !contact_ids.insert(*pair)
             || pair
                 .iter()
                 .any(|id| !ids.contains(id) && *id != EntityId::Phobos)
@@ -1051,12 +1317,17 @@ fn pair_key(a: EntityId, b: EntityId) -> [EntityId; 2] {
     if a < b { [a, b] } else { [b, a] }
 }
 fn phobos_shape() -> SharedShape {
-    let (vertices, indices) = crate::model::phobos_geometry();
-    SharedShape::trimesh(
-        vertices.into_iter().map(Vector::from_array).collect(),
-        indices,
-    )
-    .expect("generated Phobos terrain is a valid triangle mesh")
+    static SHAPE: std::sync::OnceLock<SharedShape> = std::sync::OnceLock::new();
+    SHAPE
+        .get_or_init(|| {
+            let (vertices, indices) = crate::model::phobos_geometry();
+            SharedShape::trimesh(
+                vertices.into_iter().map(Vector::from_array).collect(),
+                indices,
+            )
+            .expect("generated Phobos terrain is a valid triangle mesh")
+        })
+        .clone()
 }
 fn shuttle_shape() -> SharedShape {
     let config = settings().lander;
@@ -1096,9 +1367,32 @@ fn event(s: &mut Snapshot, asset: EntityId, message: impl Into<String>) {
         message: message.into(),
     })
 }
-fn clamp_vec(v: [f64; 3], m: f64) -> [f64; 3] {
-    let n = norm(v);
-    if n > m { scale(v, m / n) } else { v }
+fn clamp_vec(v: [f64; 3], limit: f64) -> [f64; 3] {
+    let magnitude = norm(v);
+    if magnitude > limit {
+        let mut bounded = if magnitude.is_finite() {
+            scale(v, limit / magnitude)
+        } else {
+            // Finite components can still have an unrepresentable magnitude.
+            // Divide components first so normalization keeps their direction.
+            let largest = v.into_iter().map(f64::abs).fold(0.0, f64::max);
+            let scaled = v.map(|component| component / largest);
+            scale(scaled, limit / norm(scaled))
+        };
+        let mut bounded_magnitude = norm(bounded);
+        while bounded_magnitude > limit {
+            // Correct outward rounding without relaxing the actuator limit.
+            // next_down also guarantees progress if the ratio rounds to one.
+            bounded = scale(
+                bounded,
+                (limit / bounded_magnitude).min(1.0_f64.next_down()),
+            );
+            bounded_magnitude = norm(bounded);
+        }
+        bounded
+    } else {
+        v
+    }
 }
 fn rand(s: &mut u64) -> u64 {
     *s ^= *s << 13;
@@ -1129,6 +1423,10 @@ fn vectors_match(a: [f64; 3], b: [f64; 3]) -> bool {
         .zip(b)
         .all(|(a, b)| (a - b).abs() <= 1e-8 + b.abs() * 1e-10)
 }
+
+#[cfg(test)]
+#[path = "physics/experiment_tests.rs"]
+mod experiment_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1369,6 +1667,37 @@ mod tests {
         let before = sim.snapshot();
         let position = rigid_body(&sim).translation();
         let velocity = rigid_body(&sim).linvel();
+        let pose = *rigid_body(&sim).position();
+        let spin = rigid_body(&sim).angvel();
+        let force = rigid_body(&sim).user_force();
+        let torque = rigid_body(&sim).user_torque();
+        let tiny = f64::from_bits(1);
+        for (accel, angular_accel) in [
+            ([f64::MAX, f64::MAX, 0.0], [0.0; 3]),
+            ([0.0; 3], [f64::MAX, -f64::MAX, f64::MAX]),
+            ([tiny, 0.0, 0.0], [0.0; 3]),
+            ([0.0; 3], [0.0, tiny, 0.0]),
+        ] {
+            let error = sim
+                .execute(PhysicsCommand::SetCommand {
+                    accel,
+                    angular_accel,
+                })
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "Mission finished. Reset before commanding another flight."
+            );
+            assert_eq!(
+                serde_json::to_value(sim.snapshot()).unwrap(),
+                serde_json::to_value(&before).unwrap()
+            );
+            assert_eq!(*rigid_body(&sim).position(), pose);
+            assert_eq!(rigid_body(&sim).linvel(), velocity);
+            assert_eq!(rigid_body(&sim).angvel(), spin);
+            assert_eq!(rigid_body(&sim).user_force(), force);
+            assert_eq!(rigid_body(&sim).user_torque(), torque);
+        }
         let after = sim.execute(PhysicsCommand::DebugUpright).unwrap();
         assert_eq!(
             serde_json::to_value(&after.mission).unwrap(),
@@ -1553,6 +1882,137 @@ mod tests {
             assert!(validate(&state).is_err());
             state.observations[0].diameter_m = -0.1;
         }
+    }
+
+    #[test]
+    fn restore_rejects_seeded_identity_and_kind_status_tampering_without_mutation() {
+        let mut config = ExperimentSettings::default();
+        config.debris.count = 2;
+        config.ship.mass_kg = 8_123.0;
+        config.ship.inertia_scale = 2.5;
+        let mut sim = Simulation::with_experiment(42, config).unwrap();
+        sim.set_command([0.1, 0.2, 0.3], [0.01, 0.02, 0.03])
+            .unwrap();
+        sim.advance(settings().integration.fixed_step_s);
+        let valid = sim.snapshot();
+        let before = serde_json::to_value(&valid).unwrap();
+        let pose = *rigid_body(&sim).position();
+        let force = rigid_body(&sim).user_force();
+        let torque = rigid_body(&sim).user_torque();
+        let mass_properties = rigid_body(&sim).mass_properties().local_mprops;
+        let mut invalid_states = Vec::new();
+        let mut missing = valid.clone();
+        missing.assets.pop();
+        invalid_states.push(missing);
+        let mut duplicate = valid.clone();
+        duplicate.assets[1] = duplicate.assets[0].clone();
+        invalid_states.push(duplicate);
+        for unknown_id in [EntityId::Debris(3), EntityId::Phobos] {
+            let mut unknown = valid.clone();
+            unknown.assets.last_mut().unwrap().id = unknown_id;
+            invalid_states.push(unknown);
+        }
+        for (index, entity) in valid.assets.iter().enumerate() {
+            let mut wrong_kind = valid.clone();
+            wrong_kind.assets[index].kind = match entity.kind {
+                EntityKind::Lander | EntityKind::ReturnShip => EntityKind::Debris,
+                EntityKind::LandingPad | EntityKind::Debris => EntityKind::Lander,
+            };
+            invalid_states.push(wrong_kind);
+            let mut wrong_status = valid.clone();
+            wrong_status.assets[index].status = match entity.kind {
+                EntityKind::Lander | EntityKind::Debris => EntityStatus::StationKeeping,
+                EntityKind::ReturnShip | EntityKind::LandingPad => EntityStatus::Coasting,
+            };
+            invalid_states.push(wrong_status);
+        }
+        for invalid in invalid_states {
+            assert!(
+                sim.execute(PhysicsCommand::Restore {
+                    state: Box::new(invalid)
+                })
+                .is_err()
+            );
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+            assert_eq!(*rigid_body(&sim).position(), pose);
+            assert_eq!(rigid_body(&sim).user_force(), force);
+            assert_eq!(rigid_body(&sim).user_torque(), torque);
+            assert_eq!(
+                rigid_body(&sim).mass_properties().local_mprops,
+                mass_properties
+            );
+        }
+    }
+
+    #[test]
+    fn complete_seeded_populations_round_trip_in_any_order_for_zero_maximum_and_legacy_profiles() {
+        let mut zero = ExperimentSettings::default();
+        zero.debris.count = 0;
+        let mut maximum = ExperimentSettings::default();
+        maximum.debris.count = crate::model::MAX_DEBRIS_COUNT;
+        for profile in [Some(zero), Some(maximum), None] {
+            let mut sim = Simulation::with_profile(8, profile).unwrap();
+            let inertia = sim.ship_inertia_kg_m2();
+            let mut expected = serde_json::to_value(sim.snapshot()).unwrap();
+            expected["assets"].as_array_mut().unwrap().reverse();
+            let mut archive = expected.clone();
+            if profile.is_none() {
+                archive
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("experiment_settings");
+            }
+            let state: Snapshot = serde_json::from_value(archive).unwrap();
+            let restored = sim
+                .execute(PhysicsCommand::Restore {
+                    state: Box::new(state),
+                })
+                .unwrap();
+            assert_eq!(restored.experiment_settings, profile);
+            assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+            assert_eq!(sim.ship_inertia_kg_m2(), inertia);
+            assert_eq!(sim.bodies.len(), sim.state.assets.len() + 1);
+            assert_eq!(sim.colliders.len(), sim.state.assets.len() + 1);
+        }
+    }
+
+    #[test]
+    fn real_mutual_collision_archives_restore_through_both_strict_command_envelopes() {
+        let mut config = ExperimentSettings::default();
+        config.debris.count = 2;
+        config.debris.radius_min_m = 2.0;
+        config.debris.radius_max_m = 2.0;
+        let mut sim = Simulation::with_experiment(10, config).unwrap();
+        let center = Vector::new(crate::model::phobos_enclosing_radius_m() + 500.0, 0.0, 0.0);
+        let a = EntityId::Debris(1);
+        let b = EntityId::Debris(2);
+        for (id, offset, velocity) in [(a, -2.5, 5.0), (b, 2.5, -5.0)] {
+            let body = &mut sim.bodies[sim.handles[&id]];
+            body.set_translation(center + Vector::X * offset, true);
+            body.set_angvel(Vector::ZERO, true);
+            body.apply_impulse((Vector::X * velocity - body.linvel()) * body.mass(), true);
+        }
+        let pair = pair_key(a, b);
+        for _ in 0..8 {
+            sim.advance(settings().integration.fixed_step_s);
+            if sim.state.active_contacts.contains(&pair) {
+                break;
+            }
+        }
+        assert!(sim.state.active_contacts.contains(&pair));
+        assert!(sim.state.collisions > 0);
+        let before = serde_json::to_value(sim.snapshot()).unwrap();
+        let request = json!({"op": "restore", "state": before});
+        let command: PhysicsCommand = serde_json::from_value(request.clone()).unwrap();
+        let restored = sim.execute(command).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), before);
+        let parsed: crate::api::ApiRequest = serde_json::from_value(request).unwrap();
+        let crate::api::Dispatch::Physics(command) = parsed.into_dispatch().unwrap() else {
+            panic!("restore dispatched outside physics");
+        };
+        let restored = sim.execute(command).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), before);
+        assert!(sim.state.active_contacts.contains(&pair));
     }
 
     #[test]
@@ -1981,6 +2441,107 @@ mod tests {
         center.advance(dt);
         assert_eq!(rigid_body(&center).user_torque(), Vector::ZERO);
         assert_vector_close(rigid_body(&center).angvel(), Vector::ZERO, 1e-12);
+    }
+
+    #[test]
+    fn huge_finite_commands_preserve_direction_and_apply_bounded_nonzero_real_forces() {
+        let cfg = settings().lander;
+        assert_eq!(cfg.max_accel_mps2, 0.5);
+        assert_eq!(cfg.max_angular_accel_rad_s2, 0.05);
+        let mut sim = Simulation::new_default();
+        for input in [
+            [f64::MAX, f64::MAX, 0.0],
+            [-f64::MAX, f64::MAX, -f64::MAX],
+            [f64::MAX, f64::MAX / 2.0, -f64::MAX / 4.0],
+            [1e300, -2e300, 3e300],
+            [f64::MAX, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.9, 0.2, -0.5],
+        ] {
+            let before = lander(&sim).clone();
+            let pose = *rigid_body(&sim).position();
+            let q = *rigid_body(&sim).rotation();
+            let gravity = crate::astrophysics::acceleration(
+                rigid_body(&sim).translation(),
+                rigid_body(&sim).linvel(),
+                settings().gravity,
+            );
+            let largest = input.into_iter().map(f64::abs).fold(0.0, f64::max);
+            let direction =
+                Vector::from_array(input.map(|component| component / largest)).normalize();
+            let angular_input = [input[2], -input[0], input[1]];
+            let angular_direction = Vector::new(direction.z, -direction.x, direction.y);
+            sim.execute(PhysicsCommand::SetCommand {
+                accel: input,
+                angular_accel: angular_input,
+            })
+            .unwrap();
+            let commanded = lander(&sim).clone();
+            assert!(norm(commanded.commanded_accel_mps2) > 0.0);
+            assert!(norm(commanded.commanded_accel_mps2) <= cfg.max_accel_mps2);
+            assert!(norm(commanded.commanded_angular_accel_rad_s2) > 0.0);
+            assert!(norm(commanded.commanded_angular_accel_rad_s2) <= cfg.max_angular_accel_rad_s2);
+            assert_vector_close(
+                Vector::from_array(commanded.commanded_accel_mps2),
+                direction * cfg.max_accel_mps2,
+                1e-15,
+            );
+            assert_vector_close(
+                Vector::from_array(commanded.commanded_angular_accel_rad_s2),
+                angular_direction * cfg.max_angular_accel_rad_s2,
+                1e-15,
+            );
+            assert_eq!(commanded.position, before.position);
+            assert_eq!(commanded.rotation, before.rotation);
+            assert_eq!(commanded.velocity, before.velocity);
+            assert_eq!(
+                commanded.angular_velocity_rad_s,
+                before.angular_velocity_rad_s
+            );
+            assert_eq!(*rigid_body(&sim).position(), pose);
+            assert_eq!(
+                commanded.thrust_n,
+                scale(commanded.commanded_accel_mps2, commanded.mass_kg)
+            );
+            let angular = commanded.commanded_angular_accel_rad_s2;
+            assert_eq!(
+                commanded.torque_nm,
+                cfg.inertia_kg_m2.map(|row| dot(row, angular))
+            );
+
+            sim.advance(settings().integration.fixed_step_s);
+            let body = rigid_body(&sim);
+            assert_vector_close(
+                body.user_force(),
+                q * Vector::from_array(commanded.thrust_n) + gravity * body.mass(),
+                1e-7,
+            );
+            assert_vector_close(
+                body.user_torque(),
+                q * Vector::from_array(commanded.torque_nm),
+                1e-8,
+            );
+            assert!(body.user_force().length() > 0.0);
+            assert!(body.user_torque().length() > 0.0);
+            assert_ne!(*body.position(), pose);
+        }
+    }
+
+    #[test]
+    fn zero_subnormal_and_ordinary_commands_below_the_limits_remain_unchanged() {
+        let tiny = f64::from_bits(1);
+        let mut sim = Simulation::new_default();
+        for (accel, angular) in [
+            ([0.0; 3], [0.0; 3]),
+            ([tiny, -tiny, 0.0], [0.0, tiny, -tiny]),
+            ([f64::MIN_POSITIVE; 3], [-f64::MIN_POSITIVE; 3]),
+            ([1e-100, -2e-100, 3e-100], [-3e-100, 2e-100, -1e-100]),
+            ([0.1, -0.2, 0.3], [0.01, -0.02, 0.03]),
+        ] {
+            sim.set_command(accel, angular).unwrap();
+            assert_eq!(lander(&sim).commanded_accel_mps2, accel);
+            assert_eq!(lander(&sim).commanded_angular_accel_rad_s2, angular);
+        }
     }
 
     #[test]

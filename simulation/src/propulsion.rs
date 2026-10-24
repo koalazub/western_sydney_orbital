@@ -27,7 +27,11 @@ pub(crate) fn accel_limit(application: ThrustApplication) -> f64 {
 
 /// Available local hardware, independent of the selected input/profile limit.
 pub(crate) fn local_max_thrust_n() -> f64 {
-    settings().lander.mass_kg
+    local_max_thrust_for_mass_n(settings().lander.mass_kg)
+}
+
+pub(crate) fn local_max_thrust_for_mass_n(mass_kg: f64) -> f64 {
+    mass_kg
         * accel_limit(ThrustApplication::CenterOfMass)
             .max(accel_limit(ThrustApplication::PracticeBoost))
 }
@@ -73,10 +77,12 @@ pub(crate) fn applied_jets(lander: &EntityState) -> Vec<AppliedJet> {
         || lander.kind != EntityKind::Lander
         || !force.iter().all(|v| v.is_finite())
         || !magnitude.is_finite()
+        || !lander.mass_kg.is_finite()
+        || lander.mass_kg <= 0.0
         || magnitude == 0.0
         || !accel_within_limits(
             lander.thrust_application,
-            force.map(|component| component / cfg.mass_kg),
+            force.map(|component| component / lander.mass_kg),
         )
     {
         return Vec::new();

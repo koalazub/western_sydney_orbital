@@ -6,6 +6,8 @@ pub struct Scenario {
     pub default_seed: u64,
     pub description: String,
     pub frame_description: String,
+    pub experiment_description: String,
+    pub experiment_settings: crate::model::ExperimentSettings,
     pub gravity: Gravity,
     pub integration: Integration,
     pub lander: Lander,

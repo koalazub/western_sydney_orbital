@@ -1,6 +1,11 @@
 {
   "description": "Phobos surface launch through a seeded asteroid corridor to a kinematic station-keeping return ship at Mars–Phobos L2. Circular point-mass CR3BP, synthetic terrain, and estimated contact and fuel models; not STP parity.",
   "default_seed": 100,
+  "experiment_description": "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.",
+  "experiment_settings": {
+    "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
+    "debris": { "count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4, "speed_mps": 20.0, "speed_spread_mps": 5.0, "shell_inner_m": 200.0, "shell_outer_m": 3000.0, "stream_axis": "y", "stream_sign": -1 }
+  },
   "frame_description": "Phobos-centered Mars–Phobos circular rotating frame; +X toward Mars, +Y orbit normal, +Z right-handed; SI units",
   "gravity": {
     "mars_mu_m3_s2": 42828370000000.0,
@@ -54,7 +59,7 @@
     "mount_source": {
       "status": "documented_stp",
       "url": "https://github.com/SimDynamX/STU4-Solution/wiki/1.-Vehicle-Specs-and-Model-Details#cameras",
-      "note": "Positions and yaw/pitch limits follow the official table. Aim uses the documented zero-roll Euler 3-2-1 command, positive yaw left and positive pitch down, with camera +X forward and +Z up. Both feeds are held at the allowed yaw=0, pitch=0 command. This does not claim to reproduce the initial simconf camera rotations or STP rendering."
+      "note": "Positions and yaw/pitch limits follow the official table. Aim uses the documented zero-roll Euler 3-2-1 command, positive yaw left and positive pitch down, with camera +X forward and +Z up. Both feeds start at yaw=0, pitch=0 and can be aimed independently within their published limits. Practice optics remain fixed. This does not claim to reproduce the initial simconf camera rotations or STP rendering."
     },
     "near_clip_m": 0.05,
     "far_clip_m": 20000000.0,

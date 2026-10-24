@@ -54,6 +54,11 @@ pub(crate) fn request_action(action: EngineAction) {
     });
 }
 
+#[cfg(test)]
+pub(crate) fn queued_actions_for_tests() -> usize {
+    ACTIONS.with(|queue| queue.borrow().len())
+}
+
 pub(crate) fn snapshot() -> Rc<Snapshot> {
     PUBLISHED.with(|cell| {
         if let Some(state) = cell.borrow().as_ref() {
@@ -115,6 +120,10 @@ pub(crate) fn keyboard_requires_release() -> bool {
     KEYBOARD_PILOT.with(|pilot| pilot.borrow().requires_release())
 }
 
+pub(crate) fn block_keyboard_until_release() {
+    KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().block_until_release());
+}
+
 fn platform_effect(action: ViewportAction) {
     #[cfg(target_arch = "wasm32")]
     if let Ok(callback) = js_sys::Reflect::get(&js_sys::global(), &"__wsorbPlatformAction".into())
@@ -140,61 +149,143 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
             crate::camera::request_view(request).map_err(|error| error.to_string())?;
             Ok(snapshot())
         }
-        Dispatch::Physics(command) => {
-            let debug_upright = matches!(command, PhysicsCommand::DebugUpright);
-            if debug_upright && !RUNTIME.with(|state| state.borrow().can_control) {
-                return Err(
-                    "Upright lander is unavailable in view-only mode. Request control first."
-                        .into(),
-                );
-            }
-            if debug_upright && ACTIONS.with(|actions| actions.borrow().len() >= MAX_ACTIONS) {
-                return Err("Upright lander is waiting for queued actions. Let the next frame finish, then retry.".into());
-            }
-            if matches!(command, PhysicsCommand::Step { .. })
-                && RUNTIME.with(|state| state.borrow().running)
-            {
+        Dispatch::Physics(command) => dispatch_physics(command),
+    }
+}
+
+/// Successful execution determines which input and playback state can be committed.
+enum PhysicsExecution {
+    KeyboardUnchanged(Snapshot),
+    ExternalCommand(Snapshot),
+    PausedTrial(Snapshot),
+}
+
+fn dispatch_physics(command: PhysicsCommand) -> Result<Rc<Snapshot>, String> {
+    let playback = RUNTIME.with(|state| state.borrow().clone());
+    ACTIONS.with(|queue| {
+        // Keep the checked pause slot available through execution and commit.
+        let mut actions = queue.borrow_mut();
+        let execution = execute_physics(command, &playback, &actions)?;
+        // No session side effects occur until physics has succeeded. Commit cannot fail.
+        Ok(commit_physics(execution, playback, &mut actions))
+    })
+}
+
+fn execute_physics(
+    command: PhysicsCommand,
+    playback: &PlaybackState,
+    actions: &VecDeque<EngineAction>,
+) -> Result<PhysicsExecution, String> {
+    let execute = |command| SIMULATION.with(|sim| sim.borrow_mut().execute(command));
+    match command {
+        command @ PhysicsCommand::Observe => {
+            Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
+        }
+        command @ PhysicsCommand::Step { .. } => {
+            if playback.running {
                 return Err("Pause the mission before stepping manually".into());
             }
-            let replaces_keyboard_command = matches!(
-                command,
-                PhysicsCommand::Reset { .. }
-                    | PhysicsCommand::Restore { .. }
-                    | PhysicsCommand::DebugUpright
-                    | PhysicsCommand::SetCommand { .. }
-                    | PhysicsCommand::Stop
-            );
-            match command {
-                PhysicsCommand::Reset { .. }
-                | PhysicsCommand::Restore { .. }
-                | PhysicsCommand::DebugUpright => request_action(EngineAction::Pause),
-                PhysicsCommand::Observe
-                | PhysicsCommand::Step { .. }
-                | PhysicsCommand::SetCommand { .. }
-                | PhysicsCommand::Stop => {}
-            }
-            let state = SIMULATION.with(|sim| sim.borrow_mut().execute(command))?;
-            if replaces_keyboard_command {
-                // An external command already replaced our force. A later
-                // key release must not zero it or revive a previously held key.
-                KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
-            }
-            if debug_upright {
-                // The queued Pause reaches Bevy before its next physics advance.
-                // Report the pause immediately to external experiment runners.
-                RUNTIME.with(|runtime| {
-                    let mut reported = runtime.borrow_mut();
-                    *reported = runtime::transition(
-                        reported.clone(),
-                        EngineAction::Pause,
-                        state.mission.status,
-                    )
-                    .state;
-                });
-            }
-            Ok(publish(state))
+            Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
+        }
+        command @ (PhysicsCommand::SetCommand { .. } | PhysicsCommand::Stop) => {
+            Ok(PhysicsExecution::ExternalCommand(execute(command)?))
+        }
+        command @ (PhysicsCommand::Reset { .. } | PhysicsCommand::Restore { .. }) => {
+            require_pause_slot(
+                actions,
+                "Let queued actions finish before resetting or restoring the mission",
+            )?;
+            Ok(PhysicsExecution::PausedTrial(execute(command)?))
+        }
+        command @ PhysicsCommand::DebugUpright => {
+            require_control(
+                playback,
+                "Upright lander is unavailable in view-only mode. Request control first.",
+            )?;
+            require_pause_slot(
+                actions,
+                "Upright lander is waiting for queued actions. Let the next frame finish, then retry.",
+            )?;
+            Ok(PhysicsExecution::PausedTrial(execute(command)?))
+        }
+        command @ PhysicsCommand::ConfigureExperiment { .. } => {
+            require_control(
+                playback,
+                "World and ship settings are unavailable in view-only mode",
+            )?;
+            require_pause_slot(
+                actions,
+                "Let queued actions finish before applying experiment settings",
+            )?;
+            Ok(PhysicsExecution::PausedTrial(execute(command)?))
         }
     }
+}
+
+fn require_control(playback: &PlaybackState, message: &str) -> Result<(), String> {
+    if playback.can_control {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn require_pause_slot(actions: &VecDeque<EngineAction>, message: &str) -> Result<(), String> {
+    if actions.len() < MAX_ACTIONS {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn commit_physics(
+    execution: PhysicsExecution,
+    playback: PlaybackState,
+    actions: &mut VecDeque<EngineAction>,
+) -> Rc<Snapshot> {
+    let state = match execution {
+        PhysicsExecution::KeyboardUnchanged(state) => state,
+        PhysicsExecution::ExternalCommand(state) => {
+            supersede_keyboard_command();
+            state
+        }
+        PhysicsExecution::PausedTrial(state) => {
+            commit_paused_trial(&state, playback, actions);
+            state
+        }
+    };
+    publish(state)
+}
+
+fn supersede_keyboard_command() {
+    // The external operation already replaced our force. A later key release
+    // must not zero it or revive a key held across the handoff.
+    KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
+}
+
+fn commit_paused_trial(
+    state: &Snapshot,
+    playback: PlaybackState,
+    actions: &mut VecDeque<EngineAction>,
+) {
+    // This successful API commit supersedes all previously queued flight
+    // actions, including old Pause. Window actions and rate changes keep their
+    // order. A new Play requested after this commit can resume the paused trial.
+    actions.retain(|action| match action {
+        EngineAction::Viewport(_) | EngineAction::CycleRate => true,
+        EngineAction::TogglePlayback
+        | EngineAction::Play(_)
+        | EngineAction::Pause
+        | EngineAction::Step
+        | EngineAction::Reset
+        | EngineAction::DebugUpright => false,
+    });
+    // The slot was checked before execution. Replace old pauses with exactly
+    // one Pause that reaches the playback runtime before any later flight action.
+    actions.push_front(EngineAction::Pause);
+    supersede_keyboard_command();
+    let paused = runtime::transition(playback, EngineAction::Pause, state.mission.status).state;
+    RUNTIME.with(|runtime| *runtime.borrow_mut() = paused);
 }
 
 pub(crate) fn advance_world(
@@ -240,9 +331,13 @@ pub(crate) fn advance_world(
             }
             Effect::Reset => {
                 let seed = snapshot().seed;
-                SIMULATION.with(|sim| *sim.borrow_mut() = Simulation::new(seed));
-                KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
-                refresh();
+                match SIMULATION.with(|sim| sim.borrow_mut().reset(seed)) {
+                    Ok(()) => {
+                        KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
+                        refresh();
+                    }
+                    Err(error) => state.message = error,
+                }
             }
             Effect::DebugUpright => {
                 match SIMULATION.with(|sim| sim.borrow_mut().execute(PhysicsCommand::DebugUpright))
@@ -316,7 +411,7 @@ fn update_keyboard_pilot(state: &PlaybackState, movement: Movement, modal: bool)
                 running: state.running,
                 can_control: state.can_control,
                 mission_running,
-                modal,
+                modal: modal || crate::controls::manual_input_blocked(),
             },
             scenario::settings().lander.max_accel_mps2,
         )
@@ -346,6 +441,9 @@ fn apply_keyboard_effect(sim: &mut Simulation, state: &PlaybackState, effect: Pi
         PilotEffect::SetCommand(_) | PilotEffect::ReleaseCommand => false,
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests;
 
 #[cfg(test)]
 mod keyboard_tests;
@@ -396,7 +494,7 @@ mod tests {
         assert_eq!(ship.rotation, old_ship.rotation);
         assert_eq!(
             ship.commanded_accel_mps2,
-            [scenario::settings().lander.max_accel_mps2, 0.0, 0.0]
+            [-scenario::settings().lander.max_accel_mps2, 0.0, 0.0]
         );
         simulation.advance(0.5);
         let moving = simulation.snapshot();

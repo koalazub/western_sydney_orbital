@@ -4,6 +4,12 @@ use crate::domain::{
 pub use crate::propulsion::ThrustApplication;
 pub use crate::terrain::{LandingSite, landing_site, phobos_geometry};
 use serde::{Deserialize, Serialize};
+#[path = "experiment_settings.rs"]
+mod experiment_settings;
+pub use experiment_settings::{
+    DebrisExperimentSettings, ExperimentSettings, MAX_DEBRIS_COUNT, ShipExperimentSettings,
+    StreamAxis,
+};
 pub fn phobos_radii_m() -> [f64; 3] {
     crate::scenario::settings().gravity.phobos_radii_m
 }
@@ -29,6 +35,9 @@ pub struct Snapshot {
     pub body: PrimaryBody,
     #[serde(default)]
     pub environment: crate::astrophysics::Environment,
+    /// None identifies archived corridor runs with their original fixed physics.
+    #[serde(default)]
+    pub experiment_settings: Option<ExperimentSettings>,
     pub assets: Vec<EntityState>,
     pub events: Vec<Event>,
     pub collisions: u32,
@@ -47,11 +56,16 @@ pub struct Snapshot {
 
 /// Typed simulation requests, deserialized only at the external API boundary.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PhysicsCommand {
     Reset {
         seed: Option<u64>,
     },
+    ConfigureExperiment {
+        settings: ExperimentSettings,
+        seed: Option<u64>,
+    },
+    #[serde(deserialize_with = "deserialize_empty_command")]
     Observe,
     Restore {
         state: Box<Snapshot>,
@@ -63,8 +77,22 @@ pub enum PhysicsCommand {
         accel: [f64; 3],
         angular_accel: [f64; 3],
     },
+    #[serde(deserialize_with = "deserialize_empty_command")]
     Stop,
+    #[serde(deserialize_with = "deserialize_empty_command")]
     DebugUpright,
+}
+
+pub(crate) fn deserialize_empty_command<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    // Serde's internally tagged unit variants otherwise ignore extra fields,
+    // even when their enum declares deny_unknown_fields.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EmptyCommand {}
+
+    EmptyCommand::deserialize(deserializer).map(|_| ())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2,6 +2,9 @@ use super::model::{Scenario, Terrain};
 use crate::domain::ShipCameraId;
 
 pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
+    s.experiment_settings
+        .validate()
+        .map_err(|_| "invalid reset-only experiment defaults")?;
     validate_limits(s)?;
     validate_gravity(s)?;
     validate_integration(s)?;
@@ -31,6 +34,7 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
         || !positive(&[l.position_m, l.velocity_mps, l.mass_kg, l.radius_m])
         || s.description.trim().is_empty()
         || s.frame_description.trim().is_empty()
+        || s.experiment_description.trim().is_empty()
     {
         return Err("invalid scenario limits or metadata");
     }

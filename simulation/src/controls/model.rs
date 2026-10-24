@@ -8,9 +8,9 @@ pub(crate) enum MovementTarget {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Movement {
     pub target: MovementTarget,
-    /// Unnormalized forward, left and up, each -1, 0 or 1.
+    /// Unnormalized body force for Ship; forward/left/up for DebugCamera.
     pub axes: [f64; 3],
-    /// Any physical WASDQE or Space key is down, even when opposing axes cancel.
+    /// Any configured movement key is down, even when opposing axes cancel.
     pub held: bool,
     /// Debug-camera speed only. Ship acceleration never uses this flag.
     pub boost: bool,
