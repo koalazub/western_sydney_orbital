@@ -555,7 +555,7 @@ class Simulation:
             _log(self.events, t_s, "relay", f"{asset.name}: relay online", asset.name)
             self._next_leg(asset)
 
-    def _update_search(self, asset: AssetState, t_s: float, dt: float) -> None:
+    def _update_search(self, asset: AssetState, dt: float) -> None:
         if asset.status == "idle":
             self._consume_power(asset, dt, False, self.terrain.slope_at(asset.position))
             return
@@ -641,7 +641,7 @@ class Simulation:
                 if asset.status == "relay":
                     self._update_relay(asset, t_s, dt)
                 elif asset.status in ("searching", "to_charger", "idle"):
-                    self._update_search(asset, t_s, dt)
+                    self._update_search(asset, dt)
             elapsed = t_s + dt
             self._observe(elapsed)
             if self.reported:

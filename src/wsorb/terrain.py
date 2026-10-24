@@ -56,15 +56,8 @@ class Terrain:
     def cell_count(self) -> int:
         return int(self.heights.size)
 
-    def _grid_axes(self) -> tuple[np.ndarray, np.ndarray]:
-        ny, nx = self.heights.shape
-        xs = np.linspace(self.bounds.min_x, self.bounds.max_x, nx)
-        ys = np.linspace(self.bounds.min_y, self.bounds.max_y, ny)
-        return xs, ys
-
     def _bilinear(self, grid: np.ndarray, point: Vec2) -> float:
         ny, nx = grid.shape
-        xs, ys = self._grid_axes()
         fx = (point.x - self.bounds.min_x) / self.bounds.width * (nx - 1)
         fy = (point.y - self.bounds.min_y) / self.bounds.height * (ny - 1)
         fx = min(max(fx, 0.0), nx - 1.0)
