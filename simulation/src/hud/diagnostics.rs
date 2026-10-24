@@ -66,50 +66,47 @@ fn record(
         let size = [window.width(), window.height()];
         size.iter().all(|v| v.is_finite()).then_some(size)
     });
-    let mut elements = Vec::new();
-    for (node, computed, transform, visible, target, readout, action, text, root) in &nodes {
-        let role = if root {
-            Some("root")
-        } else {
-            match (readout, action) {
-                (Some(Readout::TelemetryBrief), _) => Some("flight_metrics"),
-                (Some(Readout::Summary), _) => Some("mission_summary"),
-                (Some(Readout::ControllerSettings), _) => Some("controller_settings"),
-                (_, Some(HudAction::TogglePlayback)) => Some("run_pause"),
-                (_, Some(HudAction::ToggleControls)) => Some("details"),
-                (_, Some(HudAction::ToggleHelp)) => Some("controls_help"),
-                (_, Some(HudAction::FollowLander)) => Some("follow_lander"),
-                _ => None,
-            }
-        };
-        let Some(role) = role else {
-            continue;
-        };
-        let half = computed.size() * 0.5;
-        let affine = transform.affine();
-        let physical_to_css = computed.inverse_scale_factor() * ui_scale.0;
-        let min = affine.transform_point2(-half) * physical_to_css;
-        let max = affine.transform_point2(half) * physical_to_css;
-        let rect = [min.x, min.y, max.x - min.x, max.y - min.y];
-        let camera = target.get().and_then(|target| cameras.get(target).ok());
-        elements.push(Element {
-            role,
-            displayed: node.display != Display::None,
-            inherited_visible: visible.get(),
-            rect_css: rect.iter().all(|v| v.is_finite()).then_some(rect),
-            target_camera_active: camera.map(|(camera, _)| camera.is_active),
-            targets_window: camera
-                .is_some_and(|(_, target)| matches!(target, RenderTarget::Window(_))),
-            glyphs: text.map(|layout| layout.glyphs.len()),
-        });
-    }
     REPORT.with(|report| {
-        let samples = report.borrow().samples.saturating_add(1);
-        *report.borrow_mut() = Report {
-            samples,
-            viewport_css,
-            native_nodes: nodes.iter().len(),
-            elements,
-        };
+        let mut report = report.borrow_mut();
+        report.samples = report.samples.saturating_add(1);
+        report.viewport_css = viewport_css;
+        report.native_nodes = nodes.iter().len();
+        report.elements.clear();
+        for (node, computed, transform, visible, target, readout, action, text, root) in &nodes {
+            let role = if root {
+                Some("root")
+            } else {
+                match (readout, action) {
+                    (Some(Readout::TelemetryBrief), _) => Some("flight_metrics"),
+                    (Some(Readout::Summary), _) => Some("mission_summary"),
+                    (Some(Readout::ControllerSettings), _) => Some("controller_settings"),
+                    (_, Some(HudAction::TogglePlayback)) => Some("run_pause"),
+                    (_, Some(HudAction::ToggleDetails)) => Some("details"),
+                    (_, Some(HudAction::ToggleControls)) => Some("controls_help"),
+                    (_, Some(HudAction::FollowLander)) => Some("follow_lander"),
+                    _ => None,
+                }
+            };
+            let Some(role) = role else {
+                continue;
+            };
+            let half = computed.size() * 0.5;
+            let affine = transform.affine();
+            let physical_to_css = computed.inverse_scale_factor() * ui_scale.0;
+            let min = affine.transform_point2(-half) * physical_to_css;
+            let max = affine.transform_point2(half) * physical_to_css;
+            let rect = [min.x, min.y, max.x - min.x, max.y - min.y];
+            let camera = target.get().and_then(|target| cameras.get(target).ok());
+            report.elements.push(Element {
+                role,
+                displayed: node.display != Display::None,
+                inherited_visible: visible.get(),
+                rect_css: rect.iter().all(|v| v.is_finite()).then_some(rect),
+                target_camera_active: camera.map(|(camera, _)| camera.is_active),
+                targets_window: camera
+                    .is_some_and(|(_, target)| matches!(target, RenderTarget::Window(_))),
+                glyphs: text.map(|layout| layout.glyphs.len()),
+            });
+        }
     });
 }

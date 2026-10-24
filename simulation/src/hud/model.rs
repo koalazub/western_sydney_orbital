@@ -4,9 +4,7 @@ use crate::domain::{CameraMode, EntityId};
 
 #[derive(Resource, Default)]
 pub(crate) struct HudState {
-    pub(super) controls: ControlsState,
-    pub(super) help_open: bool,
-    pub(super) inspector_open: bool,
+    pub(super) panel: SidePanel,
     pub(super) reset_confirm_open: bool,
 }
 
@@ -16,24 +14,40 @@ impl HudState {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum ControlsState {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SidePanel {
     #[default]
-    Compact,
-    Expanded,
+    Closed,
+    Details,
+    Inspector,
+    Controls,
 }
 
-impl ControlsState {
-    pub fn expanded(self) -> bool {
-        matches!(self, Self::Expanded)
+impl SidePanel {
+    pub fn details_open(self) -> bool {
+        matches!(self, Self::Details | Self::Inspector)
+    }
+
+    pub fn toggle(self, requested: Self) -> Self {
+        match (self, requested) {
+            (Self::Details | Self::Inspector, Self::Details) | (Self::Controls, Self::Controls) => {
+                Self::Closed
+            }
+            (Self::Inspector, Self::Inspector) => Self::Details,
+            (_, requested) => requested,
+        }
+    }
+
+    pub fn close_top(self) -> Self {
+        match self {
+            Self::Inspector => Self::Details,
+            Self::Closed | Self::Details | Self::Controls => Self::Closed,
+        }
     }
 }
 
 #[derive(Component)]
 pub(super) struct HudRoot;
-
-#[derive(Component)]
-pub(super) struct HudStatusPanel;
 
 #[derive(Component)]
 pub(super) struct DetailsPanel;
@@ -61,8 +75,8 @@ pub(super) enum HudAction {
     Fullscreen,
     Maximize,
     ToggleCapture,
+    ToggleDetails,
     ToggleControls,
-    ToggleHelp,
     FollowLander,
     ToggleInspector,
     FocusNext,
@@ -95,15 +109,15 @@ pub(super) enum Readout {
     Fullscreen,
     Maximize,
     Capture,
-    Controls,
-    HelpToggle,
+    DetailsToggle,
+    ControlsToggle,
     InspectorToggle,
 }
 
 #[derive(Component, Clone, Copy)]
 pub(super) enum Overlay {
+    Details,
     Controls,
-    Help,
     Reset,
     Inspector,
 }
@@ -111,9 +125,7 @@ pub(super) enum Overlay {
 #[derive(Component, Clone, Copy)]
 pub(crate) enum LayoutPart {
     TopRow,
-    MissionActions,
     BottomRow,
-    MetricsPanel,
     CameraPanel,
     SensorActions,
 }
@@ -145,3 +157,46 @@ pub(super) const DISABLED: Color = Color::srgba(0.07, 0.09, 0.11, 0.88);
 pub(super) const HOVERED: Color = Color::srgba(0.18, 0.31, 0.38, 1.0);
 pub(super) const TEXT: Color = Color::srgb(0.91, 0.95, 0.97);
 pub(super) const MUTED: Color = Color::srgb(0.68, 0.77, 0.82);
+
+#[cfg(test)]
+mod tests {
+    use super::SidePanel::*;
+
+    #[test]
+    fn opening_a_panel_replaces_the_previous_panel() {
+        for current in [Closed, Details, Inspector, Controls] {
+            assert_eq!(
+                current.toggle(Controls),
+                if current == Controls {
+                    Closed
+                } else {
+                    Controls
+                }
+            );
+            assert_eq!(
+                current.toggle(Details),
+                if current.details_open() {
+                    Closed
+                } else {
+                    Details
+                }
+            );
+            assert_eq!(
+                current.toggle(Inspector),
+                if current == Inspector {
+                    Details
+                } else {
+                    Inspector
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn escape_closes_the_inspector_before_its_details_panel() {
+        assert_eq!(Inspector.close_top(), Details);
+        assert_eq!(Inspector.close_top().close_top(), Closed);
+        assert_eq!(Controls.close_top(), Closed);
+        assert_eq!(Closed.close_top(), Closed);
+    }
+}

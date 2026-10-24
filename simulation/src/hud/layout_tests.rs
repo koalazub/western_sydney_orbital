@@ -19,6 +19,10 @@ use bevy::{
 };
 
 use super::model::{HudAction, HudState, Readout};
+use bevy::input::{
+    ButtonState,
+    keyboard::{Key, KeyboardInput},
+};
 
 #[test]
 fn desktop_hud_survives_telemetry_and_profile_text() {
@@ -146,13 +150,7 @@ fn check_hud(width: u32, height: u32, window_scale: f32, ui_scale: f32) {
 }
 
 fn check_controls_shortcut(app: &mut App, camera: Entity) {
-    use bevy::{
-        input::{
-            ButtonState,
-            keyboard::{Key, KeyboardInput},
-        },
-        input_focus::FocusCause,
-    };
+    use bevy::input_focus::FocusCause;
     app.add_systems(
         Update,
         (
@@ -163,6 +161,7 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
         )
             .chain(),
     );
+    super::diagnostics::install(app);
     crate::camera::set_input_active(true, false);
     let window = app
         .world_mut()
@@ -178,20 +177,12 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
     app.world_mut()
         .resource_mut::<InputFocus>()
         .set(run, FocusCause::Navigated);
-    let h = |state| KeyboardInput {
-        key_code: KeyCode::KeyH,
-        logical_key: Key::Character("h".into()),
-        state,
-        text: Some("h".into()),
-        repeat: false,
-        window,
-    };
-    app.world_mut().write_message(h(ButtonState::Pressed));
+    tap_key(app, window, KeyCode::KeyH, Key::Character("h".into()));
     for _ in 0..3 {
         app.update();
     }
     assert!(
-        app.world().resource::<HudState>().help_open,
+        app.world().resource::<HudState>().panel == super::model::SidePanel::Controls,
         "H must open controls even with a HUD button focused"
     );
     let viewport = Rect::from_corners(
@@ -208,10 +199,27 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
         .query::<(Entity, &super::model::Overlay)>()
         .iter(app.world())
         .find_map(|(entity, overlay)| {
-            matches!(overlay, super::model::Overlay::Help).then_some(entity)
+            matches!(overlay, super::model::Overlay::Controls).then_some(entity)
         })
         .unwrap();
     assert_in_viewport(app.world(), panel, viewport, "controls H", "controls panel");
+    let status: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
+    assert!(status["samples"].as_u64().unwrap() > 0);
+    assert!(status["native_nodes"].as_u64().unwrap() > 0);
+    let root = status["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|element| element["role"] == "root")
+        .unwrap();
+    assert_eq!(root["displayed"], true);
+    assert_eq!(root["inherited_visible"], true);
+    assert_eq!(root["target_camera_active"], true);
+    assert_eq!(root["targets_window"], true);
+    for axis in 0..2 {
+        let size = status["viewport_css"][axis].as_f64().unwrap();
+        assert!((root["rect_css"][axis + 2].as_f64().unwrap() - size).abs() <= 1.0);
+    }
     let settings = app
         .world_mut()
         .query::<(Entity, &Readout)>()
@@ -230,15 +238,62 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
             .glyphs
             .is_empty()
     );
-    app.world_mut().write_message(h(ButtonState::Released));
-    app.update();
-    app.world_mut().write_message(h(ButtonState::Pressed));
-    app.update();
-    assert!(!app.world().resource::<HudState>().help_open);
+    tap_key(app, window, KeyCode::KeyH, Key::Character("h".into()));
+    assert_eq!(
+        app.world().resource::<HudState>().panel,
+        super::model::SidePanel::Closed
+    );
     assert_eq!(
         app.world().get::<Node>(panel).unwrap().display,
         Display::None
     );
+
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    tap_key(app, window, KeyCode::KeyI, Key::Character("i".into()));
+    assert_eq!(
+        app.world().resource::<HudState>().panel,
+        super::model::SidePanel::Inspector
+    );
+    tap_key(app, window, KeyCode::KeyH, Key::Character("h".into()));
+    assert_eq!(
+        app.world().resource::<HudState>().panel,
+        super::model::SidePanel::Controls
+    );
+    for (overlay, node) in app
+        .world_mut()
+        .query::<(&super::model::Overlay, &Node)>()
+        .iter(app.world())
+    {
+        if matches!(
+            overlay,
+            super::model::Overlay::Details | super::model::Overlay::Inspector
+        ) {
+            assert_eq!(
+                node.display,
+                Display::None,
+                "Controls must replace Details and Inspector"
+            );
+        }
+    }
+    tap_key(app, window, KeyCode::Escape, Key::Escape);
+    assert_eq!(
+        app.world().resource::<HudState>().panel,
+        super::model::SidePanel::Closed
+    );
+}
+
+fn tap_key(app: &mut App, window: Entity, key_code: KeyCode, logical_key: Key) {
+    for state in [ButtonState::Pressed, ButtonState::Released] {
+        app.world_mut().write_message(KeyboardInput {
+            key_code,
+            logical_key: logical_key.clone(),
+            state,
+            text: None,
+            repeat: false,
+            window,
+        });
+        app.update();
+    }
 }
 
 fn assert_chrome(app: &mut App, camera: Entity, stage: &str, scale: f32) {
@@ -273,7 +328,7 @@ fn assert_chrome(app: &mut App, camera: Entity, stage: &str, scale: f32) {
                 Readout::Summary => "summary",
                 Readout::TelemetryBrief => "telemetry",
                 Readout::Playback => "Run label",
-                Readout::Controls => "Details label",
+                Readout::DetailsToggle => "Details label",
                 _ => return None,
             };
             Some((entity, label))
@@ -316,7 +371,7 @@ fn assert_chrome(app: &mut App, camera: Entity, stage: &str, scale: f32) {
         .iter(world)
         .filter_map(|(entity, action)| match action {
             HudAction::TogglePlayback => Some((entity, "Run button")),
-            HudAction::ToggleControls => Some((entity, "Details button")),
+            HudAction::ToggleDetails => Some((entity, "Details button")),
             _ => None,
         })
         .collect();

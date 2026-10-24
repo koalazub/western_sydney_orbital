@@ -50,7 +50,6 @@ pub(super) fn setup(
                 children![
                     (
                         Node { width: px(360), ..panel_style() },
-                        HudStatusPanel,
                         BackgroundColor(PANEL),
                         children![
                             (text("Phobos practice | T+00:00:00 | paused", CAPTION_SIZE_PX, TEXT), Readout::Summary),
@@ -67,13 +66,12 @@ pub(super) fn setup(
                             ..button_row()
                         },
                         Pickable::IGNORE,
-                        LayoutPart::MissionActions,
                         children![
                             button("Run [P]", HudAction::TogglePlayback, Readout::Playback),
                             button("Follow lander [F]", HudAction::FollowLander, Readout::Static),
-                            button("Controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
+                            button("Controls [H]", HudAction::ToggleControls, Readout::ControlsToggle),
                             (button("Fullscreen [X]", HudAction::Fullscreen, Readout::Fullscreen), FullscreenButton),
-                            button("Details +", HudAction::ToggleControls, Readout::Controls),
+                            button("Details +", HudAction::ToggleDetails, Readout::DetailsToggle),
                         ],
                     ),
                 ],
@@ -126,22 +124,7 @@ pub(super) fn setup(
                 ],
             ),
             (
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(SCREEN_PADDING_PX),
-                    width: px(300),
-                    overflow: Overflow::scroll_y(),
-                    display: Display::None,
-                    ..panel_style()
-                },
-                BackgroundColor(PANEL),
-                ZIndex(1),
-                Overlay::Controls,
-                DetailsPanel,
-                ScrollArea,
-                Hovered::default(),
-                observe(systems::scroll_details),
-                Visibility::Hidden,
+                side_panel(Overlay::Details),
                 children![
                     text("Mission details and controls", COPY_SIZE_PX, TEXT),
                     text("Scroll for more. Focus a control to use Page Up/Down. Esc closes details.", CAPTION_SIZE_PX, MUTED),
@@ -159,7 +142,6 @@ pub(super) fn setup(
                     ),
                     (
                         Node { width: percent(100), padding: UiRect::ZERO, ..panel_style() },
-                        LayoutPart::MetricsPanel,
                         children![
                             (text("", COPY_SIZE_PX, TEXT), Readout::Mission),
                             (text("", CAPTION_SIZE_PX, MUTED), Readout::Environment),
@@ -177,7 +159,7 @@ pub(super) fn setup(
                             button("< Focus [,]", HudAction::FocusPrevious, Readout::Static),
                             button("Focus [/] >", HudAction::FocusNext, Readout::Static),
                             button("Capture [L]", HudAction::ToggleCapture, Readout::Capture),
-                            button("Controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
+                            button("Controls [H]", HudAction::ToggleControls, Readout::ControlsToggle),
                             button("Inspect [I]", HudAction::ToggleInspector, Readout::InspectorToggle),
                         ],
                     ),
@@ -191,22 +173,7 @@ pub(super) fn setup(
                 ],
             ),
             (
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(SCREEN_PADDING_PX),
-                    width: px(420),
-                    overflow: Overflow::scroll_y(),
-                    display: Display::None,
-                    ..panel_style()
-                },
-                BackgroundColor(PANEL),
-                ZIndex(1),
-                Overlay::Help,
-                DetailsPanel,
-                ScrollArea,
-                Hovered::default(),
-                observe(systems::scroll_details),
-                Visibility::Hidden,
+                side_panel(Overlay::Controls),
                 children![
                     text("Controls and controller settings [H]", COPY_SIZE_PX, TEXT),
                     text("H or Esc closes. Scroll for all settings; Page Up/Down works from a focused control.", CAPTION_SIZE_PX, MUTED),
@@ -216,12 +183,14 @@ pub(super) fn setup(
                             button("Follow lander [F]", HudAction::FollowLander, Readout::Static),
                             button("Example controller", HudAction::ToggleAutopilot, Readout::Autopilot),
                             button("Use reference Space thrust", HudAction::TogglePracticeBoost, Readout::BoostToggle),
-                            button("Close controls [H]", HudAction::ToggleHelp, Readout::HelpToggle),
+                            button("Close controls [H]", HudAction::ToggleControls, Readout::ControlsToggle),
                         ],
                     ),
                     (text("Loading current input state", COPY_SIZE_PX, TEXT), Readout::ControllerSettings),
-                    text("This panel shows live physical input and current settings. It does not pause the simulation. Scroll or use Page Up/Down while a control is focused.", CAPTION_SIZE_PX, MUTED),
+                    text("Space launches/lifts | W/S forward/back | A/D left/right | E/Q up/down\nF follows the lander | Shift+F frames the selected object\nAlt/Option + movement keys: debug camera only | Shift boosts debug movement\nP pause/run | R reset | T rate | L capture/release\n1 orbit | 2 debug FP | 3 third-person | 4 free | 5 overview | 6/7 ship sensors\nTab selects controls | Enter activates | H or Esc closes", CAPTION_SIZE_PX, MUTED),
+                    text("Manual thrust takes over from the example controller. Offset side jets can roll or topple the lander. Release keys to stop thrust, not velocity or spin. This panel does not pause flight.", CAPTION_SIZE_PX, MUTED),
                     text("Amber line: advisory path. Blue-white exhaust: actual-force debug cue. Neither is added to the fixed 512 x 512 RGB8 ship-camera images.", CAPTION_SIZE_PX, MUTED),
+                    text("The planner does not control the lander. The browser uses local practice physics, not the STP SDK.", CAPTION_SIZE_PX, MUTED),
                 ],
             ),
             (
@@ -276,6 +245,27 @@ fn panel_style() -> Node {
         max_width: percent(100),
         ..default()
     }
+}
+
+fn side_panel(overlay: Overlay) -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(SCREEN_PADDING_PX),
+            width: px(420),
+            overflow: Overflow::scroll_y(),
+            display: Display::None,
+            ..panel_style()
+        },
+        BackgroundColor(PANEL),
+        ZIndex(1),
+        overlay,
+        DetailsPanel,
+        ScrollArea,
+        Hovered::default(),
+        observe(systems::scroll_details),
+        Visibility::Hidden,
+    )
 }
 
 fn button_row() -> Node {

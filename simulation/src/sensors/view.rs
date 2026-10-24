@@ -98,10 +98,7 @@ pub(super) fn update(
         match part {
             LayoutPart::TopRow => top += height,
             LayoutPart::BottomRow => bottom += height,
-            LayoutPart::MissionActions
-            | LayoutPart::MetricsPanel
-            | LayoutPart::CameraPanel
-            | LayoutPart::SensorActions => {}
+            LayoutPart::CameraPanel | LayoutPart::SensorActions => {}
         }
     }
     for mut node in &mut panels {
