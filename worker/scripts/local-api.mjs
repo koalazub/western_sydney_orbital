@@ -3,11 +3,13 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { resolveNotebook } from "./notebook-launch.mjs";
 
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
 const BODY_TIMEOUT_MS = 3000;
 const CALL_TIMEOUT_MS = 5000;
+const CAPTURE_TIMEOUT_MS = 20000;
 const PAGE_LEASE_MS = 6000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -44,8 +46,20 @@ function validateCall(value) {
     finiteJson(value.preview);
     return;
   }
+  if (value?.method === "pan_tilt") {
+    shape(value, ["method", "camera", "yaw_deg", "pitch_deg"]);
+    if (!["top", "bottom"].includes(value.camera)
+      || !finiteBetween(value.yaw_deg, -1e6, 1e6)
+      || !finiteBetween(value.pitch_deg, -1e6, 1e6)) invalid("Invalid camera or pan/tilt angles");
+    return;
+  }
+  if (value?.method === "capture") {
+    shape(value, ["method", "camera"]);
+    if (!["top", "bottom"].includes(value.camera)) invalid("Unknown ship camera");
+    return;
+  }
   shape(value, ["method", "command"]);
-  if (value.method !== "command" || !record(value.command)) invalid("Expected snapshot, preview or command");
+  if (value.method !== "command" || !record(value.command)) invalid("Expected a public snapshot, preview, camera operation or command");
   const command = value.command;
   switch (command.op) {
     case "pause":
@@ -59,6 +73,14 @@ function validateCall(value) {
       break;
     case "reset":
       shape(command, ["op"], ["seed"]);
+      if (command.seed != null && (!Number.isInteger(command.seed) || !finiteBetween(command.seed, 0, 4294967295))) {
+        invalid("seed must be an integer from 0 to 4294967295");
+      }
+      break;
+    case "configure_experiment":
+      shape(command, ["op", "settings"], ["seed"]);
+      if (!record(command.settings)) invalid("Experiment settings must be an object");
+      finiteJson(command.settings);
       if (command.seed != null && (!Number.isInteger(command.seed) || !finiteBetween(command.seed, 0, 4294967295))) {
         invalid("seed must be an integer from 0 to 4294967295");
       }
@@ -89,7 +111,7 @@ function validateCall(value) {
       }
       break;
     default:
-      invalid("Allowed command ops: pause, play, step, reset, set_command, stop, view, debug_upright");
+      invalid("Allowed command ops: pause, play, step, reset, set_command, stop, view, debug_upright, configure_experiment");
   }
 }
 
@@ -101,11 +123,11 @@ function finiteJson(value, depth = 0) {
   }
 }
 
-function readJson(request, response) {
+function readJson(request, response, limit = BODY_LIMIT) {
   if (request.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json") {
     throw new HttpError(415, "Content-Type must be application/json");
   }
-  if (Number(request.headers["content-length"] ?? 0) > BODY_LIMIT) throw new HttpError(413, "Body exceeds 1 MiB");
+  if (Number(request.headers["content-length"] ?? 0) > limit) throw new HttpError(413, "Body exceeds the request limit");
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let size = 0;
@@ -127,7 +149,7 @@ function readJson(request, response) {
     const interrupted = () => finish(new HttpError(400, "Request disconnected while reading JSON"));
     const data = chunk => {
       size += chunk.length;
-      if (size > BODY_LIMIT) finish(new HttpError(413, "Body exceeds 1 MiB"));
+      if (size > limit) finish(new HttpError(413, "Body exceeds the request limit"));
       else chunks.push(chunk);
     };
     const end = () => {
@@ -205,12 +227,15 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
     throw new Error("Invalid local engine manifest");
   }
   const clientSource = await readFile(resolve(worker, "web/local-api.js"), "utf8");
+  const notebookHelp = await readFile(resolve(worker, "web/notebook.html"), "utf8");
   let origin;
   let closed = false;
   let publication = Promise.resolve();
   let page = null;
   let pageTimer;
-  let pending = null;
+  // One control request and one GPU readback may coexist. A capture must not
+  // hold the command channel while Python is controlling a flying vehicle.
+  const pending = new Map();
 
   function send(request, response, status, value, type = "application/json; charset=utf-8") {
     if (response.destroyed || response.writableEnded) return;
@@ -234,8 +259,8 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
   }
 
   function settle(job, status, envelope) {
-    if (pending !== job) return;
-    pending = null;
+    if (pending.get(job.id) !== job) return;
+    pending.delete(job.id);
     clearTimeout(job.timer);
     job.response.off("close", job.disconnected);
     if (envelope) send(job.request, job.response, status, envelope);
@@ -251,9 +276,11 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
     if (page && page.expires <= Date.now()) {
       page = null;
       clearTimeout(pageTimer);
-      if (pending) settle(pending, 503, lost(pending, "Browser page lease expired"));
+      for (const job of [...pending.values()]) settle(job, 503, lost(job, "Browser page lease expired"));
     }
-    if (pending && pending.deadline <= Date.now()) settle(pending, 504, lost(pending, "Local call deadline expired"));
+    for (const job of [...pending.values()]) {
+      if (job.deadline <= Date.now()) settle(job, 504, lost(job, "Local call deadline expired"));
+    }
   }
 
   function claimPage(id) {
@@ -284,8 +311,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
       if (site !== undefined && site !== "same-origin" && site !== "none") throw new HttpError(403, "Cross-origin requests are not allowed");
       if (new URL(request.url, origin).search) invalid("Local API routes do not accept query parameters");
       const moduleRoute = pathname === "/__local/bootstrap.js" || pathname === "/__local/client.js";
-      const allowedMethod = moduleRoute || pathname === "/__local/status" || pathname === "/__local/poll" ? "GET" : "POST";
-      if (!["/__local/bootstrap.js", "/__local/client.js", "/__local/status", "/__local/call", "/__local/poll", "/__local/result"].includes(pathname)) {
+      const notebookRoute = pathname === "/__local/notebook";
+      const allowedMethod = moduleRoute || notebookRoute || pathname === "/__local/status" || pathname === "/__local/poll" ? "GET" : "POST";
+      if (!["/__local/bootstrap.js", "/__local/client.js", "/__local/notebook", "/__local/status", "/__local/call", "/__local/poll", "/__local/result"].includes(pathname)) {
         throw new HttpError(404, "Unknown local API route");
       }
       if (request.method !== allowedMethod) {
@@ -293,6 +321,29 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         throw new HttpError(405, "Method not allowed");
       }
       const authorized = authenticated(request);
+      if (notebookRoute) {
+        const activatedNavigation = site === "none" && request.headers["sec-fetch-mode"] === "navigate"
+          && request.headers["sec-fetch-dest"] === "document" && request.headers["sec-fetch-user"] === "?1";
+        if (site !== "same-origin" && !activatedNavigation && !authorized) {
+          send(request, response, 200, notebookHelp, "text/html; charset=utf-8");
+          return;
+        }
+        const notebook = await resolveNotebook({ root: resolve(worker, "..") });
+        if (!notebook) {
+          send(request, response, 200, notebookHelp, "text/html; charset=utf-8");
+          return;
+        }
+        response.writeHead(302, {
+          Location: notebook.url,
+          "Cache-Control": "no-store",
+          "Referrer-Policy": "no-referrer",
+          "Cross-Origin-Resource-Policy": "same-origin",
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY",
+        });
+        response.end();
+        return;
+      }
       if (moduleRoute) {
         // Browsers supply Fetch Metadata on module imports. Native clients must
         // authenticate instead; an unadorned GET must not reveal the bootstrap.
@@ -308,14 +359,14 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
       }
       expire();
       if (pathname === "/__local/status") {
-        send(request, response, 200, { enabled: true, connected: page !== null, busy: pending !== null, engine_build: engineBuild });
+        send(request, response, 200, { enabled: true, connected: page !== null, busy: pending.size !== 0, engine_build: engineBuild });
       } else if (pathname === "/__local/poll") {
         const id = pageId(request);
         if (request.headers["x-wsorb-build"] !== engineBuild.sha256) {
           throw new HttpError(409, "Browser engine build differs from the lab server; restart the local lab and reload the simulation");
         }
         claimPage(id);
-        const job = pending && !pending.delivered ? pending : null;
+        const job = [...pending.values()].find(job => !job.delivered);
         if (job) job.delivered = true;
         send(request, response, 200, { job: job ? { id: job.id, ...job.call, deadline_ms: job.deadline } : null });
       } else if (pathname === "/__local/call") {
@@ -323,21 +374,25 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         validateCall(call);
         expire();
         if (!page) throw new HttpError(503, "No ready browser is connected to the local simulation");
-        if (pending) throw new HttpError(409, "A local simulation call is already in flight");
+        const channel = call.method === "capture" ? "capture" : "control";
+        if ([...pending.values()].some(job => job.channel === channel)) {
+          throw new HttpError(409, `A local ${channel} call is already in flight`);
+        }
         if (response.destroyed || closed) return;
-        const job = { id: randomUUID(), call, page: page.id, request, response, deadline: Date.now() + CALL_TIMEOUT_MS, delivered: false };
+        const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS : CALL_TIMEOUT_MS;
+        const job = { id: randomUUID(), call, channel, page: page.id, request, response, deadline: Date.now() + timeout, delivered: false };
         job.disconnected = () => settle(job);
-        job.timer = setTimeout(() => settle(job, 504, lost(job, "Local call deadline expired")), CALL_TIMEOUT_MS);
-        pending = job;
+        job.timer = setTimeout(() => settle(job, 504, lost(job, "Local call deadline expired")), timeout);
+        pending.set(job.id, job);
         response.once("close", job.disconnected);
       } else {
         const id = pageId(request);
-        if (!page || page.id !== id || !pending || pending.page !== id || !pending.delivered) {
+        if (!page || page.id !== id || ![...pending.values()].some(job => job.page === id && job.delivered)) {
           throw new HttpError(409, "No delivered call belongs to this browser page");
         }
-        const result = await readJson(request, response);
+        const result = await readJson(request, response, RESPONSE_LIMIT);
         expire();
-        const job = pending;
+        const job = pending.get(result?.id);
         if (!page || page.id !== id || !job || job.page !== id || !job.delivered || result?.id !== job.id || job.deadline <= Date.now()) {
           throw new HttpError(409, "Stale or expired browser result");
         }
@@ -347,11 +402,18 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
           invalid("Result error must be a nonempty string of at most 2048 characters");
         }
         if (result.ok === true) {
-          if (job.call.method !== "snapshot") {
+          if (job.call.method === "capture") {
+            shape(result.value, ["metadata", "rgb_base64"]);
+            if (!record(result.value.metadata) || result.value.metadata.width !== 512
+              || result.value.metadata.height !== 512 || result.value.metadata.channels !== 3
+              || result.value.metadata.bits_per_channel !== 8
+              || typeof result.value.rgb_base64 !== "string" || result.value.rgb_base64.length !== 1048576
+              || !/^[A-Za-z0-9+/]+$/.test(result.value.rgb_base64)) invalid("Invalid RGB8 camera capture");
+          } else if (job.call.method !== "snapshot") {
             shape(result.value, ["ok"]);
             if (result.value.ok !== true) invalid("Commands return an acknowledgement only");
           } else {
-            shape(result.value, ["observation", "telemetry", "navigation", "runtime", "engine_build"]);
+            shape(result.value, ["observation", "telemetry", "navigation", "runtime", "engine_build", "cameras"]);
             if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime].every(record)) {
               invalid("Snapshot reports must be JSON objects");
             }
@@ -406,7 +468,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
       closed = true;
       clearTimeout(pageTimer);
       page = null;
-      if (pending) settle(pending, 503, lost(pending, "Local lab is shutting down"));
+      for (const job of [...pending.values()]) settle(job, 503, lost(job, "Local lab is shutting down"));
       await publication.catch(() => {});
       await removeDescriptor();
     },

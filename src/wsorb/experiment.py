@@ -6,7 +6,7 @@ Only the worker writes commands. Stop signals it rather than starting a second
 writer, and a slow Python callback cannot be interrupted. Keep callbacks bounded.
 
 Cadence is a wall-clock upper target, not a promised HTTP or physics frequency.
-``sample_count`` counts snapshots read here, including safety and cleanup reads,
+``sample_count`` counts recorded public snapshots, including safety and cleanup reads,
 not simulation steps. ``elapsed_sim_s`` comes only from a continuous observed
 simulation clock. A browser pause, reset or manual intervention ends ownership.
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -26,6 +27,104 @@ import numpy as np
 import numpy.typing as npt
 
 from .local_api import LocalSimulation
+
+HISTORY_LIMIT = 2000
+TELEMETRY_FIELDS = (
+    "speed_mps",
+    "radial_climb_mps",
+    "terrain_center_clearance_m",
+    "target_center_range_m",
+    "target_closing_mps",
+    "applied_thrust_accel_mps2",
+    "thrust_force_n",
+    "torque_nm",
+    "angular_speed_rad_s",
+    "fuel_used_kg_estimate",
+    "damage_j_estimate",
+)
+
+
+def _finite(value: Any) -> float | None:
+    if type(value) in (int, float):
+        try:
+            return float(value) if math.isfinite(value) else None
+        except OverflowError:
+            pass
+    return None
+
+
+def measured_sample(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project a real public snapshot, retaining both independent source times.
+
+    This is serialization, not a physics calculation. Missing/invalid readings
+    stay null. A report without its actual telemetry clock and epoch is not a
+    measurement and contributes no row. Observation fields are not backdated to
+    the telemetry time; chart them against ``observation_time_s`` instead.
+    """
+    observation = snapshot.get("observation")
+    telemetry = snapshot.get("telemetry")
+    if not isinstance(observation, Mapping) or not isinstance(telemetry, Mapping):
+        return None
+    epoch = telemetry.get("epoch")
+    now = _finite(telemetry.get("source_time_s"))
+    if (
+        now is None
+        or now < 0
+        or not isinstance(epoch, Mapping)
+        or type(epoch.get("index")) is not int
+        or epoch["index"] < 0
+        or type(epoch.get("seed")) is not int
+        or epoch["seed"] < 0
+    ):
+        return None
+    metrics = telemetry.get("metrics")
+    ship = observation.get("shuttle")
+    runtime = snapshot.get("runtime")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    ship = ship if isinstance(ship, Mapping) else {}
+    runtime = runtime if isinstance(runtime, Mapping) else {}
+    counter = observation.get("manual_interventions", runtime.get("manual_interventions"))
+    row = {
+        "telemetry_time_s": now,
+        "telemetry_epoch": epoch["index"],
+        "telemetry_seed": epoch["seed"],
+        "telemetry_epoch_started_at_s": _finite(epoch.get("started_at_time_s")),
+        "telemetry_status": telemetry.get("status"),
+        "telemetry_clock": "local_simulation_elapsed_seconds",
+        "observation_time_s": _finite(observation.get("time_s")),
+        "observation_seed": observation.get("seed"),
+        "observation_clock": "local_simulation_elapsed_seconds",
+        "frame": observation.get("frame"),
+        "radar_clock": observation.get("radar_clock"),
+        "rotation_convention": observation.get("rotation_convention"),
+        "manual_interventions": counter if type(counter) is int else None,
+        "ship_mass_kg": _finite(ship.get("mass_kg")),
+        "reference_accel_limit_mps2": _finite(observation.get("max_accel_mps2")),
+        "reference_angular_accel_limit_rad_s2": _finite(
+            observation.get("max_angular_accel_rad_s2")
+        ),
+        **{name: _finite(metrics.get(name)) for name in TELEMETRY_FIELDS},
+    }
+    for field, prefix, unit in (
+        ("commanded_accel_mps2", "command_accel_body", "mps2"),
+        ("commanded_angular_accel_rad_s2", "command_angular_accel_body", "rad_s2"),
+    ):
+        vector = ship.get(field)
+        for index, axis in enumerate("xyz"):
+            row[f"{prefix}_{axis}_{unit}"] = (
+                _finite(vector[index])
+                if isinstance(vector, (list, tuple)) and len(vector) == 3
+                else None
+            )
+    inertia = ship.get("inertia_kg_m2")
+    for index, axis in enumerate("xyz"):
+        diagonal = None
+        if isinstance(inertia, (list, tuple)) and len(inertia) == 3:
+            values = inertia[index]
+            if isinstance(values, (list, tuple)) and len(values) == 3:
+                diagonal = _finite(values[index])
+        row[f"ship_inertia_{axis}{axis}_kg_m2"] = diagonal
+    return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +192,10 @@ class ExperimentRunner:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
+        self._history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
+        self._segment = 0
+        self._run_index = 0
+        self._new_run = False
         self._report: dict[str, Any] = {
             "state": "idle",
             "sample_count": 0,
@@ -132,6 +235,8 @@ class ExperimentRunner:
             self._report.update(
                 state="starting", sample_count=0, elapsed_sim_s=0.0, latest=None, error=None
             )
+            self._run_index += 1
+            self._new_run = True
             self._worker = threading.Thread(
                 target=self._run,
                 args=(sim, policy, duration_s, cadence_hz),
@@ -168,6 +273,72 @@ class ExperimentRunner:
         with self._lock:
             return deepcopy(self._report)
 
+    def history(self) -> list[dict[str, Any]]:
+        """Copy at most 2000 distinct measured telemetry samples; never contact a client."""
+        with self._lock:
+            return deepcopy(list(self._history))
+
+    def record_snapshot(self, snapshot: dict, *, source: str = "manual_read") -> None:
+        """Record an actual public read, including explicit paused-step results.
+
+        This does not advance time or send a command. The notebook calls it only
+        with real client results. Repeated held telemetry replaces the last row,
+        rather than creating new measurements at observation or wall-clock time.
+        ``segment`` splits runs, epochs, clock/frame changes and interventions.
+        """
+        row = measured_sample(snapshot)
+        with self._lock:
+            self._report["latest"] = deepcopy(snapshot)
+            self._report["sample_count"] += 1
+            if row is None:
+                return
+            previous = self._history[-1] if self._history else None
+            intervention = bool(
+                previous is not None
+                and row["manual_interventions"] is not None
+                and previous["manual_interventions"] is not None
+                and row["manual_interventions"] != previous["manual_interventions"]
+            )
+            boundary = self._new_run or intervention
+            if previous is not None:
+                boundary |= any(
+                    row[key] != previous[key]
+                    for key in (
+                        "telemetry_epoch",
+                        "telemetry_seed",
+                        "observation_seed",
+                        "frame",
+                        "radar_clock",
+                        "rotation_convention",
+                    )
+                )
+                boundary |= row["telemetry_time_s"] < previous["telemetry_time_s"]
+                if (
+                    row["observation_time_s"] is not None
+                    and previous["observation_time_s"] is not None
+                ):
+                    boundary |= row["observation_time_s"] < previous["observation_time_s"]
+            if boundary:
+                self._segment += 1
+            self._new_run = False
+            row.update(
+                segment=self._segment,
+                run_index=self._run_index,
+                sample_source=source,
+                manual_intervention=intervention,
+                manual_intervention_source=source if intervention else None,
+            )
+            if previous is not None and all(
+                row[key] == previous[key]
+                for key in ("telemetry_epoch", "telemetry_seed", "telemetry_time_s")
+            ):
+                row["manual_intervention"] |= previous["manual_intervention"]
+                if not intervention:
+                    row["manual_intervention_source"] = previous["manual_intervention_source"]
+                self._history[-1] = row
+            else:
+                self._history.append(row)
+
     def _run(
         self,
         sim: LocalSimulation,
@@ -195,9 +366,7 @@ class ExperimentRunner:
             nonlocal origin, last_time, seed, interventions, phase
             phase = "Reading public snapshot"
             snapshot = sim.snapshot()
-            with self._lock:
-                self._report["latest"] = snapshot
-                self._report["sample_count"] += 1
+            self.record_snapshot(snapshot, source="worker")
             observation, runtime = snapshot.get("observation"), snapshot.get("runtime")
             if not isinstance(observation, dict) or not isinstance(runtime, dict):
                 raise _RunError("Snapshot lacks public observation or runtime state")

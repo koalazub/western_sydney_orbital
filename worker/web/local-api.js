@@ -3,7 +3,7 @@ const POLL_MS = 50;
 const REQUEST_TIMEOUT_MS = 2500;
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
-const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright"]);
+const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright", "configure_experiment"]);
 let connected = false;
 
 export function connect(token) {
@@ -13,7 +13,8 @@ export function connect(token) {
   globalThis.__wsorbLocalApi = status;
   const page = crypto.randomUUID();
   let stopped = false;
-  let activeRequest;
+  const activeRequests = new Set();
+  let capturing = false;
   let api;
   let manifest;
   const message = error => error instanceof Error ? error.message : String(error);
@@ -24,13 +25,13 @@ export function connect(token) {
 
   addEventListener("pagehide", () => {
     stopped = true;
-    activeRequest?.abort();
+    for (const request of activeRequests) request.abort();
     report("disconnected", "This page left the local lab. Reload the simulation to reconnect.");
   }, { once: true });
 
   async function request(path, body) {
     const controller = new AbortController();
-    activeRequest = controller;
+    activeRequests.add(controller);
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(`/__local/${path}`, {
@@ -66,7 +67,7 @@ export function connect(token) {
       return value;
     } finally {
       clearTimeout(timer);
-      activeRequest = undefined;
+      activeRequests.delete(controller);
     }
   }
 
@@ -89,7 +90,7 @@ export function connect(token) {
     // The app already initialized this exact module. Do not call default() or
     // start_simulation() here, even if rebuilt assets left it uninitialized.
     const module = await import(moduleUrl);
-    const methods = ["observation", "telemetry_status", "navigation_status", "runtime_status", "renderer_status", "command", "set_navigation_preview"];
+    const methods = ["observation", "telemetry_status", "navigation_status", "runtime_status", "renderer_status", "command", "set_navigation_preview", "ship_camera_status", "pan_tilt_camera", "ship_camera_capture"];
     if (methods.some(name => typeof module[name] !== "function")) {
       throw new Error("This engine build lacks the local practice API. Rebuild and reload the simulation.");
     }
@@ -102,7 +103,7 @@ export function connect(token) {
     api = module;
   }
 
-  function invoke(job) {
+  async function invoke(job) {
     let commandInvoked = false;
     const failure = error => ({ envelope: { id: job.id, ok: false, error }, commandInvoked });
     if (!Number.isSafeInteger(job.deadline_ms) || Date.now() >= job.deadline_ms) {
@@ -118,7 +119,33 @@ export function connect(token) {
           navigation: JSON.parse(api.navigation_status()),
           runtime: JSON.parse(api.runtime_status()),
           engine_build: manifest,
+          cameras: JSON.parse(api.ship_camera_status()),
         };
+      } else if (job.method === "pan_tilt") {
+        const result = JSON.parse(api.pan_tilt_camera(job.camera, job.yaw_deg, job.pitch_deg));
+        if (result.ok !== true) return failure(result.error || "Camera aim was rejected");
+        value = { ok: true };
+      } else if (job.method === "capture") {
+        let timer;
+        try {
+          const frame = await Promise.race([
+            api.ship_camera_capture(job.camera),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("Camera capture deadline expired")), Math.max(0, job.deadline_ms - Date.now()));
+            }),
+          ]);
+          const { rgb, ...metadata } = frame;
+          if (!(rgb instanceof Uint8Array) || rgb.length !== 512 * 512 * 3) {
+            throw new Error("Camera did not return a genuine 512×512 RGB8 frame");
+          }
+          let binary = "";
+          for (let start = 0; start < rgb.length; start += 16384) {
+            binary += String.fromCharCode(...rgb.subarray(start, start + 16384));
+          }
+          value = { metadata, rgb_base64: btoa(binary) };
+        } finally {
+          clearTimeout(timer);
+        }
       } else if (job.method === "preview") {
         const json = JSON.stringify(job.preview);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before preview publication");
@@ -144,6 +171,28 @@ export function connect(token) {
     }
   }
 
+  async function complete(job) {
+    const result = await invoke(job);
+    let body = JSON.stringify(result.envelope);
+    const limit = job.method === "capture" ? RESPONSE_LIMIT : BODY_LIMIT;
+    if (new TextEncoder().encode(body).byteLength > limit) {
+      body = JSON.stringify({ id: job.id, ok: false, error: "Browser report exceeds the result limit" });
+    }
+    try {
+      if (stopped) return;
+      const acknowledgement = await request("result", body);
+      if (acknowledgement.ok !== true) throw new Error("Invalid bridge acknowledgement");
+    } catch {
+      if (result.commandInvoked) {
+        // An uncertain actuation result must never be resent automatically.
+        stopped = true;
+        report("error", "Command result was not acknowledged; outcome is indeterminate. Inspect live state before further flight control.");
+      } else {
+        report("error", "Browser result was not acknowledged. This job did not invoke a flight command.");
+      }
+    }
+  }
+
   async function run() {
     while (!stopped) {
       const startup = globalThis.__wsorbStartup;
@@ -164,22 +213,21 @@ export function connect(token) {
           if (stopped) return;
           report("connected");
           if (job) {
-            const result = invoke(job);
-            let body = JSON.stringify(result.envelope);
-            if (new TextEncoder().encode(body).byteLength > BODY_LIMIT) {
-              body = JSON.stringify({ id: job.id, ok: false, error: "Browser report exceeds the 1 MiB result limit" });
-            }
-            try {
-              const acknowledgement = await request("result", body);
-              if (acknowledgement.ok !== true) throw new Error("Invalid bridge acknowledgement");
-            } catch {
-              // Never resend a command or its result. After execution, a lost
-              // acknowledgement cannot establish whether the caller saw it.
-              report("error", result.commandInvoked
-                ? "Command result was not acknowledged; outcome is indeterminate. Inspect live state before further flight control."
-                : "Browser result was not acknowledged. This job did not invoke a command; the local bridge stopped.");
-              return;
-            }
+            if (job.method === "capture") {
+              if (capturing) {
+                // The server can expire a capture before this page finishes its
+                // result POST. A replacement must not start another readback or
+                // block polling and flight control behind the old one.
+                await request("result", JSON.stringify({
+                  id: job.id, ok: false, error: "A camera readback is still finishing. Wait before capturing again.",
+                }));
+              } else {
+                capturing = true;
+                // Keep polling to renew the page lease and deliver flight commands
+                // while the real GPU readback is pending. Never start it twice.
+                void complete(job).catch(error => report("error", message(error))).finally(() => { capturing = false; });
+              }
+            } else await complete(job);
           }
         } catch (error) {
           if (!stopped) report("disconnected", message(error));

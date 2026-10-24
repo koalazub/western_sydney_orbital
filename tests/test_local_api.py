@@ -113,6 +113,7 @@ def local_server(tmp_path):
             "PORT": "0",
             "WSORB_LAB": "1",
             "WSORB_LOCAL_CONNECTION": str(connection),
+            "WSORB_LAB_TOKEN_FILE": str(tmp_path / "marimo.token"),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -159,6 +160,33 @@ def test_real_server_requires_an_actual_ready_browser(local_server):
     assert client.status()["busy"] is False
     with _http(client, "/") as response:
         assert "/__local/" in response.read().decode()
+
+
+def test_notebook_button_falls_back_to_setup_without_publishing_a_secret(local_server):
+    client = local_server
+    with _http(client, "/notebook.html") as response:
+        assert response.headers["Cache-Control"] == "no-store"
+        text = response.read().decode()
+    assert "devenv up lab simulation" in text
+    assert "access_token=" not in text
+    with _http(
+        client, "/notebook.html", headers={"Authorization": f"Bearer {client._token}"}
+    ) as response:
+        assert "devenv up lab simulation" in response.read().decode()
+
+
+def test_camera_and_experiment_inputs_are_validated_before_reaching_a_browser():
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    for camera in ("unknown", "TopCamera"):
+        with pytest.raises(ValueError, match="camera"):
+            client.PanTiltCamera(camera, 0, 0)
+        with pytest.raises(ValueError, match="camera"):
+            client.capture_image(camera)
+    for angle in (np.nan, np.inf, True, "30"):
+        with pytest.raises(ValueError, match="finite"):
+            client.PanTiltCamera(client.topCamera, angle, 0)
+    with pytest.raises(ValueError):
+        client.configure_experiment({"ship": {"mass_kg": np.nan}})
 
 
 def test_real_server_rejects_unauthenticated_cross_origin_and_rebound_requests(local_server):

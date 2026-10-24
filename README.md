@@ -41,12 +41,19 @@ just build
 devenv up lab simulation
 ```
 
-Devenv manages the game at `http://127.0.0.1:61829/` and Marimo at port `2718`. Open the token-protected editor URL printed by the lab process. Keep one game tab open and visible, ideally in a separate window. In Marimo:
+Devenv manages the game at `http://127.0.0.1:61829/` and Marimo at port `2718`. Use **Open notebook** in the local game to open the authenticated editor. On the hosted game, this button shows the local setup instructions. Keep one game tab open and visible, ideally in a separate window. In Marimo:
 
 1. Connect and refresh to inspect real public observations, radar and flight metrics.
 2. Edit the prediction, planning and controller functions and their parameters in Python. **Plan and show route** runs the Python planner without steering. The initial controller requests zero acceleration. Editing functions or refreshing measurements does not apply thrust.
 3. Select a controller and arm **Apply and run** to run the visible simulation while Python supplies commands. Change parameters and apply again to start a new run with those changes. A read-only monitor shows the latest real observations and run status. **Run one policy step** remains available for bounded, paused experiments.
 4. Use Stop or Reset when needed. **Upright lander** pauses, aligns it with the launch pad and clears spin/thrust without moving or braking it. This local test intervention is recorded and stops a notebook run; it is not an STP maneuver. A failed connection cannot guarantee delivery of a notebook Stop request.
+
+The lab also has staged world/ship controls, measured charts and exports:
+
+- Use the linked sliders and number boxes to change ship mass/inertia, asteroid count, size range, stream speed, direction and shell coverage. **Apply world/ship settings and reset** starts a new physical trial. It never changes the official acceleration command limits.
+- The live asteroid field surrounds Phobos rather than just the station route. Its initial population fills an already-flowing shell; bodies leaving the bounded volume return through the upstream inlet. All motion and mutual/terrain/ship contacts use real rigid bodies. There is no fragmentation. **5 / Overview** frames Phobos and Mars at their actual positions.
+- Camera aim controls use the published yaw/pitch limits. The top camera pitches from −50° to 0°, the bottom from 0° to 50°, and both yaw from −89° to 89°. The practice capture remains pinned to the published square 60° example, 512×512 RGB8 and fixed exposure. Explicit image captures return real, unenhanced GPU pixels.
+- The graphs use measured, timestamped history. Missing readings stay missing; reset epochs are not joined into invented trajectories. Export experiment JSON, history CSV or the saved Python notebook after a run. Exports include applied settings and engine identity, not login credentials.
 
 The notebook is a normal `.py` file, so teammates can read, change and review it in the private repository. Its controller loop starts only on an explicit armed run action. Python decides when to sample, predict, plan and command. Use one command writer; do not run another controller against the same game. Displaying an A* route never makes Bevy follow it.
 
@@ -77,7 +84,8 @@ Click the scene, or focus the canvas with Tab, before using game keys. **H** ope
 | --- | --- |
 | Space | A fresh press launches from pause; holding it fires upward thrust. |
 | P | Run or pause the simulation. |
-| W/S, A/D | Body-frame forward/back and left/right jet forces. Offset nozzles can roll or topple the lander. |
+| W / S | Fire the front / back nozzle. The resulting force points backward / forward. |
+| A / D | Fire the left / right nozzle. The resulting force points right / left. |
 | E/Q | Reference-power upward/downward thrust. |
 | Alt/Option + movement keys | Move only the independent debug camera. Shift boosts debug movement only. |
 | F | Follow the lander with stable Orbit tracking; reset pan and viewer zoom. |
@@ -93,6 +101,8 @@ Click the scene, or focus the canvas with Tab, before using game keys. **H** ope
 | Tab / Enter / Esc | Select a control / activate it / close a panel or release the view. |
 
 Releasing keys stops thrust, **not velocity or spin**. Use opposite thrust to slow down. Autonomous control belongs to Python, not the game. After pause, focus loss, a modal or an external-command handoff, release movement keys before pressing them again if the HUD requests rearming.
+
+These are lander-body sides, not screen directions. The debug body-axis guide and H-panel legend identify front, left and up. In **H → Key bindings**, select an action, press a new physical key and release it before flying. Esc cancels capture; restore defaults returns to WASD/QE/Space. Reserved browser/game shortcuts and duplicate bindings are rejected. Bindings persist for that browser origin. Alt/Option camera navigation keeps its normal forward/back/left/right meaning.
 
 The controls panel does not pause flight. Blue-white debug streams follow the actual applied jet forces in the opposite direction. They are a visual cue, not a calibrated gas or light simulation.
 

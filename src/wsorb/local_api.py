@@ -11,6 +11,7 @@ No request is retried, since a lost response does not prove a command failed.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -30,7 +31,17 @@ DEFAULT_CONNECTION = Path(".devenv/wsorb-local.json")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_STEP_SECONDS = 1.0
 COMMANDS = frozenset(
-    {"pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright"}
+    {
+        "pause",
+        "play",
+        "step",
+        "reset",
+        "set_command",
+        "stop",
+        "view",
+        "debug_upright",
+        "configure_experiment",
+    }
 )
 
 
@@ -92,6 +103,9 @@ def _connection(value: Any) -> tuple[str, str]:
 class LocalSimulation:
     """A synchronous, authenticated client for one local browser engine."""
 
+    topCamera = "top"
+    bottomCamera = "bottom"
+
     def __init__(self, url: str, token: str, *, timeout_s: float = 8.0):
         self.url, self._token = _connection({"version": 1, "url": url, "token": token})
         if not math.isfinite(timeout_s) or not 0 < timeout_s <= 30:
@@ -119,14 +133,22 @@ class LocalSimulation:
             ) from error
         return cls(url, token, timeout_s=timeout_s)
 
-    def _request(self, route: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        route: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         data = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(f"{self.url}/__local/{route}", data=data, headers=headers)
         try:
-            with self._http.open(request, timeout=self.timeout_s) as response:
+            with self._http.open(
+                request, timeout=self.timeout_s if timeout_s is None else timeout_s
+            ) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
         except HTTPError as error:
             with error:
@@ -155,8 +177,10 @@ class LocalSimulation:
         """Read connection readiness without issuing a browser or flight command."""
         return self._request("status")
 
-    def _call(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        result = self._request("call", payload)
+    def _call(
+        self, payload: Mapping[str, Any], *, timeout_s: float | None = None
+    ) -> dict[str, Any]:
+        result = self._request("call", payload, timeout_s=timeout_s)
         if result.get("ok") is not True:
             raise LocalApiError(str(result.get("error", "Local browser request failed")))
         value = result.get("value")
@@ -197,6 +221,68 @@ class LocalSimulation:
         """Display a Python-computed advisory, or clear it with None. Never steer."""
         self._call({"method": "preview", "preview": None if report is None else dict(report)})
 
+    def camera_status(self) -> dict[str, Any]:
+        """Read actual requested aim, optics and sampled ship-camera metadata."""
+        status = self.snapshot()["cameras"]
+        if not isinstance(status, dict):
+            raise LocalApiError("The real ship cameras have not initialized")
+        return status
+
+    def PanTiltCamera(self, camera: str, yaw_deg: float, pitch_deg: float) -> None:
+        """Apply the official helper's degree convention and asymmetric clipping.
+
+        Local handles are topCamera/bottomCamera strings; STPClient uses real
+        SDK entity handles. FOV, resolution and exposure are not changed.
+        """
+        if camera not in (self.topCamera, self.bottomCamera):
+            raise ValueError("camera must be topCamera or bottomCamera")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in (yaw_deg, pitch_deg)
+        ):
+            raise ValueError("camera angles must be finite numbers")
+        self._call(
+            {
+                "method": "pan_tilt",
+                "camera": camera,
+                "yaw_deg": float(yaw_deg),
+                "pitch_deg": float(pitch_deg),
+            }
+        )
+
+    def capture_image(self, camera: str) -> dict[str, Any]:
+        """Read a real GPU frame with no enhancement, overlays or replacement pixels.
+
+        Returns metadata plus immutable uint8 RGB of shape (512,512,3).
+        The readback has its own bounded channel, separate from flight writes.
+        This local convenience is not the SDK's CaptureImageBlocking function.
+        """
+        if camera not in (self.topCamera, self.bottomCamera):
+            raise ValueError("camera must be topCamera or bottomCamera")
+        result = self._call(
+            {"method": "capture", "camera": camera}, timeout_s=max(25.0, self.timeout_s)
+        )
+        metadata, encoded = result.get("metadata"), result.get("rgb_base64")
+        if not isinstance(metadata, dict) or not isinstance(encoded, str):
+            raise LocalApiError("Camera returned an invalid capture")
+        if (
+            metadata.get("width"),
+            metadata.get("height"),
+            metadata.get("channels"),
+            metadata.get("bits_per_channel"),
+        ) != (512, 512, 3, 8):
+            raise LocalApiError("Camera capture does not match 512×512 RGB8")
+        try:
+            pixels = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise LocalApiError("Camera returned invalid RGB data") from error
+        if len(pixels) != 512 * 512 * 3:
+            raise LocalApiError("Camera returned an incomplete RGB frame")
+        rgb = np.frombuffer(pixels, dtype=np.uint8).reshape(512, 512, 3)
+        return {"metadata": metadata, "rgb": rgb}
+
     def command(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Forward a local API operation. Queued playback ACKs are not applied state.
 
@@ -236,6 +322,22 @@ class LocalSimulation:
         """
         self.pause()
         self.command({"op": "debug_upright"})
+        return self.snapshot()
+
+    def configure_experiment(
+        self, settings: Mapping[str, Any], seed: int | None = None
+    ) -> dict[str, Any]:
+        """Pause and reset the real local world with explicit bounded what-if settings.
+
+        Ship mass/inertia and asteroid fields are local experiments, not SDK
+        hardware setters. Reference acceleration limits remain unchanged.
+        """
+        if seed is not None and (type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF):
+            raise ValueError("seed must be an integer between 0 and 4294967295")
+        payload = {"op": "configure_experiment", "settings": dict(settings), "seed": seed}
+        json.dumps(payload, allow_nan=False)
+        self.pause()
+        self.command(payload)
         return self.snapshot()
 
     def step(self, seconds: float) -> dict[str, Any]:

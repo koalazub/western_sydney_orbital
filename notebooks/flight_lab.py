@@ -6,16 +6,46 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import inspect
     import json
     import math
+    from contextlib import suppress
     from dataclasses import asdict
+    from pathlib import Path
 
+    import altair as alt
     import marimo as mo
     import numpy as np
 
+    import wsorb.flight as flight_modules
+    from wsorb.experiment_io import (
+        experiment_document,
+        history_csv,
+        json_bytes,
+        source_manifest,
+    )
     from wsorb.local_api import LocalApiError, LocalSimulation
 
-    return LocalApiError, LocalSimulation, asdict, json, math, mo, np
+    lab_source_path = Path(__file__).resolve()
+    return (
+        LocalApiError,
+        LocalSimulation,
+        Path,
+        alt,
+        asdict,
+        experiment_document,
+        flight_modules,
+        history_csv,
+        inspect,
+        json,
+        json_bytes,
+        lab_source_path,
+        math,
+        mo,
+        np,
+        source_manifest,
+        suppress,
+    )
 
 
 @app.cell(hide_code=True)
@@ -23,29 +53,19 @@ def _(mo):
     mo.md("""
     # Flight lab
 
-    Prediction, A* planning, waypoint selection and controllers live in
-    **editable Python**. Rust, Bevy and Rapier run the actual browser physics
-    and rendering in WASM. Edit the functions and settings below, inspect a
-    route, then click **Apply and run** to watch the current policy fly in the
-    actual game. Paused single-step analysis is also available below.
+    Edit prediction, A*, waypoint selection and controllers in Python. Bevy/Rapier
+    runs the real local physics. Start the private lab/game processes and keep the
+    game visible in a WebGPU browser. This notebook starts neither process.
 
-    Start the local game with its private lab bridge, then open it in a
-    WebGPU-capable browser. This notebook starts neither process. Opening the
-    notebook, editing the policy and refreshing observations do not command
-    the shuttle. The live monitor shows the worker's latest actual snapshot;
-    other reports are point-in-time reads.
+    Opening the notebook, changing widgets and refreshing charts never starts
+    flight. Inspect a preview, then arm **Apply and run** or a paused single step.
+    World/ship settings require a separate confirmed reset. Export measurements
+    and saved Python after experimenting.
 
-    Keep these algorithms independent of clients so the team can reuse them
-    with the licensed Space Teams PRO adapter. The local physics differs.
-    Ship-camera images remain genuine 512×512 RGB8 captures.
-
-    `SetCommand(accelCommand, angAccelCommand)` and
-    `GetNearestDebrisLocations(N)` share the official method names. They use
-    body-frame SI 3-vectors and actual public 3×3 radar rows, respectively.
-    `snapshot`, `preview`, `pause`, `step`, `run_step` and `upright` are **local
-    experiment tools**, not STP methods. Preserve clock and rotation metadata when
-    adapting observations between backends; do not assume identical epochs
-    or quaternion conventions.
+    `SetCommand`, `GetNearestDebrisLocations` and `PanTiltCamera` share the official
+    helper contracts. Local pause, stepping, reset, preview and capture transport
+    are not SDK methods. Keep frame, quaternion and clock metadata when adapting
+    a policy to licensed STP. Local results are not official scores or physics parity.
     """)
     return
 
@@ -53,15 +73,27 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    Keep **automatic cell execution** enabled when using these controls.
-    Marimo resets a run button after its downstream cells finish. Lazy mode
-    does not reset run buttons, so do not use it for command cells.
+    Keep automatic cell execution enabled. Marimo resets run buttons after their
+    action finishes; lazy mode does not. Use one flight-command writer.
     """).callout(kind="warn")
     return
 
 
 @app.cell
 def _(json, mo):
+    def lab_slider(start, stop, step, value, label):
+        return mo.ui.slider(
+            start=start,
+            stop=stop,
+            step=step,
+            value=value,
+            label=label,
+            show_value=True,
+            include_input=True,
+            debounce=True,
+            full_width=True,
+        )
+
     def field_table(values, *, label):
         if values is None:
             return mo.md(f"{label} is unavailable in this snapshot.").callout(kind="warn")
@@ -76,6 +108,7 @@ def _(json, mo):
     def show_snapshot(snapshot):
         observation = snapshot["observation"]
         telemetry = snapshot["telemetry"]
+        ship = observation.get("shuttle") or {}
         radar_rows = [
             {
                 "row": index,
@@ -98,54 +131,55 @@ def _(json, mo):
             [
                 field_table(
                     {
-                        key: value
-                        for key, value in observation.items()
-                        if key not in {"shuttle", "target", "mission", "radar"}
+                        "observation source time, s": observation.get("time_s"),
+                        "telemetry source time, s": telemetry.get("source_time_s"),
+                        "world/ship reset settings": observation.get("experiment_settings"),
+                        "actual ship mass, kg": ship.get("mass_kg"),
+                        "actual ship inertia, kg m²": ship.get("inertia_kg_m2"),
+                        "reference linear cap, m/s²": observation.get("max_accel_mps2"),
+                        "reference angular cap, rad/s²": observation.get(
+                            "max_angular_accel_rad_s2"
+                        ),
                     },
-                    label="Public observation metadata",
+                    label="APPLIED world/ship and read-only limits, not widget drafts",
                 ),
+                field_table(telemetry.get("metrics"), label="Measured flight metrics"),
                 mo.accordion(
                     {
-                        "Own shuttle": field_table(observation["shuttle"], label="Shuttle state"),
-                        "Mission target": field_table(observation["target"], label="Target state"),
-                        "Mission": field_table(observation["mission"], label="Mission state"),
-                        "Public radar": mo.vstack(
+                        "Public observation metadata and sensor model": mo.json(
+                            {
+                                key: value
+                                for key, value in observation.items()
+                                if key
+                                not in {
+                                    "shuttle",
+                                    "target",
+                                    "mission",
+                                    "radar",
+                                    "experiment_settings",
+                                }
+                            }
+                        ),
+                        "Own shuttle, target and mission": mo.json(
+                            {key: observation.get(key) for key in ("shuttle", "target", "mission")}
+                        ),
+                        "Public radar, partial and range-sorted": mo.vstack(
                             [
-                                mo.md("""
-                                Rows are range-sorted measurements, not persistent object IDs.
-                                Relative positions use the observation's rotating-frame axes,
-                                not command body axes. Preserve measurement times. Range rate
-                                is not a full relative-velocity vector. Radar is incomplete.
-                                Check `radar_clock` before comparing timestamps across backends.
-                                """),
+                                mo.md(
+                                    "World axes, not body axes. Rows have no persistent IDs. "
+                                    "Range rate is not full velocity. Keep measurement times "
+                                    "and `radar_clock`."
+                                ),
                                 radar_view,
                                 mo.json(observation["radar"], label="Raw public 3×3 radar rows"),
                             ]
                         ),
-                        "Flight telemetry": mo.vstack(
-                            [
-                                field_table(telemetry["metrics"], label="Measured flight metrics"),
-                                mo.md("""
-                                Telemetry has its own source time. Python previews keep their
-                                planning input time until explicitly replaced.
-                                """),
-                                mo.json(telemetry, label="Telemetry status, units and caveats"),
-                            ]
+                        "Telemetry epoch, units and caveats": mo.json(telemetry),
+                        "Last Python advisory, check its source time": mo.json(
+                            snapshot["navigation"]
                         ),
-                        "Last published Python preview": mo.vstack(
-                            [
-                                mo.md("""
-                                This is the last Python report sent to the browser, not a live
-                                planner. Check its source time. A preview does not command flight.
-                                """),
-                                mo.json(snapshot["navigation"], label="Current navigation status"),
-                            ]
-                        ),
-                        "Runtime and engine build": mo.vstack(
-                            [
-                                mo.json(snapshot["runtime"], label="Actual browser runtime"),
-                                mo.json(snapshot["engine_build"], label="Loaded engine build"),
-                            ]
+                        "Actual runtime and loaded engine build": mo.json(
+                            {key: snapshot[key] for key in ("runtime", "engine_build")}
                         ),
                     },
                     multiple=True,
@@ -160,45 +194,34 @@ def _(json, mo):
         ]
         return mo.vstack(
             [
-                mo.ui.table(
-                    [
-                        {
-                            "source_time_s": observation["time_s"],
-                            "public_radar_rows": len(observation["radar"]),
-                            "status": plan.status,
-                            "detail": plan.detail,
-                            "route_points": len(points),
-                        }
-                    ],
-                    label="Python result from this observation",
-                    selection=None,
-                ),
                 field_table(
                     {
+                        "source_time_s": observation["time_s"],
+                        "status": plan.status,
+                        "detail": plan.detail,
                         "measured_obstacles": frame.measured_obstacles,
                         "unmodelled_obstacles_lower_bound": frame.unmodelled_obstacles_lower_bound,
-                        "predicted_envelopes_including_known_bodies": len(frame.obstacles),
-                        "oldest_measurement_time_s": frame.oldest_measurement_time_s,
-                        "newest_measurement_time_s": frame.newest_measurement_time_s,
-                        "maximum_observed_age_s": frame.max_measurement_age_s,
                         "forecast_horizon_s": frame.forecast_horizon_s,
-                        "tangential_allowance_mps": frame.assumed_tangential_speed_allowance_mps,
+                        "maximum_observed_age_s": frame.max_measurement_age_s,
                     },
-                    label="Public coverage and prediction uncertainty",
+                    label="Python result and public coverage, not a collision guarantee",
                 ),
                 mo.ui.table(
                     points, label="Computed route in observation world axes", selection=None
                 )
                 if points
                 else mo.md("This plan returned no route points."),
-                mo.json(
-                    plan.to_preview(),
-                    label="Prediction/search report, coverage counts and uncertainty assumptions",
+                mo.accordion(
+                    {
+                        "Full prediction/search report and uncertainty assumptions": mo.json(
+                            plan.to_preview()
+                        )
+                    }
                 ),
             ]
         )
 
-    return show_plan, show_snapshot
+    return field_table, lab_slider, show_plan, show_snapshot
 
 
 @app.cell
@@ -221,7 +244,9 @@ def _(mo):
 
 
 @app.cell
-def _(LocalApiError, LocalSimulation, connect_refresh, connection_file, mo, show_snapshot):
+def _(
+    LocalApiError, LocalSimulation, connect_refresh, connection_file, experiment, mo, show_snapshot
+):
     mo.stop(
         not connect_refresh.value,
         mo.md("Press Connect / Refresh to read the local game's status and public state."),
@@ -231,7 +256,10 @@ def _(LocalApiError, LocalSimulation, connect_refresh, connection_file, mo, show
         _sim = LocalSimulation.from_file(connection_file.value)
         _views.append(mo.md(f"[Open the actual local game in a separate window]({_sim.url})"))
         _views.append(mo.json(_sim.status(), label="Local bridge status"))
-        _views.append(show_snapshot(_sim.snapshot()))
+        _snapshot = _sim.snapshot()
+        if experiment.status()["state"] not in {"starting", "running", "stopping"}:
+            experiment.record_snapshot(_snapshot, source="inspect")
+        _views.append(show_snapshot(_snapshot))
     except (LocalApiError, ValueError) as _error:
         _views.append(
             mo.md(f"""
@@ -260,9 +288,314 @@ def _():
 
 
 @app.cell
-def _(ExperimentRunner):
+def _(ExperimentRunner, mo):
     experiment = ExperimentRunner()
-    return (experiment,)
+    get_applied_config, set_applied_config = mo.state(None)
+    get_camera_report, set_camera_report = mo.state(None)
+    return experiment, get_applied_config, get_camera_report, set_applied_config, set_camera_report
+
+
+@app.cell
+def _(LocalApiError, LocalSimulation, experiment, inspect, suppress):
+    def stopped_sim(connection_path):
+        stopped = experiment.stop(timeout_s=10)
+        if stopped["state"] in {"starting", "running", "stopping"}:
+            raise LocalApiError("Worker is still stopping. No second command writer was used.")
+        return LocalSimulation.from_file(connection_path)
+
+    def policy_sources(predict, search, decide):
+        sources = {}
+        for name, function in (
+            ("predict_scene", predict),
+            ("find_path", search),
+            ("decide_command", decide),
+        ):
+            with suppress(OSError, TypeError):
+                sources[f"{name}, inspectable function at action"] = inspect.getsource(function)
+        return sources
+
+    return policy_sources, stopped_sim
+
+
+@app.cell
+def _(lab_slider, mo):
+    default_world_settings = {
+        "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
+        "debris": {
+            "count": 500,
+            "radius_min_m": 0.4,
+            "radius_max_m": 40.4,
+            "speed_mps": 20.0,
+            "speed_spread_mps": 5.0,
+            "shell_inner_m": 200.0,
+            "shell_outer_m": 3000.0,
+            "stream_axis": "y",
+            "stream_sign": -1,
+        },
+    }
+    world_settings_form = (
+        mo.md("""
+    ### Ship draft
+    {mass_kg}
+
+    {inertia_scale}
+
+    ### Directional debris-flow draft
+    {count}
+
+    {radius_min_m}
+
+    {radius_max_m}
+
+    {speed_mps}
+
+    {speed_spread_mps}
+
+    {shell_inner_m}
+
+    {shell_outer_m}
+
+    {stream_axis}
+
+    {stream_sign}
+
+    {use_seed}
+
+    {seed}
+    """)
+        .batch(
+            mass_kg=lab_slider(100, 100000, 0.1, 3388.7, "Ship mass, kg"),
+            inertia_scale=lab_slider(0.1, 10.0, 0.1, 1.0, "Inertia tensor scale"),
+            count=lab_slider(0, 1000, 1, 500, "Actual debris rigid-body count"),
+            radius_min_m=lab_slider(0.05, 100.0, 0.05, 0.4, "Minimum debris radius, m"),
+            radius_max_m=lab_slider(0.05, 100.0, 0.05, 40.4, "Maximum debris radius, m"),
+            speed_mps=lab_slider(0.1, 200.0, 0.1, 20.0, "Stream speed, m/s"),
+            speed_spread_mps=lab_slider(
+                0.0, 100.0, 0.1, 5.0, "Stream speed spread, m/s; at most half the speed"
+            ),
+            shell_inner_m=lab_slider(
+                0.0, 49990.0, 10.0, 200.0, "Shell inner offset from Phobos, m"
+            ),
+            shell_outer_m=lab_slider(
+                10.0,
+                50000.0,
+                10.0,
+                3000.0,
+                "Shell outer offset from Phobos, m; at least 10 m beyond inner",
+            ),
+            stream_axis=mo.ui.dropdown(
+                options=["x", "y", "z"],
+                value="y",
+                allow_select_none=False,
+                label="Stream axis in the observation frame",
+            ),
+            stream_sign=mo.ui.dropdown(
+                options={"Negative direction": -1, "Positive direction": 1},
+                value="Negative direction",
+                allow_select_none=False,
+                label="Stream direction",
+            ),
+            use_seed=mo.ui.checkbox(value=False, label="Replace the current seed with this value"),
+            seed=mo.ui.number(
+                start=0, stop=4294967295, step=1, value=0, label="Optional reset seed"
+            ),
+        )
+        .form(submit_button_label="Stage world/ship draft", label="World and ship draft")
+    )
+    world_reset_confirmed = mo.ui.checkbox(
+        value=False, label="I understand this replaces the current local run and its physical state"
+    )
+    apply_world_settings = mo.ui.run_button(
+        label="Apply world/ship settings and reset", kind="danger"
+    )
+    mo.vstack(
+        [
+            mo.md("## World and ship, local reset only"),
+            mo.md(
+                "Stage a draft, then confirm and apply it. This stops the live worker and "
+                "replaces the world. Export first. Controller Apply never resets these settings. "
+                "Mass/inertia change local hardware only on reset; gains and forecasts do not. "
+                "Reference command caps remain 0.5 m/s² and 0.05 rad/s²."
+            ).callout(kind="warn"),
+            world_settings_form,
+            world_reset_confirmed,
+            apply_world_settings,
+        ]
+    )
+    return (
+        apply_world_settings,
+        default_world_settings,
+        world_reset_confirmed,
+        world_settings_form,
+    )
+
+
+@app.cell
+def _(default_world_settings, mo, world_settings_form):
+    _staged = world_settings_form.value
+    world_settings_draft = (
+        {
+            "ship": {key: _staged[key] for key in default_world_settings["ship"]},
+            "debris": {key: _staged[key] for key in default_world_settings["debris"]},
+        }
+        if _staged is not None
+        else default_world_settings
+    )
+    world_seed_draft = _staged["seed"] if _staged is not None and _staged["use_seed"] else None
+    mo.json(
+        {"settings": world_settings_draft, "seed_override": world_seed_draft},
+        label="DRAFT world/ship, last staged form values; not applied to the game",
+    )
+    return world_seed_draft, world_settings_draft
+
+
+@app.cell
+def _(
+    apply_world_settings,
+    connection_file,
+    experiment,
+    mo,
+    show_snapshot,
+    stopped_sim,
+    world_reset_confirmed,
+    world_seed_draft,
+    world_settings_draft,
+):
+    mo.stop(not apply_world_settings.value)
+    mo.stop(
+        not world_reset_confirmed.value,
+        mo.md("Confirm replacement, then click Apply world/ship settings and reset.").callout(
+            kind="warn"
+        ),
+    )
+    try:
+        _sim = stopped_sim(connection_file.value)
+        _snapshot = _sim.configure_experiment(world_settings_draft, seed=world_seed_draft)
+        experiment.record_snapshot(_snapshot, source="world_reset")
+        _world_view = show_snapshot(_snapshot)
+    except (RuntimeError, ValueError) as _error:
+        _world_view = mo.md(
+            f"World/ship apply failed. {_error} Check radius order, speed spread and shell bounds; "
+            "read the game's actual state before retrying an uncertain reset."
+        ).callout(kind="danger")
+    mo.output.replace(_world_view)
+    return
+
+
+@app.cell
+def _(lab_slider, mo):
+    camera_aim_form = (
+        mo.md("""
+    {top_yaw}
+
+    {top_pitch}
+
+    {bottom_yaw}
+
+    {bottom_pitch}
+    """)
+        .batch(
+            top_yaw=lab_slider(-89, 89, 1, 0, "Top camera yaw, degrees"),
+            top_pitch=lab_slider(-50, 0, 1, 0, "Top camera pitch, degrees"),
+            bottom_yaw=lab_slider(-89, 89, 1, 0, "Bottom camera yaw, degrees"),
+            bottom_pitch=lab_slider(0, 50, 1, 0, "Bottom camera pitch, degrees"),
+        )
+        .form(submit_button_label="Stage camera draft", label="Ship-camera aim draft")
+    )
+    apply_camera_aim = mo.ui.run_button(label="Apply camera aim")
+    capture_camera = mo.ui.dropdown(
+        options={"Top camera": "top", "Bottom camera": "bottom", "Both cameras": "both"},
+        value="Top camera",
+        allow_select_none=False,
+        label="Manual capture source",
+    )
+    capture_images = mo.ui.run_button(label="Capture selected ship cameras")
+    mo.vstack(
+        [
+            mo.md("## Mounted ship cameras"),
+            mo.md(
+                "Aim uses the source-bounded PanTiltCamera helper. The read-only sensor contract "
+                "is 60° FOV, 512×512 RGB8 per channel and fixed exposure. These are not viewer "
+                "zoom controls. Drafts send nothing; captures occur only on a click."
+            ),
+            camera_aim_form,
+            apply_camera_aim,
+            capture_camera,
+            capture_images,
+        ]
+    )
+    return apply_camera_aim, camera_aim_form, capture_camera, capture_images
+
+
+@app.cell
+def _(camera_aim_form):
+    camera_aim_draft = camera_aim_form.value or {
+        "top_yaw": 0,
+        "top_pitch": 0,
+        "bottom_yaw": 0,
+        "bottom_pitch": 0,
+    }
+    return (camera_aim_draft,)
+
+
+@app.cell
+def _(LocalSimulation, apply_camera_aim, camera_aim_draft, connection_file, mo, set_camera_report):
+    mo.stop(not apply_camera_aim.value)
+    try:
+        _sim = LocalSimulation.from_file(connection_file.value)
+        _sim.PanTiltCamera(
+            _sim.topCamera, camera_aim_draft["top_yaw"], camera_aim_draft["top_pitch"]
+        )
+        _sim.PanTiltCamera(
+            _sim.bottomCamera, camera_aim_draft["bottom_yaw"], camera_aim_draft["bottom_pitch"]
+        )
+        _camera_report = _sim.camera_status()
+        set_camera_report(_camera_report)
+        _camera_view = mo.json(_camera_report, label="Actual reported camera aim and optics")
+    except (RuntimeError, ValueError) as _error:
+        _camera_view = mo.md(
+            f"Camera apply failed. {_error} One aim may already have applied. "
+            "Reconnect and read camera status with a manual capture before retrying."
+        ).callout(kind="warn")
+    mo.output.replace(_camera_view)
+    return
+
+
+@app.cell
+def _(LocalSimulation, capture_camera, capture_images, connection_file, mo, set_camera_report):
+    mo.stop(not capture_images.value, mo.md("No camera data yet. Capture is manual, never polled."))
+    _capture_views = []
+    try:
+        _sim = LocalSimulation.from_file(connection_file.value)
+        _camera_report = _sim.camera_status()
+        set_camera_report(_camera_report)
+        _capture_views.append(mo.json(_camera_report, label="Actual camera status at read"))
+        _cameras = ("top", "bottom") if capture_camera.value == "both" else (capture_camera.value,)
+        for _camera in _cameras:
+            _capture = _sim.capture_image(_camera)
+            if _capture is None:
+                _capture_views.append(
+                    mo.md(
+                        f"No {_camera} capture returned. Check GPU readiness and capture again."
+                    ).callout(kind="warn")
+                )
+                continue
+            _capture_views.extend(
+                [
+                    mo.md(f"### Actual {_camera} camera capture"),
+                    mo.json(_capture["metadata"], label="Capture source and format metadata"),
+                    mo.image(_capture["rgb"], alt=f"Actual {_camera} ship-camera RGB capture"),
+                ]
+            )
+    except (RuntimeError, ValueError) as _error:
+        _capture_views.append(
+            mo.md(
+                f"Capture unavailable. {_error} Keep the game visible with its GPU renderer ready, "
+                "then click Capture again. No substitute image is shown."
+            ).callout(kind="warn")
+        )
+    mo.output.replace(mo.vstack(_capture_views))
+    return
 
 
 @app.cell(hide_code=True)
@@ -283,31 +616,19 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(lab_slider, mo):
     planner_controls = mo.ui.dictionary(
         {
-            "cell_size_m": mo.ui.number(
-                start=5, stop=200, step=5, value=40, label="Grid cell size, m"
+            "cell_size_m": lab_slider(5, 200, 5, 40, "Grid cell size, m"),
+            "clearance_m": lab_slider(0, 100, 1, 8, "Extra obstacle clearance, m"),
+            "forecast_horizon_s": lab_slider(0.1, 15, 0.1, 3.6, "Forecast horizon, simulation s"),
+            "max_measurement_age_s": lab_slider(
+                0, 30, 0.1, 5.4, "Maximum radar measurement age, s"
             ),
-            "clearance_m": mo.ui.number(
-                start=0, stop=100, step=1, value=8, label="Extra obstacle clearance, m"
+            "unknown_tangential_speed_mps": lab_slider(
+                0, 100, 1, 12, "Unmeasured tangential-speed allowance, m/s"
             ),
-            "forecast_horizon_s": mo.ui.number(
-                start=0.1, stop=15, step=0.1, value=3.6, label="Forecast horizon, simulation s"
-            ),
-            "max_measurement_age_s": mo.ui.number(
-                start=0, stop=30, step=0.1, value=5.4, label="Maximum radar measurement age, s"
-            ),
-            "unknown_tangential_speed_mps": mo.ui.number(
-                start=0,
-                stop=100,
-                step=1,
-                value=12,
-                label="Unmeasured tangential-speed allowance, m/s",
-            ),
-            "sigma_multiplier": mo.ui.number(
-                start=0, stop=8, step=0.1, value=3, label="Sensor uncertainty multiplier, sigma"
-            ),
+            "sigma_multiplier": lab_slider(0, 8, 0.1, 3, "Sensor uncertainty multiplier, sigma"),
         }
     )
     planner_controls.vstack()
@@ -432,7 +753,7 @@ def _(
 
 
 @app.cell
-def _(mo):
+def _(lab_slider, mo):
     controller_mode = mo.ui.dropdown(
         options={
             "Coast, zero command": "coast",
@@ -446,25 +767,13 @@ def _(mo):
     )
     gain_controls = mo.ui.dictionary(
         {
-            "position_gain_s2": mo.ui.number(
-                start=0, stop=0.02, step=0.0001, value=0.0012, label="Position gain, s⁻²"
+            "position_gain_s2": lab_slider(0, 0.02, 0.0001, 0.0012, "Position gain, s⁻²"),
+            "velocity_gain_s": lab_slider(0, 1, 0.005, 0.07, "Velocity damping gain, s⁻¹"),
+            "avoidance_range_m": lab_slider(1, 500, 1, 70, "Radar avoidance range, m"),
+            "avoidance_accel_mps2": lab_slider(
+                0, 2, 0.05, 0.7, "Avoidance request before limiting, m/s²"
             ),
-            "velocity_gain_s": mo.ui.number(
-                start=0, stop=1, step=0.005, value=0.07, label="Velocity damping gain, s⁻¹"
-            ),
-            "avoidance_range_m": mo.ui.number(
-                start=1, stop=500, step=1, value=70, label="Radar avoidance range, m"
-            ),
-            "avoidance_accel_mps2": mo.ui.number(
-                start=0,
-                stop=2,
-                step=0.05,
-                value=0.7,
-                label="Avoidance request before limiting, m/s²",
-            ),
-            "waypoint_arrival_m": mo.ui.number(
-                start=0.1, stop=200, step=0.1, value=20, label="Waypoint arrival distance, m"
-            ),
+            "waypoint_arrival_m": lab_slider(0.1, 200, 0.1, 20, "Waypoint arrival distance, m"),
         }
     )
     mo.vstack([mo.md("## Controller configuration"), controller_mode, gain_controls.vstack()])
@@ -473,13 +782,7 @@ def _(mo):
 
 @app.cell
 def _(gain_controls, mo):
-    controller_gains = {
-        "position_gain_s2": gain_controls.value["position_gain_s2"],
-        "velocity_gain_s": gain_controls.value["velocity_gain_s"],
-        "avoidance_range_m": gain_controls.value["avoidance_range_m"],
-        "avoidance_accel_mps2": gain_controls.value["avoidance_accel_mps2"],
-        "waypoint_arrival_m": gain_controls.value["waypoint_arrival_m"],
-    }
+    controller_gains = dict(gain_controls.value)
     mo.json(controller_gains, label="Editable Python controller gains, not applied yet")
     return (controller_gains,)
 
@@ -531,13 +834,9 @@ def _(basic_command, np):
 
 
 @app.cell
-def _(mo):
-    duration_s = mo.ui.number(
-        start=0.1, stop=300, step=0.1, value=30, label="Live run duration, simulation s"
-    )
-    cadence_hz = mo.ui.number(
-        start=0.1, stop=5, step=0.1, value=1, label="Requested Python controller cadence, Hz"
-    )
+def _(lab_slider, mo):
+    duration_s = lab_slider(0.1, 300, 0.1, 30, "Live run duration, simulation s")
+    cadence_hz = lab_slider(0.1, 5, 0.1, 1, "Requested Python controller cadence, Hz")
     policy_armed = mo.ui.checkbox(
         value=False,
         label="Allow Apply and run or single-step clicks to command my local shuttle",
@@ -569,9 +868,8 @@ def _(mo):
 @app.cell
 def _(
     Decision,
-    LocalApiError,
-    LocalSimulation,
     apply_and_run,
+    asdict,
     cadence_hz,
     connection_file,
     controller_gains,
@@ -584,7 +882,11 @@ def _(
     mo,
     planner_settings,
     policy_armed,
+    policy_sources,
     predict_scene,
+    set_applied_config,
+    source_manifest,
+    stopped_sim,
 ):
     mo.stop(not apply_and_run.value)
     mo.stop(
@@ -615,10 +917,7 @@ def _(
             raise ValueError("Live duration must be finite and greater than 0, up to 300 seconds.")
         if _cadence is None or not math.isfinite(_cadence) or not 0 < _cadence <= 5:
             raise ValueError("Requested cadence must be finite and greater than 0, up to 5 Hz.")
-        _sim = LocalSimulation.from_file(connection_file.value)
-        _stopped = experiment.stop(timeout_s=10)
-        if _stopped["state"] in {"starting", "running", "stopping"}:
-            raise LocalApiError("Previous worker is still stopping. No new run was started.")
+        _sim = stopped_sim(connection_file.value)
         _policy = _capture_policy(
             predict_scene,
             find_path,
@@ -629,17 +928,25 @@ def _(
             Decision,
         )
         experiment.start(_sim, _policy, duration_s=_duration, cadence_hz=_cadence)
+        _captured = {
+            "action": "live_run",
+            "controller": controller_mode.value,
+            "gains": dict(controller_gains),
+            "planner": asdict(planner_settings),
+            "duration_s": _duration,
+            "requested_cadence_hz": _cadence,
+            "python_functions": source_manifest(
+                policy_sources(predict_scene, find_path, decide_command)
+            ),
+            "source_note": "Inspectable function text only; dependencies are not standalone.",
+        }
+        set_applied_config(_captured)
         _apply_view = mo.vstack(
             [
                 mo.md(f"[Watch the actual local game]({_sim.url})"),
                 mo.md("Apply requested. The monitor below reports the actual worker state."),
                 mo.json(
-                    {
-                        "captured_controller": controller_mode.value,
-                        "captured_gains": dict(controller_gains),
-                        "duration_s": _duration,
-                        "requested_cadence_hz": _cadence,
-                    },
+                    _captured,
                     label="Settings captured by this Apply click",
                 ),
             ]
@@ -712,13 +1019,147 @@ def _(experiment, experiment_refresh, mo, show_snapshot):
 
 @app.cell
 def _(mo):
-    step_seconds = mo.ui.number(
-        start=0.001,
-        stop=1.0,
-        step=0.001,
-        value=0.05,
-        label="Base experiment interval, simulation s",
+    history_metric_labels = {
+        "Speed, rotating frame, m/s": "speed_mps",
+        "Radial climb, m/s": "radial_climb_mps",
+        "Terrain-centre clearance, m": "terrain_center_clearance_m",
+        "Target centre range, m": "target_center_range_m",
+        "Target closing speed, m/s": "target_closing_mps",
+        "Applied thrust acceleration, m/s²": "applied_thrust_accel_mps2",
+        "Applied thrust force, N": "thrust_force_n",
+        "Applied torque, N m": "torque_nm",
+        "Spin, rad/s": "angular_speed_rad_s",
+        "Estimated fuel used, kg": "fuel_used_kg_estimate",
+        "Estimated contact damage, J": "damage_j_estimate",
+        "Actual ship mass, kg": "ship_mass_kg",
+        "Actual ship inertia xx, kg m²": "ship_inertia_xx_kg_m2",
+        "Reference command cap, m/s²": "reference_accel_limit_mps2",
+        "Requested command x, body m/s²": "command_accel_body_x_mps2",
+        "Requested command y, body m/s²": "command_accel_body_y_mps2",
+        "Requested command z, body m/s²": "command_accel_body_z_mps2",
+    }
+    history_metric = mo.ui.dropdown(
+        options=history_metric_labels,
+        value="Speed, rotating frame, m/s",
+        allow_select_none=False,
+        label="Measured history metric, read-only",
+        full_width=True,
     )
+    mo.vstack(
+        [
+            mo.md("## Measured history"),
+            mo.md(
+                "Pan or zoom the chart; inspect exact values in the table. The rolling buffer "
+                "holds at most 2000 received telemetry samples, not all physics substeps. "
+                "Held telemetry replaces its previous row. Gaps, runs, reset epochs and manual "
+                "interventions split lines. Missing readings are never plotted as zero. "
+                "Fuel and contact damage are local estimates, not official scores."
+            ),
+            history_metric,
+        ]
+    )
+    return history_metric, history_metric_labels
+
+
+@app.cell
+def _(alt):
+    def history_plot(rows, metric, label, clock):
+        """Plot supplied measured rows only, without joining missing readings or epochs."""
+        points = []
+        gap = 0
+        for row in rows:
+            if row.get(metric) is None or row.get(clock) is None:
+                gap += 1
+                continue
+            points.append({**row, "plot_segment": f"{row['segment']}:{gap}"})
+        return (
+            alt.Chart(alt.Data(values=points))
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(f"{clock}:Q", title=clock.replace("_", " ")),
+                y=alt.Y(f"{metric}:Q", title=label, scale=alt.Scale(zero=False)),
+                detail="plot_segment:N",
+                color=alt.Color("segment:N", title="Observed segment"),
+                order=alt.Order(f"{clock}:Q"),
+                tooltip=[
+                    alt.Tooltip(f"{clock}:Q"),
+                    alt.Tooltip(f"{metric}:Q"),
+                    "telemetry_epoch:Q",
+                    "observation_time_s:Q",
+                    "manual_interventions:Q",
+                    "sample_source:N",
+                ],
+            )
+            .properties(width="container", height=280)
+            .interactive()
+        )
+
+    return (history_plot,)
+
+
+@app.cell
+def _(
+    experiment,
+    experiment_refresh,
+    history_metric,
+    history_metric_labels,
+    history_plot,
+    mo,
+):
+    _refresh_tick = experiment_refresh.value
+    _rows = experiment.history()
+    _metric = history_metric.value
+    _label = next(label for label, field in history_metric_labels.items() if field == _metric)
+    _clock = (
+        "observation_time_s"
+        if _metric.startswith(("ship_", "reference_", "command_"))
+        else "telemetry_time_s"
+    )
+    flight_history_chart = None
+    _history_views = []
+    if any(row.get(_metric) is not None and row.get(_clock) is not None for row in _rows):
+        flight_history_chart = mo.ui.altair_chart(
+            history_plot(_rows, _metric, _label, _clock),
+            chart_selection=False,
+            legend_selection=False,
+            label=f"Received measurements: {_label}",
+        )
+        _history_views.append(flight_history_chart)
+    else:
+        _history_views.append(
+            mo.md(
+                "No measured values for this metric yet. Connect / Refresh, or explicitly run an "
+                "armed experiment. This view never reads sensors or sends flight commands."
+            )
+        )
+    if _rows:
+        _history_views.append(
+            mo.accordion(
+                {
+                    "Measured rows, telemetry and observation source clocks": mo.ui.table(
+                        _rows,
+                        label="Rolling measured history",
+                        selection=None,
+                        page_size=12,
+                        show_column_summaries=False,
+                    ),
+                    "Observed manual interventions": mo.ui.table(
+                        [row for row in _rows if row["manual_intervention"]],
+                        label="Counter changes actually observed in received snapshots",
+                        selection=None,
+                        page_size=8,
+                        show_column_summaries=False,
+                    ),
+                }
+            )
+        )
+    mo.output.replace(mo.vstack(_history_views))
+    return (flight_history_chart,)
+
+
+@app.cell
+def _(lab_slider, mo):
+    step_seconds = lab_slider(0.001, 1.0, 0.001, 0.05, "Base experiment interval, simulation s")
     schedule_slot = mo.ui.number(
         start=0, step=1, value=0, label="Schedule row to execute on the next click, zero-based"
     )
@@ -771,8 +1212,7 @@ def _(mo):
 
 @app.cell
 def _(
-    LocalApiError,
-    LocalSimulation,
+    asdict,
     connection_file,
     controller_gains,
     controller_mode,
@@ -785,11 +1225,15 @@ def _(
     np,
     planner_settings,
     policy_armed,
+    policy_sources,
     predict_scene,
     run_policy_step,
     schedule_slot,
+    set_applied_config,
     show_plan,
     show_snapshot,
+    source_manifest,
+    stopped_sim,
 ):
     mo.stop(not run_policy_step.value)
     mo.stop(
@@ -810,11 +1254,9 @@ def _(
             or not 0 < _seconds <= 1.0
         ):
             raise ValueError("Step duration must be finite and greater than 0, up to 1 second.")
-        _stopped = experiment.stop(timeout_s=10)
-        if _stopped["state"] in {"starting", "running", "stopping"}:
-            raise LocalApiError("Live worker is still stopping. No single step was requested.")
-        _sim = LocalSimulation.from_file(connection_file.value)
+        _sim = stopped_sim(connection_file.value)
         _before = _sim.snapshot()
+        experiment.record_snapshot(_before, source="policy_input")
         _observation = _before["observation"]
         _mode = controller_mode.value
         _route = None
@@ -823,6 +1265,22 @@ def _(
             _route = find_path(_frame, planner_settings)
         _accel, _angular_accel = decide_command(_observation, _route, _mode, controller_gains)
         _after = _sim.run_step(_accel, angular_accel=_angular_accel, seconds=_seconds)
+        experiment.record_snapshot(_after, source="policy_step_before_cleanup")
+        set_applied_config(
+            {
+                "action": "paused_policy_step",
+                "controller": _mode,
+                "gains": dict(controller_gains),
+                "planner": asdict(planner_settings),
+                "schedule_row": int(_slot),
+                "requested_seconds": _seconds,
+                "policy_input_time_s": _observation["time_s"],
+                "python_functions": source_manifest(
+                    policy_sources(predict_scene, find_path, decide_command)
+                ),
+                "source_note": "Inspectable function text only; dependencies are not standalone.",
+            }
+        )
         _step_views = [
             mo.md("""
             The policy step returned. This snapshot was captured before the
@@ -879,15 +1337,14 @@ def _(mo):
 
 
 @app.cell
-def _(LocalApiError, LocalSimulation, connection_file, experiment, mo, show_snapshot, stop_forces):
+def _(connection_file, experiment, mo, show_snapshot, stop_forces, stopped_sim):
     mo.stop(not stop_forces.value)
     try:
-        _stopped = experiment.stop(timeout_s=10)
-        if _stopped["state"] in {"starting", "running", "stopping"}:
-            raise LocalApiError("Live worker is still stopping. No second command writer was used.")
-        _sim = LocalSimulation.from_file(connection_file.value)
+        _sim = stopped_sim(connection_file.value)
         _sim.stop()
-        _stop_view = show_snapshot(_sim.snapshot())
+        _snapshot = _sim.snapshot()
+        experiment.record_snapshot(_snapshot, source="stop_forces")
+        _stop_view = show_snapshot(_snapshot)
     except (RuntimeError, ValueError) as _error:
         _stop_view = mo.md(f"""
         Stop report unavailable. {_error}
@@ -916,14 +1373,13 @@ def _(mo):
 
 
 @app.cell
-def _(LocalApiError, LocalSimulation, connection_file, experiment, mo, show_snapshot, upright):
+def _(connection_file, experiment, mo, show_snapshot, stopped_sim, upright):
     mo.stop(not upright.value)
     try:
-        _stopped = experiment.stop(timeout_s=10)
-        if _stopped["state"] in {"starting", "running", "stopping"}:
-            raise LocalApiError("Live worker is still stopping. Upright was not requested.")
-        _sim = LocalSimulation.from_file(connection_file.value)
-        _upright_view = show_snapshot(_sim.upright())
+        _sim = stopped_sim(connection_file.value)
+        _snapshot = _sim.upright()
+        experiment.record_snapshot(_snapshot, source="upright")
+        _upright_view = show_snapshot(_snapshot)
     except (RuntimeError, ValueError) as _error:
         _upright_view = mo.md(f"Upright report unavailable. {_error}").callout(kind="danger")
     mo.output.replace(_upright_view)
@@ -954,14 +1410,13 @@ def _(mo):
 
 @app.cell
 def _(
-    LocalApiError,
-    LocalSimulation,
     connection_file,
     experiment,
     mo,
     reset_confirmed,
     reset_run,
     show_snapshot,
+    stopped_sim,
 ):
     mo.stop(not reset_run.value)
     mo.stop(
@@ -969,15 +1424,146 @@ def _(
         mo.md("Confirm replacement, then click Reset local run.").callout(kind="warn"),
     )
     try:
-        _stopped = experiment.stop(timeout_s=10)
-        if _stopped["state"] in {"starting", "running", "stopping"}:
-            raise LocalApiError("Live worker is still stopping. Reset was not requested.")
-        _sim = LocalSimulation.from_file(connection_file.value)
-        _sim.reset()
-        _reset_view = show_snapshot(_sim.snapshot())
+        _sim = stopped_sim(connection_file.value)
+        _snapshot = _sim.reset()
+        experiment.record_snapshot(_snapshot, source="reset")
+        _reset_view = show_snapshot(_snapshot)
     except (RuntimeError, ValueError) as _error:
         _reset_view = mo.md(f"Reset report unavailable. {_error}").callout(kind="danger")
     mo.output.replace(_reset_view)
+    return
+
+
+@app.cell
+def _(mo):
+    prepare_export = mo.ui.run_button(label="Prepare export snapshot")
+    mo.vstack(
+        [
+            mo.md("## Export this experiment"),
+            mo.md(
+                "Prepare freezes the latest received public snapshot, rolling measurements and "
+                "current Python drafts for download. It sends no game request and writes no file. "
+                "Stop first for a final run record. Save notebook edits before exporting Python; "
+                "that download is the actual saved notebook, not a standalone SDK controller. "
+                "Unsubmitted form edits remain in the browser and are not exported."
+            ),
+            prepare_export,
+        ]
+    )
+    return (prepare_export,)
+
+
+@app.cell
+def _(
+    Path,
+    asdict,
+    cadence_hz,
+    camera_aim_draft,
+    controller_gains,
+    controller_mode,
+    decide_command,
+    duration_s,
+    experiment,
+    experiment_document,
+    experiment_schedule_s,
+    find_path,
+    flight_modules,
+    get_applied_config,
+    get_camera_report,
+    history_csv,
+    json_bytes,
+    lab_source_path,
+    mo,
+    planner_settings,
+    policy_sources,
+    predict_scene,
+    prepare_export,
+    schedule_slot,
+    world_seed_draft,
+    world_settings_draft,
+):
+    mo.stop(not prepare_export.value)
+    try:
+        _status = experiment.status()
+        _rows = experiment.history()
+        _flight_dir = Path(flight_modules.__file__).resolve().parent
+        _saved_notebook = lab_source_path.read_bytes()
+        _sources = {"notebooks/flight_lab.py, saved file at export": _saved_notebook}
+        _sources.update(
+            {
+                f"src/wsorb/flight/{path.name}, saved file at export": path.read_bytes()
+                for path in sorted(_flight_dir.glob("*.py"))
+            }
+        )
+        for _name in ("experiment.py", "experiment_io.py"):
+            _sources[f"src/wsorb/{_name}, saved file at export"] = (
+                _flight_dir.parent / _name
+            ).read_bytes()
+        _sources.update(policy_sources(predict_scene, find_path, decide_command))
+        _document = experiment_document(
+            applied_config=get_applied_config(),
+            draft_config={
+                "controller": controller_mode.value,
+                "gains": dict(controller_gains),
+                "planner": asdict(planner_settings),
+                "live_duration_s": duration_s.value,
+                "requested_cadence_hz": cadence_hz.value,
+                "selected_schedule_row": schedule_slot.value,
+                "world_ship_last_staged": world_settings_draft,
+                "world_seed_override": world_seed_draft,
+                "camera_aim_last_staged": camera_aim_draft,
+            },
+            selected_policy=controller_mode.value,
+            schedule_s=experiment_schedule_s,
+            history=_rows,
+            latest_snapshot=_status["latest"],
+            sources=_sources,
+            camera_status=get_camera_report(),
+        )
+        _export_views = [
+            mo.md("Downloads freeze this prepared snapshot. Prepare again for newer data."),
+            mo.hstack(
+                [
+                    mo.download(
+                        json_bytes(_document),
+                        filename="flight-experiment.json",
+                        mimetype="application/json",
+                        label="Download experiment JSON",
+                    ),
+                    mo.download(
+                        history_csv(_rows),
+                        filename="flight-history.csv",
+                        mimetype="text/csv",
+                        label="Download measured history CSV",
+                    ),
+                    mo.download(
+                        _saved_notebook,
+                        filename="flight_lab.py",
+                        mimetype="text/x-python",
+                        label="Download saved Python notebook",
+                    ),
+                ],
+                justify="start",
+                wrap=True,
+            ),
+            mo.json(
+                _document["python_sources"], label="Actual supplied Python source SHA-256 hashes"
+            ),
+        ]
+        if _status["state"] in {"starting", "running", "stopping"}:
+            _export_views.append(
+                mo.md(
+                    "The worker was active when prepared. These are received samples so far, "
+                    "not a completed run. Stop and prepare again for the final record."
+                ).callout(kind="warn")
+            )
+        _export_view = mo.vstack(_export_views)
+    except (OSError, TypeError, ValueError):
+        _export_view = mo.md(
+            "Export preparation failed. Save the notebook, check that its source files remain "
+            "available, then prepare again. No file was written and no game command was sent."
+        ).callout(kind="warn")
+    mo.output.replace(_export_view)
     return
 
 
@@ -991,15 +1577,11 @@ def _(mo):
     [local experiment client](../src/wsorb/local_api.py),
     [simulation and rendering](../simulation/src/) and
     [licensed SDK adapter](../src/wsorb/stp_api.py).
-    Prediction, planning, controllers and schedules can change in these cells
-    or pure Python modules without a WASM rebuild. Changes to Rust simulation
-    or rendering still need a rebuild and browser reload. Compare the loaded
-    engine hash, Python source and settings when comparing experiments.
+    Python edits need no WASM rebuild. Rust changes still need a rebuild and
+    browser reload. Compare source hashes, loaded engine build and applied settings.
 
-    Teammates should clone the private repository and run their own local
-    game/notebook pair. Do not publish this editor, its connection file, a
-    Molab copy or a public editor URL. Share reviewed Python source through
-    the private repository. The game opens separately; it is not embedded here.
+    Share source through the private repository. Teammates run their own game/lab
+    pair. Never publish this executable editor, its connection file or its token.
     """)
     return
 

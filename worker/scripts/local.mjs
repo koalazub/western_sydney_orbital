@@ -55,6 +55,10 @@ if (!process.exitCode) {
           return;
         }
         const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+        if (pathname === "/notebook.html") {
+          await lab.handle(request, response, "/__local/notebook");
+          return;
+        }
         if (pathname === "/__local" || pathname.startsWith("/__local/")) {
           await lab.handle(request, response, pathname);
           return;
@@ -128,7 +132,7 @@ if (!process.exitCode) {
     server.requestTimeout = 10000;
     server.headersTimeout = 5000;
     server.keepAliveTimeout = 1000;
-    server.setTimeout(10000, socket => socket.destroy());
+    server.setTimeout(30000, socket => socket.destroy());
   }
   server.on("error", error => {
     console.error(`Local server failed: ${error.message}`);
