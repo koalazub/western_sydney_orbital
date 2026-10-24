@@ -17,7 +17,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build:sim": "bash scripts/build-sim.sh",
     "build:licenses": "node scripts/build-licenses.mjs",
-    "build": "npm run types && npm run build:sim && npm run build:web && npm run build:licenses"
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@types/node": "26.6.5",

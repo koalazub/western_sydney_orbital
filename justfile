@@ -49,9 +49,20 @@ format-module path:
 compile:
     nix shell --impure .#rust --command cargo check --manifest-path simulation/Cargo.toml --target wasm32-unknown-unknown --lib
 
-unit-check:
-    nix shell --impure .#game --command cargo test --manifest-path simulation/Cargo.toml --locked --lib
-    devenv tasks run wsorb:test
+unit-check suite="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    suite={{quote(suite)}}
+    case "$suite" in all|rust|python|wasm) ;; *) echo 'unit-check suite must be all, rust, python or wasm' >&2; exit 2 ;; esac
+    if [[ "$suite" == all || "$suite" == rust ]]; then
+        nix shell --impure .#game --command cargo test --manifest-path simulation/Cargo.toml --locked --lib
+    fi
+    if [[ "$suite" == all || "$suite" == python ]]; then
+        devenv tasks run wsorb:test
+    fi
+    if [[ "$suite" == wasm ]]; then
+        devenv shell uv run --locked --extra lab pytest tests/test_flight_engine.py
+    fi
 
 # Compile and lint the actual engine and bundle the thin browser launcher.
 check:
@@ -75,11 +86,38 @@ web-build:
 local: build
     nix shell --impure .#game --command npm --prefix worker run local
 
-local-check:
+local-check target="build":
     #!/usr/bin/env bash
     set -euo pipefail
-    nix shell --impure .#game --command node --input-type=module <<'JS'
+    nix shell --impure .#game --command node --input-type=module - {{quote(target)}} <<'JS'
     import {spawn} from 'node:child_process';
+    import {readFile} from 'node:fs/promises';
+    if (['live','load'].includes(process.argv[2])) {
+      const c=JSON.parse(await readFile(process.env.WSORB_LOCAL_CONNECTION||'.devenv/wsorb-local.json','utf8'));
+      const origin=new URL(c.url);
+      if(origin.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(origin.hostname)||origin.username||origin.password||origin.pathname!=='/'||origin.search||origin.hash)throw new Error('Local diagnostics require the configured loopback origin');
+      if(process.argv[2]==='load'){
+        const {loadVerifiedEngine}=await import('./worker/web/engine-loader.ts');
+        const response=await fetch(new URL('/sim/manifest.json',origin),{redirect:'error',signal:AbortSignal.timeout(5000)});
+        if(!response.ok)throw new Error('Engine manifest is unavailable');
+        const manifest=await response.json();
+        const result=await loadVerifiedEngine(new URL(`/sim/wsorb_bevy_bg.wasm?v=${manifest.sha256}`,origin).href,manifest);
+        console.log(JSON.stringify({runtime:process.version,measurement:'real HTTP and WebAssembly compilation, not browser/GPU rendering',sha256:manifest.sha256,...result.timings}));
+      } else {
+      const headers={Authorization:`Bearer ${c.token}`};
+      const statusResponse=await fetch(new URL('/__local/status',origin),{headers,redirect:'error',signal:AbortSignal.timeout(5000)});
+      const status=await statusResponse.json();
+      if(!statusResponse.ok||status.enabled!==true||typeof status.connected!=='boolean'||typeof status.busy!=='boolean')throw new Error('Authenticated local diagnostics are unavailable');
+      console.log(JSON.stringify({url:c.url,connected:status.connected,busy:status.busy,engine_build:status.engine_build}));
+      if(status.connected&&!status.busy){
+        const response=await fetch(new URL('/__local/call',origin),{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({method:'snapshot'}),redirect:'error',signal:AbortSignal.timeout(8000)});
+        const result=await response.json();
+        if(!response.ok||result.ok!==true)throw new Error('Live snapshot unavailable; no flight command was sent');
+        const s=result.value;
+        console.log(JSON.stringify({time_s:s.observation.time_s,running:s.runtime.running,mission:s.observation.mission.status,renderer:s.renderer}));
+      }
+      }
+    } else if (process.argv[2] === 'build') {
     const child=spawn(process.execPath,['worker/scripts/local.mjs'],{env:{...process.env,PORT:'0'},stdio:['ignore','pipe','inherit']});
     try {
       const url=await new Promise((resolve,reject)=>{child.once('error',reject);child.stdout.on('data',b=>{const match=String(b).match(/http:\/\/127\.0\.0\.1:\d+\//);if(match)resolve(match[0]);});setTimeout(()=>reject(new Error('Local startup timed out')),5000).unref();});
@@ -89,6 +127,7 @@ local-check:
       if(page.status!==200||wasm.status!==200||Number(wasm.headers.get('content-length'))!==manifest.bytes||denied.status!==405||page.headers.get('x-content-type-options')!=='nosniff')throw new Error('Local HTTP contract failed');
       console.log(JSON.stringify({url,page:page.status,wasm:wasm.status,bytes:manifest.bytes,writeRejected:denied.status,result:'PASS'}));
     } finally {child.kill('SIGTERM');}
+    } else throw new Error('local-check target must be build, live or load');
     JS
 
 tools:
@@ -232,8 +271,9 @@ beads-sync:
     bd export -o .beads/issues.jsonl --sandbox
     GIT_AUTHOR_NAME="Beads Sync" GIT_AUTHOR_EMAIL="beads-sync@users.noreply.github.com" GIT_COMMITTER_NAME="Beads Sync" GIT_COMMITTER_EMAIL="beads-sync@users.noreply.github.com" bd dolt push --remote origin --no-adopt --sandbox
 
+# Allow the licensed source maps without changing repository or global JJ config.
 status:
-    jj status
+    jj --config snapshot.max-new-file-size=6291456 status
 
 review:
     git diff --check

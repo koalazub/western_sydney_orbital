@@ -115,8 +115,24 @@ if (!process.exitCode) {
         response.end(request.method === "HEAD" ? undefined : body);
         return;
       }
+      const etag = `W/"${info.size.toString(16)}-${info.mtimeMs.toString(16)}"`;
+      const cacheHeaders = {
+        "Cache-Control": "public, max-age=0, must-revalidate",
+        ETag: etag,
+        "Last-Modified": info.mtime.toUTCString(),
+      };
+      const validators = request.headers["if-none-match"];
+      if (typeof validators === "string" && validators.split(",").some(value => {
+        const candidate = value.trim();
+        return candidate === "*" || candidate.replace(/^W\//, "") === etag.slice(2);
+      })) {
+        response.writeHead(304, { ...headers, ...cacheHeaders });
+        response.end();
+        return;
+      }
       response.writeHead(200, {
         ...headers,
+        ...cacheHeaders,
         "Content-Type": contentTypes[extname(actualPath).toLowerCase()] ?? "application/octet-stream",
         "Content-Length": info.size,
       });
