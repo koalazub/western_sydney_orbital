@@ -16,7 +16,14 @@ type Engine = {
   fullscreen_button_focused: () => boolean;
   platform_state: (fullscreen: boolean, maximized: boolean, message: string) => void;
 };
-type StartupStage = "initializing" | "preparing_view" | "drawing_world" | "presenting" | "waiting_for_gpu" | "ready" | "failed";
+type StartupStage =
+  | "initializing"
+  | "preparing_view"
+  | "drawing_world"
+  | "presenting"
+  | "waiting_for_gpu"
+  | "ready"
+  | "failed";
 type RendererStatus = {
   ready: boolean;
   stage: StartupStage;
@@ -32,11 +39,54 @@ type RendererStatus = {
   pending_pipeline_labels: string[];
   error: string | null;
 };
+type WebKitDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => void | Promise<void>;
+};
+type WebKitElement = HTMLElement & {
+  webkitRequestFullscreen?: () => void | Promise<void>;
+};
+type ScaleGesture = Event & { scale: number };
+type GPUPreflight = Awaited<ReturnType<typeof graphicsPreflight>>;
+
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = byId<HTMLCanvasElement>("simulation-canvas");
-const viewport = byId<HTMLElement>("simulation-viewport");
+const viewport = byId<WebKitElement>("simulation-viewport");
 const boot = byId<HTMLElement>("boot-screen");
 const progress = byId<HTMLProgressElement>("wasm-progress");
+const statusText = byId<HTMLElement>("sim-status");
+const progressText = byId<HTMLElement>("wasm-progress-text");
+const retryButton = byId<HTMLButtonElement>("retry-world");
+const webkitDocument = document as WebKitDocument;
+const browserGlobals = globalThis as typeof globalThis & {
+  __wsorbStartup?: {
+    stage: string;
+    renderer: RendererStatus | null;
+    hud: unknown;
+    gpu_preflight: GPUPreflight | null;
+    browser: string;
+    secure_context: boolean;
+    visibility: DocumentVisibilityState;
+    elapsed_visible_ms: number;
+    canvas: {
+      width: number;
+      height: number;
+      css_width: number;
+      css_height: number;
+      device_pixel_ratio: number;
+    };
+    error: string | null;
+  };
+  __wsorbGPU?: GPUPreflight;
+  __wsorbFullscreenFailure?: {
+    activation: boolean | undefined;
+    name: string;
+    message: string;
+  } | null;
+  __wsorbPlatformAction?: typeof platformAction;
+  __wsorbEngineError?: typeof fail;
+};
+
 let engine: Engine | undefined;
 let engineBuild: { bytes: number; sha256: string } | undefined;
 let ready = false;
@@ -50,8 +100,12 @@ let fullscreenPress: number | null = null;
 let gestureScale: number | null = null;
 let pointerLockExitPending = false;
 const movementBits = new Map([
-  ["KeyW", 1 << 0], ["KeyA", 1 << 1], ["KeyS", 1 << 2],
-  ["KeyD", 1 << 3], ["KeyQ", 1 << 4], ["KeyE", 1 << 5],
+  ["KeyW", 1 << 0],
+  ["KeyA", 1 << 1],
+  ["KeyS", 1 << 2],
+  ["KeyD", 1 << 3],
+  ["KeyQ", 1 << 4],
+  ["KeyE", 1 << 5],
   ["Space", 1 << 9],
 ]);
 const movementHeld = new Set<string>();
@@ -102,80 +156,111 @@ function movementKey(event: KeyboardEvent, down: boolean) {
   }
 }
 
-type WebKitDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void | Promise<void> };
-type WebKitElement = HTMLElement & { webkitRequestFullscreen?: () => void | Promise<void> };
-type ScaleGesture = Event & { scale: number };
+function fullscreenElement() {
+  return document.fullscreenElement || webkitDocument.webkitFullscreenElement || null;
+}
 
-function fullscreenElement() { return document.fullscreenElement || (document as WebKitDocument).webkitFullscreenElement || null; }
+function errorMessage(value: unknown) {
+  return value instanceof Error ? value.message : String(value);
+}
 
-function errorMessage(value: unknown) { return value instanceof Error ? value.message : String(value); }
-function announce(message: string) { byId("viewport-announcement").textContent = message; }
+function announce(message: string) {
+  byId("viewport-announcement").textContent = message;
+}
+
 function recordStartup(error?: string) {
   const rect = canvas.getBoundingClientRect();
   // This stays in diagnostics, not an HTML telemetry panel. The preflight
   // adapter is not necessarily the adapter Bevy actually selects.
-  (globalThis as any).__wsorbStartup = {
+  browserGlobals.__wsorbStartup = {
     stage: failed ? "failed" : lastRendererStatus?.stage ?? startupPhase,
     renderer: lastRendererStatus ?? null,
     hud: engine ? JSON.parse(engine.hud_status()) : null,
-    gpu_preflight: (globalThis as any).__wsorbGPU ?? null,
+    gpu_preflight: browserGlobals.__wsorbGPU ?? null,
     browser: navigator.userAgent,
     secure_context: isSecureContext,
     visibility: document.visibilityState,
     elapsed_visible_ms: Math.round(startupVisibleWait),
-    canvas: { width: canvas.width, height: canvas.height, css_width: rect.width, css_height: rect.height, device_pixel_ratio: devicePixelRatio },
+    canvas: {
+      width: canvas.width,
+      height: canvas.height,
+      css_width: rect.width,
+      css_height: rect.height,
+      device_pixel_ratio: devicePixelRatio,
+    },
     error: error ?? null,
   };
 }
+
 function publishPlatform(message = platformMessage) {
   platformMessage = message;
   engine?.platform_state(!!fullscreenElement(), !viewport.classList.contains("windowed"), message);
 }
+
 function inputState() {
   const locked = document.pointerLockElement === canvas;
   const active = viewportInputActive();
   if (!active) clearMovementKeys();
   engine?.set_viewport_input(active, locked);
 }
-function fail(message: string) {
-  if (failed) return;
-  ready = false; failed = true;
-  recordStartup(message);
-  boot.hidden = false;
-  byId("sim-status").textContent = "3D unavailable";
-  byId("world-message").textContent = message;
-  byId("wasm-progress-text").textContent = "Simulation could not start.";
-  progress.removeAttribute("value");
-  byId("retry-world").hidden = false;
+
+function resetViewportInput() {
+  gestureScale = null;
+  fullscreenPress = null;
+  clearMovementKeys();
   inputState();
 }
+
+function fail(message: string) {
+  if (failed) return;
+  ready = false;
+  failed = true;
+  recordStartup(message);
+  boot.hidden = false;
+  statusText.textContent = "3D unavailable";
+  byId("world-message").textContent = message;
+  progressText.textContent = "Simulation could not start.";
+  progress.removeAttribute("value");
+  retryButton.hidden = false;
+  inputState();
+}
+
 function maximize() {
   viewport.classList.toggle("windowed");
   publishPlatform(viewport.classList.contains("windowed") ? "Windowed view" : "Maximized view");
   canvas.focus({ preventScroll: true });
   window.dispatchEvent(new Event("resize"));
 }
+
 async function fullscreen() {
   if (fullscreenPending) return;
   fullscreenPending = true;
-  (globalThis as any).__wsorbFullscreenFailure = null;
+  browserGlobals.__wsorbFullscreenFailure = null;
   const activation = navigator.userActivation?.isActive;
   const exiting = !!fullscreenElement();
   try {
     // The native API call must happen in this trusted DOM event, before any
     // await or Bevy animation-frame queue consumes Safari's user activation.
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else if (exiting) {
-      if (!(document as WebKitDocument).webkitExitFullscreen) throw new Error("This browser does not expose fullscreen exit");
-      await (document as WebKitDocument).webkitExitFullscreen!();
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else if (exiting) {
+      if (!webkitDocument.webkitExitFullscreen) throw new Error("This browser does not expose fullscreen exit");
+      await webkitDocument.webkitExitFullscreen();
+    } else if (viewport.requestFullscreen) {
+      await viewport.requestFullscreen();
+    } else if (viewport.webkitRequestFullscreen) {
+      await viewport.webkitRequestFullscreen();
+    } else {
+      throw new Error("This browser does not expose fullscreen");
     }
-    else if (viewport.requestFullscreen) await viewport.requestFullscreen();
-    else if ((viewport as WebKitElement).webkitRequestFullscreen) await (viewport as WebKitElement).webkitRequestFullscreen!();
-    else throw new Error("This browser does not expose fullscreen");
     canvas.focus({ preventScroll: true });
     publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : exiting ? "Fullscreen closed" : "Fullscreen requested");
   } catch (error) {
-    (globalThis as any).__wsorbFullscreenFailure = { activation, name: error instanceof DOMException ? error.name : "Error", message: errorMessage(error) };
+    browserGlobals.__wsorbFullscreenFailure = {
+      activation,
+      name: error instanceof DOMException ? error.name : "Error",
+      message: errorMessage(error),
+    };
     publishPlatform(`Fullscreen could not be ${exiting ? "closed" : "entered"}: ${errorMessage(error)}. Click Fullscreen or press X in the game.`);
     announce(platformMessage);
   } finally {
@@ -207,31 +292,53 @@ function changeGesture(event: Event) {
   pinch(Math.log(gestureScale / scale));
   gestureScale = scale;
 }
+
 async function captureMouse() {
-  try { await canvas.requestPointerLock(); publishPlatform("Mouse captured · Escape releases it"); }
-  catch { publishPlatform("Mouse capture unavailable. Drag to look instead."); announce(platformMessage); }
+  try {
+    await canvas.requestPointerLock();
+    publishPlatform("Mouse captured · Escape releases it");
+  } catch {
+    publishPlatform("Mouse capture unavailable. Drag to look instead.");
+    announce(platformMessage);
+  }
 }
+
 function releaseMouse() {
   // exitPointerLock is asynchronous; stop input before its change event arrives.
   pointerLockExitPending = document.pointerLockElement === canvas;
   clearMovementKeys();
   if (document.pointerLockElement) document.exitPointerLock();
-  canvas.blur(); inputState(); publishPlatform("Mouse released · Click the scene to resume ship and debug controls");
+  canvas.blur();
+  inputState();
+  publishPlatform("Mouse released · Click the scene to resume ship and debug controls");
 }
+
 function exportFlight() {
   if (!engine) return;
   const result = JSON.parse(engine.command(JSON.stringify({ op: "observe" })));
-  if (!result.ok) { publishPlatform("Could not export the current mission"); return; }
-  const record = { exported_at: new Date().toISOString(), engine_build: engineBuild, state: result.state,
-    camera: JSON.parse(engine.camera_status()), runtime: JSON.parse(engine.runtime_status()),
+  if (!result.ok) {
+    publishPlatform("Could not export the current mission");
+    return;
+  }
+  const record = {
+    exported_at: new Date().toISOString(),
+    engine_build: engineBuild,
+    state: result.state,
+    camera: JSON.parse(engine.camera_status()),
+    runtime: JSON.parse(engine.runtime_status()),
     telemetry: JSON.parse(engine.telemetry_status()),
-    model_limitations: result.state.model };
+    model_limitations: result.state.model,
+  };
   const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: "application/json" }));
-  const link = document.createElement("a"); link.href = url; link.download = `phobos-flight-${result.state.seed}.json`; link.click();
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `phobos-flight-${result.state.seed}.json`;
+  link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   publishPlatform("Flight state exported");
 }
-(globalThis as any).__wsorbPlatformAction = (action: string) => {
+
+function platformAction(action: string) {
   // Native HUD fullscreen input uses the trusted DOM handlers below. Other
   // platform commands can arrive from Bevy's simulation-frame action queue.
   if (action === "fullscreen") void fullscreen();
@@ -240,23 +347,22 @@ function exportFlight() {
   else if (action === "release") releaseMouse();
   else if (action === "export") queueMicrotask(exportFlight);
   else if (action === "notebook") window.open("https://notebooklm.google.com/", "_blank", "noopener,noreferrer");
-};
-(globalThis as any).__wsorbEngineError = (message: string) => fail(message);
-canvas.addEventListener("pointerdown", event => {
+}
+
+function pressFullscreenButton(event: PointerEvent) {
   if (!ready) return;
-  canvas.focus({ preventScroll: true }); inputState();
+  canvas.focus({ preventScroll: true });
+  inputState();
   fullscreenPress = event.button === 0 && fullscreenButtonAt(event) ? event.pointerId : null;
-}, { capture: true });
-canvas.addEventListener("pointerup", event => {
+}
+
+function releaseFullscreenButton(event: PointerEvent) {
   const activate = fullscreenPress === event.pointerId && fullscreenButtonAt(event);
   fullscreenPress = null;
   if (activate) void fullscreen();
-}, { capture: true });
-canvas.addEventListener("pointercancel", () => { fullscreenPress = null; });
-canvas.addEventListener("focus", inputState);
-canvas.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; clearMovementKeys(); inputState(); });
-canvas.addEventListener("contextmenu", event => event.preventDefault());
-canvas.addEventListener("wheel", event => {
+}
+
+function wheelZoom(event: WheelEvent) {
   if (!ready || event.metaKey) return;
   if (event.ctrlKey) {
     // Trackpad pinch is ctrl-wheel in browsers without WebKit GestureEvents.
@@ -269,35 +375,36 @@ canvas.addEventListener("wheel", event => {
       pinch(event.deltaY * unit * 0.01);
     }
   } else if (document.activeElement === canvas) event.preventDefault();
-}, { passive: false, capture: true });
-canvas.addEventListener("gesturestart", event => {
+}
+
+function startGesture(event: Event) {
   if (!ready || !document.hasFocus()) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   const scale = (event as ScaleGesture).scale;
   gestureScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
-}, { passive: false, capture: true });
-canvas.addEventListener("gesturechange", changeGesture, { passive: false, capture: true });
-canvas.addEventListener("gestureend", event => {
+}
+
+function endGesture(event: Event) {
   changeGesture(event);
   gestureScale = null;
-}, { passive: false, capture: true });
-window.addEventListener("blur", () => { gestureScale = null; fullscreenPress = null; clearMovementKeys(); });
-window.addEventListener("blur", inputState); window.addEventListener("focus", inputState);
-document.addEventListener("focusin", inputState, { capture: true });
-document.addEventListener("focusout", inputState, { capture: true });
-document.addEventListener("visibilitychange", inputState);
-document.addEventListener("pointerlockchange", () => {
-  if (document.pointerLockElement !== canvas) pointerLockExitPending = false;
-  clearMovementKeys(); inputState();
-  publishPlatform(document.pointerLockElement === canvas ? "Mouse captured · Escape releases it" : "Mouse released");
-});
-for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
-  document.addEventListener(name, () => { clearMovementKeys(); publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : "Fullscreen closed"); inputState(); window.dispatchEvent(new Event("resize")); });
 }
-window.addEventListener("keydown", event => movementKey(event, true), { capture: true });
-window.addEventListener("keyup", event => movementKey(event, false), { capture: true });
-window.addEventListener("keydown", event => {
+
+function pointerLockChanged() {
+  if (document.pointerLockElement !== canvas) pointerLockExitPending = false;
+  clearMovementKeys();
+  inputState();
+  publishPlatform(document.pointerLockElement === canvas ? "Mouse captured · Escape releases it" : "Mouse released");
+}
+
+function fullscreenChanged() {
+  clearMovementKeys();
+  publishPlatform(fullscreenElement() ? "Fullscreen · Escape exits" : "Fullscreen closed");
+  inputState();
+  window.dispatchEvent(new Event("resize"));
+}
+
+function fullscreenKey(event: KeyboardEvent) {
   if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
     || document.activeElement !== canvas) return;
   const buttonActivation = event.code === "Enter" && engine.fullscreen_button_focused();
@@ -305,14 +412,58 @@ window.addEventListener("keydown", event => {
   event.preventDefault();
   event.stopImmediatePropagation();
   if (!event.repeat) void fullscreen();
-}, { capture: true });
-window.addEventListener("keydown", event => {
-  if (ready && document.activeElement === canvas && !event.ctrlKey && !event.metaKey && ["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
+}
+
+function preventViewportScroll(event: KeyboardEvent) {
+  if (!ready || document.activeElement !== canvas || event.ctrlKey || event.metaKey) return;
+  if (["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
+}
+
+function windowError(event: ErrorEvent) {
+  if (/wasm|wsorb_bevy/.test(`${event.filename} ${event.error?.stack || ""}`)) {
+    fail(`The simulation stopped: ${event.message}`);
+  }
+}
+
+function unhandledRejection(event: PromiseRejectionEvent) {
+  if (/wasm|wsorb_bevy/.test(String(event.reason?.stack || ""))) {
+    fail(`The simulation stopped: ${errorMessage(event.reason)}`);
+  }
+}
+
+browserGlobals.__wsorbPlatformAction = platformAction;
+browserGlobals.__wsorbEngineError = fail;
+canvas.addEventListener("pointerdown", pressFullscreenButton, { capture: true });
+canvas.addEventListener("pointerup", releaseFullscreenButton, { capture: true });
+canvas.addEventListener("pointercancel", () => {
+  fullscreenPress = null;
 });
-window.addEventListener("error", event => { if (/wasm|wsorb_bevy/.test(`${event.filename} ${event.error?.stack || ""}`)) fail(`The simulation stopped: ${event.message}`); });
-window.addEventListener("unhandledrejection", event => { if (/wasm|wsorb_bevy/.test(String(event.reason?.stack || ""))) fail(`The simulation stopped: ${errorMessage(event.reason)}`); });
-new ResizeObserver(() => { if (engine && !failed) window.dispatchEvent(new Event("resize")); }).observe(viewport);
-byId("retry-world").addEventListener("click", () => location.reload());
+canvas.addEventListener("focus", inputState);
+canvas.addEventListener("blur", resetViewportInput);
+canvas.addEventListener("contextmenu", event => event.preventDefault());
+canvas.addEventListener("wheel", wheelZoom, { passive: false, capture: true });
+canvas.addEventListener("gesturestart", startGesture, { passive: false, capture: true });
+canvas.addEventListener("gesturechange", changeGesture, { passive: false, capture: true });
+canvas.addEventListener("gestureend", endGesture, { passive: false, capture: true });
+window.addEventListener("blur", resetViewportInput);
+window.addEventListener("focus", inputState);
+document.addEventListener("focusin", inputState, { capture: true });
+document.addEventListener("focusout", inputState, { capture: true });
+document.addEventListener("visibilitychange", inputState);
+document.addEventListener("pointerlockchange", pointerLockChanged);
+for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
+  document.addEventListener(name, fullscreenChanged);
+}
+window.addEventListener("keydown", event => movementKey(event, true), { capture: true });
+window.addEventListener("keyup", event => movementKey(event, false), { capture: true });
+window.addEventListener("keydown", fullscreenKey, { capture: true });
+window.addEventListener("keydown", preventViewportScroll);
+window.addEventListener("error", windowError);
+window.addEventListener("unhandledrejection", unhandledRejection);
+new ResizeObserver(() => {
+  if (engine && !failed) window.dispatchEvent(new Event("resize"));
+}).observe(viewport);
+retryButton.addEventListener("click", () => location.reload());
 
 const megabytes = (bytes: number) => `${(bytes / 1048576).toFixed(2)} MB`;
 const startupDescriptions: Record<StartupStage, string> = {
@@ -324,12 +475,15 @@ const startupDescriptions: Record<StartupStage, string> = {
   ready: "game frame complete",
   failed: "renderer stopped",
 };
+
 async function waitForRenderer() {
   // Only forward render milestones reset the stall budget. Pipeline-cache
   // churn and arbitrary render-loop counts neither prove readiness nor extend
   // this wait. Browsers may suspend animation frames in a hidden tab.
   const stages: StartupStage[] = ["initializing", "preparing_view", "drawing_world", "presenting", "waiting_for_gpu", "ready"];
-  let furthestStage = 0, lastProgress = 0, lastTick = performance.now();
+  let furthestStage = 0;
+  let lastProgress = 0;
+  let lastTick = performance.now();
   let wasVisible = !document.hidden;
   await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -338,21 +492,32 @@ async function waitForRenderer() {
       settled = true;
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", check);
-      if (error) reject(error); else resolve();
+      if (error) reject(error);
+      else resolve();
     };
     const check = () => {
       if (settled) return;
       clearTimeout(timer);
       const now = performance.now();
       if (wasVisible) startupVisibleWait += now - lastTick;
-      lastTick = now; wasVisible = !document.hidden;
-      if (failed) { finish(new Error("Bevy reported a startup failure")); return; }
+      lastTick = now;
+      wasVisible = !document.hidden;
+      if (failed) {
+        finish(new Error("Bevy reported a startup failure"));
+        return;
+      }
       try {
         const status = JSON.parse(engine!.renderer_status()) as RendererStatus;
         lastRendererStatus = status;
         recordStartup();
-        if (status.error) { finish(new Error(status.error)); return; }
-        if (status.ready) { finish(); return; }
+        if (status.error) {
+          finish(new Error(status.error));
+          return;
+        }
+        if (status.ready) {
+          finish();
+          return;
+        }
         const stage = status.stage ?? "initializing";
         const milestone = stages.indexOf(stage);
         if (milestone > furthestStage) {
@@ -360,7 +525,7 @@ async function waitForRenderer() {
           lastProgress = startupVisibleWait;
         }
         const description = startupDescriptions[stage] ?? startupDescriptions.initializing;
-        byId("wasm-progress-text").textContent = document.hidden
+        progressText.textContent = document.hidden
           ? "Startup paused while this tab is hidden. Return to the tab to continue."
           : `WebGPU: ${description}. ${status.compiled_pipelines} pipelines ready, ${status.pending_pipelines} pending.`;
         if (!document.hidden && startupVisibleWait - lastProgress > 60_000) {
@@ -370,69 +535,126 @@ async function waitForRenderer() {
           return;
         }
         timer = setTimeout(check, 100);
-      } catch (error) { finish(new Error(errorMessage(error))); }
+      } catch (error) {
+        finish(new Error(errorMessage(error)));
+      }
     };
     document.addEventListener("visibilitychange", check);
     check();
   });
 }
+
 async function download(url: string, total: number): Promise<Uint8Array> {
   let response: Response;
-  try { response = await fetch(url); } catch { throw new Error("Engine download failed. Check your connection."); }
+  try {
+    response = await fetch(url);
+  } catch {
+    throw new Error("Engine download failed. Check your connection.");
+  }
   if (!response.ok || !response.body) throw new Error(`Engine download returned HTTP ${response.status}`);
-  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let loaded = 0, lastReport = 0;
-  progress.max = total; progress.value = 0;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  let lastReport = 0;
+  progress.max = total;
+  progress.value = 0;
   while (true) {
-    const { value, done } = await reader.read(); if (done) break;
+    const { value, done } = await reader.read();
+    if (done) break;
     loaded += value.byteLength;
-    if (loaded > 64 * 1048576) { await reader.cancel(); throw new Error("Engine download exceeds the 64 MB limit"); }
+    if (loaded > 64 * 1048576) {
+      await reader.cancel();
+      throw new Error("Engine download exceeds the 64 MB limit");
+    }
     chunks.push(value);
     if (performance.now() - lastReport > 80) {
       progress.value = loaded;
-      byId("wasm-progress-text").textContent = `Downloading engine: ${megabytes(loaded)} of ${megabytes(total)}`;
+      progressText.textContent = `Downloading engine: ${megabytes(loaded)} of ${megabytes(total)}`;
       lastReport = performance.now();
     }
   }
   if (loaded !== total) throw new Error("Incomplete engine download. Reload to get the current build.");
-  const bytes = new Uint8Array(loaded); let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const bytes = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   return bytes;
 }
+
+async function graphicsPreflight() {
+  const gpu = (navigator as Navigator & {
+    gpu?: {
+      requestAdapter(options: { powerPreference: "high-performance" }): Promise<{
+        info?: {
+          vendor?: string;
+          architecture?: string;
+          device?: string;
+          description?: string;
+          isFallbackAdapter?: boolean;
+        };
+        isFallbackAdapter?: boolean;
+      } | null>;
+    };
+  }).gpu;
+  if (!gpu) throw new Error("WebGPU is required. Use a current browser with WebGPU enabled.");
+  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!adapter) throw new Error("The browser did not provide a WebGPU adapter.");
+  const info = adapter.info;
+  return {
+    backend: "WebGPU",
+    vendor: info?.vendor || "",
+    architecture: info?.architecture || "",
+    device: info?.device || "",
+    description: info?.description || "",
+    fallback: adapter.isFallbackAdapter ?? info?.isFallbackAdapter ?? false,
+  };
+}
+
 async function start() {
   try {
     recordStartup();
-    const gpu = (navigator as any).gpu;
-    if (!gpu) throw new Error("WebGPU is required. Use a current browser with WebGPU enabled.");
-    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (!adapter) throw new Error("The browser did not provide a WebGPU adapter.");
-    (globalThis as any).__wsorbGPU = { backend: "WebGPU", vendor: adapter.info?.vendor || "", architecture: adapter.info?.architecture || "", device: adapter.info?.device || "", description: adapter.info?.description || "", fallback: adapter.isFallbackAdapter ?? adapter.info?.isFallbackAdapter ?? false };
-    startupPhase = "downloading_engine"; recordStartup();
+    browserGlobals.__wsorbGPU = await graphicsPreflight();
+    startupPhase = "downloading_engine";
+    recordStartup();
     const manifest = await fetch("/sim/manifest.json", { cache: "no-cache" });
     if (!manifest.ok) throw new Error(`Engine manifest returned HTTP ${manifest.status}`);
     const metadata = await manifest.json();
     const moduleUrl = `/sim/wsorb_bevy.js?v=${metadata.sha256}`;
-    const [module, bytes] = await Promise.all([import(moduleUrl), download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes)]);
+    const [module, bytes] = await Promise.all([
+      import(moduleUrl),
+      download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes),
+    ]);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
-    if (Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("") !== metadata.sha256) throw new Error("Engine integrity check failed. Reload to get the current build.");
+    const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+    if (sha256 !== metadata.sha256) throw new Error("Engine integrity check failed. Reload to get the current build.");
     engineBuild = { bytes: metadata.bytes, sha256: metadata.sha256 };
     progress.removeAttribute("value");
-    byId("sim-status").textContent = "Starting Bevy 0.20";
-    byId("wasm-progress-text").textContent = `Downloaded ${megabytes(bytes.byteLength)}. Compiling WebAssembly and WebGPU pipelines.`;
-    startupPhase = "compiling_webassembly"; recordStartup();
+    statusText.textContent = "Starting Bevy 0.20";
+    progressText.textContent = `Downloaded ${megabytes(bytes.byteLength)}. Compiling WebAssembly and WebGPU pipelines.`;
+    startupPhase = "compiling_webassembly";
+    recordStartup();
     const loaded = module as Engine;
     await loaded.default({ module_or_path: bytes });
     engine = loaded;
     clearMovementKeys();
     engine.set_viewport_input(false, false);
-    startupPhase = "starting_renderer"; recordStartup();
+    startupPhase = "starting_renderer";
+    recordStartup();
     engine.start_simulation("#simulation-canvas");
     await waitForRenderer();
     if (failed) return;
-    ready = true; byId("sim-status").textContent = "3D ready"; boot.hidden = true;
+    ready = true;
+    statusText.textContent = "3D ready";
+    boot.hidden = true;
     publishPlatform("WebGPU · Lander ready on Phobos. P runs the mission; H opens controls.");
     // Loading may finish after the user has moved to another tab or HTML control.
     if (document.hasFocus() && !document.hidden && pageBackgroundFocused()) canvas.focus({ preventScroll: true });
     inputState();
-  } catch (error) { if (!failed) fail(errorMessage(error)); }
+  } catch (error) {
+    if (!failed) fail(errorMessage(error));
+  }
 }
+
 void start();
