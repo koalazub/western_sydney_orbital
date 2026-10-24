@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,9 @@ try {
 
 if (!process.exitCode) {
   const rootRealPath = await realpath(publicRoot);
+  const lab = process.env.WSORB_LAB === "1"
+    ? await (await import("./local-api.mjs")).createLocalApi({ worker, publicRoot, rootRealPath })
+    : null;
   const contentTypes = {
     ".css": "text/css; charset=utf-8",
     ".html": "text/html; charset=utf-8",
@@ -44,6 +47,23 @@ if (!process.exitCode) {
       response.writeHead(status, headers);
       response.end(request.method === "HEAD" ? undefined : body);
     };
+
+    if (lab) {
+      try {
+        if (!lab.acceptsHost(request)) {
+          finish(403, "Local lab requires its exact loopback Host");
+          return;
+        }
+        const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+        if (pathname === "/__local" || pathname.startsWith("/__local/")) {
+          await lab.handle(request, response, pathname);
+          return;
+        }
+      } catch {
+        finish(404, "Not found");
+        return;
+      }
+    }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.setHeader("Allow", "GET, HEAD");
@@ -76,6 +96,21 @@ if (!process.exitCode) {
       if (!actualPath.startsWith(`${rootRealPath}${sep}`)) throw new Error("Path outside public root");
       const info = await lstat(actualPath);
       if (!info.isFile()) throw new Error("Not a file");
+      if (lab && relativePath === "index.html") {
+        const html = await readFile(actualPath, "utf8");
+        const body = /<\/body>/i.test(html)
+          ? html.replace(/<\/body>/i, `${lab.indexScript}\n</body>`)
+          : `${html}\n${lab.indexScript}\n`;
+        response.writeHead(200, {
+          ...headers,
+          "Content-Type": contentTypes[".html"],
+          "Content-Length": Buffer.byteLength(body),
+          "Cache-Control": "no-store",
+          "Cross-Origin-Resource-Policy": "same-origin",
+        });
+        response.end(request.method === "HEAD" ? undefined : body);
+        return;
+      }
       response.writeHead(200, {
         ...headers,
         "Content-Type": contentTypes[extname(actualPath).toLowerCase()] ?? "application/octet-stream",
@@ -88,15 +123,42 @@ if (!process.exitCode) {
     }
   });
 
+  if (lab) {
+    server.maxConnections = 32;
+    server.requestTimeout = 10000;
+    server.headersTimeout = 5000;
+    server.keepAliveTimeout = 1000;
+    server.setTimeout(10000, socket => socket.destroy());
+  }
   server.on("error", error => {
     console.error(`Local server failed: ${error.message}`);
     process.exitCode = 1;
+    if (lab) void shutdown();
   });
-  const shutdown = () => server.close(() => process.exit());
+  let stopping = false;
+  const shutdown = lab ? async () => {
+    if (stopping) return;
+    stopping = true;
+    try { await lab.close(); }
+    catch { console.error("Could not remove the local connection descriptor safely."); }
+    server.close(() => process.exit(process.exitCode ?? 0));
+    server.closeAllConnections();
+  } : () => server.close(() => process.exit());
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  server.listen(port, "127.0.0.1", () => {
+  server.listen(port, "127.0.0.1", async () => {
+    if (stopping) return;
     const address = server.address();
+    if (lab) {
+      try { await lab.listen(address.port); }
+      catch (error) {
+        console.error(`Local lab startup failed: ${error.message}`);
+        process.exitCode = 1;
+        await shutdown();
+        return;
+      }
+      if (stopping) return;
+    }
     console.log(`Western Sydney Orbital: http://127.0.0.1:${address.port}/`);
     console.log("Press Ctrl+C to stop.");
   });
