@@ -6,7 +6,6 @@ pub mod astrophysics;
 mod camera;
 mod controls;
 pub mod domain;
-mod guidance;
 mod hud;
 mod mission;
 pub mod model;
@@ -67,6 +66,15 @@ pub fn ship_camera_status() -> String {
 #[wasm_bindgen]
 pub fn navigation_status() -> String {
     navigation::status()
+}
+
+/// Draw Python-computed waypoints. This never plans a route or commands thrust.
+#[wasm_bindgen]
+pub fn set_navigation_preview(json: &str) -> String {
+    match navigation::submit(json) {
+        Ok(()) => serde_json::json!({"ok": true}).to_string(),
+        Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+    }
 }
 
 /// Local practice telemetry with explicit units/frame, not an STP SDK endpoint.

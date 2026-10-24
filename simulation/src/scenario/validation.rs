@@ -5,8 +5,6 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     validate_limits(s)?;
     validate_gravity(s)?;
     validate_integration(s)?;
-    validate_guidance(s)?;
-    validate_path_planning(s)?;
     validate_lander(s)?;
     validate_debug_thrust(s)?;
     validate_practice(s)?;
@@ -35,37 +33,6 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
         || s.frame_description.trim().is_empty()
     {
         return Err("invalid scenario limits or metadata");
-    }
-    Ok(())
-}
-
-fn validate_path_planning(s: &Scenario) -> Result<(), &'static str> {
-    let p = s.path_planning;
-    if !bounded_positive(
-        &[
-            p.replan_interval_s,
-            p.cell_size_m,
-            p.corridor_half_width_m,
-            p.forecast_horizon_s,
-            p.max_measurement_age_s,
-            p.sigma_multiplier,
-        ],
-        1.0e6,
-    ) || !p.clearance_m.is_finite()
-        || !(0.0..=1000.0).contains(&p.clearance_m)
-        || !p.unknown_tangential_speed_mps.is_finite()
-        || !(0.0..=1000.0).contains(&p.unknown_tangential_speed_mps)
-        || p.corridor_half_width_m < p.cell_size_m
-        || p.max_nodes == 0
-        || p.max_nodes > 1_000_000
-        || p.max_expansions == 0
-        || p.max_expansions > p.max_nodes
-        || p.expansions_per_frame == 0
-        || p.expansions_per_frame > 4096
-        || p.replan_interval_s > p.forecast_horizon_s
-        || p.sigma_multiplier * s.debris.diameter_noise_fraction >= 1.0
-    {
-        return Err("advisory path search settings must be finite and bounded");
     }
     Ok(())
 }
@@ -173,24 +140,6 @@ fn validate_practice(s: &Scenario) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn validate_guidance(s: &Scenario) -> Result<(), &'static str> {
-    let g = s.guidance;
-    if !bounded_positive(
-        &[
-            g.cadence_hz,
-            g.position_gain_s2,
-            g.velocity_gain_s,
-            g.avoidance_range_m,
-            g.avoidance_accel_mps2,
-        ],
-        1.0e6,
-    ) || g.cadence_hz * s.integration.fixed_step_s > 1.0
-    {
-        return Err("guidance parameters must be positive and no faster than integration");
-    }
-    Ok(())
-}
-
 fn validate_mission(s: &Scenario) -> Result<(), &'static str> {
     let m = &s.mission;
     if m.target_name.trim().is_empty()
@@ -266,10 +215,8 @@ fn validate_debris(s: &Scenario) -> Result<(), &'static str> {
 }
 
 fn validate_sensors(s: &Scenario) -> Result<(), &'static str> {
-    if !bounded_positive(
-        &[s.sensors.cadence_hz, s.sensors.minimum_reported_diameter_m],
-        1.0e6,
-    ) || s.sensors.range_noise_m > 1.0e8
+    if !bounded_positive(&[s.sensors.cadence_hz], 1.0e6)
+        || s.sensors.range_noise_m > 1.0e8
         || s.sensors.range_rate_noise_mps > 1.0e8
     {
         return Err("sensor cadence must be finite and positive");
@@ -457,27 +404,6 @@ mod tests {
         scenario.debug_thrust.max_particles = 512;
         scenario.debug_thrust.exhaust_speed_mps = f64::INFINITY;
         assert!(validate_debug_thrust(&scenario).is_err());
-    }
-
-    #[test]
-    fn advisory_search_rejects_nonfinite_geometry_and_unbounded_work() {
-        let base = crate::scenario::settings().clone();
-        assert!(validate_path_planning(&base).is_ok());
-        let mut scenario = base.clone();
-        scenario.path_planning.cell_size_m = f64::NAN;
-        assert!(validate_path_planning(&scenario).is_err());
-        scenario = base.clone();
-        scenario.path_planning.max_nodes = 1_000_001;
-        assert!(validate_path_planning(&scenario).is_err());
-        scenario = base.clone();
-        scenario.path_planning.expansions_per_frame = 4097;
-        assert!(validate_path_planning(&scenario).is_err());
-        scenario = base.clone();
-        scenario.path_planning.sigma_multiplier = 1.0 / scenario.debris.diameter_noise_fraction;
-        assert!(validate_path_planning(&scenario).is_err());
-        scenario = base;
-        scenario.path_planning.max_expansions = scenario.path_planning.max_nodes + 1;
-        assert!(validate_path_planning(&scenario).is_err());
     }
 
     #[test]

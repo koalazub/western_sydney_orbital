@@ -34,7 +34,7 @@ use wasm_bindgen::prelude::*;
 pub(crate) enum EngineSet {
     Input,
     Runtime,
-    Planning,
+    Reports,
     Camera,
     Scene,
     Hud,
@@ -350,7 +350,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
             (
                 EngineSet::Input,
                 EngineSet::Runtime,
-                EngineSet::Planning,
+                EngineSet::Reports,
                 EngineSet::Camera,
                 EngineSet::Scene,
                 EngineSet::Hud,

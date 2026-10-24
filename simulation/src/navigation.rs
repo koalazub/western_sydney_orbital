@@ -1,11 +1,11 @@
-//! Pathway-engineer preview only. No controller, vehicle mutation or hidden
-//! debris truth is available to the search. The public radar adapter is a
-//! deliberately incomplete input, not a substitute for the team's fusion layer.
-mod geometry;
-mod input;
+//! Validated transport and debug rendering for Python notebook path previews.
+//! Python owns all planning and scheduling. This module issues no flight commands
+//! and does not assess routes against obstacle truth or vehicle dynamics.
 mod model;
-mod search;
 mod systems;
 
-pub(crate) use model::{brief, details, status};
+#[cfg(test)]
+mod tests;
+
+pub(crate) use model::{brief, details, status, submit};
 pub(crate) use systems::install;

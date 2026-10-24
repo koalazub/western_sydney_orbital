@@ -25,7 +25,7 @@ fn fresh_app() -> App {
     let mut app = App::new();
     app.configure_sets(
         Update,
-        (crate::EngineSet::Runtime, crate::EngineSet::Planning).chain(),
+        (crate::EngineSet::Runtime, crate::EngineSet::Reports).chain(),
     )
     .insert_resource(Time::<()>::default())
     .insert_resource(ButtonInput::<KeyCode>::default())
@@ -75,8 +75,205 @@ fn keyboard_owns_command() -> bool {
     KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command())
 }
 
+fn tumbling_app() -> App {
+    let mut app = running_app();
+    press(&mut app, &[KeyCode::KeyA]);
+    for _ in 0..240 {
+        frame(&mut app, STEP);
+        let state = snapshot();
+        let pad = state
+            .assets
+            .iter()
+            .find(|entity| entity.id == crate::domain::EntityId::LandingPad)
+            .unwrap();
+        let pad_up = bevy::math::DQuat::from_array(pad.rotation) * bevy::math::DVec3::Z;
+        let lander_up = bevy::math::DQuat::from_array(ship(&state).rotation) * bevy::math::DVec3::Z;
+        if pad_up.dot(lander_up) < 0.0
+            && bevy::math::DVec3::from_array(ship(&state).angular_velocity_rad_s).length() > 0.05
+        {
+            assert!(keyboard_owns_command());
+            return app;
+        }
+    }
+    panic!("actual runtime keyboard thrust must tumble the lander");
+}
+
 #[test]
-fn runtime_report_preserves_its_json_contract_and_actual_keyboard_state() {
+fn native_upright_action_and_json_api_pause_before_advance_and_require_key_release() {
+    for through_json_api in [false, true] {
+        let mut app = tumbling_app();
+        app.world_mut().resource_mut::<PlaybackState>().accumulator = 0.04;
+        let before = snapshot();
+        let mut expected = Simulation::new_default();
+        expected
+            .execute(PhysicsCommand::Restore {
+                state: Box::new(before.as_ref().clone()),
+            })
+            .unwrap();
+        let expected = expected.execute(PhysicsCommand::DebugUpright).unwrap();
+
+        if through_json_api {
+            let result: serde_json::Value =
+                serde_json::from_str(&crate::command(r#"{"op":"debug_upright"}"#)).unwrap();
+            assert_eq!(result["ok"], true);
+            assert_eq!(result["state"], serde_json::to_value(&expected).unwrap());
+            let immediate: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
+            assert_eq!(immediate["running"], false);
+            assert_eq!(immediate["manual_interventions"], 1);
+            assert_eq!(immediate["keyboard_thrust"], false);
+            assert_eq!(immediate["keyboard_requires_release"], true);
+        } else {
+            request_action(EngineAction::DebugUpright);
+        }
+        frame(&mut app, STEP);
+        let reset = snapshot();
+        assert_eq!(
+            serde_json::to_value(reset.as_ref()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(
+            reset.time_s, before.time_s,
+            "the reset frame must not advance physics"
+        );
+        assert!(!app.world().resource::<PlaybackState>().running);
+        assert_eq!(app.world().resource::<PlaybackState>().accumulator, 0.0);
+        assert!(!keyboard_owns_command());
+        assert!(keyboard_requires_release());
+        let report: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
+        assert_eq!(report["running"], false);
+        assert_eq!(report["manual_interventions"], reset.manual_interventions);
+        assert_eq!(
+            observation()["manual_interventions"],
+            reset.manual_interventions
+        );
+
+        frame(&mut app, STEP);
+        assert_eq!(
+            serde_json::to_value(snapshot().as_ref()).unwrap(),
+            serde_json::to_value(reset.as_ref()).unwrap()
+        );
+        request_action(EngineAction::Play(PlaybackRate::RealTime));
+        frame(&mut app, Duration::ZERO);
+        assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+        assert_eq!(ship(&snapshot()).angular_velocity_rad_s, [0.0; 3]);
+        assert!(!keyboard_owns_command());
+        frame(&mut app, STEP);
+        assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+        assert_eq!(snapshot().mission.fuel_used_kg, reset.mission.fuel_used_kg);
+        assert_eq!(snapshot().manual_interventions, 1);
+        release(&mut app, &[KeyCode::KeyA]);
+        frame(&mut app, Duration::ZERO);
+        assert!(!keyboard_requires_release());
+        press(&mut app, &[KeyCode::KeyA]);
+        frame(&mut app, Duration::ZERO);
+        assert!(keyboard_owns_command());
+        assert_eq!(
+            ship(&snapshot()).commanded_accel_mps2,
+            [0.0, scenario::settings().lander.max_accel_mps2, 0.0]
+        );
+    }
+}
+
+#[test]
+fn upright_reset_blocks_a_fresh_space_launch_in_its_frame() {
+    let mut app = fresh_app();
+    press(&mut app, &[KeyCode::Space]);
+    request_action(EngineAction::DebugUpright);
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    assert_eq!(snapshot().manual_interventions, 1);
+    assert_eq!(snapshot().time_s, 0.0);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert!(!keyboard_owns_command());
+    assert!(keyboard_requires_release());
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    assert_eq!(snapshot().time_s, 0.0);
+    release(&mut app, &[KeyCode::Space]);
+    frame(&mut app, Duration::ZERO);
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert!(app.world().resource::<PlaybackState>().running);
+    assert!(keyboard_owns_command());
+    assert!(snapshot().time_s > 0.0);
+    assert_eq!(snapshot().manual_interventions, 1);
+}
+
+#[test]
+fn fresh_space_cannot_rearm_movement_keys_still_held_after_upright_reset() {
+    let mut app = running_app();
+    press(&mut app, &[KeyCode::KeyA]);
+    frame(&mut app, STEP);
+    request_action(EngineAction::DebugUpright);
+    frame(&mut app, Duration::ZERO);
+    let reset = snapshot();
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert!(!app.world().resource::<PlaybackState>().running);
+    assert!(!keyboard_owns_command());
+    assert!(keyboard_requires_release());
+    assert_eq!(
+        serde_json::to_value(snapshot().as_ref()).unwrap(),
+        serde_json::to_value(reset.as_ref()).unwrap()
+    );
+    release(&mut app, &[KeyCode::KeyA]);
+    frame(&mut app, STEP);
+    assert!(
+        keyboard_requires_release(),
+        "Space is still physically held"
+    );
+    assert_eq!(snapshot().time_s, reset.time_s);
+    release(&mut app, &[KeyCode::Space]);
+    frame(&mut app, Duration::ZERO);
+    assert!(!keyboard_requires_release());
+    press(&mut app, &[KeyCode::Space]);
+    frame(&mut app, STEP);
+    assert!(app.world().resource::<PlaybackState>().running);
+    assert!(keyboard_owns_command());
+    assert_eq!(snapshot().manual_interventions, 1);
+}
+
+#[test]
+fn view_only_denies_upright_actions_and_api_without_changing_the_world_or_queuing_pause() {
+    let mut app = fresh_app();
+    app.world_mut().resource_mut::<PlaybackState>().can_control = false;
+    frame(&mut app, Duration::ZERO);
+    let before = serde_json::to_value(snapshot().as_ref()).unwrap();
+    let result: serde_json::Value =
+        serde_json::from_str(&crate::command(r#"{"op":"debug_upright"}"#)).unwrap();
+    assert_eq!(result["ok"], false);
+    assert!(result["error"].as_str().unwrap().contains("view-only"));
+    assert!(ACTIONS.with(|actions| actions.borrow().is_empty()));
+    assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), before);
+    request_action(EngineAction::DebugUpright);
+    frame(&mut app, STEP);
+    assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), before);
+    assert_eq!(snapshot().manual_interventions, 0);
+}
+
+#[test]
+fn upright_api_rejects_before_mutation_if_its_pause_cannot_be_queued() {
+    let mut app = running_app();
+    press(&mut app, &[KeyCode::KeyA]);
+    frame(&mut app, STEP);
+    assert!(keyboard_owns_command());
+    let before = serde_json::to_value(snapshot().as_ref()).unwrap();
+    for _ in 0..MAX_ACTIONS {
+        request_action(EngineAction::CycleRate);
+    }
+    let result: serde_json::Value =
+        serde_json::from_str(&crate::command(r#"{"op":"debug_upright"}"#)).unwrap();
+    assert_eq!(result["ok"], false);
+    assert!(result["error"].as_str().unwrap().contains("queued actions"));
+    assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), before);
+    assert!(keyboard_owns_command());
+    let report: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
+    assert_eq!(report["running"], true);
+    assert_eq!(report["manual_interventions"], 0);
+}
+
+#[test]
+fn runtime_report_exposes_external_or_manual_control_and_actual_keyboard_state() {
     let mut app = running_app();
     set_viewport(true, false, "Flight controls ready");
     press(&mut app, &[KeyCode::KeyW]);
@@ -87,12 +284,11 @@ fn runtime_report_preserves_its_json_contract_and_actual_keyboard_state() {
         report,
         serde_json::json!({
             "running": true,
-            "autopilot": false,
-            "practice_boost": config.practice.space_boost_enabled,
+            "controller": "external_python_or_manual",
             "reference_accel_limit_mps2": config.lander.max_accel_mps2,
-            "practice_space_accel_mps2": config.practice.space_lift_accel_mps2,
             "keyboard_thrust": true,
             "keyboard_requires_release": false,
+            "manual_interventions": 0,
             "rate": 1.0,
             "can_control": true,
             "fullscreen": true,
@@ -100,11 +296,47 @@ fn runtime_report_preserves_its_json_contract_and_actual_keyboard_state() {
             "message": "Flight controls ready",
         })
     );
+    assert!(report.get("autopilot").is_none());
+    assert!(report.get("practice_boost_active").is_none());
+    assert!(report.get("space_boost_enabled").is_none());
     release(&mut app, &[KeyCode::KeyW]);
     frame(&mut app, STEP);
     let released: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
     assert_eq!(released["keyboard_thrust"], false);
     assert_eq!(released["message"], report["message"]);
+}
+
+#[test]
+fn runtime_playback_only_advances_physics_with_the_installed_command() {
+    for external_command in [false, true] {
+        let mut app = running_app();
+        let mut expected = Simulation::new_default();
+        let command = if external_command {
+            [0.0, 0.0, scenario::settings().lander.max_accel_mps2 * 0.25]
+        } else {
+            [0.0; 3]
+        };
+        if external_command {
+            dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+                accel: command,
+                angular_accel: [0.0; 3],
+            }))
+            .unwrap();
+            expected.set_command(command, [0.0; 3]).unwrap();
+        }
+        for _ in 0..40 {
+            frame(&mut app, STEP);
+            expected.advance(STEP.as_secs_f64());
+            assert_eq!(ship(&snapshot()).commanded_accel_mps2, command);
+            assert_eq!(ship(&snapshot()).commanded_angular_accel_rad_s2, [0.0; 3]);
+            assert!(!keyboard_owns_command());
+        }
+        assert_eq!(
+            serde_json::to_value(snapshot().as_ref()).unwrap(),
+            serde_json::to_value(expected.snapshot()).unwrap(),
+            "playback must not synthesize a controller command"
+        );
+    }
 }
 
 #[test]
@@ -114,9 +346,10 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
         (KeyCode::KeyW, false, [max_accel, 0.0, 0.0]),
         (KeyCode::KeyE, false, [0.0, 0.0, max_accel]),
         (KeyCode::KeyE, true, [0.0, 0.0, max_accel]),
+        (KeyCode::Space, false, [0.0, 0.0, max_accel]),
+        (KeyCode::Space, true, [0.0, 0.0, max_accel]),
     ] {
         let mut app = running_app();
-        assert!(app.world().resource::<PlaybackState>().autopilot);
         let before = snapshot();
         let mut expected = Simulation::new_default();
         expected.set_manual_thrust(command).unwrap();
@@ -131,7 +364,6 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
 
         let after = snapshot();
         let lander = ship(&after);
-        assert!(!app.world().resource::<PlaybackState>().autopilot);
         assert!(keyboard_owns_command());
         assert_eq!(after.time_s, STEP.as_secs_f64());
         assert_eq!(lander.commanded_accel_mps2, command);
@@ -168,6 +400,12 @@ fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost
 #[test]
 fn alt_handoff_and_key_release_stop_owned_thrust_without_braking() {
     let mut app = running_app();
+    let command = [0.0, scenario::settings().lander.max_accel_mps2 * 0.25, 0.0];
+    dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: command,
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
     let initial = snapshot();
     press(
         &mut app,
@@ -178,15 +416,13 @@ fn alt_handoff_and_key_release_stop_owned_thrust_without_braking() {
         ship(&snapshot()).commanded_accel_mps2,
         ship(&initial).commanded_accel_mps2
     );
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(!keyboard_owns_command());
     frame(&mut app, STEP);
     assert_eq!(snapshot().time_s, STEP.as_secs_f64());
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(!keyboard_owns_command());
-    let controller_command = ship(&snapshot()).commanded_accel_mps2;
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, command);
     frame(&mut app, Duration::ZERO);
-    assert_eq!(ship(&snapshot()).commanded_accel_mps2, controller_command);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, command);
 
     for use_alt in [false, true] {
         let mut app = running_app();
@@ -206,7 +442,6 @@ fn alt_handoff_and_key_release_stop_owned_thrust_without_braking() {
         assert_eq!(ship(&released).velocity, ship(&thrusting).velocity);
         assert_eq!(ship(&released).position, ship(&thrusting).position);
         assert_eq!(released.time_s, thrusting.time_s);
-        assert!(!app.world().resource::<PlaybackState>().autopilot);
         assert!(!keyboard_owns_command());
         frame(&mut app, STEP);
         assert_eq!(
@@ -239,7 +474,6 @@ fn queued_pause_step_and_reset_do_not_reuse_a_held_keyboard_command() {
     assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), initial);
     request_action(EngineAction::Play(PlaybackRate::RealTime));
     frame(&mut app, Duration::ZERO);
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(
         !keyboard_owns_command(),
         "a paused held key needs a fresh press"
@@ -299,7 +533,6 @@ fn focus_and_authority_loss_require_release_before_keyboard_thrust_can_resume() 
     press(&mut app, &[KeyCode::KeyE]);
     frame(&mut app, STEP);
     assert_eq!(serde_json::to_value(snapshot().as_ref()).unwrap(), initial);
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(!keyboard_owns_command());
     app.world_mut().resource_mut::<PlaybackState>().can_control = true;
     frame(&mut app, Duration::ZERO);
@@ -347,7 +580,6 @@ fn focus_and_authority_loss_require_release_before_keyboard_thrust_can_resume() 
             thrusting.mission.fuel_used_kg
         );
         assert!(!keyboard_owns_command());
-        assert!(!app.world().resource::<PlaybackState>().autopilot);
         release(&mut app, &[KeyCode::KeyE]);
         frame(&mut app, Duration::ZERO);
         press(&mut app, &[KeyCode::KeyE]);
@@ -388,7 +620,6 @@ fn external_set_command_survives_held_ship_keys_alt_and_later_key_release() {
             ship(&snapshot()).commanded_angular_accel_rad_s2,
             angular_command
         );
-        assert!(!app.world().resource::<PlaybackState>().autopilot);
         assert!(!keyboard_owns_command());
         let external = serde_json::to_value(snapshot().as_ref()).unwrap();
         release(
@@ -418,26 +649,30 @@ fn external_set_command_survives_held_ship_keys_alt_and_later_key_release() {
 }
 
 #[test]
-fn explicit_autopilot_toggles_win_over_a_held_ship_key_until_it_is_released() {
+fn external_stop_wins_over_a_held_ship_key_until_it_is_released() {
     let mut app = running_app();
     press(&mut app, &[KeyCode::KeyE]);
     frame(&mut app, STEP);
     assert!(keyboard_owns_command());
-    assert!(!app.world().resource::<PlaybackState>().autopilot);
     let thrusting = snapshot();
-    request_action(EngineAction::ToggleAutopilot);
+    let stopped = dispatch(Dispatch::Physics(PhysicsCommand::Stop)).unwrap();
+    assert_eq!(ship(&stopped).velocity, ship(&thrusting).velocity);
+    assert_eq!(ship(&stopped).position, ship(&thrusting).position);
+    assert_eq!(stopped.time_s, thrusting.time_s);
+    assert!(!keyboard_owns_command());
     frame(&mut app, Duration::ZERO);
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(!keyboard_owns_command());
     assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
     assert_eq!(ship(&snapshot()).velocity, ship(&thrusting).velocity);
     frame(&mut app, STEP);
-    assert!(app.world().resource::<PlaybackState>().autopilot);
     assert!(!keyboard_owns_command());
+    assert_eq!(
+        snapshot().mission.fuel_used_kg,
+        thrusting.mission.fuel_used_kg
+    );
 
-    request_action(EngineAction::ToggleAutopilot);
+    dispatch(Dispatch::Physics(PhysicsCommand::Stop)).unwrap();
     frame(&mut app, Duration::ZERO);
-    assert!(!app.world().resource::<PlaybackState>().autopilot);
     assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
     let fuel_used = snapshot().mission.fuel_used_kg;
     frame(&mut app, STEP);
@@ -449,7 +684,6 @@ fn explicit_autopilot_toggles_win_over_a_held_ship_key_until_it_is_released() {
     press(&mut app, &[KeyCode::KeyE]);
     frame(&mut app, STEP);
     assert!(keyboard_owns_command());
-    assert!(!app.world().resource::<PlaybackState>().autopilot);
     assert_eq!(
         ship(&snapshot()).commanded_accel_mps2,
         [0.0, 0.0, scenario::settings().lander.max_accel_mps2]
@@ -457,7 +691,7 @@ fn explicit_autopilot_toggles_win_over_a_held_ship_key_until_it_is_released() {
 }
 
 #[test]
-fn authority_return_respects_new_external_commands_and_explicit_autopilot_handoffs() {
+fn authority_return_respects_external_set_command_and_stop_handoffs() {
     for external_command in [false, true] {
         let mut app = running_app();
         press(&mut app, &[KeyCode::KeyE]);
@@ -479,10 +713,9 @@ fn authority_return_respects_new_external_commands_and_explicit_autopilot_handof
             frame(&mut app, Duration::ZERO);
             assert_eq!(ship(&snapshot()).commanded_accel_mps2, command);
         } else {
+            dispatch(Dispatch::Physics(PhysicsCommand::Stop)).unwrap();
             request_action(EngineAction::Pause);
-            request_action(EngineAction::ToggleAutopilot);
             frame(&mut app, Duration::ZERO);
-            assert!(app.world().resource::<PlaybackState>().autopilot);
             assert!(!app.world().resource::<PlaybackState>().running);
             assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
             let fuel = snapshot().mission.fuel_used_kg;
@@ -495,22 +728,17 @@ fn authority_return_respects_new_external_commands_and_explicit_autopilot_handof
 }
 
 #[test]
-fn fresh_space_launches_a_paused_lander_with_real_upward_thrust() {
+fn fresh_space_launches_a_paused_lander_with_real_reference_upward_thrust() {
     let mut app = fresh_app();
     let before = snapshot();
     let body_up = bevy::math::DQuat::from_array(ship(&before).rotation) * bevy::math::DVec3::Z;
     press(&mut app, &[KeyCode::Space]);
     frame(&mut app, STEP);
     assert!(app.world().resource::<PlaybackState>().running);
-    assert!(!app.world().resource::<PlaybackState>().autopilot);
     assert!(keyboard_owns_command());
     assert_eq!(
         ship(&snapshot()).commanded_accel_mps2,
-        [
-            0.0,
-            0.0,
-            scenario::settings().practice.space_lift_accel_mps2
-        ]
+        [0.0, 0.0, scenario::settings().lander.max_accel_mps2]
     );
     for _ in 0..9 {
         frame(&mut app, STEP);
@@ -559,47 +787,44 @@ fn space_never_cancels_an_explicit_pause_or_launches_from_debug_or_view_only_inp
 }
 
 #[test]
-fn practice_space_boost_is_explicit_reversible_and_does_not_boost_side_keys() {
-    let mut app = fresh_app();
-    assert!(app.world().resource::<PlaybackState>().practice_boost);
-    press(&mut app, &[KeyCode::Space, KeyCode::KeyW]);
-    frame(&mut app, STEP);
-    let boosted = snapshot();
-    let force = ship(&boosted).commanded_accel_mps2;
+fn space_and_e_share_reference_limits_and_manual_nozzle_physics_for_combined_keys() {
     let reference = scenario::settings().lander.max_accel_mps2;
-    assert!(force[0] > 0.0 && force[0] <= reference);
-    assert!(force[2] > reference);
-    assert_eq!(
-        ship(&boosted).thrust_application,
-        crate::model::ThrustApplication::PracticeBoost
-    );
-    request_action(EngineAction::TogglePracticeBoost);
-    frame(&mut app, Duration::ZERO);
-    assert!(!app.world().resource::<PlaybackState>().practice_boost);
-    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
-    assert_eq!(ship(&snapshot()).velocity, ship(&boosted).velocity);
-    frame(&mut app, STEP);
-    assert_eq!(
-        ship(&snapshot()).commanded_accel_mps2,
-        [0.0; 3],
-        "profile switch requires release"
-    );
-    release(&mut app, &[KeyCode::Space, KeyCode::KeyW]);
-    frame(&mut app, Duration::ZERO);
-    press(&mut app, &[KeyCode::Space]);
-    frame(&mut app, STEP);
-    assert_eq!(
-        ship(&snapshot()).commanded_accel_mps2,
-        [0.0, 0.0, reference]
-    );
-    assert_eq!(
-        ship(&snapshot()).thrust_application,
-        crate::model::ThrustApplication::ManualNozzles
-    );
+    for lateral in [None, Some(KeyCode::KeyW), Some(KeyCode::KeyA)] {
+        let mut reference_app = running_app();
+        press(&mut reference_app, &[KeyCode::KeyE]);
+        if let Some(lateral) = lateral {
+            press(&mut reference_app, &[lateral]);
+        }
+        frame(&mut reference_app, STEP);
+        let expected = snapshot();
+
+        let mut app = running_app();
+        press(
+            &mut app,
+            &[KeyCode::Space, KeyCode::KeyE, KeyCode::ShiftLeft],
+        );
+        if let Some(lateral) = lateral {
+            press(&mut app, &[lateral]);
+        }
+        frame(&mut app, STEP);
+        let actual = snapshot();
+        assert_eq!(
+            serde_json::to_value(actual.as_ref()).unwrap(),
+            serde_json::to_value(expected.as_ref()).unwrap(),
+            "Space, E and Shift must not amplify a combined command"
+        );
+        let [forward, left, up] = ship(&actual).commanded_accel_mps2;
+        assert!(forward.hypot(left).hypot(up) <= reference);
+        assert!(up > 0.0 && up <= reference);
+        assert_eq!(
+            ship(&actual).thrust_application,
+            crate::model::ThrustApplication::ManualNozzles
+        );
+    }
 }
 
 #[test]
-fn flight_telemetry_api_reports_actual_boosted_motion_after_runtime_update() {
+fn flight_telemetry_api_reports_actual_reference_motion_after_runtime_update() {
     let mut app = fresh_app();
     frame(&mut app, Duration::ZERO);
     press(&mut app, &[KeyCode::Space]);
@@ -608,16 +833,17 @@ fn flight_telemetry_api_reports_actual_boosted_motion_after_runtime_update() {
     let metrics = &report["metrics"];
     assert_eq!(report["source_time_s"], snapshot().time_s);
     assert_eq!(report["units"]["speed"], "m/s");
-    assert_eq!(report["actuation"]["practice_boost_active"], true);
+    assert_eq!(report["actuation"]["practice_boost_active"], false);
+    assert_eq!(report["actuation"]["thrust_application"], "manual_nozzles");
     assert_eq!(
         metrics["applied_thrust_accel_mps2"],
-        scenario::settings().practice.space_lift_accel_mps2
+        scenario::settings().lander.max_accel_mps2
     );
     assert!(metrics["speed_mps"].as_f64().unwrap() > 0.0);
     assert!(metrics["radial_climb_mps"].as_f64().unwrap() > 0.0);
-    assert!(
-        metrics["thrust_force_n"].as_f64().unwrap()
-            > scenario::settings().lander.mass_kg * scenario::settings().lander.max_accel_mps2
+    assert_eq!(
+        metrics["thrust_force_n"].as_f64().unwrap(),
+        scenario::settings().lander.mass_kg * scenario::settings().lander.max_accel_mps2
     );
     assert_eq!(report["provenance"]["hidden_debris_truth_used"], false);
     assert_eq!(report["caveats"]["stp_parity"], false);

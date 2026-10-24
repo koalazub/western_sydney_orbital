@@ -4,8 +4,6 @@ use crate::domain::{EngineAction, MissionStatus, PlaybackRate, ViewportAction};
 #[derive(bevy::prelude::Resource, Clone, Debug, serde::Serialize)]
 pub(crate) struct PlaybackState {
     pub running: bool,
-    pub autopilot: bool,
-    pub practice_boost: bool,
     pub rate: PlaybackRate,
     pub can_control: bool,
     pub fullscreen: bool,
@@ -13,23 +11,18 @@ pub(crate) struct PlaybackState {
     pub message: String,
     #[serde(skip)]
     pub(crate) accumulator: f64,
-    #[serde(skip)]
-    pub(crate) guidance_elapsed: f64,
 }
 
 impl Default for PlaybackState {
     fn default() -> Self {
         Self {
             running: false,
-            autopilot: true,
-            practice_boost: crate::scenario::settings().practice.space_boost_enabled,
             rate: PlaybackRate::RealTime,
             can_control: true,
             fullscreen: false,
             maximized: true,
             message: "WebGPU · Click the scene to activate ship and debug controls".into(),
             accumulator: 0.0,
-            guidance_elapsed: f64::MAX,
         }
     }
 }
@@ -39,7 +32,7 @@ pub(crate) enum Effect {
     None,
     Advance,
     Reset,
-    ZeroCommand,
+    DebugUpright,
     Viewport(ViewportAction),
 }
 
@@ -66,7 +59,6 @@ pub(crate) fn transition(
         EngineAction::Pause => {
             state.running = false;
             state.accumulator = 0.0;
-            state.guidance_elapsed = f64::MAX;
             Effect::None
         }
         EngineAction::Step
@@ -77,25 +69,12 @@ pub(crate) fn transition(
         EngineAction::Reset if state.can_control => {
             state.running = false;
             state.accumulator = 0.0;
-            state.guidance_elapsed = f64::MAX;
             Effect::Reset
         }
-        EngineAction::ToggleAutopilot if state.can_control => {
-            state.autopilot = !state.autopilot;
-            state.guidance_elapsed = f64::MAX;
-            if state.autopilot {
-                Effect::None
-            } else {
-                Effect::ZeroCommand
-            }
-        }
-        EngineAction::ManualControl => {
-            state.autopilot = false;
-            Effect::None
-        }
-        EngineAction::TogglePracticeBoost if state.can_control => {
-            state.practice_boost = !state.practice_boost;
-            Effect::None
+        EngineAction::DebugUpright if state.can_control => {
+            state.running = false;
+            state.accumulator = 0.0;
+            Effect::DebugUpright
         }
         EngineAction::CycleRate if state.can_control => {
             state.rate = state.rate.next();
@@ -106,8 +85,7 @@ pub(crate) fn transition(
         | EngineAction::Play(_)
         | EngineAction::Step
         | EngineAction::Reset
-        | EngineAction::ToggleAutopilot
-        | EngineAction::TogglePracticeBoost
+        | EngineAction::DebugUpright
         | EngineAction::CycleRate => Effect::None,
     };
     Transition { state, effect }
@@ -118,31 +96,104 @@ mod tests {
     use super::*;
 
     #[test]
-    fn practice_profile_switch_is_authorized_and_does_not_enable_autopilot_or_playback() {
+    fn local_upright_reset_pauses_and_clears_time_without_reviving_terminal_missions() {
+        for mission in [
+            MissionStatus::Running,
+            MissionStatus::FailedDamage,
+            MissionStatus::Success,
+        ] {
+            let reset = transition(
+                PlaybackState {
+                    running: true,
+                    rate: PlaybackRate::Tenfold,
+                    accumulator: 0.04,
+                    ..Default::default()
+                },
+                EngineAction::DebugUpright,
+                mission,
+            );
+            assert!(!reset.state.running);
+            assert_eq!(reset.state.accumulator, 0.0);
+            assert_eq!(reset.state.rate, PlaybackRate::Tenfold);
+            assert_eq!(reset.effect, Effect::DebugUpright);
+            let denied = transition(
+                PlaybackState {
+                    running: true,
+                    can_control: false,
+                    accumulator: 0.04,
+                    ..Default::default()
+                },
+                EngineAction::DebugUpright,
+                mission,
+            );
+            assert!(denied.state.running);
+            assert_eq!(denied.state.accumulator, 0.04);
+            assert_eq!(denied.effect, Effect::None);
+        }
+    }
+
+    #[test]
+    fn rate_changes_do_not_start_playback_and_require_authority() {
         let state = PlaybackState {
             running: false,
-            autopilot: false,
-            practice_boost: true,
             ..Default::default()
         };
         let changed = transition(
             state.clone(),
-            EngineAction::TogglePracticeBoost,
+            EngineAction::CycleRate,
             MissionStatus::Running,
         );
-        assert!(!changed.state.practice_boost);
+        assert_eq!(changed.state.rate, PlaybackRate::Fivefold);
         assert!(!changed.state.running);
-        assert!(!changed.state.autopilot);
         assert_eq!(changed.effect, Effect::None);
         let locked = PlaybackState {
             can_control: false,
             ..state
         };
-        let denied = transition(
-            locked,
-            EngineAction::TogglePracticeBoost,
+        let denied = transition(locked, EngineAction::CycleRate, MissionStatus::Running);
+        assert_eq!(denied.state.rate, PlaybackRate::RealTime);
+        assert!(!denied.state.running);
+        assert_eq!(denied.effect, Effect::None);
+    }
+
+    #[test]
+    fn pause_clears_pending_physics_time_even_without_control_authority() {
+        let paused = transition(
+            PlaybackState {
+                running: true,
+                can_control: false,
+                accumulator: 0.04,
+                ..Default::default()
+            },
+            EngineAction::Pause,
             MissionStatus::Running,
         );
-        assert!(denied.state.practice_boost);
+        assert!(!paused.state.running);
+        assert_eq!(paused.state.accumulator, 0.0);
+        assert_eq!(paused.effect, Effect::None);
+    }
+
+    #[test]
+    fn stepping_requires_paused_authorized_playback() {
+        for (running, can_control) in [(false, true), (true, true), (false, false)] {
+            let stepped = transition(
+                PlaybackState {
+                    running,
+                    can_control,
+                    ..Default::default()
+                },
+                EngineAction::Step,
+                MissionStatus::Running,
+            );
+            assert_eq!(
+                stepped.effect,
+                if !running && can_control {
+                    Effect::Advance
+                } else {
+                    Effect::None
+                }
+            );
+            assert_eq!(stepped.state.running, running);
+        }
     }
 }

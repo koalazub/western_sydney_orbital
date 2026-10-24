@@ -25,7 +25,7 @@ use bevy::input::{
 };
 
 #[test]
-fn desktop_hud_survives_telemetry_and_profile_text() {
+fn desktop_hud_survives_telemetry_and_reference_thrust_text() {
     check_hud(1280, 800, 1.0, 1.0);
 }
 
@@ -116,18 +116,13 @@ fn check_hud(width: u32, height: u32, window_scale: f32, ui_scale: f32) {
         "TextPlugin must load Bevy's built-in FiraMono font"
     );
 
-    let settings = crate::scenario::settings();
-    let profile = format!(
-        "Space: PRACTICE BOOST {:.1} m/s² | {:.0}x reference\nNot competition thrust. Reset before comparing profiles.",
-        settings.practice.space_lift_accel_mps2,
-        settings.practice.space_lift_accel_mps2 / settings.lander.max_accel_mps2,
-    );
+    let reference_thrust = super::systems::reference_thrust_brief();
     let path = crate::navigation::brief();
     for (stage, brief) in [
         ("waiting telemetry", crate::telemetry::brief()),
         (
             "numeric flight text",
-            "Speed 123.45 m/s | radial climb -12.34 m/s\nTerrain-center 98765.4 m | thrust 2.00 m/s²".into(),
+            "Speed 123.45 m/s | radial climb -12.34 m/s\nTerrain-center 98765.4 m | thrust 0.50 m/s²".into(),
         ),
     ] {
         // Change only production readout strings. Measurement and geometry stay engine-owned.
@@ -135,7 +130,7 @@ fn check_hud(width: u32, height: u32, window_scale: f32, ui_scale: f32) {
         for (readout, mut text) in world.query::<(&Readout, &mut Text)>().iter_mut(world) {
             match readout {
                 Readout::TelemetryBrief => text.0.clone_from(&brief),
-                Readout::ThrustProfile => text.0.clone_from(&profile),
+                Readout::ReferenceThrust => text.0.clone_from(&reference_thrust),
                 Readout::PathBrief => text.0.clone_from(&path),
                 _ => {}
             }
@@ -203,6 +198,43 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
         })
         .unwrap();
     assert_in_viewport(app.world(), panel, viewport, "controls H", "controls panel");
+    let upright = app
+        .world_mut()
+        .query::<(Entity, &HudAction)>()
+        .iter(app.world())
+        .find_map(|(entity, action)| matches!(action, HudAction::DebugUpright).then_some(entity))
+        .expect("H must expose the native upright test-reset button");
+    assert!(
+        app.world()
+            .get::<bevy::ui_widgets::Button>(upright)
+            .is_some()
+    );
+    assert_eq!(
+        app.world()
+            .get::<bevy::input_focus::tab_navigation::TabIndex>(upright)
+            .unwrap()
+            .0,
+        0
+    );
+    assert_eq!(
+        app.world().get::<AccessibleLabel>(upright).unwrap().0,
+        "Upright lander · test reset"
+    );
+    let mut ancestor = upright;
+    while ancestor != panel {
+        ancestor = app
+            .world()
+            .get::<ChildOf>(ancestor)
+            .expect("upright belongs to the H controls panel")
+            .parent();
+    }
+    assert_in_viewport(
+        app.world(),
+        upright,
+        viewport,
+        "controls H",
+        "upright test reset",
+    );
     let status: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
     assert!(status["samples"].as_u64().unwrap() > 0);
     assert!(status["native_nodes"].as_u64().unwrap() > 0);
@@ -216,6 +248,14 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
     assert_eq!(root["inherited_visible"], true);
     assert_eq!(root["target_camera_active"], true);
     assert_eq!(root["targets_window"], true);
+    let upright_report = status["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|element| element["role"] == "debug_upright")
+        .unwrap();
+    assert_eq!(upright_report["displayed"], true);
+    assert_eq!(upright_report["inherited_visible"], true);
     for axis in 0..2 {
         let size = status["viewport_css"][axis].as_f64().unwrap();
         assert!((root["rect_css"][axis + 2].as_f64().unwrap() - size).abs() <= 1.0);
@@ -224,13 +264,15 @@ fn check_controls_shortcut(app: &mut App, camera: Entity) {
         .world_mut()
         .query::<(Entity, &Readout)>()
         .iter(app.world())
-        .find_map(|(entity, readout)| {
-            matches!(readout, Readout::ControllerSettings).then_some(entity)
-        })
+        .find_map(|(entity, readout)| matches!(readout, Readout::InputSettings).then_some(entity))
         .unwrap();
     let text = app.world().get::<Text>(settings).unwrap();
     assert!(text.0.contains("Held keys:"));
-    assert!(text.0.contains("Controller:"));
+    assert!(
+        text.0
+            .contains("Controller owner: external Python notebook or manual keys")
+    );
+    assert!(text.0.contains("Space and E: reference limit"));
     assert!(
         !app.world()
             .get::<TextLayoutInfo>(settings)

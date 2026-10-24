@@ -142,10 +142,9 @@ fn activate_action(action: HudAction, hud: &mut HudState, playback: &PlaybackSta
             hud.reset_confirm_open = false;
         }
         HudAction::CancelReset => hud.reset_confirm_open = false,
+        HudAction::DebugUpright => crate::request_action(EngineAction::DebugUpright),
         HudAction::Export => crate::request_action(EngineAction::Viewport(ViewportAction::Export)),
         HudAction::CycleRate => crate::request_action(EngineAction::CycleRate),
-        HudAction::ToggleAutopilot => crate::request_action(EngineAction::ToggleAutopilot),
-        HudAction::TogglePracticeBoost => crate::request_action(EngineAction::TogglePracticeBoost),
         HudAction::Fullscreen => {
             // Web fullscreen must be requested by the trusted DOM event adapter,
             // using the actual native hit/focus target before Bevy's next frame.
@@ -445,15 +444,8 @@ pub(super) fn update_readouts(
             Readout::FlightControls => flight_controls_readout(&playback),
             Readout::TelemetryBrief => crate::telemetry::brief(),
             Readout::TelemetryDetails => crate::telemetry::details(),
-            Readout::ThrustProfile => thrust_profile_brief(&playback),
-            Readout::ControllerSettings => controller_settings_readout(&playback, &keys),
-            Readout::BoostToggle => {
-                if playback.practice_boost {
-                    "Use reference Space thrust".into()
-                } else {
-                    "Use practice Space boost".into()
-                }
-            }
+            Readout::ReferenceThrust => reference_thrust_brief(),
+            Readout::InputSettings => input_settings_readout(&playback, &keys),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
@@ -482,13 +474,6 @@ pub(super) fn update_readouts(
                 }
             }
             Readout::Rate => format!("{}x [T]", playback.rate.factor() as u32),
-            Readout::Autopilot => {
-                if playback.autopilot {
-                    "Example controller: on".into()
-                } else {
-                    "Example controller: off".into()
-                }
-            }
             Readout::Fullscreen => {
                 if playback.fullscreen {
                     "Exit fullscreen [X]".into()
@@ -599,10 +584,9 @@ fn action_enabled(
         HudAction::Step => playback.can_control && !playback.running && !terminal,
         HudAction::ConfirmReset => playback.can_control && hud.reset_confirm_open,
         HudAction::AskReset
+        | HudAction::DebugUpright
         | HudAction::Export
-        | HudAction::CycleRate
-        | HudAction::ToggleAutopilot
-        | HudAction::TogglePracticeBoost => playback.can_control,
+        | HudAction::CycleRate => playback.can_control,
         HudAction::CancelReset
         | HudAction::Fullscreen
         | HudAction::Maximize
@@ -629,7 +613,7 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         String::new()
     };
     format!(
-        "T+{} | {} ({})\nReturn ship {} | range {} | speed {}\nFuel used ~{} kg | damage estimate ~{} J\n{} debris | {} contacts | {} scene entities{}",
+        "T+{} | {} ({})\nReturn ship {} | range {} | speed {}\nFuel used ~{} kg | damage estimate ~{} J\n{} debris | {} contacts | {} scene entities{}\nLocal test resets: {}",
         duration(snapshot.time_s),
         snapshot.mission.phase,
         snapshot.mission.status,
@@ -646,6 +630,7 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         snapshot.active_contacts.len(),
         snapshot.assets.len(),
         terminal_score,
+        snapshot.manual_interventions,
     )
 }
 
@@ -682,60 +667,35 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
         "Click the scene or focus the canvas to enable movement keys."
     } else if crate::session::keyboard_requires_release() {
         "Release the movement keys, then press them again to rearm ship thrust."
-    } else if playback.autopilot {
-        "Example controller active. A ship thrust key switches to manual control."
     } else {
-        "Manual ship control. Release thrust keys to coast."
+        "Ship keys apply manual nozzle forces. Release thrust keys to coast."
     };
     state.into()
 }
 
-fn thrust_profile_readout(playback: &PlaybackState) -> String {
-    let settings = crate::scenario::settings();
-    if playback.practice_boost {
-        format!(
-            "Space: PRACTICE BOOST {:.1} m/s² | {:.0}x reference\nNot competition thrust. Reset before comparing profiles.",
-            settings.practice.space_lift_accel_mps2,
-            settings.practice.space_lift_accel_mps2 / settings.lander.max_accel_mps2
-        )
-    } else {
-        format!(
-            "Space: reference limit {:.2} m/s²\nPractice dynamics, not an STP-equivalent simulator.",
-            settings.lander.max_accel_mps2
-        )
-    }
+fn reference_thrust_readout() -> String {
+    format!(
+        "Space and E: reference limit {:.2} m/s²\nLocal nozzle physics, not an STP-equivalent allocator.",
+        crate::scenario::settings().lander.max_accel_mps2
+    )
 }
 
-fn thrust_profile_brief(playback: &PlaybackState) -> String {
-    let settings = crate::scenario::settings();
-    if playback.practice_boost {
-        format!(
-            "Space practice boost {:.0}x | {:.1} m/s²",
-            settings.practice.space_lift_accel_mps2 / settings.lander.max_accel_mps2,
-            settings.practice.space_lift_accel_mps2
-        )
-    } else {
-        format!(
-            "Space reference {:.2} m/s² | local model",
-            settings.lander.max_accel_mps2
-        )
-    }
+pub(super) fn reference_thrust_brief() -> String {
+    format!(
+        "Space reference {:.2} m/s² | local model",
+        crate::scenario::settings().lander.max_accel_mps2
+    )
 }
 
-fn controller_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyCode>) -> String {
+fn input_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyCode>) -> String {
     let config = crate::scenario::settings();
     let input = if camera::input_active() {
         "active"
     } else {
         "inactive; click/focus the scene"
     };
-    let controller = if playback.autopilot {
-        "example controller"
-    } else {
-        "manual/externally commanded"
-    };
     format!(
-        "Input {input}\nHeld keys: {}\nController: {controller} | simulation {}\nReference command caps: {:.2} m/s² and {:.2} rad/s²\n{}",
+        "Input {input}\nHeld keys: {}\nController owner: external Python notebook or manual keys\nLocal simulation {}\nReference command caps: {:.2} m/s² and {:.2} rad/s²\n{}",
         crate::controls::held_key_labels(keys),
         if playback.running {
             "running"
@@ -744,7 +704,7 @@ fn controller_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyC
         },
         config.lander.max_accel_mps2,
         config.lander.max_angular_accel_rad_s2,
-        thrust_profile_readout(playback)
+        reference_thrust_readout()
     )
 }
 
@@ -1034,14 +994,19 @@ mod interaction_tests {
             &playback,
             true
         ));
+        assert!(action_enabled(
+            HudAction::DebugUpright,
+            &hud,
+            &playback,
+            true
+        ));
         playback.can_control = false;
         for action in [
             HudAction::TogglePlayback,
             HudAction::AskReset,
+            HudAction::DebugUpright,
             HudAction::Export,
             HudAction::CycleRate,
-            HudAction::ToggleAutopilot,
-            HudAction::TogglePracticeBoost,
         ] {
             assert!(!action_enabled(action, &hud, &playback, false));
         }
@@ -1058,6 +1023,12 @@ mod interaction_tests {
             false
         ));
         hud.reset_confirm_open = true;
+        assert!(!action_enabled(
+            HudAction::DebugUpright,
+            &hud,
+            &playback,
+            false
+        ));
         assert!(!action_enabled(
             HudAction::ToggleControls,
             &hud,

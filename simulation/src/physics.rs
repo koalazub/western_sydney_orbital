@@ -5,10 +5,9 @@ use crate::mission::{self, FlightMetrics};
 use crate::model::{
     EntityState, Event, MissionState, Observation, PrimaryBody, Snapshot, ThrustApplication,
 };
-use crate::propulsion::{
-    accel_limit, accel_within_limits, applied_jets, applied_wrench, local_max_thrust_n,
-    space_shape_is_valid,
-};
+#[cfg(test)]
+use crate::propulsion::{accel_limit, space_shape_is_valid};
+use crate::propulsion::{accel_within_limits, applied_jets, applied_wrench, local_max_thrust_n};
 use crate::scenario::settings;
 use rapier3d_f64::prelude::*;
 use serde_json::{Value, json};
@@ -166,6 +165,9 @@ impl Simulation {
     pub fn mission_status(&self) -> MissionStatus {
         self.state.mission.status
     }
+    pub(crate) fn manual_interventions(&self) -> u32 {
+        self.state.manual_interventions
+    }
     pub fn observation(&self) -> Value {
         let shuttle = self
             .state
@@ -188,7 +190,39 @@ impl Simulation {
                 ])
             })
             .collect();
-        json!({"time_s":self.state.time_s,"seed":self.state.seed,"frame":self.state.frame,"environment":self.state.environment,"shuttle":shuttle,"target":target,"mission":self.state.mission,"radar":radar,"fuel_unlimited":settings().lander.fuel_unlimited,"max_accel_mps2":settings().lander.max_accel_mps2,"max_angular_accel_rad_s2":settings().lander.max_angular_accel_rad_s2})
+        let config = settings();
+        let surface_radius = shuttle.and_then(|ship| {
+            bevy::math::DVec3::from_array(ship.position)
+                .try_normalize()
+                .map(crate::terrain::surface_radius_m)
+        });
+        json!({
+            "time_s": self.state.time_s,
+            "seed": self.state.seed,
+            "manual_interventions": self.state.manual_interventions,
+            "frame": self.state.frame,
+            "rotation_convention": "active_xyzw",
+            "radar_clock": "simulation_elapsed_seconds",
+            "environment": self.state.environment,
+            "shuttle": shuttle,
+            "target": target,
+            "mission": self.state.mission,
+            "radar": radar,
+            "geometry": {
+                "phobos_enclosing_radius_m": crate::model::phobos_enclosing_radius_m(),
+                "terrain_radius_at_shuttle_m": surface_radius,
+                "arrival_radius_m": config.mission.arrival_radius_m,
+                "debris_count": config.debris.count,
+            },
+            "sensor_model": {
+                "range_noise_m": config.sensors.range_noise_m,
+                "range_rate_noise_mps": config.sensors.range_rate_noise_mps,
+                "diameter_noise_fraction": config.debris.diameter_noise_fraction,
+            },
+            "fuel_unlimited": config.lander.fuel_unlimited,
+            "max_accel_mps2": config.lander.max_accel_mps2,
+            "max_angular_accel_rad_s2": config.lander.max_angular_accel_rad_s2,
+        })
     }
     pub fn radar(&self, n: usize) -> Vec<Observation> {
         self.state
@@ -269,6 +303,61 @@ impl Simulation {
         lander.torque_nm = applied_wrench(&applied_jets(lander)).torque_body_nm;
         Ok(())
     }
+    /// Local test intervention, never an actuator command or a new flight.
+    /// Align to the actual pad body without translating or braking the lander.
+    pub fn debug_upright(&mut self) -> Result<(), String> {
+        let interventions = self.state.manual_interventions.checked_add(1).ok_or(
+            "Local test reset counter exhausted. Reset the run before using Upright lander.",
+        )?;
+        let lander_index = self
+            .state
+            .assets
+            .iter()
+            .position(|entity| entity.id == EntityId::Lander)
+            .ok_or("Upright lander unavailable: controlled lander missing. Reset the run.")?;
+        let pad_rotation = self
+            .handles
+            .get(&EntityId::LandingPad)
+            .and_then(|handle| self.bodies.get(*handle))
+            .map(|body| *body.rotation())
+            .ok_or("Upright lander unavailable: landing pad body missing. Reset the run.")?;
+        let lander_body = self
+            .handles
+            .get(&EntityId::Lander)
+            .and_then(|handle| self.bodies.get_mut(*handle))
+            .ok_or("Upright lander unavailable: lander body missing. Reset the run.")?;
+
+        // Rapier retains user forces until explicitly cleared. No integration,
+        // contact bookkeeping, mission assessment or sensor sampling runs here.
+        lander_body.set_rotation(pad_rotation, true);
+        lander_body.set_angvel(Vector::ZERO, true);
+        lander_body.reset_forces(false);
+        lander_body.reset_torques(false);
+        let q = lander_body.rotation();
+        let lander = &mut self.state.assets[lander_index];
+        lander.rotation = [q.x, q.y, q.z, q.w];
+        lander.angular_velocity_rad_s = [0.0; 3];
+        lander.commanded_accel_mps2 = [0.0; 3];
+        lander.commanded_angular_accel_rad_s2 = [0.0; 3];
+        lander.thrust_n = [0.0; 3];
+        lander.torque_nm = [0.0; 3];
+        if matches!(
+            lander.status,
+            EntityStatus::Thrusting | EntityStatus::Rotating
+        ) {
+            lander.status = EntityStatus::Coasting;
+        }
+        self.state.manual_interventions = interventions;
+        event(
+            &mut self.state,
+            EntityId::Lander,
+            "Local test: upright reset",
+        );
+        Ok(())
+    }
+    // Retained only to exercise old exported boost-mode states. Live controls
+    // and notebook commands use the reference actuator limit.
+    #[cfg(test)]
     pub(crate) fn set_space_thrust(&mut self, accel: [f64; 3]) -> Result<(), String> {
         // The input adapter has already scaled positive body-Z. This method must
         // never amplify horizontal motion or admit a boosted downward request.
@@ -317,6 +406,7 @@ impl Simulation {
             PhysicsCommand::Stop => {
                 self.set_command([0.0; 3], [0.0; 3])?;
             }
+            PhysicsCommand::DebugUpright => self.debug_upright()?,
         }
         Ok(self.snapshot())
     }
@@ -473,9 +563,6 @@ impl Simulation {
         }
     }
 
-    pub(crate) fn guidance_command(&self) -> Option<[f64; 3]> {
-        crate::guidance::approach(&self.state)
-    }
     fn update_mission(&mut self) {
         let (lander_position, lander_velocity) = self
             .state
@@ -581,18 +668,18 @@ impl Simulation {
                 relative_position_m: position,
                 // Analysis-only truth; observation() never exposes this field.
                 relative_velocity_mps: relative_velocity,
-                range_m: (range - debris.radius_m
-                    + gaussian(&mut self.rng) * cfg.sensors.range_noise_m)
-                    .max(0.0),
+                range_m: range - debris.radius_m
+                    + gaussian(&mut self.rng) * cfg.sensors.range_noise_m,
                 range_rate_mps: rate,
-                diameter_m: (debris.radius_m
+                diameter_m: debris.radius_m
                     * 2.0
-                    * (1.0 + gaussian(&mut self.rng) * cfg.debris.diameter_noise_fraction))
-                    .max(cfg.sensors.minimum_reported_diameter_m),
+                    * (1.0 + gaussian(&mut self.rng) * cfg.debris.diameter_noise_fraction),
                 measurement_time_s: self.state.time_s,
             });
         }
-        rows.sort_by(|a, b| a.range_m.total_cmp(&b.range_m));
+        // STU4-Sim c1e3fc8, Systems/Radar.py sorts noisy center position,
+        // independently of its unclipped closest-range and diameter samples.
+        rows.sort_by(|a, b| norm(a.relative_position_m).total_cmp(&norm(b.relative_position_m)));
         self.state.observations = rows;
     }
 }
@@ -679,6 +766,7 @@ fn initial(seed: u64) -> Snapshot {
         assets,
         events: vec![],
         collisions: 0,
+        manual_interventions: 0,
         mission: MissionState {
             shuttle_id: EntityId::Lander,
             target_id: EntityId::ReturnShip,
@@ -933,6 +1021,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             || e.t_s > s.time_s + settings().integration.fixed_step_s
             || (!ids.contains(&e.asset) && e.asset != EntityId::Phobos)
     }) || s.observations.iter().any(|o| {
+        // The published radar adds Gaussian noise without clipping these samples.
         ![
             o.range_m,
             o.range_rate_mps,
@@ -946,8 +1035,6 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                 .iter()
                 .chain(o.relative_velocity_mps.iter())
                 .all(|v| v.is_finite())
-            || o.range_m < 0.0
-            || o.diameter_m <= 0.0
             || !ids.contains(&o.id)
             || !s
                 .assets
@@ -1047,6 +1134,62 @@ fn vectors_match(a: [f64; 3], b: [f64; 3]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn public_observations_supply_known_geometry_without_hidden_obstacles_or_side_effects() {
+        let simulation = Simulation::new_default();
+        let before = serde_json::to_string(&simulation.snapshot()).unwrap();
+        let observation = simulation.observation();
+        assert_eq!(observation["manual_interventions"], 0);
+        assert_eq!(observation["rotation_convention"], "active_xyzw");
+        assert_eq!(observation["radar_clock"], "simulation_elapsed_seconds");
+        assert_eq!(
+            observation["geometry"]["debris_count"],
+            settings().debris.count
+        );
+        assert_eq!(
+            observation["geometry"]["arrival_radius_m"],
+            settings().mission.arrival_radius_m
+        );
+        assert_eq!(
+            observation["geometry"]["phobos_enclosing_radius_m"],
+            crate::model::phobos_enclosing_radius_m()
+        );
+        assert!(
+            observation["geometry"]["terrain_radius_at_shuttle_m"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        assert!(observation.get("assets").is_none());
+        let radar = observation["radar"].as_array().unwrap();
+        assert_eq!(radar.len(), settings().debris.radar_count);
+        let source = simulation.radar(settings().debris.radar_count);
+        assert!(source.windows(2).all(|pair| {
+            norm(pair[0].relative_position_m) <= norm(pair[1].relative_position_m)
+        }));
+        for (row, source) in radar.iter().zip(&source) {
+            assert_eq!(row.as_array().unwrap().len(), 3);
+            assert!(
+                row.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|part| part.as_array().unwrap().len() == 3)
+            );
+            assert_eq!(row[0], json!(source.relative_position_m));
+            assert_eq!(
+                row[1],
+                json!([source.range_m, source.range_rate_mps, source.diameter_m])
+            );
+            assert_eq!(row[2], json!([source.measurement_time_s, 0.0, 0.0]));
+            assert!(row.get("id").is_none());
+            assert!(row.get("relative_velocity_mps").is_none());
+        }
+        assert_eq!(
+            before,
+            serde_json::to_string(&simulation.snapshot()).unwrap()
+        );
+    }
+
     fn lander(sim: &Simulation) -> &EntityState {
         sim.state
             .assets
@@ -1084,6 +1227,332 @@ mod tests {
             (actual - expected).length() <= tolerance,
             "actual {actual:?}, expected {expected:?}, tolerance {tolerance}"
         );
+    }
+
+    fn tumble_with_real_nozzles(sim: &mut Simulation) {
+        let pad_up = *sim.bodies[sim.handles[&EntityId::LandingPad]].rotation() * Vector::Z;
+        let dt = settings().integration.fixed_step_s;
+        sim.set_manual_thrust([0.0, settings().lander.max_accel_mps2, 0.0])
+            .unwrap();
+        for _ in 0..(12.0 / dt).ceil() as usize {
+            sim.advance(dt);
+            let rb = rigid_body(sim);
+            if pad_up.dot(*rb.rotation() * Vector::Z) < 0.0 && rb.angvel().length() > 0.05 {
+                return;
+            }
+        }
+        panic!("the real manual side jets must create a tumbling lander");
+    }
+
+    #[test]
+    fn debug_upright_changes_actual_rotation_and_spin_without_braking_or_restarting() {
+        let mut sim = Simulation::new_default();
+        tumble_with_real_nozzles(&mut sim);
+        sim.set_command([0.2, 0.1, 0.0], [0.01, 0.0, 0.0]).unwrap();
+        let before = sim.snapshot();
+        let rb = rigid_body(&sim);
+        let before_position = rb.translation();
+        let before_velocity = rb.linvel();
+        let before_rotation = *rb.rotation();
+        let before_omega = rb.angvel();
+        let mass_properties = rb.mass_properties().local_mprops;
+        let pad_rotation = *sim.bodies[sim.handles[&EntityId::LandingPad]].rotation();
+        assert!(before_omega.length() > 0.05);
+        assert!((before_rotation * Vector::Z).dot(pad_rotation * Vector::Z) < 0.0);
+        assert!(rb.user_force().length() > 0.0);
+        assert!(rb.user_torque().length() > 0.0);
+        assert!(before.mission.fuel_used_kg > 0.0);
+
+        let after = sim.execute(PhysicsCommand::DebugUpright).unwrap();
+        let rb = rigid_body(&sim);
+        assert_eq!(*rb.rotation(), pad_rotation);
+        for axis in [Vector::X, Vector::Y, Vector::Z] {
+            assert_vector_close(*rb.rotation() * axis, pad_rotation * axis, 1e-12);
+        }
+        assert_ne!(*rb.rotation(), before_rotation);
+        assert_eq!(rb.angvel(), Vector::ZERO);
+        assert_eq!(rb.translation(), before_position);
+        assert_eq!(rb.linvel(), before_velocity);
+        assert_eq!(rb.user_force(), Vector::ZERO);
+        assert_eq!(rb.user_torque(), Vector::ZERO);
+        assert_eq!(rb.mass_properties().local_mprops, mass_properties);
+        let ship = lander(&sim);
+        assert_eq!(rotation(ship), *rb.rotation());
+        assert_eq!(ship.angular_velocity_rad_s, [0.0; 3]);
+        assert_eq!(ship.thrust_n, [0.0; 3]);
+        assert_eq!(ship.torque_nm, [0.0; 3]);
+        assert_eq!(ship.commanded_accel_mps2, [0.0; 3]);
+        assert_eq!(ship.commanded_angular_accel_rad_s2, [0.0; 3]);
+        assert!(applied_jets(ship).is_empty());
+        assert_eq!(after.manual_interventions, before.manual_interventions + 1);
+        let reset_event = after.events.last().unwrap();
+        assert_eq!(reset_event.t_s, before.time_s);
+        assert_eq!(reset_event.asset, EntityId::Lander);
+        assert_eq!(reset_event.message, "Local test: upright reset");
+        assert_eq!(sim.observation()["manual_interventions"], 1);
+
+        // Compare everything else, including contacts, sensor readings, RNG,
+        // mission outcome, hardware, mass, fuel, time and all other actors.
+        let mut expected = before;
+        let expected_ship = lander_mut(&mut expected);
+        expected_ship.rotation = ship.rotation;
+        expected_ship.angular_velocity_rad_s = [0.0; 3];
+        expected_ship.thrust_n = [0.0; 3];
+        expected_ship.torque_nm = [0.0; 3];
+        expected_ship.commanded_accel_mps2 = [0.0; 3];
+        expected_ship.commanded_angular_accel_rad_s2 = [0.0; 3];
+        expected_ship.status = EntityStatus::Coasting;
+        expected.manual_interventions += 1;
+        event(&mut expected, EntityId::Lander, "Local test: upright reset");
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn debug_upright_uses_the_restored_pad_axes_instead_of_default_launch_axes() {
+        let mut sim = Simulation::new_default();
+        let mut state = sim.snapshot();
+        let pad = state
+            .assets
+            .iter_mut()
+            .find(|e| e.id == EntityId::LandingPad)
+            .unwrap();
+        let pad_rotation = rotation(pad) * Rotation::from_rotation_z(0.7);
+        pad.rotation = [
+            pad_rotation.x,
+            pad_rotation.y,
+            pad_rotation.z,
+            pad_rotation.w,
+        ];
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(state),
+        })
+        .unwrap();
+        tumble_with_real_nozzles(&mut sim);
+        let actual_pad_rotation = *sim.bodies[sim.handles[&EntityId::LandingPad]].rotation();
+        let default = crate::model::landing_site().rotation;
+        assert_ne!(
+            [
+                actual_pad_rotation.x,
+                actual_pad_rotation.y,
+                actual_pad_rotation.z,
+                actual_pad_rotation.w
+            ],
+            default
+        );
+        sim.debug_upright().unwrap();
+        assert_eq!(*rigid_body(&sim).rotation(), actual_pad_rotation);
+        assert_eq!(rotation(lander(&sim)), actual_pad_rotation);
+        assert_eq!(rigid_body(&sim).angvel(), Vector::ZERO);
+    }
+
+    #[test]
+    fn debug_upright_preserves_a_real_terminal_collision_outcome_and_cannot_revive_it() {
+        let mut sim = Simulation::new_default();
+        let max_accel = settings().lander.max_accel_mps2;
+        let pad_up = *sim.bodies[sim.handles[&EntityId::LandingPad]].rotation() * Vector::Z;
+        sim.set_command([0.0, 0.0, max_accel], [0.0; 3]).unwrap();
+        sim.advance(8.0);
+        sim.set_manual_thrust([0.0, max_accel, 0.0]).unwrap();
+        sim.advance(1.0);
+        let handle = sim.handles[&EntityId::Lander];
+        let mass = sim.bodies[handle].mass();
+        // A real downward impulse produces a damaging Rapier contact. No pose,
+        // velocity report, damage counter or mission result is fabricated.
+        sim.bodies[handle].apply_impulse(-pad_up * mass * 60.0, true);
+        sim.advance(2.0);
+        assert_eq!(sim.mission_status(), MissionStatus::FailedDamage);
+        assert!(sim.state.mission.damage > settings().mission.impact_threshold_j);
+        assert!(sim.state.collisions > 0);
+        let before = sim.snapshot();
+        let position = rigid_body(&sim).translation();
+        let velocity = rigid_body(&sim).linvel();
+        let after = sim.execute(PhysicsCommand::DebugUpright).unwrap();
+        assert_eq!(
+            serde_json::to_value(&after.mission).unwrap(),
+            serde_json::to_value(&before.mission).unwrap()
+        );
+        assert_eq!(rigid_body(&sim).translation(), position);
+        assert_eq!(rigid_body(&sim).linvel(), velocity);
+        assert_eq!(after.time_s, before.time_s);
+        assert_eq!(after.collisions, before.collisions);
+        assert_eq!(after.active_contacts, before.active_contacts);
+        assert_eq!(after.manual_interventions, 1);
+        assert!(sim.set_command([0.0, 0.0, max_accel], [0.0; 3]).is_err());
+        let stopped = serde_json::to_value(sim.snapshot()).unwrap();
+        sim.advance(1.0);
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), stopped);
+    }
+
+    #[test]
+    fn debug_upright_counter_round_trips_defaults_for_old_snapshots_and_resets_with_a_new_run() {
+        let mut sim = Simulation::new_default();
+        sim.debug_upright().unwrap();
+        sim.debug_upright().unwrap();
+        assert_eq!(
+            sim.manual_interventions(),
+            2,
+            "even an already upright reset is an intervention"
+        );
+        let exported = serde_json::to_value(sim.snapshot()).unwrap();
+        assert_eq!(exported["manual_interventions"], 2);
+        let restored = serde_json::from_value(exported.clone()).unwrap();
+        sim.execute(PhysicsCommand::Reset { seed: None }).unwrap();
+        assert_eq!(sim.manual_interventions(), 0);
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(restored),
+        })
+        .unwrap();
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), exported);
+        assert_eq!(sim.observation()["manual_interventions"], 2);
+
+        let mut legacy = exported;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("manual_interventions");
+        let state = serde_json::from_value(legacy).unwrap();
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(state),
+        })
+        .unwrap();
+        assert_eq!(sim.manual_interventions(), 0);
+    }
+
+    #[test]
+    fn debug_upright_missing_bodies_or_exhausted_counter_do_not_partially_mutate() {
+        for invalid in 0..4 {
+            let mut sim = Simulation::new_default();
+            sim.set_manual_thrust([0.0, settings().lander.max_accel_mps2, 0.0])
+                .unwrap();
+            sim.advance(settings().integration.fixed_step_s);
+            let handle = sim.handles[&EntityId::Lander];
+            match invalid {
+                0 => {
+                    sim.handles.remove(&EntityId::LandingPad);
+                }
+                1 => {
+                    sim.handles.remove(&EntityId::Lander);
+                }
+                2 => sim
+                    .state
+                    .assets
+                    .retain(|entity| entity.id != EntityId::Lander),
+                3 => sim.state.manual_interventions = u32::MAX,
+                _ => unreachable!(),
+            }
+            let before_pose = *sim.bodies[handle].position();
+            let before_omega = sim.bodies[handle].angvel();
+            let before_force = sim.bodies[handle].user_force();
+            let before_torque = sim.bodies[handle].user_torque();
+            let before = serde_json::to_value(sim.snapshot()).unwrap();
+            assert!(sim.execute(PhysicsCommand::DebugUpright).is_err());
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+            assert_eq!(*sim.bodies[handle].position(), before_pose);
+            assert_eq!(sim.bodies[handle].angvel(), before_omega);
+            assert_eq!(sim.bodies[handle].user_force(), before_force);
+            assert_eq!(sim.bodies[handle].user_torque(), before_torque);
+        }
+    }
+
+    #[test]
+    fn radar_uses_noisy_center_sorting_and_unclipped_measurements_without_extra_rng_draws() {
+        let mut state = Simulation::new_default().snapshot();
+        let shuttle_position = lander_mut(&mut state).position;
+        let debris = state
+            .assets
+            .iter_mut()
+            .filter(|entity| entity.kind == EntityKind::Debris)
+            .take(settings().debris.radar_count)
+            .max_by(|a, b| a.radius_m.total_cmp(&b.radius_m))
+            .unwrap();
+        let nearby_id = debris.id;
+        debris.position = [
+            shuttle_position[0] + 0.5 * debris.radius_m,
+            shuttle_position[1],
+            shuttle_position[2],
+        ];
+        let mut sim = Simulation::from_state(state);
+        let mut expected_rng = sim.rng;
+        let shuttle = lander(&sim).clone();
+        let cfg = settings();
+        let mut expected = Vec::new();
+        for debris in sim
+            .state
+            .assets
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Debris)
+            .take(cfg.debris.radar_count)
+        {
+            let delta = sub(debris.position, shuttle.position);
+            let range = norm(delta);
+            let position = std::array::from_fn(|i| {
+                delta[i] + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m
+            });
+            let rate = dot(sub(debris.velocity, shuttle.velocity), delta) / range
+                + gaussian(&mut expected_rng) * cfg.sensors.range_rate_noise_mps;
+            let closest =
+                range - debris.radius_m + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m;
+            let diameter = debris.radius_m
+                * 2.0
+                * (1.0 + gaussian(&mut expected_rng) * cfg.debris.diameter_noise_fraction);
+            expected.push((debris.id, position, closest, rate, diameter));
+        }
+        expected.sort_by(|a, b| norm(a.1).total_cmp(&norm(b.1)));
+        sim.sample_radar();
+        assert_eq!(sim.rng, expected_rng);
+        for (actual, (id, position, closest, rate, diameter)) in
+            sim.state.observations.iter().zip(expected)
+        {
+            assert_eq!(actual.id, id);
+            assert_eq!(actual.relative_position_m, position);
+            assert_eq!(actual.range_m, closest);
+            assert_eq!(actual.range_rate_mps, rate);
+            assert_eq!(actual.diameter_m, diameter);
+        }
+        assert!(
+            sim.state
+                .observations
+                .iter()
+                .find(|row| row.id == nearby_id)
+                .unwrap()
+                .range_m
+                < 0.0
+        );
+        assert!(
+            sim.state
+                .observations
+                .windows(2)
+                .any(|pair| pair[0].range_m > pair[1].range_m),
+            "closest-range sorting must not replace noisy center sorting"
+        );
+    }
+
+    #[test]
+    fn restore_accepts_signed_radar_samples_but_keeps_finite_measurement_validation() {
+        let mut sim = Simulation::new_default();
+        let mut state = sim.snapshot();
+        state.observations[0].range_m = -1.0;
+        state.observations[0].diameter_m = -0.1;
+        validate(&state).unwrap();
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(state.clone()),
+        })
+        .unwrap();
+        assert_eq!(sim.snapshot().observations[0].range_m, -1.0);
+        assert_eq!(sim.snapshot().observations[0].diameter_m, -0.1);
+        state.observations[0].diameter_m = 0.0;
+        validate(&state).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            state.observations[0].range_m = invalid;
+            assert!(validate(&state).is_err());
+            state.observations[0].range_m = -1.0;
+            state.observations[0].diameter_m = invalid;
+            assert!(validate(&state).is_err());
+            state.observations[0].diameter_m = -0.1;
+        }
     }
 
     #[test]

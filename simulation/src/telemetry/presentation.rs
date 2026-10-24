@@ -52,7 +52,7 @@ pub(super) fn expanded(report: &Report) -> String {
     let mode = match report.actuation.thrust_application {
         Some(ThrustApplication::CenterOfMass) => "center of mass",
         Some(ThrustApplication::ManualNozzles) => "manual nozzles",
-        Some(ThrustApplication::PracticeBoost) => "practice boost",
+        Some(ThrustApplication::PracticeBoost) => "archived practice-boost state",
         None => "n/a",
     };
     let acceleration_state = match a.status {
@@ -77,7 +77,7 @@ pub(super) fn expanded(report: &Report) -> String {
         .angular_speed_rad_s
         .and_then(|value| super::calculations::finite(value.to_degrees()));
     format!(
-        "Local flight telemetry | {availability}\n{}\nTarget center range {} m | closing {} m/s, + toward target\nForce {} N | torque {} N m | mode {mode}\nSpin {} deg/s | fuel used ~{} kg | damage ~{} J\nObserved mean frame accel {} m/s² over {} s\nInterval {} to {} s | {acceleration_state}\nIncludes gravity/contacts/frame terms, not thrust alone\nSampled peaks: speed {} m/s | climb {} m/s | terrain-center {} m\nSimulation {} s | observed epoch {} s\n{frame}\nSpeed is rotating-frame, not inertial. Radial center clearance is not feet/pad clearance.\nOwn ship, mission target and known terrain only; no hidden debris or camera speed.\nLocal practice only, not STP parity. Reference limit {} m/s²; practice boost {} m/s².\nFuel and contact damage are local estimates. Peaks cover received samples only.",
+        "Local flight telemetry | {availability}\n{}\nTarget center range {} m | closing {} m/s, + toward target\nForce {} N | torque {} N m | mode {mode}\nSpin {} deg/s | fuel used ~{} kg | damage ~{} J\nObserved mean frame accel {} m/s² over {} s\nInterval {} to {} s | {acceleration_state}\nIncludes gravity/contacts/frame terms, not thrust alone\nSampled peaks: speed {} m/s | climb {} m/s | terrain-center {} m\nSimulation {} s | observed epoch {} s\n{frame}\nSpeed is rotating-frame, not inertial. Radial center clearance is not feet/pad clearance.\nOwn ship, mission target and known terrain only; no hidden debris or camera speed.\nReference API limit {} m/s². Guidance belongs to the Python notebook.\nFuel and contact damage are local estimates. Peaks cover received samples only.",
         compact(report),
         Number(m.target_center_range_m, 1),
         Number(m.target_closing_mps, 2),
@@ -96,6 +96,5 @@ pub(super) fn expanded(report: &Report) -> String {
         Number(report.source_time_s, 2),
         Number(report.epoch.observed_duration_s, 2),
         Number(report.caveats.reference_command_limit_mps2, 2),
-        Number(report.caveats.practice_boost_limit_mps2, 2),
     )
 }

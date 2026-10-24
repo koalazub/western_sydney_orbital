@@ -20,14 +20,15 @@
       <button id="retry-world" type="button" hidden>Reload simulation</button>
     </section>
     <p id="camera-instructions" class="screen-reader-only">
-      Click or focus the canvas to use game controls. H shows or hides controls, held inputs and controller settings. F always follows the lander again; Shift+F frames the selected object.
-      A fresh Space press launches a paused lander and fires upward thrust while held. P runs or pauses. Space defaults to a four-times-power local practice boost; select reference thrust in Controls or Details and reset before comparing strategies.
-      WASD applies body-frame forces at offset nozzles: W/S forward/back, A/D left/right. E/Q fires reference up/down thrust. Releasing keys stops thrust, not velocity or spin. Manual thrust takes over from the example controller.
+      Click or focus the canvas to use game controls. H shows or hides controls, held inputs and input settings. F always follows the lander again; Shift+F frames the selected object.
+      A fresh Space press launches a paused lander and fires upward thrust while held. P runs or pauses. Space and E use the same reference acceleration limit of 0.5 metres per second squared.
+      WASD applies body-frame forces at offset nozzles: W/S forward/back, A/D left/right. E/Q fires reference up/down thrust. Releasing keys stops thrust, not velocity or spin. Ship keys replace the current command with manual nozzle forces.
+      H also shows Upright lander, a local test reset, not a competition maneuver. It pauses, aligns the real lander to the launchpad, stops spin and clears thrust without changing position, linear velocity, time, fuel, damage or mission outcome. Each use records a manual intervention so notebook experiments can stop. Release movement keys before flying again.
       Hold Alt, called Option on macOS, with movement keys to move only the debug camera. Shift boosts debug movement only. Left drag orbits or looks, right/middle drag pans, and wheel or pinch adjusts the debug view.
       Keys 1 through 5 select orbit, debug first person, third person, free flight and overview. Keys 6 and 7 show genuine top and bottom ship sensors at 512 by 512 pixels, 8 bits per RGB channel and fixed exposure. Debug controls, HUD metrics, path markers and exhaust cues never modify those pixels.
       The flight HUD shows actual speed/climb in metres per second, terrain-centre clearance in metres and thrust acceleration. Details and Export include force, torque, spin, target range/closing, peaks and estimated fuel/damage. These are local rotating-frame measurements, not STP-equivalent physics.
       Period steps, T changes playback rate, R opens reset confirmation and I opens the inspector. M maximizes; X or Fullscreen enters browser fullscreen. Tab selects game controls and Enter activates them. Space is lift, not button activation. Esc closes panels or releases the view.
-      The advisory planner does not control the lander. The browser uses local practice APIs; the separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
+      Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
   </main>

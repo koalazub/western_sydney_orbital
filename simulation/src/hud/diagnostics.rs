@@ -79,11 +79,12 @@ fn record(
                 match (readout, action) {
                     (Some(Readout::TelemetryBrief), _) => Some("flight_metrics"),
                     (Some(Readout::Summary), _) => Some("mission_summary"),
-                    (Some(Readout::ControllerSettings), _) => Some("controller_settings"),
+                    (Some(Readout::InputSettings), _) => Some("input_settings"),
                     (_, Some(HudAction::TogglePlayback)) => Some("run_pause"),
                     (_, Some(HudAction::ToggleDetails)) => Some("details"),
                     (_, Some(HudAction::ToggleControls)) => Some("controls_help"),
                     (_, Some(HudAction::FollowLander)) => Some("follow_lander"),
+                    (_, Some(HudAction::DebugUpright)) => Some("debug_upright"),
                     _ => None,
                 }
             };

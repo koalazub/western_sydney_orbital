@@ -11,20 +11,6 @@
     "phobos_rotation_period_s": 27540.0
   },
   "integration": { "fixed_step_s": 0.05, "maximum_command_step_s": 30.0 },
-  "guidance": { "cadence_hz": 1.0, "position_gain_s2": 0.0012, "velocity_gain_s": 0.07, "avoidance_range_m": 70.0, "avoidance_accel_mps2": 0.7 },
-  "path_planning": {
-    "replan_interval_s": 0.5,
-    "cell_size_m": 40.0,
-    "corridor_half_width_m": 800.0,
-    "max_nodes": 50000,
-    "max_expansions": 12000,
-    "expansions_per_frame": 256,
-    "clearance_m": 8.0,
-    "forecast_horizon_s": 3.6,
-    "max_measurement_age_s": 5.4,
-    "unknown_tangential_speed_mps": 12.0,
-    "sigma_multiplier": 3.0
-  },
   "lander": {
     "mass_kg": 3388.7,
     "fuel_unlimited": true,
@@ -50,12 +36,12 @@
   },
   "practice": {
     "space_lift_accel_mps2": 2.0,
-    "space_boost_enabled": true
+    "space_boost_enabled": false
   },
   "pad": { "half_extents_m": [20.0,20.0,1.0], "lander_clearance_m": 5.85,"fixed_mass_kg":1.0e12 },
   "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 1.15, "nominal_time_s": 120.0,"score_offset":0.5 },
   "debris": { "count": 500, "x_min_m": 13600.0, "x_span_m": 5000.0, "y_half_width_m": 450.0, "z_half_width_m": 450.0, "speed_min_mps": 0.25, "speed_span_mps": 0.65, "radius_min_m": 0.4, "radius_span_m": 40.0, "density_kg_m3": 500.0, "spin_max_rad_s": 0.2, "radar_count": 200, "diameter_noise_fraction": 0.05 },
-  "sensors": { "range_noise_m": 2.0, "range_rate_noise_mps": 0.02, "cadence_hz": 10.0, "minimum_reported_diameter_m": 0.01 },
+  "sensors": { "range_noise_m": 2.0, "range_rate_noise_mps": 0.02, "cadence_hz": 10.0 },
   "ship_cameras": {
     "resolution_px": [512, 512],
     "field_of_view_deg": 60.0,

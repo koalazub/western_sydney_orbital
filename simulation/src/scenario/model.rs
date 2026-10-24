@@ -8,8 +8,6 @@ pub struct Scenario {
     pub frame_description: String,
     pub gravity: Gravity,
     pub integration: Integration,
-    pub guidance: Guidance,
-    pub path_planning: PathPlanning,
     pub lander: Lander,
     pub debug_thrust: DebugThrust,
     pub practice: Practice,
@@ -38,32 +36,6 @@ pub struct Gravity {
 pub struct Integration {
     pub fixed_step_s: f64,
     pub maximum_command_step_s: f64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-pub struct Guidance {
-    pub cadence_hz: f64,
-    pub position_gain_s2: f64,
-    pub velocity_gain_s: f64,
-    pub avoidance_range_m: f64,
-    pub avoidance_accel_mps2: f64,
-}
-
-/// Advisory search settings. These never set vehicle speed, force or attributes.
-/// Unobserved velocity is an explicit planning allowance, not a measured bound.
-#[derive(Clone, Copy, Debug, Deserialize)]
-pub struct PathPlanning {
-    pub replan_interval_s: f64,
-    pub cell_size_m: f64,
-    pub corridor_half_width_m: f64,
-    pub max_nodes: usize,
-    pub max_expansions: usize,
-    pub expansions_per_frame: usize,
-    pub clearance_m: f64,
-    pub forecast_horizon_s: f64,
-    pub max_measurement_age_s: f64,
-    pub unknown_tangential_speed_mps: f64,
-    pub sigma_multiplier: f64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -145,7 +117,6 @@ pub struct Sensors {
     pub range_noise_m: f64,
     pub range_rate_noise_mps: f64,
     pub cadence_hz: f64,
-    pub minimum_reported_diameter_m: f64,
 }
 
 /// Fixed optics for two RGB8 sensors. Each color channel has eight bits.

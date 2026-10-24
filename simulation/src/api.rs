@@ -24,6 +24,7 @@ pub(crate) enum ApiRequest {
         angular_accel: [f64; 3],
     },
     Stop,
+    DebugUpright,
     View {
         mode: Option<CameraMode>,
         focus: Option<crate::domain::EntityId>,
@@ -56,6 +57,7 @@ impl ApiRequest {
                 angular_accel,
             }),
             Self::Stop => Dispatch::Physics(PhysicsCommand::Stop),
+            Self::DebugUpright => Dispatch::Physics(PhysicsCommand::DebugUpright),
             Self::View { mode, focus, zoom } => Dispatch::View(CameraRequest { mode, focus, zoom }),
             Self::Play { rate } => Dispatch::Action(EngineAction::Play(
                 PlaybackRate::try_from(rate.unwrap_or(1.0)).map_err(str::to_owned)?,
@@ -76,5 +78,27 @@ pub(crate) fn execute(json: &str) -> String {
     match result {
         Ok(state) => serde_json::json!({"ok":true,"state":state.as_ref()}).to_string(),
         Err(error) => serde_json::json!({"ok":false,"error":error}).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_upright_is_a_distinct_local_physics_request_not_a_control_policy() {
+        let request: ApiRequest = serde_json::from_str(r#"{"op":"debug_upright"}"#).unwrap();
+        assert!(matches!(
+            request.into_dispatch().unwrap(),
+            Dispatch::Physics(PhysicsCommand::DebugUpright)
+        ));
+        let command: PhysicsCommand = serde_json::from_str(r#"{"op":"debug_upright"}"#).unwrap();
+        assert!(matches!(command, PhysicsCommand::DebugUpright));
+        for unsupported in ["autopilot", "boost", "upright", "set_autopilot"] {
+            assert!(
+                serde_json::from_value::<ApiRequest>(serde_json::json!({"op": unsupported}))
+                    .is_err()
+            );
+        }
     }
 }

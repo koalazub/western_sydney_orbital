@@ -8,6 +8,18 @@ pub fn phobos_radii_m() -> [f64; 3] {
     crate::scenario::settings().gravity.phobos_radii_m
 }
 
+/// Known world geometry for external planners, not an obstacle estimate.
+pub fn phobos_enclosing_radius_m() -> f64 {
+    static RADIUS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *RADIUS.get_or_init(|| {
+        phobos_geometry()
+            .0
+            .into_iter()
+            .map(|[x, y, z]| x.hypot(y).hypot(z))
+            .fold(0.0, f64::max)
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub model: String,
@@ -20,6 +32,9 @@ pub struct Snapshot {
     pub assets: Vec<EntityState>,
     pub events: Vec<Event>,
     pub collisions: u32,
+    /// Local debug resets, not competition control commands. Preserved on restore.
+    #[serde(default)]
+    pub manual_interventions: u32,
     #[serde(default)]
     pub mission: MissionState,
     #[serde(default)]
@@ -49,6 +64,7 @@ pub enum PhysicsCommand {
         angular_accel: [f64; 3],
     },
     Stop,
+    DebugUpright,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

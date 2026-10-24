@@ -5,7 +5,7 @@ use bevy::prelude::*;
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<Tracker>().add_systems(
         Update,
-        update.in_set(EngineSet::Planning).after(EngineSet::Runtime),
+        update.in_set(EngineSet::Reports).after(EngineSet::Runtime),
     );
 }
 

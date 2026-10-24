@@ -54,8 +54,8 @@ pub(super) fn setup(
                         children![
                             (text("Phobos practice | T+00:00:00 | paused", CAPTION_SIZE_PX, TEXT), Readout::Summary),
                             (text("Waiting for flight telemetry", COPY_SIZE_PX, TEXT), Readout::TelemetryBrief),
-                            (text("", CAPTION_SIZE_PX, MUTED), Readout::ThrustProfile),
-                            (text("Path preview | waiting for radar", CAPTION_SIZE_PX, MUTED), Readout::PathBrief),
+                            (text("", CAPTION_SIZE_PX, MUTED), Readout::ReferenceThrust),
+                            (text("Python path preview | none received", CAPTION_SIZE_PX, MUTED), Readout::PathBrief),
                         ],
                     ),
                     (
@@ -95,7 +95,7 @@ pub(super) fn setup(
                         LayoutPart::CameraPanel,
                         children![
                             (text("Orbit | Lander", CAPTION_SIZE_PX, MUTED), Readout::CameraMode),
-                            text("WASD lander | Space lift | Alt/Option debug | P pause", CAPTION_SIZE_PX, MUTED),
+                            text("WASD lander | Space reference lift | Alt/Option debug | P pause", CAPTION_SIZE_PX, MUTED),
                             (
                                 button_row(),
                                 Pickable::IGNORE,
@@ -135,8 +135,6 @@ pub(super) fn setup(
                             button("Reset [R]", HudAction::AskReset, Readout::Static),
                             button("Export", HudAction::Export, Readout::Static),
                             button("Rate [T]", HudAction::CycleRate, Readout::Rate),
-                            button("Example controller", HudAction::ToggleAutopilot, Readout::Autopilot),
-                            button("Use reference Space thrust", HudAction::TogglePracticeBoost, Readout::BoostToggle),
                             button("Maximize [M]", HudAction::Maximize, Readout::Maximize),
                         ],
                     ),
@@ -175,22 +173,22 @@ pub(super) fn setup(
             (
                 side_panel(Overlay::Controls),
                 children![
-                    text("Controls and controller settings [H]", COPY_SIZE_PX, TEXT),
+                    text("Controls and input settings [H]", COPY_SIZE_PX, TEXT),
                     text("H or Esc closes. Scroll for all settings; Page Up/Down works from a focused control.", CAPTION_SIZE_PX, MUTED),
                     (
                         button_row(),
                         children![
+                            button("Upright lander · test reset", HudAction::DebugUpright, Readout::Static),
                             button("Follow lander [F]", HudAction::FollowLander, Readout::Static),
-                            button("Example controller", HudAction::ToggleAutopilot, Readout::Autopilot),
-                            button("Use reference Space thrust", HudAction::TogglePracticeBoost, Readout::BoostToggle),
                             button("Close controls [H]", HudAction::ToggleControls, Readout::ControlsToggle),
                         ],
                     ),
-                    (text("Loading current input state", COPY_SIZE_PX, TEXT), Readout::ControllerSettings),
-                    text("Space launches/lifts | W/S forward/back | A/D left/right | E/Q up/down\nF follows the lander | Shift+F frames the selected object\nAlt/Option + movement keys: debug camera only | Shift boosts debug movement\nP pause/run | R reset | T rate | L capture/release\n1 orbit | 2 debug FP | 3 third-person | 4 free | 5 overview | 6/7 ship sensors\nTab selects controls | Enter activates | H or Esc closes", CAPTION_SIZE_PX, MUTED),
-                    text("Manual thrust takes over from the example controller. Offset side jets can roll or topple the lander. Release keys to stop thrust, not velocity or spin. This panel does not pause flight.", CAPTION_SIZE_PX, MUTED),
-                    text("Amber line: advisory path. Blue-white exhaust: actual-force debug cue. Neither is added to the fixed 512 x 512 RGB8 ship-camera images.", CAPTION_SIZE_PX, MUTED),
-                    text("The planner does not control the lander. The browser uses local practice physics, not the STP SDK.", CAPTION_SIZE_PX, MUTED),
+                    text("Upright lander is a local test reset, not a competition maneuver or controller command. It pauses, matches launchpad rotation, stops spin and clears thrust. Position, linear velocity, time, fuel, damage and mission outcome stay unchanged. Each reset is recorded so notebook experiments can stop. Release movement keys before flying again.", CAPTION_SIZE_PX, MUTED),
+                    (text("Loading current input state", COPY_SIZE_PX, TEXT), Readout::InputSettings),
+                    text("Space launches/lifts at reference thrust | W/S forward/back | A/D left/right | E/Q up/down\nF follows the lander | Shift+F frames the selected object\nAlt/Option + movement keys: debug camera only | Shift boosts debug movement\nP pause/run | R reset | T rate | L capture/release\n1 orbit | 2 debug FP | 3 third-person | 4 free | 5 overview | 6/7 ship sensors\nTab selects controls | Enter activates | H or Esc closes", CAPTION_SIZE_PX, MUTED),
+                    text("Flight algorithms, predictions and controller scheduling belong in the Python notebook. Ship keys replace the current command with manual nozzle forces. Offset side jets can roll or topple the lander. Release keys to stop thrust, not velocity or spin. Opening this panel does not pause flight.", CAPTION_SIZE_PX, MUTED),
+                    text("Amber line: Python notebook path preview. Blue-white exhaust: actual-force debug cue. Neither is added to the fixed 512 x 512 RGB8 ship-camera images.", CAPTION_SIZE_PX, MUTED),
+                    text("The browser runs local physics, sensors and rendering, not the STP SDK. Notebook pause and step controls affect this local model only.", CAPTION_SIZE_PX, MUTED),
                 ],
             ),
             (

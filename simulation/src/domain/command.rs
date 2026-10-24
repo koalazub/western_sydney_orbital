@@ -57,9 +57,7 @@ pub enum EngineAction {
     Pause,
     Step,
     Reset,
-    ToggleAutopilot,
-    TogglePracticeBoost,
-    ManualControl,
+    DebugUpright,
     CycleRate,
     Viewport(ViewportAction),
 }
