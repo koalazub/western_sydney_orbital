@@ -2,18 +2,23 @@ use super::{Movement, MovementTarget, PilotContext, PilotEffect};
 
 #[derive(Default)]
 pub(crate) struct KeyboardPilot {
-    command: Option<[f64; 3]>,
-    inhibited: bool,
-    pending_release: bool,
+    state: PilotState,
+}
+
+#[derive(Default)]
+enum PilotState {
+    #[default]
+    Ready,
+    CommandOwned,
+    AwaitingKeyRelease,
+    PendingCommandRelease,
 }
 
 impl KeyboardPilot {
     /// A fresh, authorized Space press explicitly starts a new manual launch.
     /// This is not called for held keys, focus recovery or modifier handoffs.
     pub(crate) fn rearm_for_launch(&mut self) {
-        self.command = None;
-        self.pending_release = false;
-        self.inhibited = false;
+        self.state = PilotState::Ready;
     }
 
     pub(crate) fn update(
@@ -26,30 +31,33 @@ impl KeyboardPilot {
             // We cannot write into a view-only world, but the last force is
             // still installed. Clear it before physics resumes on regaining
             // authority, unless an external command/reset supersedes it first.
-            self.pending_release |= self.command.take().is_some();
-            self.inhibited = true;
+            self.state = if self.has_installed_command() {
+                PilotState::PendingCommandRelease
+            } else {
+                PilotState::AwaitingKeyRelease
+            };
             return PilotEffect::None;
         }
 
         let ready = context.active && context.running && context.mission_running && !context.modal;
-        if !ready && (movement.held || self.owns_command()) {
-            self.inhibited = true;
+        if self.requires_release() || (!ready && (movement.held || self.owns_command())) {
+            let effect = self.release_command();
+            // A paused held key also needs a release. Zero net axes are not a release.
+            self.state = if !movement.held && context.active && !context.modal {
+                PilotState::Ready
+            } else {
+                PilotState::AwaitingKeyRelease
+            };
+            return effect;
         }
-        // A paused held key also needs a release. Zero net axes are not a release.
-        if !movement.held && context.active && !context.modal {
-            self.inhibited = false;
-        }
-        if std::mem::take(&mut self.pending_release) {
-            return PilotEffect::ReleaseCommand;
-        }
-        if !ready || self.inhibited || !movement.held {
+        if !ready || !movement.held {
             return self.release_command();
         }
 
         match movement.target {
             MovementTarget::Ship => match bounded_command(movement.axes, max_accel_mps2) {
                 Some(command) => {
-                    self.command = Some(command);
+                    self.state = PilotState::CommandOwned;
                     PilotEffect::SetCommand(command)
                 }
                 None => self.release_command(),
@@ -61,27 +69,33 @@ impl KeyboardPilot {
 
     /// Forget ownership without releasing a command installed by an external source.
     pub(crate) fn cancel_until_release(&mut self) {
-        self.command = None;
-        self.inhibited = true;
-        self.pending_release = false;
+        self.state = PilotState::AwaitingKeyRelease;
     }
 
     pub(crate) fn owns_command(&self) -> bool {
-        self.command.is_some()
+        matches!(self.state, PilotState::CommandOwned)
     }
 
     pub(crate) fn has_installed_command(&self) -> bool {
-        self.owns_command() || self.pending_release
+        matches!(
+            self.state,
+            PilotState::CommandOwned | PilotState::PendingCommandRelease
+        )
     }
 
     pub(crate) fn requires_release(&self) -> bool {
-        self.inhibited
+        matches!(
+            self.state,
+            PilotState::AwaitingKeyRelease | PilotState::PendingCommandRelease
+        )
     }
 
     fn release_command(&mut self) -> PilotEffect {
-        match self.command.take() {
-            Some(_) => PilotEffect::ReleaseCommand,
-            None => PilotEffect::None,
+        if self.has_installed_command() {
+            self.state = PilotState::Ready;
+            PilotEffect::ReleaseCommand
+        } else {
+            PilotEffect::None
         }
     }
 }
@@ -123,6 +137,7 @@ mod tests {
     const ALT: u16 = 1 << 6;
     const SHIFT: u16 = 1 << 7;
     const BLOCKED_CTRL_META: u16 = 1 << 8;
+    const SPACE: u16 = 1 << 9;
 
     fn ready() -> PilotContext {
         PilotContext {
@@ -368,6 +383,55 @@ mod tests {
     }
 
     #[test]
+    fn authority_return_releases_pending_thrust_but_only_active_key_up_rearms() {
+        for context in [
+            ready(),
+            PilotContext {
+                active: false,
+                ..ready()
+            },
+            PilotContext {
+                running: false,
+                ..ready()
+            },
+            PilotContext {
+                modal: true,
+                ..ready()
+            },
+            PilotContext {
+                mission_running: false,
+                ..ready()
+            },
+        ] {
+            let mut pilot = KeyboardPilot::default();
+            command(pilot.update(decode(W), ready(), 10.0));
+            pilot.update(
+                decode(W),
+                PilotContext {
+                    can_control: false,
+                    ..ready()
+                },
+                10.0,
+            );
+            assert_eq!(
+                pilot.update(decode(0), context, 10.0),
+                PilotEffect::ReleaseCommand
+            );
+            assert!(!pilot.has_installed_command());
+            let rearmed = context.active && !context.modal;
+            assert_eq!(pilot.requires_release(), !rearmed);
+            assert_eq!(
+                pilot.update(decode(W), ready(), 10.0),
+                if rearmed {
+                    PilotEffect::SetCommand([10.0, 0.0, 0.0])
+                } else {
+                    PilotEffect::None
+                }
+            );
+        }
+    }
+
+    #[test]
     fn external_cancellation_discards_ownership_without_releasing_external_commands() {
         for initially_owned in [false, true] {
             let mut pilot = KeyboardPilot::default();
@@ -410,6 +474,32 @@ mod tests {
         };
         assert_eq!(pilot.update(decode(0), paused, 10.0), PilotEffect::None);
         command(pilot.update(decode(W), ready(), 10.0));
+    }
+
+    #[test]
+    fn fresh_launch_clears_ownership_inhibition_and_pending_command_release() {
+        for context in [
+            ready(),
+            PilotContext {
+                running: false,
+                ..ready()
+            },
+            PilotContext {
+                can_control: false,
+                ..ready()
+            },
+        ] {
+            let mut pilot = KeyboardPilot::default();
+            command(pilot.update(decode(W), ready(), 10.0));
+            pilot.update(decode(W), context, 10.0);
+            pilot.rearm_for_launch();
+            assert!(!pilot.has_installed_command());
+            assert!(!pilot.requires_release());
+            assert_eq!(
+                pilot.update(decode(SPACE), ready(), 10.0),
+                PilotEffect::SetCommand([0.0, 0.0, 10.0])
+            );
+        }
     }
 
     #[test]

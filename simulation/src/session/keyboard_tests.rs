@@ -76,6 +76,38 @@ fn keyboard_owns_command() -> bool {
 }
 
 #[test]
+fn runtime_report_preserves_its_json_contract_and_actual_keyboard_state() {
+    let mut app = running_app();
+    set_viewport(true, false, "Flight controls ready");
+    press(&mut app, &[KeyCode::KeyW]);
+    frame(&mut app, STEP);
+    let config = scenario::settings();
+    let report: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "running": true,
+            "autopilot": false,
+            "practice_boost": config.practice.space_boost_enabled,
+            "reference_accel_limit_mps2": config.lander.max_accel_mps2,
+            "practice_space_accel_mps2": config.practice.space_lift_accel_mps2,
+            "keyboard_thrust": true,
+            "keyboard_requires_release": false,
+            "rate": 1.0,
+            "can_control": true,
+            "fullscreen": true,
+            "maximized": false,
+            "message": "Flight controls ready",
+        })
+    );
+    release(&mut app, &[KeyCode::KeyW]);
+    frame(&mut app, STEP);
+    let released: serde_json::Value = serde_json::from_str(&runtime_report()).unwrap();
+    assert_eq!(released["keyboard_thrust"], false);
+    assert_eq!(released["message"], report["message"]);
+}
+
+#[test]
 fn running_ship_keys_take_over_before_the_first_physics_step_without_shift_boost() {
     let max_accel = scenario::settings().lander.max_accel_mps2;
     for (key, shift, command) in [

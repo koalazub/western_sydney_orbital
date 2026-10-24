@@ -17,7 +17,6 @@ use std::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-#[derive(Clone)]
 struct ViewportState {
     fullscreen: bool,
     maximized: bool,
@@ -90,8 +89,24 @@ pub(crate) fn set_viewport(fullscreen: bool, maximized: bool, message: &str) {
 pub(crate) fn runtime_report() -> String {
     RUNTIME.with(|state| {
         let state = state.borrow();
-        let keyboard_thrust = KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command()) && state.running;
-        serde_json::json!({"running":state.running,"autopilot":state.autopilot,"practice_boost":state.practice_boost,"reference_accel_limit_mps2":scenario::settings().lander.max_accel_mps2,"practice_space_accel_mps2":scenario::settings().practice.space_lift_accel_mps2,"keyboard_thrust":keyboard_thrust,"keyboard_requires_release":keyboard_requires_release(),"rate":state.rate.factor(),"can_control":state.can_control,"fullscreen":state.fullscreen,"maximized":state.maximized,"message":state.message}).to_string()
+        let config = scenario::settings();
+        let keyboard_thrust =
+            KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command()) && state.running;
+        serde_json::json!({
+            "running": state.running,
+            "autopilot": state.autopilot,
+            "practice_boost": state.practice_boost,
+            "reference_accel_limit_mps2": config.lander.max_accel_mps2,
+            "practice_space_accel_mps2": config.practice.space_lift_accel_mps2,
+            "keyboard_thrust": keyboard_thrust,
+            "keyboard_requires_release": keyboard_requires_release(),
+            "rate": state.rate.factor(),
+            "can_control": state.can_control,
+            "fullscreen": state.fullscreen,
+            "maximized": state.maximized,
+            "message": state.message,
+        })
+        .to_string()
     })
 }
 
@@ -166,10 +181,12 @@ pub(crate) fn advance_world(
     let movement = crate::controls::movement(&keys);
     let space_down = crate::controls::lift_key_down(&keys);
     let fresh_space = SPACE_HELD.with(|held| !held.replace(space_down) && space_down);
-    let context = VIEWPORT.with(|context| context.borrow().clone());
-    state.fullscreen = context.fullscreen;
-    state.maximized = context.maximized;
-    state.message = context.message;
+    VIEWPORT.with(|context| {
+        let context = context.borrow();
+        state.fullscreen = context.fullscreen;
+        state.maximized = context.maximized;
+        state.message.clone_from(&context.message);
+    });
     let actions: Vec<_> = ACTIONS.with(|queue| queue.borrow_mut().drain(..).collect());
     let explicit_playback_action = actions.iter().any(|action| {
         matches!(
