@@ -68,10 +68,6 @@ artifact-size:
 web-build:
     nix shell --impure .#game --command npm --prefix worker run build:web
 
-# Remove editor-only dependencies from the canvas-only browser application.
-web-cleanup:
-    nix shell --impure .#game --command npm --prefix worker uninstall @codemirror/lang-python codemirror y-codemirror.next y-protocols
-
 # Run the built game locally. This never deploys to Cloudflare.
 local: build
     nix shell --impure .#game --command npm --prefix worker run local
@@ -190,7 +186,7 @@ login-cf:
 login-wrangler:
     nix shell --impure .#game --command npm --prefix worker run login:wrangler
 
-# Owner-controlled release only. Never a dependency of local/check/preview.
+# Owner-controlled release only. Never a dependency of local/check.
 deploy:
     nix shell --impure .#game --command npm --prefix worker run deploy
 

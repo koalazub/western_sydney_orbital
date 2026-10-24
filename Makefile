@@ -1,4 +1,4 @@
-.PHONY: setup test lint fmt check campaign notebook serve clean login-cf login-wrangler account build deploy preview beads-sync
+.PHONY: setup test lint fmt check campaign notebook serve clean login-cf login-wrangler account build deploy beads-sync
 
 setup:
 	uv sync --locked
@@ -40,9 +40,6 @@ build:
 
 deploy:
 	npm --prefix worker run deploy
-
-preview:
-	npm --prefix worker run preview -- --run-strategy
 
 beads-sync:
 	bd export -o .beads/issues.jsonl --sandbox

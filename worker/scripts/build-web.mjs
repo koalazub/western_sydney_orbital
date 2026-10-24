@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdir, copyFile } from "node:fs/promises";
+import { mkdir, copyFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -9,6 +9,8 @@ const source = resolve(root, "web");
 const output = resolve(root, "public");
 
 await mkdir(output, { recursive: true });
+// Remove the retired generated runner from incremental builds, not other assets.
+await rm(resolve(output, "python-worker.js"), { force: true });
 await Promise.all([
   copyFile(resolve(source, "index.html"), resolve(output, "index.html")),
   copyFile(resolve(source, "styles.css"), resolve(output, "styles.css")),
@@ -20,15 +22,6 @@ await build({
   bundle: true,
   external: ["/sim/*"],
   format: "esm",
-  target: "es2022",
-  minify: true,
-});
-await build({
-  entryPoints: [resolve(source, "python-worker.ts")],
-  outfile: resolve(output, "python-worker.js"),
-  bundle: true,
-  format: "iife",
-  platform: "browser",
   target: "es2022",
   minify: true,
 });
