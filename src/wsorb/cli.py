@@ -17,6 +17,7 @@ from wsorb.campaign import (
     write_campaign,
 )
 from wsorb.geometry import Vec2
+from wsorb.lab import lab_port, launch_lab
 from wsorb.notebook import add_entry, list_entries, write_index
 from wsorb.report import (
     format_duration,
@@ -92,6 +93,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     campaign_show = campaign_sub.add_parser("show", help="show a saved campaign")
     campaign_show.add_argument("path", type=Path, help="path to campaign.json or run directory")
+
+    lab = subparsers.add_parser("lab", help="start the private local Marimo editor")
+    lab.add_argument(
+        "--port",
+        type=lab_port,
+        default=None,
+        help="override WSORB_LAB_PORT (default: 2718); use the same port for the game server",
+    )
 
     notebook = subparsers.add_parser("notebook", help="work with the shared mission notebook")
     notebook_sub = notebook.add_subparsers(dest="notebook_command", required=True)
@@ -348,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_campaign_show(args)
         if args.command == "notebook":
             return _cmd_notebook(args)
+        if args.command == "lab":
+            launch_lab(port=args.port)
     except (ValueError, KeyError, OSError) as exc:
         print(f"wsorb: {exc}", file=sys.stderr)
         return 2

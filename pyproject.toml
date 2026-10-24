@@ -16,7 +16,9 @@ wsorb = "wsorb.cli:main"
 
 [project.optional-dependencies]
 lab = [
+    "altair>=6.3.0",
     "marimo>=0.25.2",
+    "pillow>=13.0.0",
 ]
 
 [dependency-groups]
