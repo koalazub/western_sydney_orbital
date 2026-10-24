@@ -34,8 +34,9 @@ setup:
 setup-python:
     devenv shell uv sync --locked
 
-# Format the Rust modules before checking or building them.
-format:
+# Format the repository's Python, Rust and Nix sources together.
+format: format-nix
+    devenv shell uv run --locked ruff format .
     nix shell --impure .#rust --command cargo fmt --manifest-path simulation/Cargo.toml
 
 format-nix:
@@ -50,9 +51,11 @@ compile:
 
 unit-check:
     nix shell --impure .#game --command cargo test --manifest-path simulation/Cargo.toml --locked --lib
+    devenv tasks run wsorb:test
 
 # Compile and lint the actual engine and bundle the thin browser launcher.
 check:
+    devenv tasks run wsorb:lint
     nix shell --impure .#rust --command cargo fmt --manifest-path simulation/Cargo.toml -- --check
     nix shell --impure .#game --command cargo clippy --manifest-path simulation/Cargo.toml --locked --target wasm32-unknown-unknown --lib -- -D warnings
     nix shell --impure .#game --command npm --prefix worker run build:web

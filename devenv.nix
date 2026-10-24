@@ -61,17 +61,19 @@ in
 
   tasks = {
     "wsorb:sync" = {
-      exec = "uv sync --locked";
+      exec = "uv sync --locked --extra lab";
     };
     "wsorb:test" = {
-      exec = "uv run --locked pytest";
+      exec = "uv run --locked --extra lab pytest";
     };
     "wsorb:lint" = {
-      exec = "uv run --locked ruff check . && uv run --locked ruff format --check .";
+      exec = "uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict notebooks";
     };
   };
 
   processes = {
     notebook.exec = "WSORB_PORT=\"\${WSORB_PORT:-8765}\" bash scripts/serve-tailnet";
+    simulation.exec = "exec env WSORB_LAB=1 PORT=\"\${WSORB_GAME_PORT:-61829}\" node worker/scripts/local.mjs";
+    lab.exec = "exec uv run --locked --extra lab marimo edit notebooks/flight_lab.py --host 127.0.0.1 --port \"\${WSORB_LAB_PORT:-2718}\" --headless --no-sandbox --skip-update-check";
   };
 }

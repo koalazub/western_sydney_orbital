@@ -13,6 +13,7 @@ build/
 .coverage
 .coverage.*
 htmlcov/
+__marimo__/
 
 # Nix / direnv
 .direnv/
