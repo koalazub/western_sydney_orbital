@@ -4,8 +4,14 @@
   "experiment_description": "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.",
   "experiment_settings": {
     "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
-    "debris": { "count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4, "speed_mps": 20.0, "speed_spread_mps": 5.0, "shell_inner_m": 200.0, "shell_outer_m": 3000.0, "stream_axis": "y", "stream_sign": -1 }
+    "debris": { "count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4, "speed_mps": 20.0, "speed_spread_mps": 4.0, "shell_inner_m": 60.0, "shell_outer_m": 700.0, "stream_axis": "x", "stream_sign": 1 }
   },
+  "flight_presets": {
+    "mars_facing_l1": { "label": "Mars-facing launch to L1", "launch_side": "mars_facing", "target_region": "L1", "target_name": "Return ship · Mars–Phobos L1" },
+    "far_side_l2": { "label": "Far-side launch to L2", "launch_side": "far_side", "target_region": "L2", "target_name": "Return ship · Mars–Phobos L2" }
+  },
+  "impact_ejecta_defaults": { "source_direction": [-1.0, 0.0, 0.0], "kick_velocity_mps": [-1.0, 0.0, 0.0], "tangential_speed_mps": 7.0, "patch_half_angle_deg": 15.0 },
+  "legacy_corridor_flow_reference": { "speed_mps": 20.0, "speed_spread_mps": 5.0, "stream_axis": "y", "stream_sign": -1 },
   "frame_description": "Phobos-centered Mars–Phobos circular rotating frame; +X toward Mars, +Y orbit normal, +Z right-handed; SI units",
   "gravity": {
     "mars_mu_m3_s2": 42828370000000.0,

@@ -1,10 +1,17 @@
 use super::model::{Scenario, Terrain};
-use crate::domain::ShipCameraId;
+use crate::domain::{FlightPreset, ShipCameraId};
 
 pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     s.experiment_settings
         .validate()
         .map_err(|_| "invalid reset-only experiment defaults")?;
+    s.legacy_corridor_flow_reference
+        .validate()
+        .map_err(|_| "invalid archived corridor flow calibration reference")?;
+    s.impact_ejecta_defaults
+        .validate()
+        .map_err(|_| "invalid impact ejecta defaults")?;
+    validate_flight_presets(s)?;
     validate_limits(s)?;
     validate_gravity(s)?;
     validate_integration(s)?;
@@ -26,7 +33,7 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
     let l = s.limits;
     if s.default_seed > u32::MAX as u64
         || s.debris.count == 0
-        || s.debris.count > 512
+        || s.debris.count > crate::model::MAX_DEBRIS_COUNT
         || s.debris.radar_count > s.debris.count
         || l.events == 0
         || l.contacts == 0
@@ -37,6 +44,28 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
         || s.experiment_description.trim().is_empty()
     {
         return Err("invalid scenario limits or metadata");
+    }
+    Ok(())
+}
+
+fn validate_flight_presets(s: &Scenario) -> Result<(), &'static str> {
+    for preset in [FlightPreset::MarsFacingL1, FlightPreset::FarSideL2] {
+        let config = s.flight_preset(preset);
+        if config.label.trim().is_empty()
+            || config.target_name.trim().is_empty()
+            || config.launch_side != preset.launch_side()
+            || config.target_region != preset.target_region()
+        {
+            return Err(
+                "flight preset labels, physical launch sides, or target regions are invalid",
+            );
+        }
+    }
+    let legacy = s.flight_preset(FlightPreset::FarSideL2);
+    if legacy.target_region != s.mission.target_region
+        || legacy.target_name != s.mission.target_name
+    {
+        return Err("far-side L2 preset must retain the archived mission target");
     }
     Ok(())
 }
@@ -387,6 +416,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_presets_keep_opposite_hemispheres_and_the_legacy_l2_target() {
+        let scenario = crate::scenario::settings();
+        validate_flight_presets(scenario).unwrap();
+        assert_eq!(
+            scenario
+                .flight_preset(FlightPreset::MarsFacingL1)
+                .launch_side,
+            crate::domain::LaunchSide::MarsFacing
+        );
+        assert_eq!(
+            scenario.flight_preset(FlightPreset::FarSideL2).target_name,
+            scenario.mission.target_name
+        );
+        let mut invalid = scenario.clone();
+        invalid.flight_presets.far_side_l2.launch_side = crate::domain::LaunchSide::MarsFacing;
+        assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid.flight_presets.mars_facing_l1.target_region = crate::domain::LagrangeRegion::L2;
+        assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid.flight_presets.mars_facing_l1.label.clear();
+        assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid.flight_presets.far_side_l2.target_name = "Relabeled return ship".into();
+        assert!(validate_flight_presets(&invalid).is_err());
+    }
+
+    #[test]
+    fn impact_defaults_and_debris_count_bounds_are_validated_as_scenario_data() {
+        let mut scenario = crate::scenario::settings().clone();
+        scenario.debris.count = crate::model::MAX_DEBRIS_COUNT;
+        validate_limits(&scenario).unwrap();
+        scenario.debris.count += 1;
+        assert!(validate_limits(&scenario).is_err());
+        scenario = crate::scenario::settings().clone();
+        scenario.impact_ejecta_defaults.source_direction = [0.0; 3];
+        assert_eq!(validate(&scenario), Err("invalid impact ejecta defaults"));
+    }
+
+    #[test]
     fn practice_lift_is_bounded_and_cannot_silently_lower_the_reference_limit() {
         let mut scenario = crate::scenario::settings().clone();
         assert!(validate_practice(&scenario).is_ok());
@@ -394,6 +463,31 @@ mod tests {
             scenario.practice.space_lift_accel_mps2 = invalid;
             assert!(validate_practice(&scenario).is_err());
         }
+    }
+
+    #[test]
+    fn archived_corridor_reference_is_explicit_validated_data_not_the_current_default() {
+        let scenario = crate::scenario::settings();
+        assert_eq!(scenario.legacy_corridor_flow_reference.speed_mps, 20.0);
+        assert_eq!(
+            scenario.legacy_corridor_flow_reference.speed_spread_mps,
+            5.0
+        );
+        assert_eq!(
+            scenario.legacy_corridor_flow_reference.stream_axis,
+            crate::model::StreamAxis::Y
+        );
+        assert_eq!(scenario.legacy_corridor_flow_reference.stream_sign, -1);
+        assert_ne!(
+            scenario.legacy_corridor_flow_reference,
+            crate::model::DebrisFlowTuning::from(scenario.experiment_settings.debris)
+        );
+        let mut invalid = scenario.clone();
+        invalid.legacy_corridor_flow_reference.speed_mps = f64::NAN;
+        assert_eq!(
+            validate(&invalid),
+            Err("invalid archived corridor flow calibration reference")
+        );
     }
 
     #[test]

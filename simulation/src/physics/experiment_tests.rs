@@ -167,7 +167,7 @@ fn interior_debris_motion_is_integrated_by_rapier_without_reapplying_the_stream_
         .iter()
         .filter(|entity| entity.kind == EntityKind::Debris)
     {
-        assert_eq!(asteroid.velocity, [0.0, -20.0, 0.0]);
+        assert_eq!(asteroid.velocity, [20.0, 0.0, 0.0]);
     }
     let before = actor(&sim, id);
     let velocity = before.linvel();
@@ -602,9 +602,9 @@ fn bounded_configuration_rejects_invalid_values_atomically_including_real_forces
         (5, -0.1),
         (5, 10.001),
         (6, -0.1),
-        (6, 2991.0),
+        (6, base.debris.shell_outer_m - 9.0),
         (7, 50_000.1),
-        (7, 200.0),
+        (7, base.debris.shell_inner_m),
     ] {
         let mut config = base;
         match field {
@@ -621,7 +621,7 @@ fn bounded_configuration_rejects_invalid_values_atomically_including_real_forces
         invalid.push(config);
     }
     let mut config = base;
-    config.debris.count = 1_001;
+    config.debris.count = crate::model::MAX_DEBRIS_COUNT + 1;
     invalid.push(config);
     for sign in [-2, 0, 2] {
         let mut config = base;
@@ -678,7 +678,7 @@ fn restoring_uses_the_stored_profile_and_rejects_unbounded_or_mismatched_physics
     invalid.experiment_settings.as_mut().unwrap().ship.mass_kg = f64::NAN;
     invalid_states.push(invalid);
     let mut invalid = valid.clone();
-    invalid.experiment_settings.as_mut().unwrap().debris.count = 1_001;
+    invalid.experiment_settings.as_mut().unwrap().debris.count = crate::model::MAX_DEBRIS_COUNT + 1;
     invalid_states.push(invalid);
     let mut invalid = valid.clone();
     invalid

@@ -6,7 +6,7 @@ pub enum EntityId {
     Lander,
     ReturnShip,
     LandingPad,
-    Debris(u16),
+    Debris(u32),
     Phobos,
     Mars,
     L1,
@@ -42,7 +42,10 @@ impl FromStr for EntityId {
             "L2" => Ok(Self::L2),
             name => name
                 .strip_prefix("Debris")
-                .and_then(|index| index.parse::<u16>().ok())
+                .filter(|index| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|index| index.parse::<u32>().ok())
                 .filter(|index| *index > 0)
                 .map(Self::Debris)
                 .ok_or_else(|| format!("unknown entity {name}")),
@@ -115,5 +118,53 @@ impl fmt::Display for EntityStatus {
             Self::Fixed => "Fixed",
             Self::StationKeeping => "Station keeping",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debris_ids_round_trip_beyond_u16_without_changing_old_names() {
+        for index in [1, 500, 1_000, 65_535, 65_536, 100_000, u32::MAX] {
+            let id = EntityId::Debris(index);
+            let text = format!("Debris{index}");
+            assert_eq!(id.to_string(), text);
+            assert_eq!(text.parse::<EntityId>().unwrap(), id);
+            assert_eq!(serde_json::to_value(id).unwrap(), text);
+            assert_eq!(
+                serde_json::from_value::<EntityId>(serde_json::json!(text)).unwrap(),
+                id
+            );
+        }
+        assert_eq!("Lander".parse::<EntityId>().unwrap(), EntityId::Lander);
+        assert_eq!(EntityId::Lander.to_string(), "Shuttle");
+    }
+
+    #[test]
+    fn malformed_and_overflowing_debris_ids_are_rejected() {
+        for text in [
+            "Debris",
+            "Debris0",
+            "Debris000",
+            "Debris-1",
+            "Debris+1",
+            "Debris1.0",
+            "Debris1e3",
+            "Debris 1",
+            "Debris1 ",
+            " Debris1",
+            "debris1",
+            "Debris4294967296",
+            "Debris18446744073709551616",
+        ] {
+            assert!(text.parse::<EntityId>().is_err(), "{text}");
+            assert!(
+                serde_json::from_value::<EntityId>(serde_json::json!(text)).is_err(),
+                "{text}"
+            );
+        }
+        assert!(serde_json::from_str::<EntityId>("100000").is_err());
     }
 }

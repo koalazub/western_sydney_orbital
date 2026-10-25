@@ -3,8 +3,9 @@ use crate::domain::{
 };
 use crate::mission::{self, FlightMetrics};
 use crate::model::{
-    DebrisExperimentSettings, EntityState, Event, ExperimentSettings, MissionState, Observation,
-    PrimaryBody, Snapshot, ThrustApplication,
+    AppliedActuatorWrench, DebrisDistribution, DebrisExperimentSettings, DebrisFlowTuning,
+    EntityState, Event, ExperimentSettings, FlightPreset, MissionState, Observation, PrimaryBody,
+    ShipTuning, Snapshot, ThrustApplication,
 };
 #[cfg(test)]
 use crate::propulsion::{accel_limit, space_shape_is_valid};
@@ -18,6 +19,16 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
 pub use crate::model::PhysicsCommand;
+
+mod applied;
+mod debris;
+mod live_tuning;
+mod lookahead;
+mod placement;
+mod spatial_index;
+mod surface_placement;
+use live_tuning::{apply_actuator_forces, inertia_matrix, reconcile_ship_wrench};
+use spatial_index::SpawnIndex;
 
 fn body() -> PrimaryBody {
     PrimaryBody {
@@ -45,6 +56,8 @@ pub struct Simulation {
     collider_ids: HashMap<ColliderHandle, EntityId>,
     touching: HashSet<[EntityId; 2]>,
     rng: u64,
+    // Runtime readback only. An archive never supplies purported measured forces.
+    last_actuator_application: Option<AppliedActuatorWrench>,
 }
 
 impl Simulation {
@@ -61,21 +74,63 @@ impl Simulation {
         Self::with_profile(seed, Some(experiment))
     }
     fn with_profile(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Self, String> {
-        let mut sim = Self::from_state(initial(seed, experiment)?);
+        Self::with_flight_profile(seed, experiment, FlightPreset::default())
+    }
+    fn with_flight_profile(
+        seed: u64,
+        experiment: Option<ExperimentSettings>,
+        preset: FlightPreset,
+    ) -> Result<Self, String> {
+        let state = if preset.is_default() {
+            initial(seed, experiment)?
+        } else {
+            initial_for_flight(seed, experiment, None, None, preset)?
+        };
+        let mut sim = Self::from_state(state);
         sim.sample_radar();
         sim.state.rng_state = sim.rng;
         Ok(sim)
+    }
+    /// Construct a fresh trial first. Session playback/input changes belong to the adapter.
+    pub fn configure_flight(
+        &mut self,
+        experiment: ExperimentSettings,
+        seed: Option<u64>,
+        preset: FlightPreset,
+    ) -> Result<(), String> {
+        let seed = seed.unwrap_or(self.state.seed);
+        validate_seed(seed)?;
+        experiment.validate()?;
+        let replacement = Self::with_flight_profile(seed, Some(experiment), preset)?;
+        *self = replacement;
+        Ok(())
     }
     /// Repeat the active trial, including an archived corridor profile when None.
     /// The replacement is constructed first, so invalid input cannot clear a run.
     pub fn reset(&mut self, seed: u64) -> Result<(), String> {
         validate_seed(seed)?;
-        let replacement = Self::with_profile(seed, self.state.experiment_settings)?;
+        let mut state = initial_for_flight(
+            seed,
+            self.state.experiment_settings,
+            self.state.ship_tuning_override,
+            self.state.debris_flow_override,
+            self.state.flight_preset,
+        )?;
+        state.model = self.state.model.clone();
+        state.tuning_revision = self.state.tuning_revision;
+        let mut replacement = Self::from_state(state);
+        // Birth rejection/draw order belongs to the preset, not the mutable pad.
+        // Check a custom seat against that complete population before replacement.
+        if let Some(direction) = self.state.launch_site_direction {
+            replacement.reset_launch_site(direction)?;
+        }
+        replacement.sample_radar();
+        replacement.state.rng_state = replacement.rng;
         *self = replacement;
         Ok(())
     }
     fn from_state(mut state: Snapshot) -> Self {
-        let inertia = ship_inertia_for_profile(state.experiment_settings);
+        let inertia = state.ship_tuning().inertia_kg_m2();
         if let Some(lander) = state.assets.iter_mut().find(|e| e.id == EntityId::Lander) {
             if has_legacy_lander_thrust_cap(lander) {
                 lander.max_thrust_n = local_max_thrust_n();
@@ -83,9 +138,7 @@ impl Simulation {
             if lander.thrust_application == ThrustApplication::CenterOfMass {
                 // Older center snapshots can omit command/torque fields. Preserve
                 // their command-driven dynamics and reconcile the reported wrench.
-                let a = lander.commanded_angular_accel_rad_s2;
-                lander.thrust_n = scale(lander.commanded_accel_mps2, lander.mass_kg);
-                lander.torque_nm = [dot(inertia[0], a), dot(inertia[1], a), dot(inertia[2], a)];
+                reconcile_ship_wrench(lander, inertia);
             }
         }
         let rng = if state.rng_state == 0 {
@@ -94,6 +147,7 @@ impl Simulation {
             state.rng_state
         };
         let touching = state.active_contacts.iter().copied().collect();
+        let capacity = state.assets.len() + 1;
         let mut sim = Self {
             rng,
             state,
@@ -108,9 +162,10 @@ impl Simulation {
             multibody: MultibodyJointSet::new(),
             soft: SoftBodySet::new(),
             ccd: CCDSolver::new(),
-            handles: HashMap::new(),
-            collider_ids: HashMap::new(),
+            handles: HashMap::with_capacity(capacity),
+            collider_ids: HashMap::with_capacity(capacity),
             touching,
+            last_actuator_application: None,
         };
         sim.integration.dt = settings().integration.fixed_step_s;
         for e in &sim.state.assets {
@@ -144,16 +199,10 @@ impl Simulation {
                 .restitution(settings().contacts.restitution)
                 .active_events(ActiveEvents::COLLISION_EVENTS);
             if e.kind == EntityKind::Lander {
-                let i = inertia;
-                let inertia = Matrix::from_cols(
-                    Vector::new(i[0][0], i[1][0], i[2][0]),
-                    Vector::new(i[0][1], i[1][1], i[2][1]),
-                    Vector::new(i[0][2], i[1][2], i[2][2]),
-                );
                 collider = collider.mass_properties(MassProperties::with_inertia_matrix(
                     Vector::ZERO,
                     e.mass_kg,
-                    inertia,
+                    inertia_matrix(inertia),
                 ));
             } else if matches!(e.kind, EntityKind::Debris) {
                 collider = collider.mass(e.mass_kg);
@@ -185,8 +234,20 @@ impl Simulation {
     pub fn mission_status(&self) -> MissionStatus {
         self.state.mission.status
     }
+    pub fn flight_preset(&self) -> FlightPreset {
+        self.state.flight_preset
+    }
     pub(crate) fn manual_interventions(&self) -> u32 {
         self.state.manual_interventions
+    }
+    pub fn ship_tuning(&self) -> ShipTuning {
+        self.state.ship_tuning()
+    }
+    pub fn debris_flow(&self) -> DebrisFlowTuning {
+        self.state.debris_flow()
+    }
+    pub fn tuning_revision(&self) -> u32 {
+        self.state.tuning_revision
     }
     pub fn ship_inertia_kg_m2(&self) -> [[f64; 3]; 3] {
         let matrix = self.bodies[self.handles[&EntityId::Lander]]
@@ -224,10 +285,33 @@ impl Simulation {
                 .try_normalize()
                 .map(crate::terrain::surface_radius_m)
         });
+        let (applied_physics, applied_physics_error) = match self.applied_physics() {
+            Ok(physics) => (Some(physics), None),
+            Err(error) => (None, Some(error)),
+        };
         let shuttle_report = shuttle.map(|ship| {
             let mut report = json!(ship);
-            report["inertia_kg_m2"] = json!(self.ship_inertia_kg_m2());
-            report["inertia_frame"] = json!("body");
+            // Archived EntityState wrench fields remain command-derived. Do not
+            // label that requested/calibrated wrench as an applied measurement.
+            report["wrench_provenance"] = json!("command_derived_local_calibration");
+            if let Some(actual) = &applied_physics {
+                let inertia = actual.inertia_body_kg_m2;
+                report["inertia_kg_m2"] = json!(inertia);
+                report["inertia_frame"] = json!("body");
+                report["mass_kg"] = json!(actual.mass_kg);
+                report["actuation_state"] = json!(actual.actuation_state);
+                let application = actual.last_actuator_application;
+                report["actuator_application_time_s"] =
+                    json!(application.map(|applied| applied.application_time_s));
+                report["applied_accel_mps2"] = json!(
+                    application
+                        .map(|applied| { scale(applied.force_body_n, 1.0 / actual.mass_kg) })
+                );
+                report["applied_angular_accel_rad_s2"] = json!(application.map(|applied| {
+                    (inertia_matrix(inertia).inverse() * Vector::from_array(applied.torque_body_nm))
+                        .to_array()
+                }));
+            }
             report
         });
         let debris_count = self
@@ -236,6 +320,20 @@ impl Simulation {
             .iter()
             .filter(|asset| asset.kind == EntityKind::Debris)
             .count();
+        let launchpad = self
+            .handles
+            .get(&EntityId::LandingPad)
+            .and_then(|handle| self.bodies.get(*handle))
+            .map(|pad| {
+                let q = pad.rotation();
+                json!({
+                    "position": pad.translation().to_array(),
+                    "rotation": [q.x, q.y, q.z, q.w],
+                    "source_time_s": self.state.time_s,
+                    "source_seed": self.state.seed,
+                    "normal_world": (*q * Vector::Z).to_array(),
+                })
+            });
         json!({
             "time_s": self.state.time_s,
             "seed": self.state.seed,
@@ -245,6 +343,26 @@ impl Simulation {
             "radar_clock": "simulation_elapsed_seconds",
             "environment": self.state.environment,
             "experiment_settings": self.state.experiment_settings,
+            "flight_preset": self.flight_preset(),
+            "launch_site_direction": self.state.launch_site_direction,
+            "launchpad": launchpad,
+            "debris_distribution": self.state.experiment_settings.map(|experiment| experiment.debris.distribution),
+            "physical_debris_limit": crate::model::MAX_DEBRIS_COUNT,
+            "ship_tuning": self.ship_tuning(),
+            "debris_flow": self.debris_flow(),
+            "debris_flow_spread_scope": "future_births_only",
+            "debris_births_enabled": self.state.experiment_settings.is_some_and(|experiment| {
+                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+            }),
+            "debris_flow_active": self.state.experiment_settings.is_some_and(|experiment| {
+                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+            }),
+            "debris_flow_tuning_available": self.state.experiment_settings.is_none_or(|experiment| {
+                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+            }),
+            "tuning_revision": self.tuning_revision(),
+            "applied_physics": applied_physics,
+            "applied_physics_error": applied_physics_error,
             "shuttle": shuttle_report,
             "target": target,
             "mission": self.state.mission,
@@ -297,7 +415,7 @@ impl Simulation {
         {
             return Err("Mission finished. Reset before commanding another flight.".into());
         }
-        let inertia = ship_inertia_for_profile(self.state.experiment_settings);
+        let inertia = self.state.ship_tuning().inertia_kg_m2();
         let e = self
             .state
             .assets
@@ -307,20 +425,7 @@ impl Simulation {
         e.commanded_accel_mps2 = accel;
         e.commanded_angular_accel_rad_s2 = angular_accel;
         e.thrust_application = application;
-        e.thrust_n = scale(accel, e.mass_kg);
-        e.torque_nm = match application {
-            ThrustApplication::CenterOfMass => {
-                let i = inertia;
-                [
-                    dot(i[0], angular_accel),
-                    dot(i[1], angular_accel),
-                    dot(i[2], angular_accel),
-                ]
-            }
-            ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
-                applied_wrench(&applied_jets(e)).torque_body_nm
-            }
-        };
+        reconcile_ship_wrench(e, inertia);
         e.status = if norm(accel) > 0.0 {
             EntityStatus::Thrusting
         } else if norm(angular_accel) > 0.0 {
@@ -374,6 +479,7 @@ impl Simulation {
         lander_body.set_angvel(Vector::ZERO, true);
         lander_body.reset_forces(false);
         lander_body.reset_torques(false);
+        self.last_actuator_application = None;
         let q = lander_body.rotation();
         let lander = &mut self.state.assets[lander_index];
         lander.rotation = [q.x, q.y, q.z, q.w];
@@ -426,10 +532,21 @@ impl Simulation {
                 settings: experiment,
                 seed,
             } => {
-                let replacement =
-                    Self::with_experiment(seed.unwrap_or(self.state.seed), experiment)?;
-                *self = replacement;
+                self.configure_flight(experiment, seed, self.state.flight_preset)?;
             }
+            PhysicsCommand::ConfigureFlight {
+                settings,
+                seed,
+                preset,
+            } => {
+                self.configure_flight(settings, seed, preset)?;
+            }
+            PhysicsCommand::PlaceLander { position_m } => self.place_lander(position_m)?,
+            PhysicsCommand::MoveLaunchpad { surface_direction } => {
+                self.move_launchpad(surface_direction)?;
+            }
+            PhysicsCommand::TuneShip { settings } => self.tune_ship(settings)?,
+            PhysicsCommand::TuneDebrisFlow { settings } => self.tune_debris_flow(settings)?,
             PhysicsCommand::Observe => {}
             PhysicsCommand::Restore { state } => {
                 validate(&state)?;
@@ -464,7 +581,6 @@ impl Simulation {
         let n = (seconds / dt).ceil().max(1.0) as usize;
         let h = seconds / n as f64;
         self.integration.dt = h;
-        let ship_inertia = ship_inertia_for_profile(self.state.experiment_settings);
         for _ in 0..n {
             if self.state.mission.status.is_terminal() {
                 break;
@@ -479,31 +595,14 @@ impl Simulation {
                     rb.reset_torques(false);
                     if e.id == EntityId::Lander {
                         let cfg = settings().lander;
-                        let q = *rb.rotation();
-                        let fuel_force_n = match e.thrust_application {
-                            ThrustApplication::CenterOfMass => {
-                                let accel = Vector::from_array(e.commanded_accel_mps2);
-                                rb.add_force(q * accel * rb.mass(), true);
-                                accel.length() * rb.mass()
-                            }
-                            ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
-                                let jets = applied_jets(e);
-                                for jet in &jets {
-                                    let force_world = q * Vector::from_array(jet.force_body_n);
-                                    let point_world = rb
-                                        .position()
-                                        .transform_point(Vector::from_array(jet.point_body_m));
-                                    rb.add_force_at_point(force_world, point_world, true);
-                                }
-                                applied_wrench(&jets).propellant_force_n
-                            }
-                        };
-                        // add_force_at_point already supplies every r × F moment.
-                        // Only an explicit angular request contributes direct torque.
-                        let x = e.commanded_angular_accel_rad_s2;
-                        let i = ship_inertia;
-                        let torque = q * Vector::new(dot(i[0], x), dot(i[1], x), dot(i[2], x));
-                        rb.add_torque(torque, true);
+                        let application = apply_actuator_forces(
+                            rb,
+                            e,
+                            self.state.time_s,
+                            self.state.tuning_revision,
+                        );
+                        let fuel_force_n = application.propellant_force_n;
+                        self.last_actuator_application = Some(application);
                         self.state.mission.fuel_used_kg +=
                             fuel_force_n * h / (cfg.specific_impulse_s * cfg.standard_gravity_mps2);
                     }
@@ -623,8 +722,22 @@ impl Simulation {
             // Archived corridor runs never recycled bodies or consumed birth RNG.
             return;
         };
-        let cfg = experiment.debris;
+        match experiment.debris.distribution {
+            DebrisDistribution::ImpactEjecta { .. } => return,
+            DebrisDistribution::DirectedStream => {}
+        }
+        let cfg = self.state.debris_flow().apply_to(experiment.debris);
         let half_extent = flow_half_extent_m(cfg);
+        if !self.state.assets.iter().any(|entity| {
+            entity.kind == EntityKind::Debris
+                && entity
+                    .position
+                    .iter()
+                    .any(|value| value.abs() > half_extent)
+        }) {
+            return;
+        }
+        let mut spawn_index = spawn_index(&self.state.assets, cfg.radius_max_m);
         let count = self.state.assets.len();
         // Bound inlet work even after restoring a run with every body outside.
         // Derive the scan start from persisted RNG without drawing extra noise.
@@ -651,7 +764,7 @@ impl Simulation {
                 &mut self.rng,
                 cfg,
                 radius,
-                &self.state.assets,
+                &spawn_index,
                 Some(id),
                 DebrisBirth::UpstreamInlet,
             ) else {
@@ -661,6 +774,8 @@ impl Simulation {
             };
             let velocity = debris_birth_velocity(&mut self.rng, cfg);
             let angular_velocity = debris_birth_spin(&mut self.rng);
+            spawn_index.remove(id);
+            spawn_index.insert(id, position, radius);
             let body = &mut self.bodies[self.handles[&id]];
             body.set_translation(Vector::from_array(position), true);
             body.set_linvel(Vector::from_array(velocity), true);
@@ -701,12 +816,22 @@ impl Simulation {
             .expect("scenario has a pad");
         let distance = norm(sub(lander_position, target_position));
         let speed = norm(sub(lander_velocity, target_velocity));
+        // The existing phase assessor measures progress along a negative launch
+        // axis. Reflect only its phase coordinates for L1, never physical state.
+        let phase_x_sign = match self.state.flight_preset {
+            FlightPreset::MarsFacingL1 => -1.0,
+            FlightPreset::FarSideL2 => 1.0,
+        };
+        let mut phase_lander_position = lander_position;
+        let mut phase_pad_position = pad_position;
+        phase_lander_position[0] *= phase_x_sign;
+        phase_pad_position[0] *= phase_x_sign;
         let assessment = mission::assess(
             &self.state.mission,
             FlightMetrics {
                 distance_m: distance,
-                lander_position_m: lander_position,
-                pad_position_m: pad_position,
+                lander_position_m: phase_lander_position,
+                pad_position_m: phase_pad_position,
                 time_s: self.state.time_s,
                 damage_j: self.state.mission.damage,
                 minimum_step_s: settings().integration.fixed_step_s,
@@ -799,10 +924,54 @@ impl Simulation {
 }
 
 fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot, String> {
+    initial_with_overrides(seed, experiment, None, None)
+}
+
+fn initial_with_overrides(
+    seed: u64,
+    experiment: Option<ExperimentSettings>,
+    ship_tuning_override: Option<ShipTuning>,
+    debris_flow_override: Option<DebrisFlowTuning>,
+) -> Result<Snapshot, String> {
+    initial_for_flight(
+        seed,
+        experiment,
+        ship_tuning_override,
+        debris_flow_override,
+        FlightPreset::default(),
+    )
+}
+
+fn initial_for_flight(
+    seed: u64,
+    experiment: Option<ExperimentSettings>,
+    ship_tuning_override: Option<ShipTuning>,
+    debris_flow_override: Option<DebrisFlowTuning>,
+    preset: FlightPreset,
+) -> Result<Snapshot, String> {
+    if experiment.is_none() && !preset.is_default() {
+        return Err(
+            "Archived None corridor supports only far_side_l2; configure a new flight for L1."
+                .into(),
+        );
+    }
+    if experiment.is_some_and(|experiment| {
+        matches!(
+            experiment.debris.distribution,
+            DebrisDistribution::ImpactEjecta { .. }
+        )
+    }) && debris_flow_override.is_some()
+    {
+        return Err(
+            "Impact ejecta cannot carry a live stream override; configure a new flight.".into(),
+        );
+    }
     let mut rng = seed.max(1);
-    let mut assets = vec![];
-    let site = crate::model::landing_site();
+    let capacity = experiment.map_or(settings().debris.count, |config| config.debris.count) + 3;
+    let mut assets = Vec::with_capacity(capacity);
+    let site = crate::model::landing_site_for(preset);
     let cfg = settings();
+    let flight = cfg.flight_preset(preset);
     let mut ship = entity(
         EntityId::Lander,
         EntityKind::Lander,
@@ -814,9 +983,18 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
     ship.name = "Lander".into();
     ship.rotation = site.rotation;
     ship.status = EntityStatus::Landed;
+    if let Some(tuning) = ship_tuning_override {
+        tuning.validate()?;
+        ship.mass_kg = tuning.mass_kg;
+        ship.actuator_gain = tuning.thrust_scale;
+        ship.max_thrust_n = local_max_thrust_for_mass_n(tuning.mass_kg) * tuning.thrust_scale;
+    }
+    if let Some(flow) = debris_flow_override {
+        flow.validate()?;
+    }
     assets.push(ship);
     let env = crate::astrophysics::environment(cfg.gravity);
-    let target_position = match cfg.mission.target_region {
+    let target_position = match flight.target_region {
         LagrangeRegion::L1 => env.l1_position_m,
         LagrangeRegion::L2 => env.l2_position_m,
     };
@@ -828,7 +1006,7 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
         cfg.mission.target_radius_m,
         cfg.mission.target_mass_kg,
     );
-    target.name = cfg.mission.target_name.clone();
+    target.name = flight.target_name.clone();
     assets.push(target);
     let mut pad = entity(
         EntityId::LandingPad,
@@ -842,24 +1020,26 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
     pad.rotation = site.rotation;
     assets.push(pad);
     if let Some(experiment) = experiment {
-        // The initial shell is an already-streaming population around every
-        // side of Phobos, not a batch emitted at the launch pad. Later births
-        // occur only at the upstream plane after leaving the bounded flow box.
-        // No velocity is imposed again while a body remains inside that box:
-        // gravity, spin and every mutual/terrain/ship contact are Rapier physics.
+        let debris =
+            debris_flow_override.map_or(experiment.debris, |flow| flow.apply_to(experiment.debris));
+        let mut spawn_index = spawn_index(&assets, debris.radius_max_m);
+        // Streams start around every side of Phobos and later recycle at the
+        // upstream plane. Impact mode instead selects a source patch and never
+        // recycles. Both modes use only gravity and real contacts after birth,
+        // never a per-frame velocity/orbit constraint.
         for i in 0..experiment.debris.count {
-            let debris = experiment.debris;
             // A quadratic size sample keeps plenty of small rocks without
             // excluding the large end of the configured physical radius range.
             let size = uniform(&mut rng);
             let radius =
                 debris.radius_min_m + (debris.radius_max_m - debris.radius_min_m) * size * size;
             let position = debris_birth_position(
-                &mut rng, debris, radius, &assets, None, DebrisBirth::InitialShell,
+                &mut rng, debris, radius, &spawn_index, None, DebrisBirth::InitialShell,
             ).ok_or("experiment shell cannot safely place its population within the bounded birth budget")?;
-            let velocity = debris_birth_velocity(&mut rng, debris);
+            let velocity = debris::initial_velocity(&mut rng, debris, position);
+            let id = EntityId::Debris((i + 1) as u32);
             let mut asteroid = entity(
-                EntityId::Debris((i + 1) as u16),
+                id,
                 EntityKind::Debris,
                 position,
                 velocity,
@@ -868,6 +1048,7 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
             );
             asteroid.name = format!("Debris {}", i + 1);
             asteroid.angular_velocity_rad_s = debris_birth_spin(&mut rng);
+            spawn_index.insert(id, position, radius);
             assets.push(asteroid);
         }
     } else {
@@ -886,7 +1067,7 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
             let radius = cfg.debris.radius_min_m + uniform(&mut rng) * cfg.debris.radius_span_m;
             let mass = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) * cfg.debris.density_kg_m3;
             let mut e = entity(
-                EntityId::Debris((i + 1) as u16),
+                EntityId::Debris((i + 1) as u32),
                 EntityKind::Debris,
                 pos,
                 vel,
@@ -898,18 +1079,31 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
                 .normalize_or_zero();
             let angular_velocity = axis * uniform(&mut rng) * cfg.debris.spin_max_rad_s;
             e.angular_velocity_rad_s = angular_velocity.to_array();
+            if let Some(flow) = debris_flow_override {
+                // Keep the old draw order and isotropic corridor initializer.
+                // A live calibration adds only its common-velocity delta.
+                let reference = settings().legacy_corridor_flow_reference;
+                let delta = sub(flow.common_velocity_mps(), reference.common_velocity_mps());
+                e.velocity = std::array::from_fn(|axis| e.velocity[axis] + delta[axis]);
+            }
             assets.push(e);
         }
     }
     let initial_distance = norm(sub(site.lander_position_m, target_position));
     Ok(Snapshot {
-        model: profile_description(experiment),
+        model: profile_description_for(experiment, preset),
         time_s: 0.0,
         seed,
+        flight_preset: preset,
+        launch_site_direction: None,
+        trial_start_launch_site_direction: None,
         frame: cfg.frame_description.clone(),
         body: body(),
         environment: env,
         experiment_settings: experiment,
+        ship_tuning_override,
+        debris_flow_override,
+        tuning_revision: 0,
         assets,
         events: vec![],
         collisions: 0,
@@ -926,7 +1120,7 @@ fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot
             score: None,
             score_label: "Custom mission estimate; not official STP score".into(),
             phase: MissionPhase::OnPad,
-            target_region: cfg.mission.target_region,
+            target_region: flight.target_region,
         },
         observations: vec![],
         rng_state: rng,
@@ -963,17 +1157,22 @@ fn debris_birth_position(
     rng: &mut u64,
     cfg: DebrisExperimentSettings,
     radius: f64,
-    assets: &[EntityState],
+    spawn_index: &SpawnIndex,
     ignored: Option<EntityId>,
     birth: DebrisBirth,
 ) -> Option<[f64; 3]> {
-    // At most 64 terrain queries and 64 * 1003 actor checks per birth. An
+    // At most 64 terrain queries and indexed actor-neighborhood checks. An
     // impossible arrangement is an atomic configure error, never an endless loop.
     let shape = phobos_shape();
     for _ in 0..MAX_BIRTH_ATTEMPTS {
         let position = match birth {
             DebrisBirth::InitialShell => {
-                let direction = random_direction(rng);
+                let direction = match cfg.distribution {
+                    DebrisDistribution::DirectedStream => random_direction(rng),
+                    DebrisDistribution::ImpactEjecta { settings } => {
+                        debris::source_direction(rng, settings)
+                    }
+                };
                 let terrain_radius =
                     crate::terrain::surface_radius_m(bevy::math::DVec3::from_array(direction));
                 let margin =
@@ -1001,22 +1200,28 @@ fn debris_birth_position(
         {
             continue;
         }
-        let clear = assets
-            .iter()
-            .filter(|asset| Some(asset.id) != ignored)
-            .all(|asset| {
-                let other_radius = match asset.kind {
-                    EntityKind::LandingPad => norm(settings().pad.half_extents_m),
-                    EntityKind::Lander => settings().lander.proxy_radius_m * 2.0,
-                    EntityKind::ReturnShip | EntityKind::Debris => asset.radius_m,
-                };
-                norm(sub(position, asset.position)) > radius + other_radius + BIRTH_CLEARANCE_M
-            });
-        if clear {
+        if spawn_index.is_clear(position, radius, BIRTH_CLEARANCE_M, ignored) {
             return Some(position);
         }
     }
     None
+}
+
+fn spawn_index(assets: &[EntityState], maximum_debris_radius_m: f64) -> SpawnIndex {
+    let maximum_radius_m = maximum_debris_radius_m
+        .max(norm(settings().pad.half_extents_m))
+        .max(settings().lander.proxy_radius_m * 2.0)
+        .max(settings().mission.target_radius_m);
+    let mut index = SpawnIndex::new(maximum_radius_m);
+    for asset in assets {
+        let radius = match asset.kind {
+            EntityKind::LandingPad => norm(settings().pad.half_extents_m),
+            EntityKind::Lander => settings().lander.proxy_radius_m * 2.0,
+            EntityKind::ReturnShip | EntityKind::Debris => asset.radius_m,
+        };
+        index.insert(asset.id, asset.position, radius);
+    }
+    index
 }
 
 fn debris_birth_velocity(rng: &mut u64, cfg: DebrisExperimentSettings) -> [f64; 3] {
@@ -1036,19 +1241,52 @@ fn debris_mass_kg(radius: f64) -> f64 {
     4.0 / 3.0 * std::f64::consts::PI * radius.powi(3) * settings().debris.density_kg_m3
 }
 
-fn ship_inertia_for_profile(experiment: Option<ExperimentSettings>) -> [[f64; 3]; 3] {
-    experiment.map_or(settings().lander.inertia_kg_m2, |settings| {
-        settings.ship.inertia_kg_m2()
-    })
+#[cfg(test)]
+fn profile_description(experiment: Option<ExperimentSettings>) -> String {
+    profile_description_for(experiment, FlightPreset::default())
 }
 
-fn profile_description(experiment: Option<ExperimentSettings>) -> String {
+fn profile_base_description(
+    experiment: Option<ExperimentSettings>,
+    preset: FlightPreset,
+) -> String {
     match experiment {
         None => settings().description.clone(),
-        Some(experiment) if experiment == settings().experiment_settings => {
-            settings().experiment_description.clone()
+        Some(experiment) => match (preset, experiment.debris.distribution) {
+            (FlightPreset::FarSideL2, DebrisDistribution::DirectedStream) => {
+                settings().experiment_description.clone()
+            }
+            (_, DebrisDistribution::DirectedStream) => format!(
+                "local_experiment_v1: {}; directional stream initial/inlet velocities, real rigid-body contacts and estimated fuel; not STP parity.",
+                settings().flight_preset(preset).label
+            ),
+            (_, DebrisDistribution::ImpactEjecta { .. }) => format!(
+                "local_experiment_v1: {}; post-impact cloud initial conditions with gravity and real contacts, not a fracture solver or guaranteed orbit; not STP parity.",
+                settings().flight_preset(preset).label
+            ),
+        },
+    }
+}
+
+fn profile_description_for(experiment: Option<ExperimentSettings>, preset: FlightPreset) -> String {
+    let base = profile_base_description(experiment, preset);
+    match experiment {
+        None => base,
+        Some(experiment) if experiment == settings().experiment_settings => base,
+        Some(_) => format!("{base} [custom settings]"),
+    }
+}
+
+fn profile_description_matches(state: &Snapshot) -> bool {
+    match state.experiment_settings {
+        None => state.model == settings().description,
+        // These are descriptive v1 labels, not physical profile identifiers.
+        // A former default becomes custom when scenario defaults change. Keep
+        // both exact labels, while validating every physical setting below.
+        Some(_) => {
+            let base = profile_base_description(state.experiment_settings, state.flight_preset);
+            state.model == base || state.model == format!("{base} [custom settings]")
         }
-        Some(_) => format!("{} [custom settings]", settings().experiment_description),
     }
 }
 
@@ -1077,6 +1315,7 @@ fn entity(id: EntityId, kind: EntityKind, p: [f64; 3], v: [f64; 3], r: f64, m: f
             0.0
         },
         thrust_n: [0.0; 3],
+        actuator_gain: 1.0,
         thrust_application: ThrustApplication::CenterOfMass,
         status: match kind {
             EntityKind::LandingPad => EntityStatus::Fixed,
@@ -1095,6 +1334,7 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
     e.id == EntityId::Lander
         && e.kind == EntityKind::Lander
         && e.mass_kg == settings().lander.mass_kg
+        && e.actuator_gain == 1.0
         && matches!(
             e.thrust_application,
             ThrustApplication::CenterOfMass | ThrustApplication::ManualNozzles
@@ -1105,6 +1345,35 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     if let Some(experiment) = s.experiment_settings {
         experiment.validate()?;
     }
+    if let Some(ship) = s.ship_tuning_override {
+        ship.validate()?;
+    }
+    if let Some(flow) = s.debris_flow_override {
+        flow.validate()?;
+    }
+    if s.experiment_settings.is_none() && !s.flight_preset.is_default() {
+        return Err(
+            "Archived None corridor supports only far_side_l2; configure a new flight for L1."
+                .into(),
+        );
+    }
+    if s.experiment_settings.is_some_and(|experiment| {
+        matches!(
+            experiment.debris.distribution,
+            DebrisDistribution::ImpactEjecta { .. }
+        )
+    }) && s.debris_flow_override.is_some()
+    {
+        return Err(
+            "Impact ejecta cannot carry a live stream override; configure a new flight.".into(),
+        );
+    }
+    if s.tuning_revision == 0
+        && (s.ship_tuning_override.is_some() || s.debris_flow_override.is_some())
+    {
+        return Err("live tuning overrides require a nonzero tuning_revision".into());
+    }
+    let ship_tuning = s.ship_tuning();
     let debris_count = s
         .experiment_settings
         .map_or(settings().debris.count, |config| config.debris.count);
@@ -1113,10 +1382,10 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     // Keep full contact history, rather than truncating it and double-counting
     // real contacts after restoring a dense population.
     let contact_limit = if s.experiment_settings.is_some() {
-        let bodies = debris_count + 4;
+        let bodies = debris_count as u64 + 4;
         bodies * (bodies - 1) / 2
     } else {
-        settings().limits.contacts
+        settings().limits.contacts as u64
     };
     if !s.time_s.is_finite()
         || s.time_s < 0.0
@@ -1124,14 +1393,14 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         || s.assets.len() != debris_count + 3
         || s.events.len() > settings().limits.events
         || s.observations.len() > radar_count
-        || s.active_contacts.len() > contact_limit
+        || s.active_contacts.len() as u64 > contact_limit
         || (s.experiment_settings.is_some() && s.rng_state == 0)
         || s.body.name != "Phobos"
         || s.body.radii_m != settings().gravity.phobos_radii_m
         || s.body.mu_m3_s2 != settings().gravity.phobos_mu_m3_s2
         || s.body.rotation_period_s != settings().gravity.phobos_rotation_period_s
         || s.frame != settings().frame_description
-        || s.model != profile_description(s.experiment_settings)
+        || !profile_description_matches(s)
         || s.environment.mars_position_m
             != crate::astrophysics::environment(settings().gravity).mars_position_m
         || s.environment.mars_mu_m3_s2 != settings().gravity.mars_mu_m3_s2
@@ -1157,14 +1426,41 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         .all(|v| v.is_finite())
         || s.mission.fuel_used_kg < 0.0
         || s.mission.damage < 0.0
-        || s.mission.target_region != settings().mission.target_region
+        || s.mission.target_region != settings().flight_preset(s.flight_preset).target_region
         || s.mission.score.is_some_and(|v| !v.is_finite())
     {
         return Err("invalid or client-modified fixed configuration".into());
     }
     let mut ids = HashSet::new();
-    let fixed = initial(s.seed, s.experiment_settings)?;
-    if s.mission.initial_distance_m != fixed.mission.initial_distance_m {
+    // Always seed against the original preset. Moving a pad must never change
+    // the acceptance RNG that determines later debris IDs/radii in an archive.
+    let fixed = initial_for_flight(s.seed, s.experiment_settings, None, None, s.flight_preset)?;
+    let custom_site = s
+        .launch_site_direction
+        .map(surface_placement::archived_launch_site)
+        .transpose()?;
+    let start_site = s
+        .trial_start_launch_site_direction
+        .map(surface_placement::archived_launch_site)
+        .transpose()?;
+    if (start_site.is_some() && custom_site.is_none())
+        || (custom_site.is_some()
+            && s.manual_interventions == 0
+            && s.launch_site_direction != s.trial_start_launch_site_direction)
+    {
+        return Err(
+            "custom launch site lacks its recorded intervention or trial-start anchor".into(),
+        );
+    }
+    let initial_distance = start_site.map_or(fixed.mission.initial_distance_m, |site| {
+        let target = fixed
+            .assets
+            .iter()
+            .find(|asset| asset.id == EntityId::ReturnShip)
+            .expect("canonical preset has a target");
+        norm(sub(site.lander_position_m, target.position))
+    });
+    if s.mission.initial_distance_m != initial_distance {
         return Err("mission initial range differs from the configured launch and target".into());
     }
     let expected: HashMap<EntityId, &EntityState> =
@@ -1194,12 +1490,17 @@ fn validate(s: &Snapshot) -> Result<(), String> {
             || !e.mass_kg.is_finite()
             || e.mass_kg <= 0.0
             || e.mass_kg > settings().limits.mass_kg
+            || !e.actuator_gain.is_finite()
+            || !(0.1..=10.0).contains(&e.actuator_gain)
             || !e.radius_m.is_finite()
             || e.radius_m <= 0.0
             || e.radius_m > settings().limits.radius_m
             || !(0.99..=1.01).contains(&qn)
             || !accel_within_limits(e.thrust_application, e.commanded_accel_mps2)
-            || !accel_within_limits(e.thrust_application, scale(e.thrust_n, 1.0 / e.mass_kg))
+            || !accel_within_limits(
+                e.thrust_application,
+                scale(e.thrust_n, 1.0 / (e.mass_kg * e.actuator_gain)),
+            )
             || norm(e.commanded_angular_accel_rad_s2)
                 > settings().lander.max_angular_accel_rad_s2 + 1e-9
             || !e.fuel_kg.is_finite()
@@ -1214,27 +1515,44 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         let fixed = expected
             .get(&e.id)
             .ok_or_else(|| format!("unknown scene entity {}", e.id))?;
-        if fixed.mass_kg != e.mass_kg
+        let (mass_kg, max_thrust_n, actuator_gain) = if e.id == EntityId::Lander {
+            (
+                ship_tuning.mass_kg,
+                local_max_thrust_for_mass_n(ship_tuning.mass_kg) * ship_tuning.thrust_scale,
+                ship_tuning.thrust_scale,
+            )
+        } else {
+            (fixed.mass_kg, fixed.max_thrust_n, 1.0)
+        };
+        let legacy_cap = s.ship_tuning_override.is_none() && has_legacy_lander_thrust_cap(e);
+        if mass_kg != e.mass_kg
             || fixed.radius_m != e.radius_m
             || fixed.kind != e.kind
-            || (fixed.max_thrust_n != e.max_thrust_n && !has_legacy_lander_thrust_cap(e))
+            || (max_thrust_n != e.max_thrust_n && !legacy_cap)
+            || actuator_gain != e.actuator_gain
             || fixed.name != e.name
         {
             return Err(format!(
                 "fixed settings differ for {}: mass {:?} expected {:?}, radius {:?} expected {:?}, max thrust {:?} expected {:?}",
-                e.id,
-                e.mass_kg,
-                fixed.mass_kg,
-                e.radius_m,
-                fixed.radius_m,
-                e.max_thrust_n,
-                fixed.max_thrust_n
+                e.id, e.mass_kg, mass_kg, e.radius_m, fixed.radius_m, e.max_thrust_n, max_thrust_n
             ));
         }
         match e.thrust_application {
             // Keep legacy center snapshots compatible, including the historically
             // optional fields. from_state reconciles reports with the commands.
-            ThrustApplication::CenterOfMass => {}
+            ThrustApplication::CenterOfMass => {
+                if e.id == EntityId::Lander && s.ship_tuning_override.is_some() {
+                    let mut expected = e.clone();
+                    reconcile_ship_wrench(&mut expected, ship_tuning.inertia_kg_m2());
+                    if !vectors_match(e.thrust_n, expected.thrust_n)
+                        || !vectors_match(e.torque_nm, expected.torque_nm)
+                    {
+                        return Err(
+                            "tuned ship wrench differs from its requested command and gain".into(),
+                        );
+                    }
+                }
+            }
             ThrustApplication::ManualNozzles | ThrustApplication::PracticeBoost => {
                 if e.id != EntityId::Lander || e.kind != EntityKind::Lander {
                     return Err("only the lander can use manual or practice-boost nozzles".into());
@@ -1242,7 +1560,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                 if e.commanded_angular_accel_rad_s2 != [0.0; 3] {
                     return Err("nozzle modes cannot include a direct angular command".into());
                 }
-                let force = scale(e.commanded_accel_mps2, e.mass_kg);
+                let force = scale(e.commanded_accel_mps2, e.mass_kg * e.actuator_gain);
                 let wrench = applied_wrench(&applied_jets(e));
                 if !vectors_match(e.thrust_n, force)
                     || !vectors_match(wrench.force_body_n, force)
@@ -1269,6 +1587,15 @@ fn validate(s: &Snapshot) -> Result<(), String> {
                 "status is incompatible with entity kind for {}",
                 e.id
             ));
+        }
+        if e.id == EntityId::LandingPad
+            && let Some(site) = custom_site
+            && (!vectors_match(e.position, site.pad_position_m)
+                || !surface_placement::same_orientation(e.rotation, site.rotation)
+                || e.velocity != [0.0; 3]
+                || e.angular_velocity_rad_s != [0.0; 3])
+        {
+            return Err("landing pad pose differs from its saved Phobos surface anchor".into());
         }
     }
     let mut contact_ids = HashSet::new();
@@ -1427,6 +1754,34 @@ fn vectors_match(a: [f64; 3], b: [f64; 3]) -> bool {
 #[cfg(test)]
 #[path = "physics/experiment_tests.rs"]
 mod experiment_tests;
+
+#[cfg(test)]
+#[path = "physics/tuning_tests.rs"]
+mod tuning_tests;
+
+#[cfg(test)]
+#[path = "physics/lookahead_tests.rs"]
+mod lookahead_tests;
+
+#[cfg(test)]
+#[path = "physics/applied_tests.rs"]
+mod applied_tests;
+
+#[cfg(test)]
+#[path = "physics/default_flow_tests.rs"]
+mod default_flow_tests;
+
+#[cfg(test)]
+#[path = "physics/flight_tests.rs"]
+mod flight_tests;
+
+#[cfg(test)]
+#[path = "physics/surface_placement_tests.rs"]
+mod surface_placement_tests;
+
+#[cfg(test)]
+#[path = "physics/debris_tests.rs"]
+mod debris_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1945,11 +2300,12 @@ mod tests {
     }
 
     #[test]
-    fn complete_seeded_populations_round_trip_in_any_order_for_zero_maximum_and_legacy_profiles() {
+    fn complete_seeded_populations_round_trip_in_any_order_for_zero_small_and_legacy_profiles() {
         let mut zero = ExperimentSettings::default();
         zero.debris.count = 0;
         let mut maximum = ExperimentSettings::default();
-        maximum.debris.count = crate::model::MAX_DEBRIS_COUNT;
+        // The 100k construction/step test runs once without JSON archive copies.
+        maximum.debris.count = 1_000;
         for profile in [Some(zero), Some(maximum), None] {
             let mut sim = Simulation::with_profile(8, profile).unwrap();
             let inertia = sim.ship_inertia_kg_m2();

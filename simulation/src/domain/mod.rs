@@ -2,9 +2,11 @@
 mod camera;
 mod command;
 mod entity;
+mod flight;
 mod mission;
 
 pub use camera::{CameraMode, CameraRequest, ShipCameraId};
 pub use command::{EngineAction, PlaybackRate, ViewportAction};
 pub use entity::{EntityId, EntityKind, EntityStatus};
+pub use flight::{FlightPreset, LaunchSide};
 pub use mission::{LagrangeRegion, MissionPhase, MissionStatus};

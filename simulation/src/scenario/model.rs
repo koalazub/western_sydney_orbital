@@ -1,4 +1,4 @@
-use crate::domain::{LagrangeRegion, ShipCameraId};
+use crate::domain::{FlightPreset, LagrangeRegion, LaunchSide, ShipCameraId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -8,6 +8,10 @@ pub struct Scenario {
     pub frame_description: String,
     pub experiment_description: String,
     pub experiment_settings: crate::model::ExperimentSettings,
+    pub flight_presets: FlightPresets,
+    pub impact_ejecta_defaults: crate::model::ImpactEjectaSettings,
+    /// Frozen calibration reference for archived None corridor live overrides.
+    pub legacy_corridor_flow_reference: crate::model::DebrisFlowTuning,
     pub gravity: Gravity,
     pub integration: Integration,
     pub lander: Lander,
@@ -22,6 +26,31 @@ pub struct Scenario {
     pub terrain: Terrain,
     pub limits: Limits,
     pub contacts: Contacts,
+}
+
+impl Scenario {
+    pub fn flight_preset(&self, preset: FlightPreset) -> &FlightPresetSettings {
+        match preset {
+            FlightPreset::MarsFacingL1 => &self.flight_presets.mars_facing_l1,
+            FlightPreset::FarSideL2 => &self.flight_presets.far_side_l2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlightPresets {
+    pub mars_facing_l1: FlightPresetSettings,
+    pub far_side_l2: FlightPresetSettings,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlightPresetSettings {
+    pub label: String,
+    pub launch_side: LaunchSide,
+    pub target_region: LagrangeRegion,
+    pub target_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

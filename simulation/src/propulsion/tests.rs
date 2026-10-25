@@ -250,3 +250,56 @@ fn configured_mass_drives_the_same_real_nozzle_map_and_reference_acceleration_ca
         assert!(applied_jets(&invalid).is_empty());
     }
 }
+
+#[test]
+fn local_gain_above_one_emits_actual_scaled_jets_but_does_not_raise_the_request_cap() {
+    let mut sim = Simulation::new_default();
+    sim.set_manual_thrust([0.0, 5.0, 0.0]).unwrap();
+    let mut tuning = sim.ship_tuning();
+    tuning.thrust_scale = 10.0;
+    sim.tune_ship(tuning).unwrap();
+    let ship = lander(&sim);
+    assert_eq!(ship.commanded_accel_mps2, [0.0, 0.5, 0.0]);
+    assert_eq!(ship.actuator_gain, 10.0);
+    let jets = applied_jets(&ship);
+    assert_eq!(jets.len(), 1);
+    assert_eq!(jets[0].force_body_n, [0.0, ship.mass_kg * 5.0, 0.0]);
+    assert_vector_close(applied_wrench(&jets).torque_body_nm, ship.torque_nm);
+    for gain in [0.0, 0.099, 10.001, f64::NAN, f64::INFINITY] {
+        let mut invalid = ship.clone();
+        invalid.actuator_gain = gain;
+        assert!(applied_jets(&invalid).is_empty());
+    }
+    let mut invalid = ship;
+    invalid.thrust_n[1] *= 1.01;
+    assert!(applied_jets(&invalid).is_empty());
+}
+
+#[test]
+fn missing_gain_in_a_legacy_boost_archive_defaults_to_one_and_preserves_the_nozzles() {
+    let mut original = Simulation::new_default();
+    original.set_space_thrust([0.2, -0.3, 1.5]).unwrap();
+    let expected = lander(&original);
+    let mut archive = serde_json::to_value(original.snapshot()).unwrap();
+    for entity in archive["assets"].as_array_mut().unwrap() {
+        entity.as_object_mut().unwrap().remove("actuator_gain");
+    }
+    let mut restored = Simulation::new_default();
+    restored
+        .execute(crate::model::PhysicsCommand::Restore {
+            state: Box::new(serde_json::from_value(archive).unwrap()),
+        })
+        .unwrap();
+    let actual = lander(&restored);
+    assert_eq!(actual.actuator_gain, 1.0);
+    assert_eq!(actual.thrust_application, ThrustApplication::PracticeBoost);
+    assert_eq!(actual.thrust_n, expected.thrust_n);
+    assert_eq!(actual.torque_nm, expected.torque_nm);
+    assert_eq!(applied_jets(&actual).len(), applied_jets(&expected).len());
+    original.advance(settings().integration.fixed_step_s);
+    restored.advance(settings().integration.fixed_step_s);
+    assert_eq!(
+        serde_json::to_value(original.snapshot()).unwrap(),
+        serde_json::to_value(restored.snapshot()).unwrap()
+    );
+}

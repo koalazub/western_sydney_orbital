@@ -79,10 +79,12 @@ pub(crate) fn applied_jets(lander: &EntityState) -> Vec<AppliedJet> {
         || !magnitude.is_finite()
         || !lander.mass_kg.is_finite()
         || lander.mass_kg <= 0.0
+        || !lander.actuator_gain.is_finite()
+        || !(0.1..=10.0).contains(&lander.actuator_gain)
         || magnitude == 0.0
         || !accel_within_limits(
             lander.thrust_application,
-            force.map(|component| component / lander.mass_kg),
+            force.map(|component| component / lander.mass_kg / lander.actuator_gain),
         )
     {
         return Vec::new();
