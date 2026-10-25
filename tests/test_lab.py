@@ -214,10 +214,10 @@ def test_new_world_and_placement_controls_stay_behind_closed_native_disclosures(
 
 def test_launch_copy_separates_native_pad_movement_from_advanced_lander_xyz(lab_defs, lab_panels):
     launch = lab_panels["Launch"].text
-    assert "Pause the game, then drag the launchpad on Phobos." in launch
-    assert "Use its Launch tab for point/keyboard placement." in launch
-    assert "Frame Phobos, Choose surface point" in launch
-    assert "Apply launch site" in launch
+    assert "select Place lander, then drag the launchpad on Phobos." in launch
+    assert "The button pauses flight and frames the pad." in launch
+    assert "select Place lander, click Phobos, then Apply" in launch
+    assert "Choose surface point" not in launch
     assert "Escape to cancel" in launch
     assert "N/S/E/W" in launch
     assert "Reset flight retains a custom launch site" in launch

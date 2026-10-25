@@ -57,6 +57,210 @@ fn hidpi_and_enlarged_ui_keep_real_native_targets_reachable() {
 }
 
 #[test]
+fn placement_toolbar_keeps_native_controls_reachable_and_the_pad_center_clear() {
+    use super::model::{BUTTON_HEIGHT_PX, LaunchpadControl, LayoutPart, Overlay, SidePanel};
+    use bevy::input_focus::FocusCause;
+
+    for (width, height, ui_scale) in [
+        (1280, 800, 1.0),
+        (880, 640, 1.0),
+        (320, 640, 1.0),
+        (320, 640, 2.0),
+        (800, 360, 2.0),
+    ] {
+        let (mut app, camera) = hud_app(width, height, 1.0, ui_scale);
+        app.add_systems(
+            Update,
+            (
+                super::systems::update_buttons,
+                super::systems::update_readouts,
+            )
+                .chain(),
+        );
+        crate::camera::set_input_active(true, false);
+        let unchanged = crate::snapshot();
+        app.world_mut().resource_mut::<HudState>().panel = SidePanel::Launch;
+        for _ in 0..4 {
+            app.update();
+        }
+        let actions: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &HudAction)>()
+            .iter(app.world())
+            .map(|(entity, action)| (entity, *action))
+            .collect();
+        let place = actions
+            .iter()
+            .find(|(_, action)| *action == HudAction::Launchpad(LaunchpadControl::ChooseSurface))
+            .unwrap()
+            .0;
+        let cancel = actions
+            .iter()
+            .find(|(_, action)| *action == HudAction::Launchpad(LaunchpadControl::Cancel))
+            .unwrap()
+            .0;
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<bevy::window::PrimaryWindow>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(place, FocusCause::Navigated);
+        tap_key(&mut app, window, KeyCode::Enter, Key::Enter);
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(crate::launchpad::gesture_active());
+        assert_eq!(app.world().resource::<HudState>().panel, SidePanel::Launch);
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(cancel));
+        let overlays: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &Overlay)>()
+            .iter(app.world())
+            .map(|(entity, overlay)| (entity, *overlay))
+            .collect();
+        for (entity, overlay) in &overlays {
+            if matches!(overlay, Overlay::FlightStrip | Overlay::Launch) {
+                assert_eq!(
+                    app.world().get::<Node>(*entity).unwrap().display,
+                    Display::None
+                );
+            }
+        }
+        let preview = overlays
+            .iter()
+            .find(|(_, overlay)| matches!(overlay, Overlay::LaunchpadPreview))
+            .unwrap()
+            .0;
+        assert_eq!(
+            app.world().get::<Node>(preview).unwrap().display,
+            Display::Flex
+        );
+        let viewport = Rect::from_corners(
+            Vec2::ZERO,
+            app.world()
+                .get::<Camera>(camera)
+                .unwrap()
+                .physical_viewport_size()
+                .unwrap()
+                .as_vec2(),
+        );
+        let strips: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &LayoutPart)>()
+            .iter(app.world())
+            .filter_map(|(entity, part)| {
+                matches!(part, LayoutPart::TopRow | LayoutPart::BottomRow).then_some(entity)
+            })
+            .collect();
+        for strip in strips {
+            let rect = assert_in_viewport(app.world(), strip, viewport, "placement", "HUD strip");
+            assert!(
+                rect.max.y <= viewport.center().y - BUTTON_HEIGHT_PX * ui_scale + 1.0
+                    || rect.min.y >= viewport.center().y + BUTTON_HEIGHT_PX * ui_scale - 1.0,
+                "placement chrome must leave the framed pad center uncovered: {rect:?}"
+            );
+        }
+        let controls: Vec<_> = actions
+            .iter()
+            .filter_map(|(entity, _)| {
+                descendant_of(app.world(), *entity, preview).then_some(*entity)
+            })
+            .collect();
+        assert_eq!(
+            controls.len(),
+            6,
+            "one Apply, Cancel and four native nudges"
+        );
+        for control in controls {
+            app.world_mut()
+                .resource_mut::<InputFocus>()
+                .set(control, FocusCause::Navigated);
+            for _ in 0..3 {
+                app.update();
+            }
+            assert_in_viewport(
+                app.world(),
+                control,
+                viewport,
+                "placement focus",
+                "native action",
+            );
+            assert_button_glyphs_fit(app.world(), control, "placement action");
+            let node = app.world().get::<ComputedNode>(control).unwrap();
+            assert!(node.size().min_element() * node.inverse_scale_factor() >= 24.0);
+            assert_ne!(
+                app.world().get::<Outline>(control).unwrap().color,
+                Color::NONE
+            );
+        }
+        // This fixture checks queued HUD intents and native layout, not the
+        // launchpad adapter's commit. Clear its request bridge for cleanup.
+        crate::launchpad::reset_for_tests();
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Node>(preview).unwrap().display,
+            Display::None
+        );
+        for (entity, overlay) in &overlays {
+            if matches!(overlay, Overlay::FlightStrip | Overlay::Launch) {
+                assert_eq!(
+                    app.world().get::<Node>(*entity).unwrap().display,
+                    Display::Flex
+                );
+            }
+        }
+        let focused = app.world().resource::<InputFocus>().get().unwrap();
+        assert_eq!(
+            focused, place,
+            "return to the logical Launch task after placement"
+        );
+        assert!(
+            app.world()
+                .get::<bevy::ui_widgets::Button>(focused)
+                .is_some()
+        );
+        assert_in_viewport(
+            app.world(),
+            focused,
+            viewport,
+            "placement ended",
+            "restored focus",
+        );
+        let launch = overlays
+            .iter()
+            .find(|(_, overlay)| matches!(overlay, Overlay::Launch))
+            .unwrap()
+            .0;
+        let status = app
+            .world_mut()
+            .query::<(Entity, &Readout)>()
+            .iter(app.world())
+            .find_map(|(entity, readout)| {
+                (matches!(readout, Readout::LaunchpadSummary)
+                    && descendant_of(app.world(), entity, launch))
+                .then_some(entity)
+            })
+            .unwrap();
+        assert!(
+            app.world()
+                .get::<InheritedVisibility>(status)
+                .unwrap()
+                .get()
+        );
+        assert_eq!(
+            app.world().get::<Text>(status).unwrap().0,
+            super::readable_text(&crate::launchpad::summary()),
+            "Launch retains the adapter's result, cancellation or rejection status"
+        );
+        assert!(std::rc::Rc::ptr_eq(&unchanged, &crate::snapshot()));
+    }
+}
+
+#[test]
 fn captions_errors_vectors_and_long_labels_shape_inside_real_content_widths() {
     use super::model::{Overlay, SidePanel, TaskTab};
     use bevy::input_focus::FocusCause;
@@ -99,6 +303,30 @@ fn captions_errors_vectors_and_long_labels_shape_inside_real_content_widths() {
                 .as_vec2(),
         );
         assert_in_viewport(app.world(), panel, viewport, "wrapped task", "Launch panel");
+        let place = app
+            .world_mut()
+            .query::<(Entity, &HudAction)>()
+            .iter(app.world())
+            .find_map(|(entity, action)| {
+                matches!(
+                    action,
+                    HudAction::Launchpad(super::model::LaunchpadControl::ChooseSurface)
+                )
+                .then_some(entity)
+            })
+            .unwrap();
+        assert_eq!(
+            app.world().get::<AccessibleLabel>(place).unwrap().0,
+            "Place lander"
+        );
+        assert_eq!(app.world().get::<ChildOf>(place).unwrap().parent(), panel);
+        assert_in_viewport(
+            app.world(),
+            place,
+            viewport,
+            "Launch primary action",
+            "Place lander",
+        );
         let target = |app: &mut App, caption: bool| {
             app.world_mut()
                 .query::<(Entity, &Readout)>()
@@ -107,7 +335,7 @@ fn captions_errors_vectors_and_long_labels_shape_inside_real_content_widths() {
                     (if caption {
                         matches!(readout, Readout::LaunchpadHint)
                     } else {
-                        matches!(readout, Readout::LaunchpadSummary)
+                        matches!(readout, Readout::LaunchSite)
                     })
                     .then_some(entity)
                 })
@@ -596,7 +824,8 @@ fn check_instruments_disclosure(app: &mut App, camera: Entity, window: Entity) {
                     Overlay::Ship => owner == SidePanel::Ship,
                     Overlay::Debris => owner == SidePanel::Debris,
                     Overlay::Launch => owner == SidePanel::Launch,
-                    Overlay::LaunchpadPreview
+                    Overlay::FlightStrip
+                    | Overlay::LaunchpadPreview
                     | Overlay::Camera
                     | Overlay::Details
                     | Overlay::Controls
@@ -1619,7 +1848,10 @@ fn check_native_instrument_editors(app: &mut App, camera: Entity, window: Entity
         crate::session::applied_physics().unwrap().position_world_m,
         old_position
     );
-    let place = action(app, "Place lander at the drafted XYZ position and pause");
+    let place = action(
+        app,
+        "Apply XYZ position to the lander only and pause, debug-only",
+    );
     activate(app, window, place);
     let placed = crate::session::applied_physics().unwrap();
     assert_eq!(placed.position_world_m, [20000.0, 100.0, 0.0]);

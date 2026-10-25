@@ -390,6 +390,71 @@ fn assert_launchpad_context_rejected_unchanged(context: CommandContext) {
 }
 
 #[test]
+fn placement_button_pauses_the_real_runtime_without_moving_or_restarting_the_world() {
+    let mut app = fresh_app();
+    dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: [0.0, 0.0, 0.25],
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    frame(&mut app, STEP);
+    assert!(is_running());
+    let before = snapshot();
+    let physics = physics_json();
+    let revision = trial_revision();
+    request_action(EngineAction::CycleRate);
+    let paused = pause_for_launchpad_placement().unwrap();
+    assert!(!paused.running && !is_running());
+    assert_eq!(paused.accumulator, 0.0);
+    assert_eq!(queued_actions_for_tests(), 2);
+    assert!(Rc::ptr_eq(&before, &snapshot()));
+    assert_eq!(physics_json(), physics);
+    assert_eq!(trial_revision(), revision);
+    *app.world_mut().resource_mut::<PlaybackState>() = paused;
+    frame(&mut app, STEP);
+    assert!(!is_running());
+    assert_eq!(snapshot().time_s, before.time_s);
+    assert_eq!(physics_json(), physics);
+    assert_eq!(trial_revision(), revision);
+    assert_eq!(
+        app.world().resource::<PlaybackState>().rate,
+        PlaybackRate::Fivefold
+    );
+}
+
+#[test]
+fn placement_button_rejects_unavailable_control_or_pending_actions_without_changes() {
+    for (can_control, actions) in [
+        (false, vec![]),
+        (true, vec![EngineAction::Play(PlaybackRate::RealTime)]),
+        (true, vec![EngineAction::Step]),
+        (true, vec![EngineAction::Reset]),
+        (true, vec![EngineAction::CycleRate; MAX_ACTIONS]),
+    ] {
+        let mut app = fresh_app();
+        app.world_mut().resource_mut::<PlaybackState>().can_control = can_control;
+        frame(&mut app, Duration::ZERO);
+        for action in actions {
+            request_action(action);
+        }
+        let physics = physics_json();
+        let runtime = playback_state();
+        let queue = queued_actions();
+        let keyboard = keyboard_state();
+        let revision = trial_revision();
+        let published = snapshot();
+        assert!(pause_for_launchpad_placement().is_err());
+        assert_eq!(physics_json(), physics);
+        assert_eq!(playback_state(), runtime);
+        assert_eq!(queued_actions(), queue);
+        assert_eq!(keyboard_state(), keyboard);
+        assert_eq!(trial_revision(), revision);
+        assert!(Rc::ptr_eq(&published, &snapshot()));
+    }
+}
+
+#[test]
 fn launchpad_move_requires_real_pause_and_does_not_consume_a_queued_flight_action() {
     let mut app = fresh_app();
     request_action(EngineAction::Play(PlaybackRate::RealTime));

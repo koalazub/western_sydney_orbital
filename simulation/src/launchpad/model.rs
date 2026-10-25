@@ -110,6 +110,27 @@ impl Source {
             && self.pad == current.pad
             && self.lander == current.lander
     }
+
+    fn after_pause(
+        self,
+        snapshot: &Snapshot,
+        trial_revision: u32,
+        running: bool,
+        release_command: bool,
+    ) -> Option<Self> {
+        let mut released = self;
+        released.lander.command = [0.0; 3];
+        released.lander.angular_command = [0.0; 3];
+        // The real runtime pause can release a command owned by the keyboard.
+        // Accept only that release, never a changed pose, time, trial or tuning.
+        if self.matches(snapshot, trial_revision, running)
+            || (release_command && released.matches(snapshot, trial_revision, running))
+        {
+            Self::capture(snapshot, self.indices, trial_revision, running)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +149,10 @@ pub(super) struct Edit {
 pub(super) enum Phase {
     #[default]
     Idle,
+    Preparing {
+        edit: Edit,
+        release_command: bool,
+    },
     Armed(Edit),
     Dragging {
         edit: Edit,
@@ -165,6 +190,10 @@ impl Placement {
         !matches!(self.phase, Phase::Idle)
     }
 
+    pub fn preparing(&self) -> bool {
+        matches!(self.phase, Phase::Preparing { .. })
+    }
+
     pub fn blocked(&self) -> bool {
         self.active() || !matches!(self.releasing, ReleaseGuard::Clear)
     }
@@ -191,14 +220,60 @@ impl Placement {
     pub fn edit(&self) -> Option<&Edit> {
         match &self.phase {
             Phase::Idle => None,
-            Phase::Armed(edit) | Phase::Dragging { edit, .. } => Some(edit),
+            Phase::Preparing { edit, .. } | Phase::Armed(edit) | Phase::Dragging { edit, .. } => {
+                Some(edit)
+            }
         }
     }
 
     pub fn edit_mut(&mut self) -> Option<&mut Edit> {
         match &mut self.phase {
             Phase::Idle => None,
-            Phase::Armed(edit) | Phase::Dragging { edit, .. } => Some(edit),
+            Phase::Preparing { edit, .. } | Phase::Armed(edit) | Phase::Dragging { edit, .. } => {
+                Some(edit)
+            }
+        }
+    }
+
+    pub fn prepare(&mut self, source: Source, preview: Preview, release_command: bool) {
+        self.phase = Phase::Preparing {
+            edit: Edit {
+                source,
+                preview: Some(preview),
+            },
+            release_command,
+        };
+        self.notice = None;
+    }
+
+    pub fn rebase_preparation(
+        &mut self,
+        snapshot: &Snapshot,
+        trial_revision: u32,
+        running: bool,
+    ) -> bool {
+        let Phase::Preparing {
+            edit,
+            release_command,
+        } = &mut self.phase
+        else {
+            return false;
+        };
+        let Some(source) =
+            edit.source
+                .after_pause(snapshot, trial_revision, running, *release_command)
+        else {
+            return false;
+        };
+        edit.source = source;
+        *release_command = false;
+        true
+    }
+
+    pub fn finish_preparation(&mut self) {
+        if let Phase::Preparing { edit, .. } = self.phase {
+            self.phase = Phase::Armed(edit);
+            self.notice = None;
         }
     }
 
@@ -234,14 +309,14 @@ impl Placement {
     pub fn drag_pointer(&self) -> Option<Pointer> {
         match self.phase {
             Phase::Dragging { pointer, .. } => Some(pointer),
-            Phase::Idle | Phase::Armed(_) => None,
+            Phase::Idle | Phase::Preparing { .. } | Phase::Armed(_) => None,
         }
     }
 
     pub fn surface_cursor(&self, at: [f32; 2]) -> [f32; 2] {
         match self.phase {
             Phase::Dragging { grab_offset, .. } => [at[0] - grab_offset[0], at[1] - grab_offset[1]],
-            Phase::Idle | Phase::Armed(_) => at,
+            Phase::Idle | Phase::Preparing { .. } | Phase::Armed(_) => at,
         }
     }
 
@@ -283,7 +358,7 @@ impl Placement {
             return None;
         }
         if !moved {
-            self.cancel("Pad unchanged. Drag its lift grip or use Choose surface point.");
+            self.cancel("Pad unchanged. Drag its lift grip or choose Place lander.");
             return None;
         }
         if !valid_release || edit.preview.is_none() {
@@ -294,11 +369,13 @@ impl Placement {
     }
 
     pub fn take_commit(&mut self) -> Option<Commit> {
+        if self.preparing() {
+            return None;
+        }
         let edit = *self.edit()?;
         let Some(preview) = edit.preview else {
-            self.notice = Some(
-                "Choose a point on Phobos or nudge the preview before Apply launch site.".into(),
-            );
+            self.notice =
+                Some("Choose a point on Phobos or nudge the preview before Apply.".into());
             return None;
         };
         // Consume the edit before dispatch, including on rejection. Another

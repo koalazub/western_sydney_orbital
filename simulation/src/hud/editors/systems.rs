@@ -495,7 +495,7 @@ fn apply_value(
         EditorField::Placement(axis) => {
             if value.abs() > crate::scenario::settings().limits.position_m {
                 return Err(
-                    "Enter a position within the world position limit, then retry Place lander."
+                    "Enter a position within the world position limit, then retry Apply XYZ position."
                         .into(),
                 );
             }

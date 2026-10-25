@@ -106,9 +106,9 @@ The flight strip keeps speed, clearance, climb, target distance, closing speed a
 
 ### Move the launchpad on Phobos
 
-Pause the simulation, then drag the launchpad or its visible handle along Phobos. Release over a valid surface point to move the pad and seat the lander upright at rest. The preview follows the actual terrain; it does not change physics until you release. Esc cancels.
+Open **Launch** and select **Place lander**. This pauses flight and frames the current launch site. Drag the launchpad or its handle along Phobos, then release to move the pad and seat the lander upright at rest. There is no second Apply step after a drag. The preview follows the actual terrain; it does not change physics until you release. **Esc** cancels, and flight stays paused.
 
-Use **Launch → Frame Phobos** if the pad is hard to find. **Choose surface point** lets you select a location without dragging. Use the directional buttons or arrow keys to adjust its preview, then **Apply launch site** or cancel. You do not need to enter XYZ coordinates.
+To place without dragging, select **Place lander**, then click a surface point or use the directional buttons or arrow keys to adjust the preview. Select **Apply** to use that site. You do not need to enter XYZ coordinates.
 
 Moving the launchpad keeps the debris field, simulation time, hardware, fuel, damage and mission outcome. It clears the lander's thrust and motion and records a local test intervention. The selected L1 or L2 target does not move with the pad. A blocked or cancelled placement leaves the existing site unchanged.
 
@@ -118,7 +118,7 @@ Reset flight returns to the chosen custom launch site. Creating a new world retu
 
 In **Launch**, expand the new-world setup to choose **Mars-facing L1** or **Far-side L2**. **Create paused world** opens a replacement confirmation; **Replace run at time zero** applies it. Expand **Size, shell and ejection inputs** for advanced settings. The default remains the far-side L2 setup with 500 debris bodies. Choosing a draft does not replace an ongoing flight or limit where you can drag the current pad.
 
-The advanced lander-only placement controls are a different tool. Enter world X, Y and Z coordinates and select **Place lander** to move the lander without moving its pad. **Reload current XYZ** fills the fields from the current lander position. Placement pauses flight, aligns the lander away from Phobos, stops its motion and clears thrust. Placement inside another body or outside the supported world is rejected.
+The advanced lander-only placement controls are a different tool. Enter world X, Y and Z coordinates and select **Apply XYZ position** to move the lander without moving its pad. **Reload current XYZ** fills the fields from the current lander position. Placement pauses flight, aligns the lander away from Phobos, stops its motion and clears thrust. Placement inside another body or outside the supported world is rejected.
 
 The notebook's **Launch → Separate lander placement, advanced → Place lander only** controls move only the lander. A rejected placement leaves the Python controller attached; a valid placement stops its worker.
 

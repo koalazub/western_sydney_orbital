@@ -329,7 +329,14 @@ fn activate_action(
                 hud.expanded_references.insert(section);
             }
         }
-        HudAction::Launchpad(control) => crate::launchpad::request(control.request()),
+        HudAction::Launchpad(control) => {
+            if control == LaunchpadControl::ChooseSurface {
+                // Keep the task open logically. Its full overlay hides only
+                // during placement, then returns with the result or rejection.
+                hud.panel = SidePanel::Launch;
+            }
+            crate::launchpad::request(control.request());
+        }
         HudAction::ToggleControls => {
             hud.panel = hud.panel.toggle(SidePanel::Controls);
         }
@@ -366,6 +373,7 @@ type ChromeLayout = (
     &'static ComputedNode,
     &'static LayoutPart,
     &'static mut Node,
+    &'static mut ScrollPosition,
 );
 type ChromeLayoutFilter = (
     Without<Overlay>,
@@ -387,6 +395,7 @@ type CueLayoutFilter = (
 pub(super) struct ChromeMeasurements {
     viewport: Vec2,
     top_height: f32,
+    placement: bool,
 }
 
 pub(super) fn update_layout(
@@ -408,16 +417,23 @@ pub(super) fn update_layout(
         .map(|window| (window.width() / scale, window.height() / scale))
         .unwrap_or((800.0, 800.0));
     let viewport = Vec2::new(width, height);
+    let placement = crate::launchpad::gesture_active();
+    let placement_changed = natural.placement != placement;
+    natural.placement = placement;
     let resized = natural.viewport != viewport;
     natural.viewport = viewport;
     let mut top_height = 0.0;
     let mut bottom_height = 0.0;
-    for (computed, part, node) in &layout {
+    for (computed, part, node, _) in &layout {
         let measured = computed.size().y * computed.inverse_scale_factor();
         match part {
             LayoutPart::TopRow => {
                 top_height = measured;
-                if node.height == Val::Auto && node.max_height == Val::Auto && measured > 0.0 {
+                if !placement
+                    && node.height == Val::Auto
+                    && node.max_height == Val::Auto
+                    && measured > 0.0
+                {
                     natural.top_height =
                         (computed.content_size().y * computed.inverse_scale_factor()).max(measured);
                 }
@@ -436,26 +452,49 @@ pub(super) fn update_layout(
             < panel_floor;
     let task_open = hud.panel != SidePanel::Closed;
     let top_budget = (height - bottom_height - 2.0 * SCREEN_PADDING_PX - PANEL_GAP_PX).max(0.0);
-    for (_, part, mut node) in &mut layout {
+    // Keep a drag-sized gap around the framed pad, even at 320px and 200%.
+    // Both toolbars remain scrollable rather than shrinking native controls.
+    let placement_budget = (height * 0.5 - SCREEN_PADDING_PX - BUTTON_HEIGHT_PX).max(0.0);
+    for (_, part, mut node, mut position) in &mut layout {
+        if placement_changed && matches!(part, LayoutPart::TopRow | LayoutPart::BottomRow) {
+            *position = ScrollPosition::default();
+        }
         if matches!(part, LayoutPart::TopRow) {
-            node.height = if compact && task_open {
+            node.height = if !placement && compact && task_open {
                 px(0)
             } else {
                 Val::Auto
             };
-            node.max_height = if compact { px(top_budget) } else { Val::Auto };
-            node.overflow = if compact {
+            node.max_height = if placement {
+                px(placement_budget)
+            } else if compact {
+                px(top_budget)
+            } else {
+                Val::Auto
+            };
+            node.overflow = if placement || compact {
                 Overflow::scroll_y()
             } else {
                 Overflow::visible()
             };
-            if compact && task_open {
+            if !placement && compact && task_open {
                 top_height = 0.0;
             }
+        } else if matches!(part, LayoutPart::BottomRow) {
+            node.max_height = if placement {
+                px(placement_budget)
+            } else {
+                Val::Auto
+            };
+            node.overflow = if placement {
+                Overflow::scroll_y()
+            } else {
+                Overflow::visible()
+            };
         }
     }
     for mut cue in &mut cues {
-        cue.display = if compact && !task_open {
+        cue.display = if !placement && compact && !task_open {
             Display::Flex
         } else {
             Display::None
@@ -518,13 +557,14 @@ pub(super) fn update_overlays(
     for (entity, mut node, mut visibility, overlay, modal_group, mut position) in &mut overlays {
         let was_shown = node.display != Display::None;
         let shown = match overlay {
+            Overlay::FlightStrip => !crate::launchpad::gesture_active(),
             Overlay::Flight => hud.panel == SidePanel::Flight,
             Overlay::Ship => hud.panel == SidePanel::Ship,
             Overlay::Debris => hud.panel == SidePanel::Debris,
-            Overlay::Launch => hud.panel == SidePanel::Launch,
-            Overlay::LaunchpadPreview => {
-                hud.panel == SidePanel::Launch && crate::launchpad::gesture_active()
+            Overlay::Launch => {
+                hud.panel == SidePanel::Launch && !crate::launchpad::gesture_active()
             }
+            Overlay::LaunchpadPreview => crate::launchpad::gesture_active(),
             Overlay::Camera => hud.panel == SidePanel::Camera,
             Overlay::Details => hud.panel.details_open(),
             Overlay::Controls => hud.panel == SidePanel::Controls,
@@ -562,7 +602,7 @@ pub(super) fn update_overlays(
             hidden_focus = Some(match overlay {
                 Overlay::Camera => SidePanel::Camera,
                 Overlay::Controls => SidePanel::Controls,
-                Overlay::Flight => SidePanel::Flight,
+                Overlay::FlightStrip | Overlay::Flight => SidePanel::Flight,
                 Overlay::Ship => SidePanel::Ship,
                 Overlay::Debris => SidePanel::Debris,
                 Overlay::Launch | Overlay::LaunchpadPreview => SidePanel::Launch,
@@ -581,7 +621,23 @@ pub(super) fn update_overlays(
     if let Some(panel) = hidden_focus
         && !hud.reset_confirm_open
     {
-        if let Some((entity, _)) = buttons.iter().find(|(entity, action)| {
+        if crate::launchpad::gesture_active()
+            && let Some((entity, _)) = buttons.iter().find(|(_, action)| {
+                matches!(action, HudAction::Launchpad(LaunchpadControl::Cancel))
+            })
+        {
+            input_focus.set(entity, FocusCause::Navigated);
+        } else if panel == SidePanel::Launch
+            && hud.panel == SidePanel::Launch
+            && let Some((entity, _)) = buttons.iter().find(|(_, action)| {
+                matches!(
+                    action,
+                    HudAction::Launchpad(LaunchpadControl::ChooseSurface)
+                )
+            })
+        {
+            input_focus.set(entity, FocusCause::Navigated);
+        } else if let Some((entity, _)) = buttons.iter().find(|(entity, action)| {
             let matches_panel = match panel {
                 SidePanel::Camera => matches!(action, HudAction::ToggleCamera),
                 SidePanel::Controls => matches!(action, HudAction::ToggleControls),
@@ -748,7 +804,7 @@ pub(super) fn update_buttons(
                     "Frame Phobos in the debug viewer without moving the launchpad."
                 }
                 LaunchpadControl::ChooseSurface => {
-                    "While paused, choose a surface point without dragging. No physical change until Apply launch site."
+                    "Pause flight and frame the pad. Drag the pad or lift grip; release moves both pad and lander without Apply. Or click a surface point or use arrow keys, then Apply. Esc cancels."
                 }
                 LaunchpadControl::Apply => {
                     "Commit the previewed launch site and seat the lander at rest on the pad."
@@ -760,7 +816,7 @@ pub(super) fn update_buttons(
                 | LaunchpadControl::South
                 | LaunchpadControl::East
                 | LaunchpadControl::West => {
-                    "Nudge only the launch site preview. Apply launch site commits; Cancel leaves physics unchanged."
+                    "Nudge only the launch site preview. Apply commits; Cancel leaves physics unchanged."
                 }
             };
             if accessible.description() != Some(description) {
@@ -855,11 +911,7 @@ pub(super) fn update_readouts(
             Readout::LaunchpadSummary => crate::launchpad::summary(),
             Readout::LaunchSite => launch_site_readout(&snapshot),
             Readout::LaunchpadHint => {
-                if playback.running {
-                    "Pause to move the launchpad. Scroll for new-world setup.".into()
-                } else {
-                    "Drag the paused pad, or Choose surface point without dragging. Scroll for new-world setup and lander-only XYZ.".into()
-                }
+                "Place lander pauses flight and frames the pad. Drag the pad or lift grip; release moves both pad and lander without Apply. Esc cancels.".into()
             }
             Readout::DebrisPlayback => {
                 if snapshot.mission.status.is_terminal() {
@@ -1009,6 +1061,7 @@ pub(super) fn update_readouts(
 }
 
 type ScrollPanel = (
+    Entity,
     &'static Node,
     &'static ComputedNode,
     &'static mut ScrollPosition,
@@ -1019,6 +1072,7 @@ type ScrollPanelFilter = Or<(With<DetailsPanel>, With<LayoutPart>)>;
 pub(super) fn scroll_details(
     mut event: On<FocusedInput<KeyboardInput>>,
     mut panels: Query<ScrollPanel, ScrollPanelFilter>,
+    parents: Query<&ChildOf>,
     inputs: Query<(), With<bevy::ui_widgets::TextInput>>,
     hud: Res<HudState>,
 ) {
@@ -1043,17 +1097,29 @@ pub(super) fn scroll_details(
         event.propagate(false);
         return;
     }
-    let Some((_, computed, mut position, _)) =
-        panels.iter_mut().find(|(node, computed, _, part)| {
+    let focused_panel = parents
+        .iter_ancestors(event.original_event_target())
+        .find(|ancestor| {
+            panels
+                .get(*ancestor)
+                .is_ok_and(|(_, node, computed, _, _)| {
+                    node.display != Display::None
+                        && !computed.is_empty()
+                        && node.overflow.y == OverflowAxis::Scroll
+                })
+        });
+    let Some((_, _, computed, mut position, _)) =
+        panels.iter_mut().find(|(entity, node, computed, _, part)| {
             node.display != Display::None
                 && !computed.is_empty()
+                && focused_panel.is_none_or(|focused| focused == *entity)
                 && match part {
                     Some(LayoutPart::TopRow) => {
-                        hud.panel == SidePanel::Closed && node.overflow.y == OverflowAxis::Scroll
+                        (hud.panel == SidePanel::Closed || crate::launchpad::gesture_active())
+                            && node.overflow.y == OverflowAxis::Scroll
                     }
-                    Some(
-                        LayoutPart::BottomRow | LayoutPart::CameraPanel | LayoutPart::SensorActions,
-                    ) => false,
+                    Some(LayoutPart::BottomRow) => focused_panel == Some(*entity),
+                    Some(LayoutPart::CameraPanel | LayoutPart::SensorActions) => false,
                     None => hud.panel != SidePanel::Closed,
                 }
         })

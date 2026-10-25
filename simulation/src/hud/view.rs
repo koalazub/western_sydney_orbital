@@ -15,6 +15,7 @@ pub(super) fn setup(
     mut commands: Commands,
     cameras: Query<Entity, With<crate::camera::SimulationCamera>>,
 ) {
+    let top_row = spawn_top_row(&mut commands);
     let root = commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -39,52 +40,12 @@ pub(super) fn setup(
             (
                 Node {
                     width: percent(100),
-                    flex_direction: FlexDirection::Column,
-                    flex_shrink: 0.0,
-                    align_items: AlignItems::Stretch,
-                    column_gap: px(PANEL_GAP_PX),
-                    row_gap: px(PANEL_GAP_PX),
-                    ..default()
-                },
-                ScrollArea,
-                Hovered::default(),
-                LayoutPart::TopRow,
-                children![
-                    (
-                        Node { width: percent(100), ..panel_style() },
-                        BackgroundColor(PANEL),
-                        children![
-                            (
-                                Node { width: percent(100), padding: UiRect::ZERO, ..panel_style() },
-                                Pickable::IGNORE,
-                                children![
-                                    (text("T+-- | paused", CAPTION_SIZE_PX, MUTED), Readout::Summary),
-                                    (text("Python path preview | Waiting for notebook", CAPTION_SIZE_PX, MUTED), Readout::PathBrief),
-                                ],
-                            ),
-                            (
-                                Node { column_gap: px(8), ..button_row() },
-                                Pickable::IGNORE,
-                                children![
-                                    flight_tile(FlightMetric::STRIP[0]),
-                                    flight_tile(FlightMetric::STRIP[1]),
-                                    flight_tile(FlightMetric::STRIP[2]),
-                                    flight_tile(FlightMetric::STRIP[3]),
-                                    flight_tile(FlightMetric::STRIP[4]),
-                                    flight_tile(FlightMetric::STRIP[5]),
-                                ],
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-            (
-                Node {
-                    width: percent(100),
                     padding: UiRect::ZERO,
                     ..panel_style()
                 },
                 Pickable::IGNORE,
+                ScrollArea,
+                Hovered::default(),
                 LayoutPart::BottomRow,
                 children![
                     (
@@ -276,6 +237,7 @@ pub(super) fn setup(
             ),
         ],
     )).id();
+    commands.entity(root).insert_child(0, top_row);
     commands.entity(root).with_children(|parent| {
         parent.spawn(side_panel(Overlay::Flight)).with_children(|panel| {
             task_intro(panel, "Flight", "Measured state for the current flight. Scroll for kinematics and sample history; Tab reaches each section.", HudAction::ToggleInstruments);
@@ -308,31 +270,14 @@ pub(super) fn setup(
         });
         parent.spawn(side_panel(Overlay::Launch)).with_children(|panel| {
             panel.spawn(text("Launchpad on Phobos", COPY_SIZE_PX, TEXT));
+            panel.spawn(launchpad_button("Place lander", LaunchpadControl::ChooseSurface));
+            panel.spawn((text("", COPY_SIZE_PX, TEXT), Readout::LaunchpadSummary));
+            panel.spawn((text("", CAPTION_SIZE_PX, MUTED), Readout::LaunchpadHint));
             panel.spawn((button_row(), children![
                 launchpad_button("Frame Phobos", LaunchpadControl::FramePhobos),
                 button("Close launch", HudAction::ToggleLaunch, Readout::Static),
             ]));
             panel.spawn((text("", COPY_SIZE_PX, TEXT), Readout::LaunchSite));
-            panel.spawn(launchpad_button("Choose surface point", LaunchpadControl::ChooseSurface));
-            panel.spawn((text("", CAPTION_SIZE_PX, MUTED), Readout::LaunchpadHint));
-            panel.spawn((text("", COPY_SIZE_PX, TEXT), Readout::LaunchpadSummary));
-            panel.spawn((
-                Node { width: percent(100), padding: UiRect::ZERO, display: Display::None, ..panel_style() },
-                Overlay::LaunchpadPreview,
-                Visibility::Hidden,
-            )).with_children(|preview| {
-                preview.spawn(text("Preview only. Choose a point or use these buttons, then Apply launch site or Cancel.", CAPTION_SIZE_PX, MUTED));
-                preview.spawn((button_row(), children![
-                    launchpad_button("North", LaunchpadControl::North),
-                    launchpad_button("South", LaunchpadControl::South),
-                    launchpad_button("East", LaunchpadControl::East),
-                    launchpad_button("West", LaunchpadControl::West),
-                ]));
-                preview.spawn((button_row(), children![
-                    launchpad_button("Apply launch site", LaunchpadControl::Apply),
-                    launchpad_button("Cancel", LaunchpadControl::Cancel),
-                ]));
-            });
             reference(panel, ReferenceSection::LaunchpadEffects, |contents| {
                 contents.spawn(text("Applying a site seats the lander at rest on the pad and clears thrust. It records an intervention; time, fuel, damage, mission outcome and the L1/L2 target stay unchanged. Reset retains a custom site. Preview and Cancel do not change physics.", CAPTION_SIZE_PX, MUTED));
             });
@@ -344,6 +289,77 @@ pub(super) fn setup(
     if let Ok(camera) = cameras.single() {
         commands.entity(root).insert(UiTargetCamera(camera));
     }
+}
+
+fn spawn_top_row(commands: &mut Commands) -> Entity {
+    // Keep construction stack use bounded instead of adding these toolbars to
+    // the root's already large nested bundle.
+    commands
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                align_items: AlignItems::Stretch,
+                column_gap: px(PANEL_GAP_PX),
+                row_gap: px(PANEL_GAP_PX),
+                ..default()
+            },
+            ScrollArea,
+            Hovered::default(),
+            LayoutPart::TopRow,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node { width: percent(100), ..panel_style() },
+                BackgroundColor(PANEL),
+                Overlay::FlightStrip,
+                Visibility::Inherited,
+                children![
+                    (
+                        Node { width: percent(100), padding: UiRect::ZERO, ..panel_style() },
+                        Pickable::IGNORE,
+                        children![
+                            (text("T+-- | paused", CAPTION_SIZE_PX, MUTED), Readout::Summary),
+                            (text("Python path preview | Waiting for notebook", CAPTION_SIZE_PX, MUTED), Readout::PathBrief),
+                        ],
+                    ),
+                    (
+                        Node { column_gap: px(8), ..button_row() },
+                        Pickable::IGNORE,
+                        children![
+                            flight_tile(FlightMetric::STRIP[0]),
+                            flight_tile(FlightMetric::STRIP[1]),
+                            flight_tile(FlightMetric::STRIP[2]),
+                            flight_tile(FlightMetric::STRIP[3]),
+                            flight_tile(FlightMetric::STRIP[4]),
+                            flight_tile(FlightMetric::STRIP[5]),
+                        ],
+                    ),
+                ],
+            ));
+            parent.spawn((
+                Node { width: percent(100), display: Display::None, ..panel_style() },
+                BackgroundColor(PANEL),
+                Overlay::LaunchpadPreview,
+                Visibility::Hidden,
+                children![
+                    (button_row(), children![
+                        launchpad_button("Apply", LaunchpadControl::Apply),
+                        launchpad_button("Cancel", LaunchpadControl::Cancel),
+                    ]),
+                    (button_row(), children![
+                        launchpad_button("North", LaunchpadControl::North),
+                        launchpad_button("South", LaunchpadControl::South),
+                        launchpad_button("East", LaunchpadControl::East),
+                        launchpad_button("West", LaunchpadControl::West),
+                    ]),
+                    text("Drag the pad or lift grip. Release moves pad and lander without Apply. Esc cancels. Or click a point or use arrows, then Apply.", CAPTION_SIZE_PX, MUTED),
+                    (text("", CAPTION_SIZE_PX, TEXT), Readout::LaunchpadSummary),
+                ],
+            ));
+        })
+        .id()
 }
 
 fn task_intro(parent: &mut ChildSpawnerCommands, title: &str, description: &str, close: HudAction) {

@@ -77,9 +77,9 @@ impl EditorField {
             Self::RadiusMax => "Maximum asteroid radius [m]",
             Self::ShellInner => "Inner shell terrain clearance [m]",
             Self::ShellOuter => "Outer shell terrain clearance [m]",
-            Self::Placement(StreamAxis::X) => "Place lander at X [m]",
-            Self::Placement(StreamAxis::Y) => "Place lander at Y [m]",
-            Self::Placement(StreamAxis::Z) => "Place lander at Z [m]",
+            Self::Placement(StreamAxis::X) => "Lander-only X [m]",
+            Self::Placement(StreamAxis::Y) => "Lander-only Y [m]",
+            Self::Placement(StreamAxis::Z) => "Lander-only Z [m]",
             Self::ImpactSource(StreamAxis::X) => "Ejection source direction X",
             Self::ImpactSource(StreamAxis::Y) => "Ejection source direction Y",
             Self::ImpactSource(StreamAxis::Z) => "Ejection source direction Z",
@@ -110,7 +110,7 @@ impl EditorField {
                 "0 to 50000 m above terrain, plus asteroid radius. At least 10 m thick."
             }
             Self::Placement(_) => {
-                "Phobos-centered rotating world axes, in meters. Draft until Place lander."
+                "Phobos-centered rotating world axes, in meters. Debug-only draft until Apply XYZ position."
             }
             Self::ImpactSource(_) => {
                 "Source direction from Phobos center. XYZ must form a nonzero finite vector."

@@ -30,7 +30,7 @@ pub(super) fn action_enabled(
         | HudAction::CycleRate => mode == InteractionMode::Ready && playback.can_control,
         HudAction::Launchpad(control) => match control {
             LaunchpadControl::FramePhobos => ready,
-            LaunchpadControl::ChooseSurface => ready && playback.can_control && !playback.running,
+            LaunchpadControl::ChooseSurface => ready && playback.can_control,
             LaunchpadControl::Apply
             | LaunchpadControl::North
             | LaunchpadControl::South
@@ -203,6 +203,21 @@ mod tests {
                 matches!(action, HudAction::ConfirmReset | HudAction::CancelReset),
                 "{action:?}",
             );
+        }
+    }
+
+    #[test]
+    fn place_lander_can_start_while_running_but_still_requires_control() {
+        let mut playback = PlaybackState::default();
+        playback.running = true;
+        let action = HudAction::Launchpad(LaunchpadControl::ChooseSurface);
+        for mode in [InteractionMode::Ready, InteractionMode::LaunchpadPlacement] {
+            assert!(action_enabled(action, mode, &playback, false));
+            assert!(action_enabled(action, mode, &playback, true));
+        }
+        playback.can_control = false;
+        for mode in [InteractionMode::Ready, InteractionMode::LaunchpadPlacement] {
+            assert!(!action_enabled(action, mode, &playback, false));
         }
     }
 

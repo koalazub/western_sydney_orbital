@@ -7,7 +7,7 @@ use super::{
     request, reset_for_tests,
 };
 use crate::{
-    domain::{EngineAction, EntityId, ShipCameraId},
+    domain::{CameraMode, EngineAction, EntityId, PlaybackRate, ShipCameraId},
     physics::Simulation,
 };
 use bevy::{
@@ -19,6 +19,10 @@ use bevy::{
         config::{DefaultGizmoConfigGroup, GizmoConfig, GizmoConfigStore},
         gizmos::GizmoStorage,
     },
+    input::{
+        gestures::PinchGesture,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    },
     input_focus::{FocusCause, InputFocus},
     math::DVec3,
     picking::pointer::{
@@ -26,7 +30,8 @@ use bevy::{
         PointerMap,
     },
     prelude::*,
-    window::{PrimaryWindow, WindowRef},
+    render::{camera::camera_system, texture::ManualTextureViews},
+    window::{PrimaryWindow, WindowCreated, WindowRef, WindowResized, WindowScaleFactorChanged},
 };
 
 fn real_simulation() -> Simulation {
@@ -473,6 +478,7 @@ fn input_app(sensors: bool) -> (App, Entity, Entity) {
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>()
         .init_resource::<crate::hud::HudState>()
+        .init_resource::<crate::scene::VisualSettings>()
         .init_resource::<crate::PlaybackState>()
         .init_resource::<crate::camera::CameraRig>()
         .init_resource::<PointerMap>()
@@ -483,6 +489,7 @@ fn input_app(sensors: bool) -> (App, Entity, Entity) {
             (
                 crate::EngineSet::Input,
                 crate::EngineSet::Runtime,
+                crate::EngineSet::Camera,
                 crate::EngineSet::Scene,
                 crate::EngineSet::Hud,
             )
@@ -502,7 +509,7 @@ fn input_app(sensors: bool) -> (App, Entity, Entity) {
     app.update();
     assert!(!crate::session::is_running());
     let mut settings = crate::model::ExperimentSettings::default();
-    settings.debris.count = 0;
+    settings.debris.count = 4;
     crate::session::dispatch(crate::api::Dispatch::Physics(
         crate::model::PhysicsCommand::ConfigureFlight {
             settings,
@@ -648,82 +655,227 @@ fn scheduled_native_drag_previews_then_escape_cancels_without_touching_the_sessi
 }
 
 #[test]
-fn scheduled_lift_grip_drag_commits_both_real_bodies_once_on_release() {
+fn scheduled_place_lander_then_pad_or_grip_drag_commits_both_real_bodies_once_on_release() {
     let _restore = RestoreBridge::fresh();
-    let (mut app, window, camera) = input_app(false);
-    let before = crate::snapshot();
-    let revision = crate::session::trial_revision();
-    let (_, initial) = initial(&before);
-    let grip = geometry::grip(
-        app.world().get::<Camera>(camera).unwrap(),
-        app.world().get::<GlobalTransform>(camera).unwrap(),
-        initial.site,
-    )
-    .unwrap();
-    pointer_frame(
-        &mut app,
-        window,
-        grip.handle_css,
-        PointerAction::Press(PointerButton::Primary),
-    );
-    assert!(matches!(
-        app.world().resource::<Placement>().phase,
-        Phase::Dragging { .. }
-    ));
-    let destination = grip.handle_css + Vec2::X * 25.0;
-    pointer_frame(
-        &mut app,
-        window,
-        destination,
-        PointerAction::Move {
-            delta: Vec2::X * 25.0,
-        },
-    );
-    let preview = app
-        .world()
-        .resource::<Placement>()
-        .edit()
-        .unwrap()
-        .preview
+    for (mode, lift_grip) in [
+        (CameraMode::Overview, false),
+        (CameraMode::ShipTop, true),
+        (CameraMode::ShipBottom, true),
+    ] {
+        let (mut app, window, camera) = input_app(false);
+        // Run the real queued camera controller, transform propagation and CPU
+        // projection update. This does not install a renderer or claim GPU readiness.
+        app.add_plugins(TransformPlugin)
+            .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<AccumulatedMouseScroll>()
+            .init_resource::<ManualTextureViews>()
+            .add_message::<PinchGesture>()
+            .add_message::<WindowCreated>()
+            .add_message::<WindowResized>()
+            .add_message::<WindowScaleFactorChanged>()
+            .add_message::<AssetEvent<Image>>()
+            .add_systems(PostUpdate, camera_system);
+        crate::camera::install(&mut app);
+        app.world_mut()
+            .resource_mut::<crate::scene::VisualSettings>()
+            .guides = false;
+        crate::camera::request_view(crate::domain::CameraRequest {
+            mode: Some(mode),
+            focus: Some(EntityId::Phobos),
+            zoom: Some(1.0),
+        })
         .unwrap();
-    assert_eq!(crate::session::trial_revision(), revision);
-    assert_eq!(
-        serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
-        serde_json::to_value(before.as_ref()).unwrap()
-    );
-    pointer_frame(
-        &mut app,
-        window,
-        destination,
-        PointerAction::Release(PointerButton::Primary),
-    );
-    let after = crate::snapshot();
-    assert_eq!(after.manual_interventions, before.manual_interventions + 1);
-    assert_eq!(crate::session::trial_revision(), revision + 1);
-    assert_eq!(after.time_s, before.time_s);
-    assert_eq!(after.rng_state, before.rng_state);
-    assert!(!crate::session::is_running());
-    let physics = crate::session::applied_physics().unwrap();
-    assert_eq!(physics.position_world_m, preview.site.lander_position_m);
-    assert_eq!(physics.velocity_world_mps, [0.0; 3]);
-    assert_eq!(physics.angular_velocity_world_rad_s, [0.0; 3]);
-    let pad = after
-        .assets
-        .iter()
-        .find(|asset| asset.id == EntityId::LandingPad)
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        crate::request_action(EngineAction::Play(PlaybackRate::RealTime));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(50));
+        app.update();
+        assert!(crate::session::is_running());
+        assert!(crate::session::keyboard_owns_command());
+        assert_eq!(
+            app.world().resource::<crate::camera::CameraRig>().mode,
+            mode
+        );
+        let before = crate::snapshot();
+        let revision = crate::session::trial_revision();
+        let (_, initial) = initial(&before);
+        assert!(before.time_s > 0.0);
+        assert!(
+            before
+                .assets
+                .iter()
+                .any(|asset| matches!(asset.id, EntityId::Debris(_)))
+        );
+
+        // This is the HUD's Place lander intent. No separate Pause or Frame.
+        request(LaunchpadAction::PlaceOnSurface);
+        app.update();
+        assert!(app.world().resource::<Placement>().preparing());
+        assert_eq!(frame_direction(), Some(initial.direction));
+        assert!(!crate::session::is_running());
+        assert!(!app.world().resource::<crate::PlaybackState>().running);
+        assert!(!crate::session::keyboard_owns_command());
+        assert_eq!(crate::snapshot().time_s, before.time_s);
+        assert_eq!(
+            crate::snapshot().manual_interventions,
+            before.manual_interventions
+        );
+        assert_eq!(crate::session::trial_revision(), revision);
+        app.update();
+        assert!(matches!(
+            app.world().resource::<Placement>().phase,
+            Phase::Armed(_)
+        ));
+        let prepared = crate::snapshot();
+        assert!(
+            app.world()
+                .resource::<Placement>()
+                .edit()
+                .unwrap()
+                .source
+                .matches(&prepared, revision, false,)
+        );
+        let grip = geometry::grip(
+            app.world().get::<Camera>(camera).unwrap(),
+            app.world().get::<GlobalTransform>(camera).unwrap(),
+            initial.site,
+        )
         .unwrap();
-    assert_eq!(pad.position, preview.site.pad_position_m);
-    pointer_frame(
-        &mut app,
-        window,
-        destination,
-        PointerAction::Release(PointerButton::Primary),
-    );
-    assert_eq!(crate::session::trial_revision(), revision + 1);
-    assert_eq!(
-        crate::snapshot().manual_interventions,
-        before.manual_interventions + 1
-    );
+        let press = if lift_grip {
+            grip.handle_css + Vec2::new(5.0, 3.0)
+        } else {
+            grip.pad_css
+        };
+        let anchor = app
+            .world()
+            .get::<Camera>(camera)
+            .unwrap()
+            .world_to_viewport(
+                app.world().get::<GlobalTransform>(camera).unwrap(),
+                geometry::render_position(DVec3::from_array(initial.site.surface_position_m)),
+            )
+            .unwrap();
+        if lift_grip {
+            let ray = geometry::viewport_ray(
+                app.world().get::<Camera>(camera).unwrap(),
+                app.world().get::<GlobalTransform>(camera).unwrap(),
+                press,
+            )
+            .unwrap();
+            assert!(
+                !geometry::pad_hit(ray, initial.site),
+                "the visible lift grip must work with guides off"
+            );
+        }
+        pointer_frame(
+            &mut app,
+            window,
+            press,
+            PointerAction::Press(PointerButton::Primary),
+        );
+        assert!(matches!(
+            app.world().resource::<Placement>().phase,
+            Phase::Dragging { .. }
+        ));
+        let delta = Vec2::new(25.0, 7.0);
+        let destination = press + delta;
+        pointer_frame(&mut app, window, destination, PointerAction::Move { delta });
+        let preview = app
+            .world()
+            .resource::<Placement>()
+            .edit()
+            .unwrap()
+            .preview
+            .unwrap();
+        let projected = app
+            .world()
+            .get::<Camera>(camera)
+            .unwrap()
+            .world_to_viewport(
+                app.world().get::<GlobalTransform>(camera).unwrap(),
+                geometry::render_position(DVec3::from_array(preview.site.surface_position_m)),
+            )
+            .unwrap();
+        assert!(
+            projected.distance(anchor + delta) < 0.01,
+            "drag must preserve the pickup offset"
+        );
+        assert!(gesture_active() && input_blocked());
+        assert_eq!(crate::session::trial_revision(), revision);
+        assert_eq!(
+            serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+            serde_json::to_value(prepared.as_ref()).unwrap()
+        );
+        pointer_frame(
+            &mut app,
+            window,
+            destination,
+            PointerAction::Release(PointerButton::Primary),
+        );
+        let after = crate::snapshot();
+        assert_eq!(after.manual_interventions, before.manual_interventions + 1);
+        assert_eq!(crate::session::trial_revision(), revision + 1);
+        assert_eq!(after.events.len(), before.events.len() + 1);
+        assert_eq!(after.time_s, before.time_s);
+        assert_eq!(after.seed, before.seed);
+        assert_eq!(after.rng_state, before.rng_state);
+        assert_eq!(after.flight_preset, before.flight_preset);
+        assert_eq!(
+            after.trial_start_launch_site_direction,
+            before.trial_start_launch_site_direction
+        );
+        assert_eq!(after.tuning_revision, before.tuning_revision);
+        assert_eq!(after.collisions, before.collisions);
+        assert_eq!(after.mission.target_id, before.mission.target_id);
+        assert_eq!(after.mission.target_region, before.mission.target_region);
+        assert_eq!(
+            after.mission.initial_distance_m,
+            before.mission.initial_distance_m
+        );
+        assert_eq!(after.mission.damage, before.mission.damage);
+        assert_eq!(after.mission.fuel_used_kg, before.mission.fuel_used_kg);
+        assert!(!crate::session::is_running());
+        let physics = crate::session::applied_physics().unwrap();
+        assert_eq!(physics.position_world_m, preview.site.lander_position_m);
+        assert_eq!(physics.velocity_world_mps, [0.0; 3]);
+        assert_eq!(physics.angular_velocity_world_rad_s, [0.0; 3]);
+        let report = crate::session::observation();
+        assert_eq!(
+            report["launchpad"]["position"],
+            serde_json::json!(preview.site.pad_position_m)
+        );
+        for old in &before.assets {
+            let current = after
+                .assets
+                .iter()
+                .find(|asset| asset.id == old.id)
+                .unwrap();
+            assert_eq!(current.fuel_kg, old.fuel_kg);
+            if !matches!(old.id, EntityId::Lander | EntityId::LandingPad) {
+                assert_eq!(
+                    serde_json::to_value(current).unwrap(),
+                    serde_json::to_value(old).unwrap()
+                );
+            }
+        }
+        // Repeated native release cannot apply the same checked move twice.
+        pointer_frame(
+            &mut app,
+            window,
+            destination,
+            PointerAction::Release(PointerButton::Primary),
+        );
+        assert_eq!(crate::session::trial_revision(), revision + 1);
+        assert_eq!(
+            serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+            serde_json::to_value(after.as_ref()).unwrap()
+        );
+        assert!(app.get_sub_app(bevy::render::RenderApp).is_none());
+    }
 }
 
 #[test]

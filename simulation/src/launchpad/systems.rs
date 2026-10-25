@@ -59,6 +59,14 @@ type TextEditor = Or<(
     With<TextInput>,
     With<EditableText>,
 )>;
+type PlacementCamera = (
+    Entity,
+    &'static Camera,
+    &'static GlobalTransform,
+    &'static RenderTarget,
+    &'static Transform,
+    &'static Projection,
+);
 
 #[derive(SystemParam)]
 struct Input<'w, 's> {
@@ -66,20 +74,11 @@ struct Input<'w, 's> {
     buttons: Res<'w, ButtonInput<MouseButton>>,
     focus: Res<'w, InputFocus>,
     hud: Res<'w, crate::hud::HudState>,
-    playback: Res<'w, PlaybackState>,
+    visuals: Res<'w, crate::scene::VisualSettings>,
+    playback: ResMut<'w, PlaybackState>,
     rig: Res<'w, CameraRig>,
     windows: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
-    cameras: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static Camera,
-            &'static GlobalTransform,
-            &'static RenderTarget,
-        ),
-        With<SimulationCamera>,
-    >,
+    cameras: Query<'w, 's, PlacementCamera, With<SimulationCamera>>,
     ui: Query<'w, 's, UiGeometry, UiBlocker>,
     editors: Query<'w, 's, (), TextEditor>,
     ui_buttons: Query<'w, 's, (), With<UiButton>>,
@@ -135,13 +134,9 @@ fn over_ui(
     )
 }
 
-fn blocked_reason(input: &Input, window: Option<&Window>, ready: bool) -> Option<&'static str> {
-    if input.playback.running || crate::session::is_running() {
-        Some("Pause the simulation before moving the launchpad. Camera controls still work.")
-    } else if !input.playback.can_control {
+fn interaction_blocked_reason(input: &Input, window: Option<&Window>) -> Option<&'static str> {
+    if !input.playback.can_control {
         Some("Launchpad placement needs control. Camera controls still work in view-only mode.")
-    } else if input.rig.mode.sensor().is_some() {
-        Some("Choose a debug view to place the pad. Mounted RGB cameras stay unchanged.")
     } else if input.hud.launchpad_input_blocked()
         || input
             .focus
@@ -151,6 +146,33 @@ fn blocked_reason(input: &Input, window: Option<&Window>, ready: bool) -> Option
         Some("Placement cancelled for another editor or dialog. Close it, then try again.")
     } else if !crate::camera::input_active() || window.is_none_or(|window| !window.focused) {
         Some("Placement cancelled because the scene lost focus. Click the scene to try again.")
+    } else {
+        None
+    }
+}
+
+fn flight_blocked_reason(input: &Input, window: Option<&Window>) -> Option<&'static str> {
+    if input.playback.running || crate::session::is_running() {
+        Some("Use Place lander to pause and frame the pad, or pause before dragging it directly.")
+    } else {
+        interaction_blocked_reason(input, window)
+    }
+}
+
+const PREPARING: &str = "Preparing the Phobos view. Pad and lander are unchanged; Esc cancels.";
+
+fn blocked_reason(
+    input: &Input,
+    window: Option<&Window>,
+    ready: bool,
+    preparing: bool,
+) -> Option<&'static str> {
+    if let Some(reason) = flight_blocked_reason(input, window) {
+        Some(reason)
+    } else if preparing {
+        Some(PREPARING)
+    } else if input.rig.mode.sensor().is_some() {
+        Some("Use Place lander to open a debug placement view. Mounted RGB cameras stay unchanged.")
     } else if !ready {
         Some("Viewer projection is unavailable. Try again when the scene appears.")
     } else {
@@ -168,8 +190,8 @@ fn source(snapshot: &crate::model::Snapshot, state: &Placement) -> Option<Source
 }
 
 fn commit(state: &mut Placement, operation: Commit) {
-    // No Pause, Stop, transform update or other physical write precedes this
-    // checked adapter. A stale context or rejected collision leaves physics alone.
+    // Only this checked adapter writes the pad and lander poses. A stale context
+    // or rejected collision leaves physics alone; preparation only pauses playback.
     state.notice = Some(match crate::session::dispatch_launchpad_checked(operation.direction, operation.expected) {
         Ok(_) => "Pad and lander moved at rest. Local intervention recorded; flight target unchanged.".into(),
         Err(crate::api::CommandError::StaleContext) =>
@@ -213,17 +235,49 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
         .refresh(&snapshot, crate::session::trial_revision());
     let window = input.windows.single().ok();
     let view = input.cameras.single().ok();
-    let ready = view.is_some_and(|(_, camera, global, target)| {
+    let ready = view.is_some_and(|(_, camera, global, target, transform, projection)| {
         let Some((window_entity, _)) = window else { return false; };
         let Some(rect) = camera.logical_viewport_rect() else { return false; };
         !rect.is_empty()
             && matches!(target.normalize(Some(window_entity)),
                 Some(bevy::camera::NormalizedRenderTarget::Window(window)) if window.entity() == window_entity)
+            && global.to_matrix().abs_diff_eq(transform.to_matrix(), 1.0e-4)
+            && camera.computed.clip_from_view.abs_diff_eq(projection.get_clip_from_view(), 1.0e-5)
             && geometry::viewport_ray(camera, global, rect.center()).is_some()
     });
-    let reason = blocked_reason(&input, window.map(|(_, window)| window), ready);
+    let window_ref = window.map(|(_, window)| window);
 
-    if state.active() {
+    // This runs no earlier than the input frame after the requested real Pause
+    // and queued camera view. Do not mistake the previous sensor/projection for
+    // a failed placement, or retain a command legitimately released by Pause.
+    if state.preparing() {
+        if let Some(reason) = flight_blocked_reason(&input, window_ref) {
+            state.cancel(reason);
+        } else if !state.rebase_preparation(
+            &snapshot,
+            crate::session::trial_revision(),
+            crate::session::is_running(),
+        ) {
+            state.cancel(
+                "Placement cancelled because the flight changed. Choose the pad again to retry.",
+            );
+        } else if ready
+            && input.rig.mode == CameraMode::Orbit
+            && input.rig.focus == EntityId::Phobos
+            && state
+                .edit()
+                .and_then(|edit| edit.preview)
+                .is_some_and(|preview| {
+                    view.is_some_and(|(_, camera, global, ..)| {
+                        geometry::grip(camera, global, preview.site).is_some()
+                    })
+                })
+        {
+            state.finish_preparation();
+        }
+    }
+    let reason = blocked_reason(&input, window_ref, ready, state.preparing());
+    if state.active() && !state.preparing() {
         if let Some(reason) = reason {
             state.cancel(reason);
         } else if state.edit().is_some_and(|edit| {
@@ -265,6 +319,7 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
         if escape && action != LaunchpadAction::FramePhobos {
             continue;
         }
+        let reason = blocked_reason(&input, window_ref, ready, state.preparing());
         match action {
             LaunchpadAction::Cancel => {
                 state.cancel("Placement cancelled. Pad and lander are unchanged.")
@@ -279,16 +334,37 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
                 }
             }
             LaunchpadAction::PlaceOnSurface => {
-                if let Some(reason) = reason {
+                if let Some(reason) = interaction_blocked_reason(&input, window_ref) {
                     state.notice = Some(reason.into());
                 } else if !state.blocked() {
-                    if let Some(source) = source(&snapshot, &state) {
-                        state.arm(source);
-                    } else {
+                    let Some(initial) = geometry::actual_preview(&snapshot, state.indices) else {
                         state.notice = Some(
                             "The actual launchpad is unavailable. Reload a valid flight archive."
                                 .into(),
                         );
+                        continue;
+                    };
+                    let release_command = crate::session::keyboard_owns_command();
+                    match crate::session::pause_for_launchpad_placement() {
+                        Ok(paused) => {
+                            *input.playback = paused;
+                            if let Some(source) = source(&snapshot, &state) {
+                                state.prepare(source, initial, release_command);
+                                if let Err(error) = crate::camera::request_view(CameraRequest {
+                                    mode: Some(CameraMode::Orbit),
+                                    focus: Some(EntityId::Phobos),
+                                    zoom: Some(1.0),
+                                }) {
+                                    state.cancel(format!("Placement cancelled. {error}"));
+                                }
+                            } else {
+                                state.notice = Some(
+                                    "The actual pad or lander is unavailable. Placement did not start."
+                                        .into(),
+                                );
+                            }
+                        }
+                        Err(error) => state.notice = Some(format!("Pad unchanged. {error}")),
                     }
                 }
             }
@@ -311,6 +387,7 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
         }
     }
 
+    let reason = blocked_reason(&input, window_ref, ready, state.preparing());
     if reason.is_none()
         && !text_focused
         && plain_keys(&input.keys)
@@ -338,7 +415,7 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
         }
     }
 
-    if let (Some((window_entity, _)), Some((camera_entity, camera, global, target))) =
+    if let (Some((window_entity, _)), Some((camera_entity, camera, global, target, ..))) =
         (window, view)
     {
         let target = target.normalize(Some(window_entity));
@@ -359,7 +436,8 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
             let blocked_ui = over_ui(&input.ui, camera_entity, camera, at);
             match event.action {
                 PointerAction::Cancel => {
-                    if state.drag_pointer() == Some(owner) || matches!(state.phase, Phase::Armed(_))
+                    if state.drag_pointer() == Some(owner)
+                        || matches!(state.phase, Phase::Preparing { .. } | Phase::Armed(_))
                     {
                         state.cancel("Placement cancelled because the pointer was interrupted. The pad is unchanged.");
                     }
@@ -374,20 +452,48 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
                         continue;
                     }
                     if matches!(state.phase, Phase::Armed(_)) && reason.is_none() {
-                        let preview = geometry::surface_preview(camera, global, at);
-                        if let Some(edit) = state.edit_mut() {
-                            edit.preview = preview;
-                        }
-                        state.notice = preview.is_none().then(|| {
-                            "No Phobos terrain at that point. Choose a visible point on Phobos."
-                                .into()
+                        let actual = geometry::actual_preview(&snapshot, state.indices);
+                        let preview = state.edit().and_then(|edit| edit.preview);
+                        let grabbed = [preview, actual].into_iter().flatten().find(|preview| {
+                            geometry::viewport_ray(camera, global, at)
+                                .is_some_and(|ray| geometry::pad_hit(ray, preview.site))
+                                || geometry::grip(camera, global, preview.site)
+                                    .is_some_and(|grip| grip.hit(at))
                         });
+                        if let Some(initial) = grabbed {
+                            if let Some(edit) = state.edit()
+                                && let Ok(anchor) = camera.world_to_viewport(
+                                    global,
+                                    geometry::render_position(DVec3::from_array(
+                                        initial.site.surface_position_m,
+                                    )),
+                                )
+                            {
+                                let source = edit.source;
+                                state.start_drag(
+                                    source,
+                                    initial,
+                                    owner,
+                                    at.to_array(),
+                                    anchor.to_array(),
+                                );
+                            }
+                        } else {
+                            let preview = geometry::surface_preview(camera, global, at);
+                            if let Some(edit) = state.edit_mut() {
+                                edit.preview = preview;
+                            }
+                            state.notice = preview.is_none().then(|| {
+                                "No Phobos terrain at that point. Choose a visible point on Phobos."
+                                    .into()
+                            });
+                        }
                     } else if !state.blocked()
                         && let Some(initial) = geometry::actual_preview(&snapshot, state.indices)
                     {
                         let physical_hit = geometry::viewport_ray(camera, global, at)
                             .is_some_and(|ray| geometry::pad_hit(ray, initial.site));
-                        let marker_hit = crate::scene::visual_settings().guides
+                        let marker_hit = input.visuals.guides
                             && geometry::grip(camera, global, initial.site)
                                 .is_some_and(|grip| grip.hit(at));
                         if !physical_hit && !marker_hit {
@@ -468,12 +574,16 @@ fn update(mut input: Input, mut state: ResMut<Placement>) {
     publish(
         &state,
         reason,
-        view.map(|(_, camera, global, _)| (camera, global)),
+        view.map(|(_, camera, global, ..)| (camera, global)),
     );
 }
 
 fn nudge(snapshot: &crate::model::Snapshot, state: &mut Placement, step: SurfaceStep) {
-    if matches!(state.phase, Phase::Dragging { .. }) || (!state.active() && state.blocked()) {
+    if matches!(
+        state.phase,
+        Phase::Preparing { .. } | Phase::Dragging { .. }
+    ) || (!state.active() && state.blocked())
+    {
         return;
     }
     let Some(initial) = geometry::actual_preview(snapshot, state.indices) else {
@@ -497,20 +607,21 @@ fn publish(state: &Placement, reason: Option<&str>, view: Option<(&Camera, &Glob
         notice.clone()
     } else {
         match state.phase {
+            Phase::Preparing { .. } => PREPARING.into(),
             Phase::Dragging { edit, .. } if edit.preview.is_none() =>
                 "No terrain under the pointer. Return to Phobos; releasing here cancels.".into(),
             Phase::Dragging { .. } =>
                 "Preview only. Release on Phobos to move pad + lander. Esc cancels.".into(),
             Phase::Armed(edit) if edit.preview.is_some_and(|preview| view.is_some_and(|(camera, global)| geometry::grip(camera, global, preview.site).is_none())) =>
-                "Preview is outside this view. Use Frame Phobos, then Apply launch site or Cancel.".into(),
+                "Preview is outside this view. Apply to use this site, or Cancel and start again.".into(),
             Phase::Armed(edit) if edit.preview.is_some() =>
-                "Preview only. Apply launch site or Enter moves pad + lander. Arrows step 100 m; Esc cancels.".into(),
+                "Drag the pad or lift grip; release moves pad + lander. Or click terrain, then Apply or Enter. Arrows step 100 m; Esc cancels.".into(),
             Phase::Armed(_) =>
-                "Click Phobos or use arrows for 100 m steps. Apply launch site or Enter applies; Esc cancels.".into(),
+                "Click Phobos or use arrows for 100 m steps. Apply or Enter applies; Esc cancels.".into(),
             Phase::Idle => reason.unwrap_or(if crate::scene::visual_settings().guides {
-                "Drag the pad or lift grip. Or use Choose surface point. Flight target stays unchanged."
+                "Drag the pad or lift grip, or choose Place lander. Flight target stays unchanged."
             } else {
-                "Drag the pad or use Choose surface point. Turn on debug guides to see its lift grip."
+                "Choose Place lander to reveal its lift grip, or drag the pad while paused."
             }).into(),
         }
     };
@@ -529,6 +640,7 @@ fn draw(
     mut state: ResMut<Placement>,
     rig: Res<CameraRig>,
     hud: Res<crate::hud::HudState>,
+    visuals: Res<crate::scene::VisualSettings>,
     playback: Res<PlaybackState>,
     cameras: Query<(&Camera, &GlobalTransform), With<SimulationCamera>>,
     mut gizmos: Gizmos,
@@ -537,32 +649,33 @@ fn draw(
     // Explicit native/API actions can apply after Input. Clear their stale
     // preview before rendering, without sending any compensating physics command.
     if state.active()
-        && (rig.mode.sensor().is_some()
+        && ((!state.preparing() && rig.mode.sensor().is_some())
             || playback.running
             || crate::session::is_running()
             || !playback.can_control
             || hud.launchpad_input_blocked()
-            || state.edit().is_some_and(|edit| {
-                !edit.source.matches(
-                    &snapshot,
-                    crate::session::trial_revision(),
-                    crate::session::is_running(),
-                )
-            }))
+            || (!state.preparing()
+                && state.edit().is_some_and(|edit| {
+                    !edit.source.matches(
+                        &snapshot,
+                        crate::session::trial_revision(),
+                        crate::session::is_running(),
+                    )
+                })))
     {
         state.cancel(
             "Placement cancelled because the view or flight changed. The pad is unchanged.",
         );
         publish(&state, None, cameras.single().ok());
     }
-    if rig.mode.sensor().is_some() {
+    if rig.mode.sensor().is_some() || state.preparing() {
         return;
     }
-    let guides = crate::scene::visual_settings().guides;
+    let guides = visuals.guides;
     if !guides && !state.active() {
         return;
     }
-    if guides && let Some(site) = geometry::actual_site(&snapshot, state.indices) {
+    if let Some(site) = geometry::actual_site(&snapshot, state.indices) {
         draw_box(
             &mut gizmos,
             site.pad_position_m,

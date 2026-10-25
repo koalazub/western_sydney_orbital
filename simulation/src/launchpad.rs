@@ -73,7 +73,8 @@ pub(crate) fn summary() -> String {
     BRIDGE.with(|bridge| {
         let bridge = bridge.borrow();
         if bridge.status.is_empty() {
-            "Pause, then drag the pad or lift grip. Or use Choose surface point.".into()
+            "Place lander pauses and frames the pad. Drag the pad or lift grip, then release."
+                .into()
         } else {
             bridge.status.clone()
         }

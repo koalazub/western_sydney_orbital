@@ -181,7 +181,7 @@ pub(in crate::hud) fn spawn_placement(parent: &mut ChildSpawnerCommands) {
             ..panel_style()
         },
         children![text(
-            "Lander XYZ placement, not launchpad movement",
+            "Debug-only XYZ, moves lander only",
             COPY_SIZE_PX,
             TEXT
         )],
@@ -190,7 +190,7 @@ pub(in crate::hud) fn spawn_placement(parent: &mut ChildSpawnerCommands) {
         text("", CAPTION_SIZE_PX, MUTED),
         EditorReadout::PlacementSummary,
     ));
-    parent.spawn(text("This moves only the lander, not the launchpad. Stage XYZ, then Place lander; the action pauses flight, clears motion/thrust and records an intervention without changing time, fuel, damage or mission outcome.", CAPTION_SIZE_PX, MUTED));
+    parent.spawn(text("Debug-only. This moves only the lander, not the launchpad. Stage XYZ, then Apply XYZ position. It pauses flight, clears motion/thrust and records an intervention without changing time, fuel, damage or mission outcome. To move both together, use Place lander above.", CAPTION_SIZE_PX, MUTED));
     for field in EditorField::PLACEMENT {
         numeric(parent, field);
     }
@@ -198,8 +198,8 @@ pub(in crate::hud) fn spawn_placement(parent: &mut ChildSpawnerCommands) {
         button_row(),
         children![
             action(
-                "Place lander",
-                "Place lander at the drafted XYZ position and pause",
+                "Apply XYZ position",
+                "Apply XYZ position to the lander only and pause, debug-only",
                 EditorAction::PlaceLander
             ),
             action(

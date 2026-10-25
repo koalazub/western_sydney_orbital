@@ -2000,15 +2000,15 @@ def _(
                     launch_readback_view,
                     mo.md("### Move the launchpad"),
                     mo.md(
-                        "Pause the game, then drag the launchpad on Phobos. "
-                        "Use its Launch tab for point/keyboard placement."
+                        "In the game's Launch tab, select Place lander, then drag the "
+                        "launchpad on Phobos. The button pauses flight and frames the pad."
                     ),
                     mo.accordion(
                         {
                             "Launchpad controls and retained state": mo.md(
                                 "Release to apply the site; press Escape to cancel. "
-                                "For point placement, use Frame Phobos, Choose surface point, "
-                                "then Apply launch site in the game. Its N/S/E/W preview controls "
+                                "For point placement, select Place lander, click Phobos, "
+                                "then Apply in the game. Its N/S/E/W preview controls "
                                 "also work with the keyboard. Cancel discards a preview. "
                                 "The pad and lander move together at rest, with thrust cleared. "
                                 "The clock, hardware, fuel, damage and mission outcome stay "

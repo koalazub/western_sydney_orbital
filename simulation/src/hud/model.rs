@@ -172,7 +172,7 @@ impl ReferenceSection {
             Self::DebrisSampling => "Sampling and collider details",
             Self::ControlGuide => "Control guide and input diagnostics",
             Self::LaunchpadEffects => "What applying a launch site changes",
-            Self::LanderPlacement => "Advanced: place lander at XYZ",
+            Self::LanderPlacement => "Advanced: debug-only lander XYZ",
         }
     }
 }
@@ -314,6 +314,7 @@ pub(super) enum Readout {
 
 #[derive(Component, Clone, Copy)]
 pub(super) enum Overlay {
+    FlightStrip,
     Flight,
     Ship,
     Debris,

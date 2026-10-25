@@ -74,6 +74,40 @@ pub(crate) fn request_action(action: EngineAction) {
     });
 }
 
+/// The explicit placement button pauses playback without replacing the world.
+/// Return the same paused state for Bevy's resource before its next runtime pass.
+pub(crate) fn pause_for_launchpad_placement() -> Result<PlaybackState, String> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    require_control(
+        &playback,
+        "Lander placement is unavailable in view-only mode. Request control first.",
+    )?;
+    ACTIONS.with(|queue| {
+        let mut actions = queue.borrow_mut();
+        if actions.iter().any(|action| {
+            matches!(
+                action.engine_action(),
+                EngineAction::TogglePlayback
+                    | EngineAction::Play(_)
+                    | EngineAction::Step
+                    | EngineAction::Reset
+                    | EngineAction::DebugUpright
+            )
+        }) {
+            return Err("Let queued flight actions finish, then choose Place lander again.".into());
+        }
+        require_pause_slot(
+            &actions,
+            "Let queued actions finish, then choose Place lander again.",
+        )?;
+        let mission = SIMULATION.with(|sim| sim.borrow().mission_status());
+        let paused = runtime::transition(playback, EngineAction::Pause, mission).state;
+        actions.push_back(QueuedAction::Native(EngineAction::Pause));
+        RUNTIME.with(|runtime| *runtime.borrow_mut() = paused.clone());
+        Ok(paused)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn queued_actions_for_tests() -> usize {
     ACTIONS.with(|queue| queue.borrow().len())
