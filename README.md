@@ -221,7 +221,8 @@ For technical details, use the [API and measurement reference](notebook/entries/
 | The notebook will not connect | Start `lab simulation`, wait for the game, open Notebook from that game and select Connect / Refresh. A game-only server is not the live lab connection. |
 | A run finished and Run is refused | Use Reset flight. Editing parameters does not revive a completed result. |
 | Mars is missing from the close view | Use Overview. Phobos blocks Mars from the far-side pad; viewer lighting cannot remove that obstruction. |
-| Loading stalls or the view fails | Share the exact startup message. `just local-check live` reads the connected game's status without a flight command; `just local-check load` checks loading the game code, not browser graphics. |
+| WebGPU canvas unavailable | Use **Copy startup diagnostics** on the error screen. It records the actual failure without calling the failed renderer. Restart or update Safari Technology Preview and reopen the page if needed. The app does not silently fall back to another renderer. |
+| Loading stalls or the view fails | Copy the startup diagnostics and share the exact message. `just local-check live` reads the connected game's status without a flight command; `just local-check load` checks loading the game code, not browser graphics. |
 | Stop could not be delivered | Use P in the game and confirm its clock is paused. A failed connection cannot guarantee a stop request reached the browser. |
 
 ## Find the relevant code

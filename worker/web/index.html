@@ -17,7 +17,15 @@
       <progress id="wasm-progress" aria-label="Simulation engine download"></progress>
       <p id="wasm-progress-text">Checking browser graphics support.</p>
       <p id="world-message" role="alert"></p>
+      <p id="startup-recovery" hidden></p>
       <button id="retry-world" type="button" hidden>Reload simulation</button>
+      <p id="reload-consequence" hidden>Reloading starts a fresh simulation.</p>
+      <button id="copy-startup-diagnostics" type="button" hidden>Copy startup diagnostics</button>
+      <p id="diagnostics-status" role="status" aria-live="polite"></p>
+      <details id="startup-details" hidden>
+        <summary>Technical details</summary>
+        <pre id="startup-diagnostics" tabindex="0" aria-label="Startup diagnostics"></pre>
+      </details>
     </section>
     <p id="camera-instructions" class="screen-reader-only">
       Click or focus the canvas to use game controls. H shows or hides controls, held inputs and input settings. F always follows the lander again; Shift+F frames the selected object.

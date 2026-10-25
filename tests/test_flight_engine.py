@@ -84,6 +84,24 @@ def engine(wasm):
     return wasm
 
 
+def test_renderer_rejects_the_actual_no_dom_runtime_without_panicking_or_starting_physics(engine):
+    # Node really has no browser document or GPU surface. None is installed or
+    # replaced here. This is a negative-path test, not proof of GPU rendering.
+    before = engine.query("debug_snapshot")
+    runtime = engine.query("runtime")
+    for _ in range(2):
+        result = engine.query("renderer_start_result", selector="#simulation-canvas")
+        assert result["ok"] is False
+        assert result["code"] == "document_unavailable"
+        assert engine.query("renderer_status")["started"] is False
+        assert engine.query("renderer_status")["ready"] is False
+        assert engine.query("debug_snapshot") == before
+        assert engine.query("runtime") == runtime
+    # A rejected renderer start must not poison the real WASM instance.
+    engine.command(op="step", seconds=0.05)
+    assert engine.query("observation")["time_s"] == pytest.approx(before["time_s"] + 0.05)
+
+
 def test_python_plans_from_genuine_public_sensor_data_without_changing_the_world(engine):
     observation = engine.query("observation")
     before = json.dumps(observation, sort_keys=True)

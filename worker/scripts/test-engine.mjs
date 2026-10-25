@@ -24,6 +24,15 @@ for await (const line of createInterface({ input: process.stdin })) {
     else if (request.method === "telemetry") value = JSON.parse(api.telemetry_status());
     else if (request.method === "field_diagnostics") value = JSON.parse(api.field_diagnostics());
     else if (request.method === "control_result") value = JSON.parse(api.control(JSON.stringify(request.command)));
+    else if (request.method === "renderer_status") value = JSON.parse(api.renderer_status());
+    else if (request.method === "renderer_start_result") {
+      try {
+        api.start_simulation(request.selector ?? "#simulation-canvas");
+        value = { ok: true };
+      } catch (error) {
+        value = { ok: false, code: error.code ?? null, message: error.message ?? String(error) };
+      }
+    }
     else if (request.method === "preview") {
       value = JSON.parse(api.set_navigation_preview(JSON.stringify(request.preview)));
     } else if (request.method === "command") {

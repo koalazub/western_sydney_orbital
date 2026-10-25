@@ -31,7 +31,9 @@ use std::{
 };
 use wasm_bindgen::prelude::*;
 
+mod browser_surface;
 mod readiness;
+use browser_surface::StartupError;
 use readiness::{PrimaryGameFrame, RecordWorldDraw, extract_primary_view};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -136,7 +138,16 @@ pub fn status() -> String {
 fn fail(message: String) {
     // A rejected shader can cause several later "module is invalid" errors.
     // Keep the first compiler/device error instead of replacing it with fallout.
-    if !RENDERER.with(|state| state.borrow_mut().record_failure(message.clone())) {
+    // A panic may occur while RENDERER is already borrowed. Still notify the
+    // browser without triggering a second panic inside the panic hook.
+    let first_failure = RENDERER
+        .try_with(|state| {
+            state
+                .try_borrow_mut()
+                .map_or(true, |mut state| state.record_failure(message.clone()))
+        })
+        .unwrap_or(true);
+    if !first_failure {
         return;
     }
     #[cfg(target_arch = "wasm32")]
@@ -145,6 +156,10 @@ fn fail(message: String) {
     {
         let _ = callback.call1(&JsValue::NULL, &message.into());
     }
+}
+
+fn install_panic_bridge() {
+    std::panic::set_hook(Box::new(|info| fail(format!("Bevy stopped: {info}"))));
 }
 
 fn pipeline_label(descriptor: &PipelineDescriptor) -> &str {
@@ -575,13 +590,16 @@ fn browser_render_settings() -> WgpuSettings {
 }
 
 pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
-    let already_started =
-        RENDERER.with(|state| std::mem::replace(&mut state.borrow_mut().started, true));
-    if already_started {
-        return Err(JsValue::from_str(
-            "Renderer already started. Reload to retry.",
-        ));
+    if RENDERER.with(|state| state.borrow().started) {
+        return Err(StartupError::RendererAlreadyStarted.into_js());
     }
+    // Validate the actual browser surface before committing startup. Hold no
+    // renderer borrow across browser calls or error reporting.
+    #[cfg(target_arch = "wasm32")]
+    browser_surface::claim_for_bevy(canvas_selector).map_err(StartupError::into_js)?;
+    RENDERER.with(|state| state.borrow_mut().started = true);
+    // Record construction/plugin failures too, after ownership is committed.
+    install_panic_bridge();
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::BLACK))
         .init_resource::<crate::PlaybackState>()
@@ -655,7 +673,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
         .add_systems(ExtractSchedule, extract_primary_view)
         .add_systems(Render, observe_frame.in_set(RenderSystems::Cleanup));
     // Bevy's logging plugin also installs a hook; the failure bridge goes last.
-    std::panic::set_hook(Box::new(|info| fail(format!("Bevy stopped: {info}"))));
+    install_panic_bridge();
     app.run();
     Ok(())
 }
@@ -663,6 +681,15 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn panic_bridge_does_not_reborrow_renderer_state() {
+        RENDERER.with(|state| {
+            let _borrow = state.borrow_mut();
+            fail("Panic while renderer state is borrowed".into());
+        });
+    }
 
     fn material_alias_fixture(texture: &str, sampler: &str, body: &str) -> String {
         let (declarations, _, _) = pbr_alias_declarations(texture, sampler);
