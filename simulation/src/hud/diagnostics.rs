@@ -1,5 +1,5 @@
 //! Read-only native UI geometry for diagnosing a missing HUD without browser automation.
-use super::model::{HudAction, HudRoot, Readout};
+use super::model::{HudAction, HudRoot, InstrumentSection, Readout};
 use bevy::{
     camera::{RenderTarget, visibility::VisibilitySystems},
     prelude::*,
@@ -54,6 +54,8 @@ type Geometry = (
     Option<&'static HudAction>,
     Option<&'static TextLayoutInfo>,
     Has<HudRoot>,
+    Option<&'static InstrumentSection>,
+    Option<&'static super::EditorField>,
 );
 
 fn record(
@@ -72,17 +74,51 @@ fn record(
         report.viewport_css = viewport_css;
         report.native_nodes = nodes.iter().len();
         report.elements.clear();
-        for (node, computed, transform, visible, target, readout, action, text, root) in &nodes {
+        for (
+            node,
+            computed,
+            transform,
+            visible,
+            target,
+            readout,
+            action,
+            text,
+            root,
+            section,
+            editor,
+        ) in &nodes
+        {
             let role = if root {
                 Some("root")
+            } else if let Some(section) = section {
+                // Keep existing diagnostic roles stable when visible headings
+                // are shortened or moved to another task panel.
+                Some(match section.0 {
+                    crate::telemetry::InstrumentGroup::Flight => "Flight",
+                    crate::telemetry::InstrumentGroup::Acceleration => "Observed acceleration",
+                    crate::telemetry::InstrumentGroup::Peaks => "Sampled peaks",
+                    crate::telemetry::InstrumentGroup::Actuation => "Ship mass and actuation",
+                    crate::telemetry::InstrumentGroup::Ship => "Lander kinematics",
+                    crate::telemetry::InstrumentGroup::Target => "Target kinematics",
+                    crate::telemetry::InstrumentGroup::Stream => "Asteroid motion and flow",
+                    crate::telemetry::InstrumentGroup::World => "World setup",
+                    crate::telemetry::InstrumentGroup::Mission => "Mission and sample clock",
+                })
+            } else if let Some(field) = editor {
+                Some(field.label())
             } else {
                 match (readout, action) {
-                    (Some(Readout::TelemetryBrief), _) => Some("flight_metrics"),
+                    (Some(Readout::Instrument(_)), _) => Some("flight_metrics"),
                     (Some(Readout::Summary), _) => Some("mission_summary"),
                     (Some(Readout::InputSettings), _) => Some("input_settings"),
                     (Some(Readout::Notebook), _) => Some("notebook_label"),
                     (_, Some(HudAction::TogglePlayback)) => Some("run_pause"),
                     (_, Some(HudAction::ToggleDetails)) => Some("details"),
+                    (_, Some(HudAction::ToggleInstruments)) => Some("instruments"),
+                    (_, Some(HudAction::ToggleShip)) => Some("ship_inputs"),
+                    (_, Some(HudAction::ToggleDebris)) => Some("debris_inputs"),
+                    (_, Some(HudAction::ToggleLaunch)) => Some("launch_setup"),
+                    (_, Some(HudAction::ToggleCamera)) => Some("views"),
                     (_, Some(HudAction::ToggleControls)) => Some("controls_help"),
                     (_, Some(HudAction::FollowLander)) => Some("follow_lander"),
                     (_, Some(HudAction::DebugUpright)) => Some("debug_upright"),

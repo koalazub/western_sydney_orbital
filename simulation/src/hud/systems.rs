@@ -31,12 +31,18 @@ pub(super) fn install(app: &mut App) {
                 .after(InputSystems)
                 .before(InputFocusSystems::Dispatch),
         )
-        .add_systems(Update, interactions.in_set(EngineSet::Input))
+        .add_systems(
+            Update,
+            interactions
+                .in_set(EngineSet::Input)
+                .after(crate::launchpad::LaunchpadSystems::Input),
+        )
         .add_systems(
             Update,
             (
                 update_layout,
                 update_overlays,
+                update_instrument_sections,
                 update_buttons,
                 update_readouts,
             )
@@ -48,6 +54,8 @@ pub(super) fn install(app: &mut App) {
             scroll_focused_control_into_view.after(UiSystems::PostLayout),
         );
     input::install(app);
+    super::text_layout::install(app);
+    super::editors::install(app);
     super::diagnostics::install(app);
 }
 
@@ -73,15 +81,27 @@ pub(super) fn capture_binding_input(
     mut events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     hud: Res<HudState>,
+    input_focus: Res<InputFocus>,
+    editors: Query<(), With<super::InstrumentEditor>>,
 ) {
     controls::begin_input_frame();
+    super::editors::begin_input_frame(
+        input_focus
+            .get()
+            .is_some_and(|entity| editors.contains(entity)),
+        &keys,
+    );
     if controls::binding_capture_active()
-        && (!camera::input_active() || hud.reset_confirm_open || hud.panel != SidePanel::Controls)
+        && (!camera::input_active()
+            || hud.reset_confirm_open
+            || hud.panel != SidePanel::Controls
+            || super::instrument_editing())
     {
         controls::cancel_capture();
     }
     for input in events.read() {
-        if controls::binding_capture_active()
+        if !super::instrument_editing()
+            && controls::binding_capture_active()
             && input.state == ButtonState::Pressed
             && !input.repeat
         {
@@ -107,11 +127,29 @@ pub(super) fn interactions(
     keys: Res<ButtonInput<KeyCode>>,
     input_focus: Res<InputFocus>,
     buttons: Query<(), With<Button>>,
+    editors: Query<(), With<super::InstrumentEditor>>,
     mut hud: ResMut<HudState>,
     playback: Res<PlaybackState>,
 ) {
+    // EditableText handles its own keyboard events, but ButtonInput is global.
+    // Check actual focus before Escape, P/R, capture or any other HUD shortcut.
+    if super::instrument_editing()
+        || input_focus
+            .get()
+            .is_some_and(|entity| editors.contains(entity))
+    {
+        return;
+    }
     let mode = interaction_mode(&hud);
     if mode == InteractionMode::Rebinding {
+        return;
+    }
+    // Placement owns its complete gesture and key-release interval. Escape
+    // cancels the preview before it can close a panel or reach a flight key.
+    if crate::launchpad::input_blocked() {
+        if crate::launchpad::gesture_active() && keys.just_pressed(KeyCode::Escape) {
+            crate::launchpad::request(crate::launchpad::LaunchpadAction::Cancel);
+        }
         return;
     }
     let button_focused = input_focus
@@ -181,6 +219,8 @@ fn interaction_mode(hud: &HudState) -> InteractionMode {
         InteractionMode::Rebinding
     } else if hud.reset_confirm_open {
         InteractionMode::ResetConfirmation
+    } else if crate::launchpad::gesture_active() {
+        InteractionMode::LaunchpadPlacement
     } else {
         InteractionMode::Ready
     }
@@ -199,6 +239,22 @@ fn activate_action(
         crate::snapshot().mission.status.is_terminal(),
     ) {
         return;
+    }
+    if crate::launchpad::gesture_active()
+        && matches!(
+            action,
+            HudAction::ToggleDetails
+                | HudAction::ToggleInstruments
+                | HudAction::ToggleShip
+                | HudAction::ToggleDebris
+                | HudAction::ToggleLaunch
+                | HudAction::ToggleCamera
+                | HudAction::ToggleControls
+                | HudAction::ToggleInspector
+                | HudAction::ChangeCamera(_)
+        )
+    {
+        crate::launchpad::request(crate::launchpad::LaunchpadAction::Cancel);
     }
     match action {
         HudAction::TogglePlayback => crate::request_action(EngineAction::TogglePlayback),
@@ -239,6 +295,41 @@ fn activate_action(
         HudAction::ToggleDetails => {
             hud.panel = hud.panel.toggle(SidePanel::Details);
         }
+        HudAction::ToggleInstruments => {
+            hud.panel = hud.panel.toggle(SidePanel::Flight);
+        }
+        HudAction::ToggleShip => {
+            hud.panel = hud.panel.toggle(SidePanel::Ship);
+        }
+        HudAction::ToggleDebris => {
+            hud.panel = hud.panel.toggle(SidePanel::Debris);
+        }
+        HudAction::ToggleLaunch => {
+            hud.panel = hud.panel.toggle(SidePanel::Launch);
+        }
+        HudAction::ToggleCamera => {
+            hud.panel = hud.panel.toggle(SidePanel::Camera);
+        }
+        HudAction::CycleIllumination => {
+            crate::scene::request_visual_action(crate::scene::VisualAction::CycleIllumination)
+        }
+        HudAction::ToggleStars => {
+            crate::scene::request_visual_action(crate::scene::VisualAction::ToggleStars)
+        }
+        HudAction::ToggleGuides => {
+            crate::scene::request_visual_action(crate::scene::VisualAction::ToggleGuides)
+        }
+        HudAction::ToggleInstrumentSection(group) => {
+            if !hud.expanded_instruments.remove(&group) {
+                hud.expanded_instruments.insert(group);
+            }
+        }
+        HudAction::ToggleReference(section) => {
+            if !hud.expanded_references.remove(&section) {
+                hud.expanded_references.insert(section);
+            }
+        }
+        HudAction::Launchpad(control) => crate::launchpad::request(control.request()),
         HudAction::ToggleControls => {
             hud.panel = hud.panel.toggle(SidePanel::Controls);
         }
@@ -264,25 +355,49 @@ fn activate_action(
                 focus: None,
                 zoom: None,
             });
+            if hud.panel == SidePanel::Camera {
+                hud.panel = SidePanel::Closed;
+            }
         }
     }
+}
+
+type ChromeLayout = (
+    &'static ComputedNode,
+    &'static LayoutPart,
+    &'static mut Node,
+);
+type ChromeLayoutFilter = (
+    Without<Overlay>,
+    Without<DetailsPanel>,
+    Without<CompactFlightCue>,
+);
+type PanelLayoutFilter = (
+    With<DetailsPanel>,
+    Without<LayoutPart>,
+    Without<CompactFlightCue>,
+);
+type CueLayoutFilter = (
+    With<CompactFlightCue>,
+    Without<LayoutPart>,
+    Without<DetailsPanel>,
+);
+
+#[derive(Default)]
+pub(super) struct ChromeMeasurements {
+    viewport: Vec2,
+    top_height: f32,
 }
 
 pub(super) fn update_layout(
     windows: Query<&Window, With<PrimaryWindow>>,
     ui_scale: Res<UiScale>,
-    mut input_focus: ResMut<InputFocus>,
-    mut previous_sensor: Local<bool>,
-    mut layout: Query<(&mut Node, &mut Visibility, &ComputedNode, &LayoutPart), Without<Overlay>>,
-    mut details: Query<&mut Node, (With<DetailsPanel>, Without<LayoutPart>)>,
+    hud: Res<HudState>,
+    mut layout: Query<ChromeLayout, ChromeLayoutFilter>,
+    mut details: Query<&mut Node, PanelLayoutFilter>,
+    mut cues: Query<&mut Node, CueLayoutFilter>,
+    mut natural: Local<ChromeMeasurements>,
 ) {
-    let sensor = camera::status().mode.sensor().is_some();
-    if *previous_sensor != sensor {
-        // The clicked view button may now be hidden with its toolbar. Keep
-        // keyboard navigation on the canvas rather than on an invisible button.
-        input_focus.clear();
-        *previous_sensor = sensor;
-    }
     let scale = if ui_scale.0.is_finite() && ui_scale.0 > 0.0 {
         ui_scale.0
     } else {
@@ -292,33 +407,62 @@ pub(super) fn update_layout(
         .single()
         .map(|window| (window.width() / scale, window.height() / scale))
         .unwrap_or((800.0, 800.0));
-    let mut top = SCREEN_PADDING_PX + PANEL_GAP_PX;
-    let mut bottom = SCREEN_PADDING_PX + PANEL_GAP_PX;
-    for (mut node, mut visibility, computed, part) in &mut layout {
-        let height = computed.size().y * computed.inverse_scale_factor();
+    let viewport = Vec2::new(width, height);
+    let resized = natural.viewport != viewport;
+    natural.viewport = viewport;
+    let mut top_height = 0.0;
+    let mut bottom_height = 0.0;
+    for (computed, part, node) in &layout {
+        let measured = computed.size().y * computed.inverse_scale_factor();
         match part {
-            LayoutPart::TopRow => top += height,
-            LayoutPart::BottomRow => bottom += height,
+            LayoutPart::TopRow => {
+                top_height = measured;
+                if node.height == Val::Auto && node.max_height == Val::Auto && measured > 0.0 {
+                    natural.top_height =
+                        (computed.content_size().y * computed.inverse_scale_factor()).max(measured);
+                }
+            }
+            LayoutPart::BottomRow => bottom_height = measured,
             LayoutPart::CameraPanel | LayoutPart::SensorActions => {}
         }
-        let shown = match part {
-            LayoutPart::CameraPanel => !sensor,
-            LayoutPart::SensorActions => sensor,
-            LayoutPart::TopRow | LayoutPart::BottomRow => true,
-        };
-        let display = if shown { Display::Flex } else { Display::None };
-        let next_visibility = if shown {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if node.display != display {
-            node.display = display;
-        }
-        if *visibility != next_visibility {
-            *visibility = next_visibility;
+    }
+    // At extreme zoom or short heights, persistent chrome cannot all fit at
+    // once. Keep every main action visible, make the flight strip scrollable,
+    // and let a task panel use that space while open. Measurements remain in
+    // Flight; no fonts, hit targets or measured inventory are reduced.
+    let panel_floor = 2.0 * BUTTON_HEIGHT_PX + 2.0 * PANEL_PADDING_Y_PX;
+    let compact = !resized
+        && height - natural.top_height - bottom_height - 2.0 * (SCREEN_PADDING_PX + PANEL_GAP_PX)
+            < panel_floor;
+    let task_open = hud.panel != SidePanel::Closed;
+    let top_budget = (height - bottom_height - 2.0 * SCREEN_PADDING_PX - PANEL_GAP_PX).max(0.0);
+    for (_, part, mut node) in &mut layout {
+        if matches!(part, LayoutPart::TopRow) {
+            node.height = if compact && task_open {
+                px(0)
+            } else {
+                Val::Auto
+            };
+            node.max_height = if compact { px(top_budget) } else { Val::Auto };
+            node.overflow = if compact {
+                Overflow::scroll_y()
+            } else {
+                Overflow::visible()
+            };
+            if compact && task_open {
+                top_height = 0.0;
+            }
         }
     }
+    for mut cue in &mut cues {
+        cue.display = if compact && !task_open {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    let top = SCREEN_PADDING_PX + PANEL_GAP_PX + top_height;
+    let bottom = SCREEN_PADDING_PX + PANEL_GAP_PX + bottom_height;
     for mut node in &mut details {
         // Fit disclosed content between the real top and bottom strips. Keep
         // overflow scrollable instead of pushing controls off a narrow canvas.
@@ -370,18 +514,34 @@ pub(super) fn update_overlays(
         }
         modal.open = hud.reset_confirm_open;
     }
-    let mut hidden_focus = false;
+    let mut hidden_focus = None;
     for (entity, mut node, mut visibility, overlay, modal_group, mut position) in &mut overlays {
         let was_shown = node.display != Display::None;
         let shown = match overlay {
+            Overlay::Flight => hud.panel == SidePanel::Flight,
+            Overlay::Ship => hud.panel == SidePanel::Ship,
+            Overlay::Debris => hud.panel == SidePanel::Debris,
+            Overlay::Launch => hud.panel == SidePanel::Launch,
+            Overlay::LaunchpadPreview => {
+                hud.panel == SidePanel::Launch && crate::launchpad::gesture_active()
+            }
+            Overlay::Camera => hud.panel == SidePanel::Camera,
             Overlay::Details => hud.panel.details_open(),
             Overlay::Controls => hud.panel == SidePanel::Controls,
             Overlay::Reset => hud.reset_confirm_open,
             Overlay::Inspector => hud.panel == SidePanel::Inspector,
         };
         node.display = if shown { Display::Flex } else { Display::None };
-        if matches!(overlay, Overlay::Details | Overlay::Controls)
-            && !was_shown
+        if matches!(
+            overlay,
+            Overlay::Flight
+                | Overlay::Ship
+                | Overlay::Debris
+                | Overlay::Launch
+                | Overlay::Camera
+                | Overlay::Details
+                | Overlay::Controls
+        ) && !was_shown
             && node.display != Display::None
         {
             position.y = 0.0;
@@ -399,7 +559,15 @@ pub(super) fn update_overlays(
                         .any(|parent| parent == entity)
             })
         {
-            hidden_focus = true;
+            hidden_focus = Some(match overlay {
+                Overlay::Camera => SidePanel::Camera,
+                Overlay::Controls => SidePanel::Controls,
+                Overlay::Flight => SidePanel::Flight,
+                Overlay::Ship => SidePanel::Ship,
+                Overlay::Debris => SidePanel::Debris,
+                Overlay::Launch | Overlay::LaunchpadPreview => SidePanel::Launch,
+                Overlay::Details | Overlay::Inspector | Overlay::Reset => SidePanel::Controls,
+            });
         }
         let needs_modal_group = matches!(overlay, Overlay::Reset) && hud.reset_confirm_open;
         if needs_modal_group != modal_group {
@@ -410,15 +578,76 @@ pub(super) fn update_overlays(
             }
         }
     }
-    if hidden_focus && !hud.reset_confirm_open {
-        if let Some((entity, _)) = buttons
-            .iter()
-            .find(|(_, action)| matches!(action, HudAction::ToggleDetails))
-        {
+    if let Some(panel) = hidden_focus
+        && !hud.reset_confirm_open
+    {
+        if let Some((entity, _)) = buttons.iter().find(|(entity, action)| {
+            let matches_panel = match panel {
+                SidePanel::Camera => matches!(action, HudAction::ToggleCamera),
+                SidePanel::Controls => matches!(action, HudAction::ToggleControls),
+                SidePanel::Flight => matches!(action, HudAction::ToggleInstruments),
+                SidePanel::Ship => matches!(action, HudAction::ToggleShip),
+                SidePanel::Debris => matches!(action, HudAction::ToggleDebris),
+                SidePanel::Launch => matches!(action, HudAction::ToggleLaunch),
+                SidePanel::Details | SidePanel::Inspector => {
+                    matches!(action, HudAction::ToggleControls)
+                }
+                SidePanel::Closed => false,
+            };
+            matches_panel
+                && !parents
+                    .iter_ancestors(*entity)
+                    .any(|parent| overlays.contains(parent))
+        }) {
             input_focus.set(entity, FocusCause::Navigated);
         } else {
             input_focus.clear();
         }
+    }
+}
+
+pub(super) fn update_instrument_sections(
+    hud: Res<HudState>,
+    mut sections: Query<
+        (&InstrumentContents, &mut Node, &mut Visibility),
+        Without<ReferenceContents>,
+    >,
+    mut references: Query<
+        (&ReferenceContents, &mut Node, &mut Visibility),
+        Without<InstrumentContents>,
+    >,
+) {
+    for (section, mut node, mut visibility) in &mut sections {
+        let expanded = hud.expanded_instruments.contains(&section.0);
+        let display = if expanded {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        let shown = if expanded {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        if *visibility != shown {
+            *visibility = shown;
+        }
+    }
+    for (section, mut node, mut visibility) in &mut references {
+        let expanded = hud.expanded_references.contains(&section.0);
+        node.display = if expanded {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        *visibility = if expanded {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
@@ -431,6 +660,7 @@ type ButtonVisual = (
     &'static mut BackgroundColor,
     &'static mut AccessibilityNode,
     &'static mut Outline,
+    Option<&'static TaskTab>,
 );
 
 pub(super) fn update_buttons(
@@ -442,9 +672,19 @@ pub(super) fn update_buttons(
 ) {
     let snapshot = crate::snapshot();
     let camera_status = camera::status();
+    let visual_settings: crate::scene::VisualSettings = crate::scene::visual_settings();
     let mode = interaction_mode(&hud);
-    for (entity, action, hovered, pressed, disabled, mut background, mut accessible, mut outline) in
-        &mut button_views
+    for (
+        entity,
+        action,
+        hovered,
+        pressed,
+        disabled,
+        mut background,
+        mut accessible,
+        mut outline,
+        task_tab,
+    ) in &mut button_views
     {
         let should_disable = !action_enabled(
             *action,
@@ -459,11 +699,24 @@ pub(super) fn update_buttons(
                 commands.entity(entity).remove::<InteractionDisabled>();
             }
         }
-        let (selected, expanded) = match *action {
+        let (mut selected, expanded) = match *action {
             HudAction::ChangeCamera(mode) => (Some(mode == camera_status.mode), None),
             HudAction::ToggleDetails => (None, Some(hud.panel.details_open())),
+            HudAction::ToggleInstruments => (None, Some(hud.panel == SidePanel::Flight)),
+            HudAction::ToggleShip => (None, Some(hud.panel == SidePanel::Ship)),
+            HudAction::ToggleDebris => (None, Some(hud.panel == SidePanel::Debris)),
+            HudAction::ToggleLaunch => (None, Some(hud.panel == SidePanel::Launch)),
+            HudAction::ToggleCamera => (None, Some(hud.panel == SidePanel::Camera)),
             HudAction::ToggleControls => (None, Some(hud.panel == SidePanel::Controls)),
             HudAction::ToggleInspector => (None, Some(hud.panel == SidePanel::Inspector)),
+            HudAction::ToggleStars => (Some(visual_settings.stars), None),
+            HudAction::ToggleGuides => (Some(visual_settings.guides), None),
+            HudAction::ToggleInstrumentSection(group) => {
+                (None, Some(hud.expanded_instruments.contains(&group)))
+            }
+            HudAction::ToggleReference(section) => {
+                (None, Some(hud.expanded_references.contains(&section)))
+            }
             HudAction::TogglePlayback
             | HudAction::Step
             | HudAction::AskReset
@@ -480,8 +733,40 @@ pub(super) fn update_buttons(
             | HudAction::ToggleCapture
             | HudAction::FollowLander
             | HudAction::FocusNext
-            | HudAction::FocusPrevious => (None, None),
+            | HudAction::FocusPrevious
+            | HudAction::Launchpad(_) => (None, None),
+            HudAction::CycleIllumination => (None, None),
         };
+        if let Some(tab) = task_tab {
+            selected = Some(
+                hud.panel == tab.0 || (tab.0 == SidePanel::Controls && hud.panel.details_open()),
+            );
+        }
+        if let HudAction::Launchpad(control) = action {
+            let description = match control {
+                LaunchpadControl::FramePhobos => {
+                    "Frame Phobos in the debug viewer without moving the launchpad."
+                }
+                LaunchpadControl::ChooseSurface => {
+                    "While paused, choose a surface point without dragging. No physical change until Apply launch site."
+                }
+                LaunchpadControl::Apply => {
+                    "Commit the previewed launch site and seat the lander at rest on the pad."
+                }
+                LaunchpadControl::Cancel => {
+                    "Discard the launch site preview without changing physics."
+                }
+                LaunchpadControl::North
+                | LaunchpadControl::South
+                | LaunchpadControl::East
+                | LaunchpadControl::West => {
+                    "Nudge only the launch site preview. Apply launch site commits; Cancel leaves physics unchanged."
+                }
+            };
+            if accessible.description() != Some(description) {
+                accessible.set_description(description);
+            }
+        }
         if let Some(expanded) = expanded
             && accessible.is_expanded() != Some(expanded)
         {
@@ -518,21 +803,74 @@ pub(super) fn update_readouts(
     playback: Res<PlaybackState>,
     keys: Res<ButtonInput<KeyCode>>,
     hud: Res<HudState>,
-    mut reads: Query<(&mut Text, &Readout, &ChildOf)>,
+    mut reads: Query<(Entity, &mut Text, &Readout, &ChildOf)>,
     mut buttons: Query<&mut AccessibilityNode, With<Button>>,
+    parents: Query<&ChildOf>,
+    nodes: Query<&Node>,
 ) {
     let snapshot = crate::snapshot();
     let camera_status = camera::status();
+    let visual_settings = crate::scene::visual_settings();
     let focus = focused_item(&snapshot, camera_status.focus);
-    for (mut text, readout, parent) in &mut reads {
+    for (entity, mut text, readout, parent) in &mut reads {
+        // Use this frame's disclosure state, not last frame's inherited
+        // visibility. Newly opened panels refresh before their first layout.
+        if parents.iter_ancestors(entity).any(|ancestor| {
+            nodes
+                .get(ancestor)
+                .is_ok_and(|node| node.display == Display::None)
+        }) {
+            continue;
+        }
         let value = match readout {
-            Readout::Summary => summary_readout(&snapshot, &playback),
+            Readout::Summary => summary_readout(
+                &snapshot,
+                &playback,
+                crate::session::keyboard_owns_command(),
+            ),
             Readout::PathBrief => crate::navigation::brief(),
             Readout::PathDetails => crate::navigation::details(),
-            Readout::FlightControls => flight_controls_readout(&playback),
-            Readout::TelemetryBrief => crate::telemetry::brief(),
+            Readout::FlightControls => flight_controls_readout(&snapshot, &playback),
             Readout::TelemetryDetails => crate::telemetry::details(),
-            Readout::ReferenceThrust => reference_thrust_brief(),
+            Readout::Instrument(key) => crate::telemetry::instrument(*key),
+            Readout::InstrumentGroup(group) => crate::telemetry::group_status(*group),
+            Readout::InstrumentSection(group) => format!(
+                "{} {}",
+                if hud.expanded_instruments.contains(group) {
+                    "-"
+                } else {
+                    "+"
+                },
+                group.title()
+            ),
+            Readout::ReferenceToggle(section) => format!(
+                "{} {}",
+                if hud.expanded_references.contains(section) {
+                    "-"
+                } else {
+                    "+"
+                },
+                section.title()
+            ),
+            Readout::LaunchpadSummary => crate::launchpad::summary(),
+            Readout::LaunchSite => launch_site_readout(&snapshot),
+            Readout::LaunchpadHint => {
+                if playback.running {
+                    "Pause to move the launchpad. Scroll for new-world setup.".into()
+                } else {
+                    "Drag the paused pad, or Choose surface point without dragging. Scroll for new-world setup and lander-only XYZ.".into()
+                }
+            }
+            Readout::DebrisPlayback => {
+                if snapshot.mission.status.is_terminal() {
+                    "Mission ended. Stored asteroid velocities are not advancing motion.".into()
+                } else if playback.running {
+                    "Running. Actual body dynamics are sampled about twice per second.".into()
+                } else {
+                    "Paused. Nonzero stored velocities do not mean asteroids are moving.".into()
+                }
+            }
+            Readout::TelemetryStatus => crate::telemetry::sample_status(),
             Readout::InputSettings => input_settings_readout(&playback, &keys),
             Readout::BindingStatus => controls::capture_message(),
             Readout::Binding(action) => format!(
@@ -540,15 +878,7 @@ pub(super) fn update_readouts(
                 action.label(),
                 controls::key_label(*action)
             ),
-            Readout::FlightHint => format!(
-                "{}/{} fire front/back | {}/{} fire left/right | {} lift | Alt/Option debug",
-                controls::key_label(controls::Action::Front),
-                controls::key_label(controls::Action::Back),
-                controls::key_label(controls::Action::Left),
-                controls::key_label(controls::Action::Right),
-                controls::key_label(controls::Action::Lift),
-            ),
-            Readout::Notebook => "Open notebook · new tab".into(),
+            Readout::Notebook => "Notebook · new tab".into(),
             Readout::Mission => mission_readout(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
@@ -571,9 +901,9 @@ pub(super) fn update_readouts(
                 if snapshot.mission.status.is_terminal() {
                     snapshot.mission.status.to_string()
                 } else if playback.running {
-                    "Pause [P]".into()
+                    "Pause sim [P]".into()
                 } else {
-                    "Run [P]".into()
+                    "Play sim [P]".into()
                 }
             }
             Readout::Rate => format!("{}x [T]", playback.rate.factor() as u32),
@@ -599,15 +929,45 @@ pub(super) fn update_readouts(
                 }
             }
             Readout::DetailsToggle => if hud.panel.details_open() {
-                "Details -"
+                "Close details"
             } else {
                 "Details +"
             }
             .into(),
-            Readout::ControlsToggle => if hud.panel == SidePanel::Controls {
-                "Close controls [H]"
+            Readout::InstrumentsToggle => if hud.panel == SidePanel::Flight {
+                "Flight -"
             } else {
-                "Controls [H]"
+                "Flight +"
+            }
+            .into(),
+            Readout::ShipToggle => if hud.panel == SidePanel::Ship {
+                "Ship -"
+            } else {
+                "Ship +"
+            }
+            .into(),
+            Readout::DebrisToggle => if hud.panel == SidePanel::Debris {
+                "Debris -"
+            } else {
+                "Debris +"
+            }
+            .into(),
+            Readout::LaunchToggle => if hud.panel == SidePanel::Launch {
+                "Launch -"
+            } else {
+                "Launch +"
+            }
+            .into(),
+            Readout::CameraToggle => if hud.panel == SidePanel::Camera {
+                "Views -"
+            } else {
+                "Views +"
+            }
+            .into(),
+            Readout::ControlsToggle => if hud.panel == SidePanel::Controls {
+                "Help - [H]"
+            } else {
+                "Help [H]"
             }
             .into(),
             Readout::InspectorToggle => if hud.panel == SidePanel::Inspector {
@@ -616,7 +976,28 @@ pub(super) fn update_readouts(
                 "Inspect [I]"
             }
             .into(),
+            Readout::Illumination => format!(
+                "Viewer light: {}",
+                match visual_settings.illumination {
+                    crate::scene::IlluminationMode::Natural => "Natural",
+                    crate::scene::IlluminationMode::Context => "Context",
+                    crate::scene::IlluminationMode::Inspection => "Inspection",
+                }
+            ),
+            Readout::Stars => format!(
+                "Stars: {}",
+                if visual_settings.stars { "on" } else { "off" }
+            ),
+            Readout::Guides => format!(
+                "Debug guides: {}",
+                if visual_settings.guides { "on" } else { "off" }
+            ),
             Readout::Static => continue,
+        };
+        let value = if value.is_ascii() {
+            value
+        } else {
+            super::readable_text(&value)
         };
         if text.0 != value {
             if let Ok(mut accessible) = buttons.get_mut(parent.parent()) {
@@ -627,10 +1008,23 @@ pub(super) fn update_readouts(
     }
 }
 
+type ScrollPanel = (
+    &'static Node,
+    &'static ComputedNode,
+    &'static mut ScrollPosition,
+    Option<&'static LayoutPart>,
+);
+type ScrollPanelFilter = Or<(With<DetailsPanel>, With<LayoutPart>)>;
+
 pub(super) fn scroll_details(
     mut event: On<FocusedInput<KeyboardInput>>,
-    mut panels: Query<(&Node, &ComputedNode, &mut ScrollPosition), With<DetailsPanel>>,
+    mut panels: Query<ScrollPanel, ScrollPanelFilter>,
+    inputs: Query<(), With<bevy::ui_widgets::TextInput>>,
+    hud: Res<HudState>,
 ) {
+    if inputs.contains(event.original_event_target()) {
+        return;
+    }
     if controls::binding_actions_blocked() {
         event.propagate(false);
         return;
@@ -638,9 +1032,31 @@ pub(super) fn scroll_details(
     if event.input.state != ButtonState::Pressed {
         return;
     }
-    let Some((_, computed, mut position)) = panels
-        .iter_mut()
-        .find(|(node, computed, _)| node.display != Display::None && !computed.is_empty())
+    if crate::launchpad::input_blocked()
+        && matches!(
+            event.input.key_code,
+            KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight
+        )
+    {
+        // Armed placement owns its direction keys. Page Up/Down still scrolls
+        // the panel, and Tab/Enter still reaches its native nudge buttons.
+        event.propagate(false);
+        return;
+    }
+    let Some((_, computed, mut position, _)) =
+        panels.iter_mut().find(|(node, computed, _, part)| {
+            node.display != Display::None
+                && !computed.is_empty()
+                && match part {
+                    Some(LayoutPart::TopRow) => {
+                        hud.panel == SidePanel::Closed && node.overflow.y == OverflowAxis::Scroll
+                    }
+                    Some(
+                        LayoutPart::BottomRow | LayoutPart::CameraPanel | LayoutPart::SensorActions,
+                    ) => false,
+                    None => hud.panel != SidePanel::Closed,
+                }
+        })
     else {
         return;
     };
@@ -660,10 +1076,12 @@ pub(super) fn scroll_details(
     position.y = next.clamp(0.0, max_scroll);
 }
 
+type FocusableControls = Or<(With<Button>, With<super::InstrumentEditor>)>;
+
 pub(super) fn scroll_focused_control_into_view(
     mut commands: Commands,
     input_focus: Res<InputFocus>,
-    buttons: Query<(), With<Button>>,
+    buttons: Query<(), FocusableControls>,
     mut previous: Local<Option<Entity>>,
 ) {
     let focused = input_focus.get();
@@ -688,7 +1106,7 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         String::new()
     };
     format!(
-        "T+{} | {} ({})\nReturn ship {} | range {} | speed {}\nFuel used ~{} kg | damage estimate ~{} J\n{} debris | {} contacts | {} scene entities{}\nLocal test resets: {}",
+        "T+{} | {} ({})\nReturn ship {} | range {} | speed {}\nFuel used ~{} kg | damage estimate ~{} J\n{} debris | {} contacts | {} scene entities{}\nRecorded local interventions: {}",
         duration(snapshot.time_s),
         snapshot.mission.phase,
         snapshot.mission.status,
@@ -709,19 +1127,24 @@ fn mission_readout(snapshot: &Snapshot) -> String {
     )
 }
 
-fn summary_readout(snapshot: &Snapshot, playback: &PlaybackState) -> String {
+fn summary_readout(snapshot: &Snapshot, playback: &PlaybackState, manual_command: bool) -> String {
     let state = if snapshot.mission.status.is_terminal() {
         snapshot.mission.status.to_string()
-    } else if !playback.can_control {
-        "view only".into()
     } else if playback.running {
         "running".into()
     } else {
         "paused".into()
     };
     format!(
-        "Phobos practice | T+{} | {state}",
-        duration(snapshot.time_s)
+        "T+{} | {state} · {}x · {}{}",
+        duration(snapshot.time_s),
+        playback.rate.factor() as u32,
+        command_owner_label(manual_command),
+        if playback.can_control {
+            ""
+        } else {
+            " · view only"
+        },
     )
 }
 
@@ -733,7 +1156,11 @@ fn environment_readout(snapshot: &Snapshot) -> String {
     )
 }
 
-fn flight_controls_readout(playback: &PlaybackState) -> String {
+fn flight_controls_readout(snapshot: &Snapshot, playback: &PlaybackState) -> String {
+    if snapshot.mission.status.is_terminal() {
+        return "Mission ended. Reset to start another flight; tuning keeps this result intact."
+            .into();
+    }
     if controls::binding_capture_active() {
         return "Changing a key. Manual flight is blocked; press one key or Esc to cancel.".into();
     }
@@ -741,7 +1168,7 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
         "Ship controls unavailable in view-only mode."
     } else if !playback.running {
         return format!(
-            "Lander paused. {} launches; P or Run resumes playback.",
+            "Lander paused. {} launches; P or Play sim resumes playback.",
             controls::key_label(controls::Action::Lift)
         );
     } else if !camera::input_active() {
@@ -756,17 +1183,9 @@ fn flight_controls_readout(playback: &PlaybackState) -> String {
 
 fn reference_thrust_readout() -> String {
     format!(
-        "{} and {}: reference limit {:.2} m/s²\nLocal nozzle physics, not an STP-equivalent allocator.",
+        "{} and {}: reference limit {:.2} m/s²",
         controls::key_label(controls::Action::Lift),
         controls::key_label(controls::Action::Up),
-        crate::scenario::settings().lander.max_accel_mps2
-    )
-}
-
-pub(super) fn reference_thrust_brief() -> String {
-    format!(
-        "{} reference {:.2} m/s² | local model",
-        controls::key_label(controls::Action::Lift),
         crate::scenario::settings().lander.max_accel_mps2
     )
 }
@@ -779,8 +1198,9 @@ fn input_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyCode>)
         "inactive; click/focus the scene"
     };
     format!(
-        "Input {input}\nHeld keys: {}\nController owner: external Python notebook or manual keys\nLocal simulation {}\nReference command caps: {:.2} m/s² and {:.2} rad/s²\n{}",
+        "Input {input}\nHeld keys: {}\nCommand owner: {}\nSimulation {}\nReference command caps: {:.2} m/s² and {:.2} rad/s²\n{}",
         crate::controls::held_key_labels(keys),
+        command_owner_label(crate::session::keyboard_owns_command()),
         if playback.running {
             "running"
         } else {
@@ -790,6 +1210,10 @@ fn input_settings_readout(playback: &PlaybackState, keys: &ButtonInput<KeyCode>)
         config.lander.max_angular_accel_rad_s2,
         reference_thrust_readout()
     )
+}
+
+fn command_owner_label(manual: bool) -> &'static str {
+    if manual { "manual keys" } else { "API / idle" }
 }
 
 fn camera_readout(camera: crate::camera::CameraStatus) -> String {
@@ -912,7 +1336,7 @@ fn inspector_readout(snapshot: &Snapshot, focus: Option<FocusItem<'_>>) -> Strin
     };
     if let Some(entity) = focus.entity {
         return format!(
-            "{} | {} | {}\nPosition {:.1}, {:.1}, {:.1} m\nVelocity {:.3}, {:.3}, {:.3} m/s\nQuaternion {:.4}, {:.4}, {:.4}, {:.4}\nAngular velocity {:.4}, {:.4}, {:.4} rad/s\nMass {:.1} kg | radius {:.2} m | fuel {:.1} kg\nApplied command {:.4}, {:.4}, {:.4} m/s^2",
+            "{} | {} | {}\nPosition {:.1}, {:.1}, {:.1} m\nVelocity {:.3}, {:.3}, {:.3} m/s\nQuaternion {:.4}, {:.4}, {:.4}, {:.4}\nAngular velocity {:.4}, {:.4}, {:.4} rad/s\nMass {:.1} kg | radius {:.2} m | fuel {:.1} kg\nRequested acceleration {:.4}, {:.4}, {:.4} m/s^2",
             entity.name,
             entity.kind,
             entity.status,
@@ -982,7 +1406,7 @@ fn format_number(value: f64) -> String {
     if value.is_finite() {
         format!("{value:.1}")
     } else {
-        "-".into()
+        "--".into()
     }
 }
 
@@ -990,7 +1414,7 @@ fn meters(value: f64) -> String {
     if value.is_finite() {
         format!("{value:.1} m")
     } else {
-        "-".into()
+        "--".into()
     }
 }
 
@@ -998,13 +1422,13 @@ fn speed(value: f64) -> String {
     if value.is_finite() {
         format!("{value:.3} m/s")
     } else {
-        "-".into()
+        "--".into()
     }
 }
 
 fn duration(time: f64) -> String {
-    if time.is_finite() {
-        let seconds = time.max(0.0) as u64;
+    if time.is_finite() && time >= 0.0 {
+        let seconds = time as u64;
         format!(
             "{:02}:{:02}:{:02}",
             seconds / 3600,
@@ -1012,7 +1436,7 @@ fn duration(time: f64) -> String {
             seconds % 60
         )
     } else {
-        "-".into()
+        "--".into()
     }
 }
 
@@ -1023,9 +1447,75 @@ fn region_label(region: LagrangeRegion) -> &'static str {
     }
 }
 
+pub(in crate::hud) fn launch_site_readout(snapshot: &Snapshot) -> String {
+    format!(
+        "{}\nTarget {}",
+        if snapshot.launch_site_direction.is_some() {
+            "Custom launch site"
+        } else {
+            "Template launch site"
+        },
+        region_label(snapshot.mission.target_region)
+    )
+}
+
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+
+    #[test]
+    fn a_custom_launch_site_does_not_claim_the_template_hemisphere() {
+        let mut snapshot = crate::physics::Simulation::new_default().snapshot();
+        snapshot.launch_site_direction = Some([-1.0, 0.0, 0.0]);
+        snapshot.mission.target_region = LagrangeRegion::L1;
+        assert_eq!(
+            launch_site_readout(&snapshot),
+            "Custom launch site\nTarget L1"
+        );
+        snapshot.mission.target_region = LagrangeRegion::L2;
+        assert_eq!(
+            launch_site_readout(&snapshot),
+            "Custom launch site\nTarget L2"
+        );
+    }
+
+    #[test]
+    fn summary_reports_playback_and_command_ownership_without_metadata_or_fake_time() {
+        let mut snapshot = crate::physics::Simulation::new_default().snapshot();
+        let mut playback = PlaybackState::default();
+        assert!(summary_readout(&snapshot, &playback, true).contains("paused · 1x · manual keys"));
+        playback.running = true;
+        assert!(summary_readout(&snapshot, &playback, false).contains("running · 1x · API / idle"));
+        playback.can_control = false;
+        assert!(
+            summary_readout(&snapshot, &playback, false)
+                .contains("running · 1x · API / idle · view only")
+        );
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            snapshot.time_s = invalid;
+            assert!(summary_readout(&snapshot, &playback, false).starts_with("T+-- |"));
+        }
+        let text = summary_readout(&snapshot, &playback, false);
+        for metadata in ["local model", "STP", "limit", "Click", "controls", "m/s"] {
+            assert!(!text.contains(metadata));
+        }
+    }
+
+    #[test]
+    fn terminal_flight_help_never_promises_that_lift_or_tuning_will_restart_it() {
+        let mut snapshot = crate::physics::Simulation::new_default().snapshot();
+        let playback = PlaybackState::default();
+        assert!(flight_controls_readout(&snapshot, &playback).contains("launches"));
+        for status in [
+            crate::domain::MissionStatus::Success,
+            crate::domain::MissionStatus::FailedDamage,
+        ] {
+            snapshot.mission.status = status;
+            let help = flight_controls_readout(&snapshot, &playback);
+            assert!(help.contains("Mission ended") && help.contains("Reset"));
+            assert!(!help.contains("launches"));
+        }
+    }
 
     #[test]
     fn p_controls_playback_but_space_and_browser_modifier_chords_do_not() {

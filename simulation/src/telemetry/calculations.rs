@@ -108,6 +108,18 @@ pub(super) fn waiting_report() -> Report {
         observed_frame_acceleration: ObservedFrameAcceleration::default(),
         peaks: Peaks::default(),
         actuation: Actuation::default(),
+        ship: ActorMeasurements::default(),
+        target: ActorMeasurements::default(),
+        ship_inertia_body_kg_m2: None,
+        applied_physics: None,
+        applied_physics_error: None,
+        playback_context: None,
+        mission: MissionMeasurements::default(),
+        debris_flow_reference: None,
+        physical_debris_count: None,
+        debris_dynamics: None,
+        debris_dynamics_error: None,
+        debris_distribution: None,
         units: &UNITS,
         provenance: Provenance {
             own_ship_id: None,
@@ -176,6 +188,30 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
 
     let metrics = &mut report.metrics;
     let issues = &mut report.input_issues;
+    report.ship = actor_measurements(own);
+    report.target = target.map(actor_measurements).unwrap_or_default();
+    report.mission = MissionMeasurements {
+        collisions: Some(snapshot.collisions),
+        active_contacts: Some(snapshot.active_contacts.len()),
+        manual_interventions: Some(snapshot.manual_interventions),
+        tuning_revision: Some(snapshot.tuning_revision),
+    };
+    let flow = snapshot.debris_flow();
+    report.debris_distribution = snapshot
+        .experiment_settings
+        .map(|settings| settings.debris.distribution);
+    report.debris_flow_reference = (report
+        .debris_distribution
+        .is_none_or(|distribution| distribution.is_directed_stream())
+        && flow.validate().is_ok())
+    .then_some(flow);
+    report.physical_debris_count = Some(
+        snapshot
+            .assets
+            .iter()
+            .filter(|actor| actor.kind == crate::domain::EntityKind::Debris)
+            .count(),
+    );
     let radius = magnitude(own.position);
     let position = radius.map(|_| own.position);
     metrics.speed_mps = magnitude(own.velocity);
@@ -306,4 +342,31 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
         _ => None,
     };
     Measurement { report, kinematics }
+}
+
+fn actor_measurements(actor: &EntityState) -> ActorMeasurements {
+    let mass_kg = positive(actor.mass_kg);
+    let applied_force_body_n = vector(actor.thrust_n);
+    ActorMeasurements {
+        position_m: vector(actor.position),
+        velocity_mps: vector(actor.velocity),
+        rotation_xyzw: rotation(actor.rotation),
+        angular_velocity_rad_s: vector(actor.angular_velocity_rad_s),
+        mass_kg,
+        radius_m: nonnegative(actor.radius_m),
+        fuel_kg: nonnegative(actor.fuel_kg),
+        requested_accel_body_mps2: vector(actor.commanded_accel_mps2),
+        requested_angular_accel_body_rad_s2: vector(actor.commanded_angular_accel_rad_s2),
+        applied_accel_body_mps2: applied_force_body_n
+            .zip(mass_kg)
+            .and_then(|(force, mass)| vector(force.map(|value| value / mass))),
+        applied_force_body_n,
+        applied_torque_body_nm: vector(actor.torque_nm),
+        max_thrust_n: nonnegative(actor.max_thrust_n),
+        actuator_gain: actor
+            .actuator_gain
+            .is_finite()
+            .then_some(actor.actuator_gain)
+            .filter(|value| (0.1..=10.0).contains(value)),
+    }
 }

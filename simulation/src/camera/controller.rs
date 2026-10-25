@@ -107,6 +107,7 @@ struct CameraInput<'w, 's> {
     pinches: MessageReader<'w, 's, PinchGesture>,
     windows: Query<'w, 's, &'static Window>,
     ui: Query<'w, 's, UiHover, CameraUi>,
+    editors: Query<'w, 's, (), With<crate::hud::InstrumentEditor>>,
 }
 
 fn update_camera(
@@ -136,6 +137,7 @@ fn update_camera(
         mut pinches,
         windows,
         ui,
+        editors,
     } = input;
     let pinch_delta = PINCH_ZOOM.with(|pending| pending.replace(0.0))
         - pinches
@@ -144,7 +146,8 @@ fn update_camera(
             .filter(|delta| delta.is_finite())
             .sum::<f32>();
     let gate = GATE.with(|gate| *gate.borrow());
-    if !gate.active {
+    let launchpad_blocked = crate::launchpad::gesture_active() || crate::launchpad::input_blocked();
+    if !gate.active || launchpad_blocked {
         gesture.start = None;
         gesture.dragged = false;
         gesture.blocked = false;
@@ -156,9 +159,14 @@ fn update_camera(
     };
     let snapshot = crate::snapshot();
     let previous_mode = rig.mode;
+    overview::update_viewport_aspect(camera, windows.single().ok(), &mut projection);
     if !rig.initialized {
-        flight.preserve_pose(&mut rig, transform.rotation);
-        rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
+        if rig.mode == CameraMode::Overview {
+            overview::frame(&mut rig, &snapshot);
+        } else {
+            flight.preserve_pose(&mut rig, transform.rotation);
+            rig.distance_km = base_distance_km(rig.focus, &snapshot, rig.mode) * rig.zoom;
+        }
         rig.initialized = true;
     }
     let mut mode_changed = false;
@@ -181,10 +189,14 @@ fn update_camera(
         .iter()
         .any(|(_, hovered, pressed)| hovered.get() || pressed);
     let button_focused = input_focus.get().is_some_and(|entity| ui.contains(entity));
+    let editor_focused = input_focus
+        .get()
+        .is_some_and(|entity| editors.contains(entity));
     let cursor = windows.single().ok().and_then(Window::cursor_position);
     let dt = time.delta_secs().min(0.1);
     let binding_actions_blocked = crate::controls::binding_actions_blocked();
-    let keyboard_blocked = hud.movement_blocked() || binding_actions_blocked;
+    let keyboard_blocked =
+        hud.movement_blocked() || binding_actions_blocked || editor_focused || launchpad_blocked;
     if gate.active && !button_focused && !keyboard_blocked {
         if keys.just_pressed(KeyCode::Escape) {
             crate::request_action(EngineAction::Viewport(ViewportAction::Release));
@@ -230,7 +242,7 @@ fn update_camera(
         }
     }
 
-    if gate.active && !hud.movement_blocked() {
+    if gate.active && !hud.movement_blocked() && !editor_focused && !launchpad_blocked {
         if buttons.just_pressed(MouseButton::Left)
             || buttons.just_pressed(MouseButton::Right)
             || buttons.just_pressed(MouseButton::Middle)
@@ -327,7 +339,7 @@ fn update_camera(
             &mut transform,
             &crate::controls::movement(&keys),
             input_active(),
-            hud.movement_blocked(),
+            hud.movement_blocked() || editor_focused || launchpad_blocked,
             dt,
         );
     }
@@ -486,6 +498,20 @@ fn frame_focus(rig: &mut CameraRig, focus: EntityId, snapshot: &Snapshot) {
     rig.pan_offset = Vec3::ZERO;
     rig.zoom = 1.0;
     rig.distance_km = base_distance_km(focus, snapshot, rig.mode);
+    if focus == EntityId::Phobos {
+        // A deliberate body-frame request reveals the actual pad hemisphere,
+        // or the current placement preview. Opening Launch does not move the view.
+        let direction = crate::launchpad::frame_direction()
+            .or(snapshot.launch_site_direction)
+            .or_else(|| focus_entity(EntityId::LandingPad, snapshot).map(|pad| pad.position));
+        if let Some(direction) = direction {
+            let outward =
+                Vec3::from_array(direction.map(|value| value as f32)).normalize_or(Vec3::NEG_X);
+            rig.yaw = outward.x.atan2(outward.z);
+            rig.pitch = outward.y.clamp(-1.0, 1.0).asin().clamp(-1.3, 1.3);
+        }
+        return;
+    }
     if focus != EntityId::Lander {
         return;
     }
@@ -554,9 +580,11 @@ fn base_distance_km(focus: EntityId, snapshot: &Snapshot, mode: CameraMode) -> f
     }
     match focus {
         EntityId::Phobos => {
-            crate::model::phobos_radii_m()
-                .into_iter()
-                .fold(0.0_f64, f64::max) as f32
+            crate::model::phobos_enclosing_radius_m().max(
+                crate::model::phobos_radii_m()
+                    .into_iter()
+                    .fold(0.0_f64, f64::max),
+            ) as f32
                 * KM
                 * 2.2
         }
@@ -814,6 +842,7 @@ mod tests {
 
     fn camera_app(mode: CameraMode) -> App {
         crate::controls::reset_for_tests();
+        crate::launchpad::reset_for_tests();
         COMMANDS.with(|commands| commands.borrow_mut().clear());
         PINCH_ZOOM.with(|pending| pending.set(0.0));
         STATUS.with(|status| *status.borrow_mut() = CameraStatus::default());
@@ -982,6 +1011,89 @@ mod tests {
             sensors
         );
         crate::controls::reset_for_tests();
+    }
+
+    #[test]
+    fn launchpad_input_gate_suppresses_navigation_but_preserves_explicit_view_and_resize() {
+        for mode in [CameraMode::Orbit, CameraMode::FreeFlight] {
+            let mut app = camera_app(mode);
+            app.world_mut().spawn(Window {
+                resolution: bevy::window::WindowResolution::new(780, 1688)
+                    .with_scale_factor_override(2.0),
+                ..default()
+            });
+            crate::launchpad::request(crate::launchpad::LaunchpadAction::PlaceOnSurface);
+            assert!(crate::launchpad::gesture_active());
+            for key in [
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::KeyF,
+                KeyCode::ArrowUp,
+                KeyCode::ArrowLeft,
+                KeyCode::AltLeft,
+                KeyCode::KeyW,
+                KeyCode::Escape,
+            ] {
+                app.world_mut()
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(key);
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            app.world_mut()
+                .resource_mut::<AccumulatedMouseMotion>()
+                .delta = Vec2::new(50.0, -40.0);
+            app.world_mut()
+                .resource_mut::<AccumulatedMouseScroll>()
+                .delta = Vec2::Y * 8.0;
+            pinch_zoom(0.4);
+            request_view(CameraRequest {
+                mode: Some(CameraMode::FirstPerson),
+                focus: Some(EntityId::ReturnShip),
+                zoom: Some(1.5),
+            })
+            .unwrap();
+            app.update();
+            let rig = app.world().resource::<CameraRig>();
+            assert_eq!(rig.mode, CameraMode::FirstPerson);
+            assert_eq!(rig.focus, EntityId::ReturnShip);
+            assert_eq!(rig.pan_offset, Vec3::ZERO);
+            assert_eq!((rig.yaw, rig.pitch), (0.0, 0.0));
+            assert_eq!(rig.zoom, 1.5);
+            assert_eq!(rig.speed_mps, 100.0);
+            assert!(input_active(), "placement Escape cannot release the camera");
+            let world = app.world_mut();
+            let mut projections = world.query_filtered::<&Projection, With<SimulationCamera>>();
+            let projection = projections.single(world).unwrap();
+            let Projection::Perspective(lens) = projection else {
+                panic!("viewer perspective");
+            };
+            assert!((lens.aspect_ratio - 390.0 / 844.0).abs() < 1.0e-6);
+            crate::launchpad::reset_for_tests();
+        }
+    }
+
+    #[test]
+    fn frame_phobos_deliberately_reveals_the_actual_launch_hemisphere() {
+        crate::launchpad::reset_for_tests();
+        let snapshot = Simulation::new_default().snapshot();
+        let pad = meters(
+            focus_entity(EntityId::LandingPad, &snapshot)
+                .unwrap()
+                .position,
+        )
+        .normalize();
+        let mut rig = CameraRig {
+            yaw: (-pad.x).atan2(-pad.z),
+            ..default()
+        };
+        frame_focus(&mut rig, EntityId::Phobos, &snapshot);
+        assert_eq!(rig.mode, CameraMode::Orbit);
+        assert_eq!(rig.focus, EntityId::Phobos);
+        assert_eq!(rig.zoom, 1.0);
+        assert!(orbit_offset(&rig, rig.distance_km).normalize().dot(pad) > 0.9);
+        assert!(rig.distance_km * 1000.0 > crate::model::phobos_enclosing_radius_m() as f32);
     }
 
     #[test]
@@ -1173,6 +1285,102 @@ mod tests {
         assert_eq!(rig.focus, EntityId::Lander);
         assert_eq!(rig.distance_km, 0.12);
         assert_eq!(serde_json::to_value(simulation.snapshot()).unwrap(), before);
+    }
+
+    #[test]
+    fn first_scheduled_update_frames_default_overview_before_preserving_an_old_pose() {
+        let mut app = camera_app(CameraMode::Overview);
+        *app.world_mut().resource_mut::<CameraRig>() = CameraRig::default();
+        app.world_mut().spawn(Window {
+            resolution: bevy::window::WindowResolution::new(780, 1688)
+                .with_scale_factor_override(2.0),
+            ..default()
+        });
+        let snapshot = crate::snapshot();
+        let before = serde_json::to_value(snapshot.as_ref()).unwrap();
+        let mut expected_rig = CameraRig::default();
+        let mut expected_projection = Projection::Perspective(PerspectiveProjection {
+            near: 0.0005,
+            far: 20_000.0,
+            aspect_ratio: 390.0 / 844.0,
+            ..default()
+        });
+        overview::frame(&mut expected_rig, &snapshot);
+        let expected = overview::view(&expected_rig, &snapshot, &mut expected_projection);
+        let world = app.world_mut();
+        for (mut transform, mut projection) in world
+            .query_filtered::<(&mut Transform, &mut Projection), With<SimulationCamera>>()
+            .iter_mut(world)
+        {
+            *transform = Transform::IDENTITY;
+            *projection = Projection::Perspective(PerspectiveProjection {
+                near: 0.0005,
+                far: 20_000.0,
+                ..default()
+            });
+        }
+        app.update();
+        let rig = app.world().resource::<CameraRig>();
+        assert!(rig.initialized);
+        assert_eq!(rig.mode, CameraMode::Overview);
+        assert_eq!(rig.focus, EntityId::Phobos);
+        assert_eq!((rig.yaw, rig.pitch), (expected_rig.yaw, expected_rig.pitch));
+        assert_eq!(rig.distance_km, expected_rig.distance_km);
+        let world = app.world_mut();
+        let mut camera =
+            world.query_filtered::<(&Transform, &Projection), With<SimulationCamera>>();
+        let (transform, projection) = camera.single(world).unwrap();
+        close(transform.translation, expected.translation);
+        close(
+            transform.rotation * Vec3::NEG_Z,
+            expected.rotation * Vec3::NEG_Z,
+        );
+        let Projection::Perspective(lens) = projection else {
+            panic!("viewer perspective")
+        };
+        let Projection::Perspective(expected_lens) = expected_projection else {
+            panic!("viewer perspective")
+        };
+        assert_eq!(lens.aspect_ratio, 390.0 / 844.0);
+        assert_eq!(lens.fov, expected_lens.fov);
+        assert_eq!(lens.far, 20_000.0);
+        assert_eq!(status().mode, CameraMode::Overview);
+        assert_eq!(status().focus, EntityId::Phobos);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        let rig = app.world().resource::<CameraRig>();
+        assert_eq!(rig.mode, CameraMode::Orbit);
+        assert_eq!(rig.focus, EntityId::Lander);
+        assert_eq!(rig.distance_km, 0.12);
+        assert_eq!(
+            serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn close_follow_does_not_move_mars_out_from_behind_the_real_anti_mars_pad() {
+        let snapshot = Simulation::new_default().snapshot();
+        let before = serde_json::to_value(&snapshot).unwrap();
+        let mut rig = CameraRig::default();
+        frame_focus(&mut rig, EntityId::Lander, &snapshot);
+        let view = orbit_view(&rig, &snapshot);
+        let mars = meters(snapshot.environment.mars_position_m);
+        let direction = (mars - view.translation).normalize();
+        let phobos_hit = ray_ellipsoid(
+            view.translation,
+            direction,
+            snapshot.body.radii_m.map(|radius| (radius * 0.001) as f32),
+        )
+        .expect("Phobos physically occludes Mars in the anti-Mars close view");
+        assert!(
+            phobos_hit
+                < view.translation.distance(mars) - snapshot.environment.mars_radius_m as f32 * KM
+        );
+        assert_eq!(rig.distance_km, 0.12);
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), before);
     }
 
     #[test]

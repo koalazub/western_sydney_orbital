@@ -34,6 +34,7 @@ pub(super) enum InputIssue {
     InvalidFuelEstimate,
     InvalidDamageEstimate,
     NonfiniteDerivedValue,
+    LivePhysicsUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -107,6 +108,42 @@ pub(super) struct Actuation {
     pub practice_boost_active: Option<bool>,
 }
 
+/// Validated snapshot values, not configured vehicle specifications. Each field
+/// stays optional so one bad input cannot turn missing telemetry into zero.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(super) struct ActorMeasurements {
+    pub position_m: Option<[f64; 3]>,
+    pub velocity_mps: Option<[f64; 3]>,
+    pub rotation_xyzw: Option<[f64; 4]>,
+    pub angular_velocity_rad_s: Option<[f64; 3]>,
+    pub mass_kg: Option<f64>,
+    pub radius_m: Option<f64>,
+    pub fuel_kg: Option<f64>,
+    pub requested_accel_body_mps2: Option<[f64; 3]>,
+    pub requested_angular_accel_body_rad_s2: Option<[f64; 3]>,
+    pub applied_accel_body_mps2: Option<[f64; 3]>,
+    pub applied_force_body_n: Option<[f64; 3]>,
+    pub applied_torque_body_nm: Option<[f64; 3]>,
+    pub max_thrust_n: Option<f64>,
+    pub actuator_gain: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(super) struct MissionMeasurements {
+    pub collisions: Option<u32>,
+    pub active_contacts: Option<usize>,
+    pub manual_interventions: Option<u32>,
+    pub tuning_revision: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PlaybackContext {
+    Running,
+    Paused,
+    Ended,
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct FrameMetadata {
     pub snapshot_description: Option<Cow<'static, str>>,
@@ -176,6 +213,23 @@ pub(super) struct Report {
     pub observed_frame_acceleration: ObservedFrameAcceleration,
     pub peaks: Peaks,
     pub actuation: Actuation,
+    pub ship: ActorMeasurements,
+    pub target: ActorMeasurements,
+    /// Supplied by the live physics adapter, never inferred from settings.
+    pub ship_inertia_body_kg_m2: Option<[[f64; 3]; 3]>,
+    pub applied_physics: Option<crate::model::AppliedPhysics>,
+    pub applied_physics_error: Option<String>,
+    pub playback_context: Option<PlaybackContext>,
+    pub mission: MissionMeasurements,
+    pub debris_flow_reference: Option<crate::model::DebrisFlowTuning>,
+    pub physical_debris_count: Option<usize>,
+    /// Native debug instruments only. Never add all-body motion to telemetry_status.
+    #[serde(skip)]
+    pub debris_dynamics: Option<crate::model::DebrisDynamicsReport>,
+    #[serde(skip)]
+    pub debris_dynamics_error: Option<String>,
+    #[serde(skip)]
+    pub debris_distribution: Option<crate::model::DebrisDistribution>,
     pub units: &'static Units,
     pub provenance: Provenance,
     pub caveats: &'static Caveats,

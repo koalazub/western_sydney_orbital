@@ -1,4 +1,4 @@
-use super::model::{HudAction, InteractionMode};
+use super::model::{HudAction, InteractionMode, LaunchpadControl};
 use crate::PlaybackState;
 
 /// Availability shared by native button visuals and activation-time checks.
@@ -10,20 +10,38 @@ pub(super) fn action_enabled(
     terminal: bool,
 ) -> bool {
     let ready = match mode {
-        InteractionMode::Ready => true,
+        InteractionMode::Ready | InteractionMode::LaunchpadPlacement => true,
         InteractionMode::ResetConfirmation => false,
         InteractionMode::Rebinding => return false,
     };
     match action {
-        HudAction::TogglePlayback => ready && playback.can_control && !terminal,
-        HudAction::Step => ready && playback.can_control && !playback.running && !terminal,
+        HudAction::TogglePlayback => {
+            mode == InteractionMode::Ready && playback.can_control && !terminal
+        }
+        HudAction::Step => {
+            mode == InteractionMode::Ready && playback.can_control && !playback.running && !terminal
+        }
         HudAction::ConfirmReset => {
             mode == InteractionMode::ResetConfirmation && playback.can_control
         }
         HudAction::AskReset
         | HudAction::DebugUpright
         | HudAction::Export
-        | HudAction::CycleRate => ready && playback.can_control,
+        | HudAction::CycleRate => mode == InteractionMode::Ready && playback.can_control,
+        HudAction::Launchpad(control) => match control {
+            LaunchpadControl::FramePhobos => ready,
+            LaunchpadControl::ChooseSurface => ready && playback.can_control && !playback.running,
+            LaunchpadControl::Apply
+            | LaunchpadControl::North
+            | LaunchpadControl::South
+            | LaunchpadControl::East
+            | LaunchpadControl::West => {
+                mode == InteractionMode::LaunchpadPlacement
+                    && playback.can_control
+                    && !playback.running
+            }
+            LaunchpadControl::Cancel => mode == InteractionMode::LaunchpadPlacement,
+        },
         HudAction::CancelReset => true,
         HudAction::Fullscreen
         | HudAction::Notebook
@@ -32,6 +50,16 @@ pub(super) fn action_enabled(
         | HudAction::Maximize
         | HudAction::ToggleCapture
         | HudAction::ToggleDetails
+        | HudAction::ToggleInstruments
+        | HudAction::ToggleShip
+        | HudAction::ToggleDebris
+        | HudAction::ToggleLaunch
+        | HudAction::ToggleCamera
+        | HudAction::CycleIllumination
+        | HudAction::ToggleStars
+        | HudAction::ToggleGuides
+        | HudAction::ToggleInstrumentSection(_)
+        | HudAction::ToggleReference(_)
         | HudAction::ToggleControls
         | HudAction::FollowLander
         | HudAction::ToggleInspector
@@ -46,7 +74,7 @@ mod tests {
     use super::*;
     use crate::{controls::Action, domain::CameraMode};
 
-    const ACTIONS: [HudAction; 22] = [
+    const ACTIONS: &[HudAction] = &[
         HudAction::TogglePlayback,
         HudAction::Step,
         HudAction::AskReset,
@@ -62,6 +90,24 @@ mod tests {
         HudAction::Maximize,
         HudAction::ToggleCapture,
         HudAction::ToggleDetails,
+        HudAction::ToggleInstruments,
+        HudAction::ToggleShip,
+        HudAction::ToggleDebris,
+        HudAction::ToggleLaunch,
+        HudAction::ToggleCamera,
+        HudAction::CycleIllumination,
+        HudAction::ToggleStars,
+        HudAction::ToggleGuides,
+        HudAction::ToggleInstrumentSection(crate::telemetry::InstrumentGroup::Actuation),
+        HudAction::ToggleReference(super::super::model::ReferenceSection::ControlGuide),
+        HudAction::Launchpad(LaunchpadControl::FramePhobos),
+        HudAction::Launchpad(LaunchpadControl::ChooseSurface),
+        HudAction::Launchpad(LaunchpadControl::Apply),
+        HudAction::Launchpad(LaunchpadControl::Cancel),
+        HudAction::Launchpad(LaunchpadControl::North),
+        HudAction::Launchpad(LaunchpadControl::South),
+        HudAction::Launchpad(LaunchpadControl::East),
+        HudAction::Launchpad(LaunchpadControl::West),
         HudAction::ToggleControls,
         HudAction::FollowLander,
         HudAction::ToggleInspector,
@@ -147,7 +193,7 @@ mod tests {
     #[test]
     fn reset_and_rebinding_close_every_unrelated_action_path() {
         let playback = PlaybackState::default();
-        for action in ACTIONS {
+        for &action in ACTIONS {
             assert!(
                 !action_enabled(action, InteractionMode::Rebinding, &playback, false),
                 "{action:?}"
@@ -158,5 +204,74 @@ mod tests {
                 "{action:?}",
             );
         }
+    }
+
+    #[test]
+    fn surface_nudges_are_paused_preview_actions_not_flight_commands() {
+        let mut playback = PlaybackState::default();
+        let ready = InteractionMode::Ready;
+        let placement = InteractionMode::LaunchpadPlacement;
+        assert!(action_enabled(
+            HudAction::Launchpad(LaunchpadControl::ChooseSurface),
+            ready,
+            &playback,
+            true
+        ));
+        for control in [
+            LaunchpadControl::Apply,
+            LaunchpadControl::North,
+            LaunchpadControl::South,
+            LaunchpadControl::East,
+            LaunchpadControl::West,
+        ] {
+            assert!(!action_enabled(
+                HudAction::Launchpad(control),
+                ready,
+                &playback,
+                false
+            ));
+            assert!(action_enabled(
+                HudAction::Launchpad(control),
+                placement,
+                &playback,
+                true
+            ));
+            playback.running = true;
+            assert!(!action_enabled(
+                HudAction::Launchpad(control),
+                placement,
+                &playback,
+                false
+            ));
+            playback.running = false;
+        }
+        for action in [
+            HudAction::TogglePlayback,
+            HudAction::Step,
+            HudAction::AskReset,
+            HudAction::DebugUpright,
+            HudAction::CycleRate,
+        ] {
+            assert!(!action_enabled(action, placement, &playback, false));
+        }
+        playback.can_control = false;
+        assert!(!action_enabled(
+            HudAction::Launchpad(LaunchpadControl::ChooseSurface),
+            ready,
+            &playback,
+            false
+        ));
+        assert!(action_enabled(
+            HudAction::Launchpad(LaunchpadControl::FramePhobos),
+            ready,
+            &playback,
+            false
+        ));
+        assert!(action_enabled(
+            HudAction::Launchpad(LaunchpadControl::Cancel),
+            placement,
+            &playback,
+            false
+        ));
     }
 }

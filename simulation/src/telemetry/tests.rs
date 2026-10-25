@@ -1,6 +1,7 @@
 use super::{
     calculations::{magnitude, measure, waiting_report},
     data::*,
+    instruments::{ActorField, FlightMetric, Instrument, InstrumentGroup, Reading},
     presentation,
     tracking::advance,
 };
@@ -81,10 +82,141 @@ fn finite_report(report: &Report) -> serde_json::Value {
     if let Some(vector) = a.vector_mps2 {
         assert!(vector.into_iter().all(f64::is_finite));
     }
+    for group in InstrumentGroup::ALL {
+        for &key in group.instruments() {
+            match key.reading(report) {
+                Reading::Scalar(value, _, _) => assert!(value.is_none_or(f64::is_finite)),
+                Reading::Vector(value, _, _) => {
+                    assert!(value.is_none_or(|value| value.into_iter().all(f64::is_finite)))
+                }
+                Reading::Quaternion(value) => {
+                    assert!(value.is_none_or(|value| value.into_iter().all(f64::is_finite)))
+                }
+                Reading::Count(_) => {}
+                Reading::Text(_) => {}
+                Reading::Direction(value) => {
+                    assert!(value.is_none_or(|(_, sign)| [-1, 1].contains(&sign)))
+                }
+            }
+        }
+    }
     let json = serde_json::to_string(report).unwrap();
     assert!(!json.contains("NaN"));
     assert!(!json.contains("Infinity"));
     serde_json::from_str(&json).unwrap()
+}
+
+#[test]
+fn actual_live_tuning_reaches_instruments_without_rewinding_measurement_time() {
+    let mut settings = crate::model::ExperimentSettings::default();
+    settings.debris.count = 3;
+    let mut simulation = Simulation::with_experiment(100, settings).unwrap();
+    simulation.set_command([0.1, 0.0, 0.0], [0.0; 3]).unwrap();
+    simulation.advance(0.05);
+    let mut tracker = Tracker::default();
+    let before = advance(&mut tracker, &simulation.snapshot());
+    simulation
+        .tune_ship(crate::model::ShipTuning {
+            mass_kg: 4500.0,
+            inertia_scale: 1.5,
+            thrust_scale: 2.0,
+        })
+        .unwrap();
+    simulation
+        .tune_debris_flow(crate::model::DebrisFlowTuning {
+            speed_mps: 33.0,
+            speed_spread_mps: 6.0,
+            stream_axis: crate::model::StreamAxis::Z,
+            stream_sign: 1,
+        })
+        .unwrap();
+    let after = advance(&mut tracker, &simulation.snapshot());
+    assert_eq!(before.source_time_s, after.source_time_s);
+    assert_eq!(before.epoch.index, after.epoch.index);
+    assert_eq!(
+        reading(&after, Instrument::Ship(ActorField::Mass)),
+        "4500.00 kg"
+    );
+    assert_eq!(
+        reading(&after, Instrument::Ship(ActorField::ActuatorGain)),
+        "2.00 ×"
+    );
+    assert_eq!(reading(&after, Instrument::TuningRevision), "2");
+    assert_eq!(reading(&after, Instrument::StreamSpeed), "33.00 m/s");
+    assert_eq!(reading(&after, Instrument::BirthSpread), "6.00 m/s");
+    assert_eq!(reading(&after, Instrument::StreamDirection), "+Z");
+    close(after.metrics.applied_thrust_accel_mps2, 0.2);
+    close(after.metrics.thrust_force_n, 900.0);
+    finite_report(&after);
+}
+
+#[test]
+fn native_live_adapter_distinguishes_pending_requests_actual_applications_and_paused_motion() {
+    let mut config = crate::model::ExperimentSettings::default();
+    config.debris.count = 0;
+    let mut simulation = Simulation::with_experiment(100, config).unwrap();
+    simulation.set_command([0.1, 0.0, 0.0], [0.0; 3]).unwrap();
+    let mut tracker = Tracker::default();
+    let mut pending = advance(&mut tracker, &simulation.snapshot());
+    super::systems::attach_physics(
+        &mut pending,
+        simulation.applied_physics(),
+        PlaybackContext::Paused,
+    );
+    assert_eq!(reading(&pending, Instrument::LastForce), "-- N");
+    assert_eq!(
+        reading(&pending, Instrument::ActuationStatus),
+        "request awaiting application"
+    );
+    assert!(pending.metrics.thrust_force_n.is_none());
+    assert!(
+        presentation::group_description(InstrumentGroup::Actuation, &pending).contains("Paused")
+    );
+    simulation.advance(0.05);
+    let before = simulation.snapshot();
+    let mut active = advance(&mut tracker, &before);
+    super::systems::attach_physics(
+        &mut active,
+        simulation.applied_physics(),
+        PlaybackContext::Running,
+    );
+    close(active.metrics.applied_thrust_accel_mps2, 0.1);
+    close(active.metrics.thrust_force_n, config.ship.mass_kg * 0.1);
+    assert_eq!(
+        active.ship_inertia_body_kg_m2,
+        Some(simulation.applied_physics().unwrap().inertia_body_kg_m2)
+    );
+    simulation
+        .tune_ship(crate::model::ShipTuning {
+            mass_kg: 100.0,
+            inertia_scale: 2.0,
+            thrust_scale: 3.2,
+        })
+        .unwrap();
+    let mut tuned = advance(&mut tracker, &simulation.snapshot());
+    super::systems::attach_physics(
+        &mut tuned,
+        simulation.applied_physics(),
+        PlaybackContext::Paused,
+    );
+    assert_eq!(tuned.source_time_s, active.source_time_s);
+    assert_eq!(reading(&tuned, Instrument::BodyMass), "100.00 kg");
+    assert_eq!(reading(&tuned, Instrument::LastApplicationTime), "0.050 s");
+    close(tuned.metrics.applied_thrust_accel_mps2, 0.32);
+    close(tuned.metrics.thrust_force_n, 32.0);
+    assert_eq!(own(&simulation.snapshot()).velocity, own(&before).velocity);
+    let mut mismatched = advance(&mut tracker, &before);
+    let mut physics = simulation.applied_physics().unwrap();
+    physics.source_time_s += 1.0;
+    super::systems::attach_physics(&mut mismatched, Ok(physics), PlaybackContext::Paused);
+    assert!(mismatched.applied_physics.is_none());
+    assert!(mismatched.applied_physics_error.is_some());
+    assert_eq!(reading(&mismatched, Instrument::LastForce), "-- N");
+    assert!(mismatched.metrics.thrust_force_n.is_none());
+    finite_report(&pending);
+    finite_report(&active);
+    finite_report(&tuned);
+    finite_report(&mismatched);
 }
 
 fn known_state() -> Snapshot {
@@ -140,13 +272,17 @@ fn known_vectors_use_actual_si_state_not_configuration_maxima_or_cached_range() 
     assert_eq!(json["units"]["angular_speed"], "rad/s");
     assert_eq!(json["caveats"]["stp_parity"], false);
     assert_eq!(
-        presentation::compact(&report),
-        format!(
-            "Speed 5.00 m/s | radial climb 3.00 m/s\nTerrain-center {:.1} m | thrust 5.00 m/s²",
-            20_000.0 - crate::terrain::surface_radius_m(DVec3::X),
-        )
+        reading(&report, Instrument::Flight(FlightMetric::Speed)),
+        "5.00 m/s"
     );
-    assert!(presentation::expanded(&report).contains("28.65 deg/s"));
+    assert_eq!(
+        reading(&report, Instrument::Flight(FlightMetric::Spin)),
+        "0.5000 rad/s"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Flight(FlightMetric::TargetRange)),
+        "10.0 m"
+    );
 }
 
 #[test]
@@ -186,7 +322,10 @@ fn zero_radius_is_not_a_radial_direction_or_a_fake_clearance() {
             .input_issues
             .contains(&InputIssue::UndefinedRadialDirection)
     );
-    assert!(presentation::compact(&report).contains("Terrain-center n/a m"));
+    assert_eq!(
+        reading(&report, Instrument::Flight(FlightMetric::TerrainClearance)),
+        "-- m"
+    );
     finite_report(&report);
 }
 
@@ -225,6 +364,7 @@ fn same_time_force_and_actual_mode_update_without_inventing_a_new_derivative() {
     own_mut(&mut state).velocity = [4.0, 4.0, 0.0];
     let timed = advance(&mut tracker, &state);
     let ship = own_mut(&mut state);
+    ship.mass_kg = 2_000.0;
     ship.thrust_n = [0.0, 0.0, 2.0 * ship.mass_kg];
     ship.thrust_application = ThrustApplication::PracticeBoost;
     let paused = advance(&mut tracker, &state);
@@ -236,6 +376,8 @@ fn same_time_force_and_actual_mode_update_without_inventing_a_new_derivative() {
     );
     assert_eq!(paused.actuation.practice_boost_active, Some(true));
     close(paused.metrics.applied_thrust_accel_mps2, 2.0);
+    assert_eq!(paused.ship.mass_kg, Some(2_000.0));
+    assert_eq!(paused.ship.applied_force_body_n, Some([0.0, 0.0, 4_000.0]));
     assert_eq!(
         paused.observed_frame_acceleration.status,
         AccelerationStatus::HeldWithoutTimeAdvance
@@ -249,7 +391,10 @@ fn same_time_force_and_actual_mode_update_without_inventing_a_new_derivative() {
         finite_report(&paused)["actuation"]["thrust_application"],
         "practice_boost"
     );
-    assert!(presentation::expanded(&paused).contains("held; no time advance"));
+    assert_eq!(
+        presentation::group_description(InstrumentGroup::Acceleration, &paused),
+        "Held; no time advance"
+    );
 }
 
 #[test]
@@ -568,7 +713,7 @@ fn missing_actors_bad_frame_and_unknown_terrain_do_not_fabricate_measurements() 
 #[test]
 fn changing_hidden_debris_observations_contacts_and_rng_does_not_change_flight_inputs() {
     let state = known_state();
-    let before = finite_report(&measure(&state).report);
+    let mut before = finite_report(&measure(&state).report);
     let mut changed = state.clone();
     for actor in &mut changed.assets {
         if actor.kind == EntityKind::Debris {
@@ -584,7 +729,15 @@ fn changing_hidden_debris_observations_contacts_and_rng_does_not_change_flight_i
     changed.events.clear();
     changed.collisions = 999;
     changed.rng_state ^= u64::MAX;
-    assert_eq!(finite_report(&measure(&changed).report), before);
+    let report = measure(&changed).report;
+    assert_eq!(report.mission.collisions, Some(999));
+    assert_eq!(report.mission.active_contacts, Some(0));
+    let mut after = finite_report(&report);
+    // Mission counters are now native instruments too. Changing them must not
+    // change any own/target flight input, measurement, provenance or RNG state.
+    before.as_object_mut().unwrap().remove("mission");
+    after.as_object_mut().unwrap().remove("mission");
+    assert_eq!(after, before);
     changed.mission.shuttle_id = EntityId::Debris(1);
     assert_eq!(measure(&changed).report.status, ReportStatus::Unavailable);
     changed.mission.shuttle_id = state.mission.shuttle_id;
@@ -614,7 +767,7 @@ fn calculations_and_publishing_leave_actual_simulation_snapshot_and_rng_unchange
         let report = advance(&mut tracker, &state);
         finite_report(&report);
         presentation::publish(report);
-        let _ = super::brief();
+        let _ = super::instrument(Instrument::Flight(FlightMetric::Speed));
         let _ = super::details();
         let _: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
     }
@@ -640,6 +793,15 @@ fn installed_readonly_system_preserves_published_snapshot_identity_and_rng() {
     assert_eq!(before.rng_state, after.rng_state);
     let published: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
     assert_eq!(published["source_time_s"], after.time_s);
+    assert_eq!(
+        published["ship_inertia_body_kg_m2"],
+        serde_json::to_value(
+            crate::session::applied_physics()
+                .unwrap()
+                .inertia_body_kg_m2
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -715,16 +877,172 @@ fn actual_reference_and_boost_physics_publish_force_speed_climb_fuel_and_frame_a
 }
 
 #[test]
-fn waiting_report_has_no_fake_measurements_and_compact_si_labels() {
+fn waiting_report_has_no_fake_measurements_in_any_instrument_group() {
     let report = waiting_report();
     assert_eq!(report.status, ReportStatus::WaitingForSnapshot);
     assert!(report.source_time_s.is_none());
-    let text = presentation::compact(&report);
+    for group in InstrumentGroup::ALL {
+        for &key in group.instruments() {
+            let value = reading(&report, key);
+            assert!(
+                value.starts_with("--"),
+                "{key:?} invented a waiting value: {value}"
+            );
+        }
+    }
     assert_eq!(
-        text,
-        "Speed n/a m/s | radial climb n/a m/s\nTerrain-center n/a m | thrust n/a m/s²"
+        presentation::source(&report),
+        "Source -- s · waiting for snapshot"
     );
     finite_report(&report);
+}
+
+fn reading(report: &Report, key: Instrument) -> String {
+    presentation::format_reading(key.reading(report))
+}
+
+#[test]
+fn grouped_inventory_covers_every_flight_metric_once_with_its_actual_value() {
+    let mut report = waiting_report();
+    report.metrics = FlightMetrics {
+        speed_mps: Some(1.0),
+        radial_climb_mps: Some(2.0),
+        terrain_center_clearance_m: Some(3.0),
+        target_center_range_m: Some(4.0),
+        target_closing_mps: Some(5.0),
+        applied_thrust_accel_mps2: Some(6.0),
+        thrust_force_n: Some(7.0),
+        torque_nm: Some(8.0),
+        angular_speed_rad_s: Some(9.0),
+        fuel_used_kg_estimate: Some(10.0),
+        damage_j_estimate: Some(11.0),
+    };
+    let inventory: Vec<_> = InstrumentGroup::ALL
+        .into_iter()
+        .flat_map(|group| group.instruments().iter().copied())
+        .collect();
+    for (metric, expected) in report.metrics.inventory() {
+        let key = Instrument::Flight(metric);
+        assert_eq!(
+            inventory
+                .iter()
+                .filter(|&&candidate| candidate == key)
+                .count(),
+            1,
+            "{metric:?}"
+        );
+        let Reading::Scalar(value, unit, _) = key.reading(&report) else {
+            panic!("a flight metric must be a scalar");
+        };
+        assert_eq!(value, expected, "{metric:?}");
+        assert!(!unit.is_empty());
+    }
+    assert_eq!(FlightMetric::STRIP.len(), 6);
+    for metric in FlightMetric::STRIP {
+        assert!(
+            InstrumentGroup::Flight
+                .instruments()
+                .contains(&Instrument::Flight(metric))
+        );
+    }
+}
+
+#[test]
+fn actor_instruments_read_actual_mass_commands_wrench_and_kinematics() {
+    let mut state = known_state();
+    let ship = own_mut(&mut state);
+    ship.commanded_accel_mps2 = [0.1, -0.2, 0.3];
+    ship.commanded_angular_accel_rad_s2 = [0.01, 0.02, -0.03];
+    let report = measure(&state).report;
+    assert_eq!(report.ship.mass_kg, Some(1_000.0));
+    assert_eq!(report.ship.applied_accel_body_mps2, Some([3.0, 4.0, 0.0]));
+    assert_eq!(
+        report.ship.requested_accel_body_mps2,
+        Some([0.1, -0.2, 0.3])
+    );
+    assert_eq!(
+        report.ship.requested_angular_accel_body_rad_s2,
+        Some([0.01, 0.02, -0.03])
+    );
+    assert_eq!(report.ship.applied_torque_body_nm, Some([0.0, 0.0, -12.0]));
+    assert_eq!(report.ship.position_m, Some(own(&state).position));
+    assert_eq!(report.ship.velocity_mps, Some(own(&state).velocity));
+    assert_eq!(report.ship.rotation_xyzw, Some(own(&state).rotation));
+    assert_eq!(report.target.position_m, Some([20_010.0, 0.0, 0.0]));
+    assert_eq!(
+        reading(&report, Instrument::Ship(ActorField::Mass)),
+        "1000.00 kg"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Ship(ActorField::AppliedForce)),
+        "3000.00, 4000.00, 0.00 N"
+    );
+    // Snapshot settings are not evidence of a live Rapier tensor.
+    assert!(report.ship_inertia_body_kg_m2.is_none());
+}
+
+#[test]
+fn partial_inputs_show_missing_only_where_unavailable_without_hiding_valid_values() {
+    let mut state = known_state();
+    own_mut(&mut state).thrust_n[1] = f64::NAN;
+    target_mut(&mut state).velocity[2] = f64::INFINITY;
+    let report = measure(&state).report;
+    assert_eq!(presentation::source(&report), "Source 2.000 s · partial");
+    assert_eq!(
+        reading(
+            &report,
+            Instrument::Flight(FlightMetric::ThrustAcceleration)
+        ),
+        "-- m/s²"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Ship(ActorField::AppliedForce)),
+        "-- N"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Target(ActorField::Velocity)),
+        "-- m/s"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Flight(FlightMetric::Closing)),
+        "-- m/s"
+    );
+    assert_eq!(
+        reading(&report, Instrument::Flight(FlightMetric::Speed)),
+        "5.00 m/s"
+    );
+    state.time_s = f64::NAN;
+    let unavailable = measure(&state).report;
+    assert_eq!(
+        presentation::source(&unavailable),
+        "Source -- s · unavailable"
+    );
+    assert_eq!(
+        reading(&unavailable, Instrument::Ship(ActorField::Mass)),
+        "-- kg"
+    );
+    finite_report(&unavailable);
+}
+
+#[test]
+fn acceleration_inventory_includes_vector_magnitude_and_both_source_times() {
+    let mut state = known_state();
+    let mut tracker = Tracker::default();
+    advance(&mut tracker, &state);
+    state.time_s = 4.0;
+    own_mut(&mut state).velocity = [7.0, -2.0, 6.0];
+    let report = advance(&mut tracker, &state);
+    assert_eq!(
+        reading(&report, Instrument::ObservedVector),
+        "2.0000, -3.0000, 3.0000 m/s²"
+    );
+    assert_eq!(
+        reading(&report, Instrument::ObservedMagnitude),
+        "4.6904 m/s²"
+    );
+    assert_eq!(reading(&report, Instrument::IntervalStart), "2.000 s");
+    assert_eq!(reading(&report, Instrument::IntervalEnd), "4.000 s");
+    assert_eq!(reading(&report, Instrument::IntervalDuration), "2.000 s");
 }
 
 #[test]
@@ -746,4 +1064,137 @@ fn real_samples_preserve_fixed_metadata_and_leave_the_waiting_report_unchanged()
         simulation.advance(settings().integration.fixed_step_s);
     }
     assert_eq!(finite_report(&waiting_report()), waiting);
+}
+
+#[test]
+fn native_debris_diagnostics_sample_real_bodies_without_time_and_never_serialize_hidden_motion() {
+    use crate::{
+        api::Dispatch,
+        model::{ExperimentSettings, FlightPreset, PhysicsCommand, StreamAxis},
+    };
+    let saved = crate::snapshot();
+    let mut settings = ExperimentSettings::default();
+    settings.debris.count = 3;
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::ConfigureFlight {
+        settings,
+        seed: Some(saved.seed),
+        preset: FlightPreset::FarSideL2,
+    }))
+    .unwrap();
+    let mut app = App::new();
+    super::install(&mut app);
+    assert!(
+        !app.world()
+            .contains_resource::<bevy::prelude::Time<bevy::prelude::Real>>()
+    );
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        app.world()
+            .resource::<super::debris::DebrisSampleCache>()
+            .samples_taken,
+        1,
+        "a headless app must not invent elapsed wall time or resample per displayed field"
+    );
+    let actual = crate::session::debris_dynamics().unwrap();
+    assert_eq!(
+        super::instrument(Instrument::DebrisCount),
+        actual.physical_count.to_string()
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMovingCount),
+        actual.moving_count.to_string()
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMeanVelocity),
+        presentation::format_reading(Reading::Vector(
+            Some(actual.mean_velocity_world_mps),
+            "m/s",
+            3
+        ))
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMinSpeed),
+        presentation::format_reading(Reading::Scalar(actual.min_speed_mps, "m/s", 3))
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMaxSpeed),
+        presentation::format_reading(Reading::Scalar(actual.max_speed_mps, "m/s", 3))
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMeanSpin),
+        presentation::format_reading(Reading::Scalar(actual.mean_spin_rad_s, "rad/s", 4))
+    );
+    assert!(super::group_status(InstrumentGroup::Stream).contains("Paused"));
+    assert!(super::group_status(InstrumentGroup::Stream).contains("do not mean"));
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::TuneDebrisFlow {
+        settings: crate::model::DebrisFlowTuning {
+            speed_mps: 35.0,
+            speed_spread_mps: 4.0,
+            stream_axis: StreamAxis::Z,
+            stream_sign: -1,
+        },
+    }))
+    .unwrap();
+    app.update();
+    let changed = crate::session::debris_dynamics().unwrap();
+    assert_eq!(changed.source_time_s, actual.source_time_s);
+    assert_ne!(
+        changed.mean_velocity_world_mps,
+        actual.mean_velocity_world_mps
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::debris::DebrisSampleCache>()
+            .samples_taken,
+        2,
+        "same-time flow tuning refreshes the one cached body sample"
+    );
+    assert_eq!(
+        super::instrument(Instrument::DebrisMeanVelocity),
+        presentation::format_reading(Reading::Vector(
+            Some(changed.mean_velocity_world_mps),
+            "m/s",
+            3
+        ))
+    );
+    let public: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
+    for hidden in [
+        "debris_dynamics",
+        "debris_dynamics_error",
+        "debris_distribution",
+        "mean_velocity_world_mps",
+        "mean_spin_rad_s",
+        "moving_count",
+    ] {
+        assert!(
+            public.get(hidden).is_none(),
+            "native debug data must not leak through telemetry_status: {hidden}"
+        );
+    }
+    assert_eq!(public["provenance"]["hidden_debris_truth_used"], false);
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::Restore {
+        state: Box::new(saved.as_ref().clone()),
+    }))
+    .unwrap();
+}
+
+#[test]
+fn impact_mode_never_labels_an_inactive_stream_reference_as_a_measured_velocity() {
+    let mut settings = crate::model::ExperimentSettings::default();
+    settings.debris.count = 3;
+    settings.debris.distribution = crate::model::DebrisDistribution::impact_default();
+    let simulation = Simulation::with_experiment(100, settings).unwrap();
+    let report = measure(&simulation.snapshot()).report;
+    assert!(report.debris_flow_reference.is_none());
+    for key in [
+        Instrument::StreamSpeed,
+        Instrument::BirthSpread,
+        Instrument::StreamDirection,
+    ] {
+        assert!(reading(&report, key).starts_with("--"));
+    }
+    let text = presentation::group_description(InstrumentGroup::Stream, &report);
+    assert!(text.contains("Impact ejecta") && text.contains("inactive"));
 }

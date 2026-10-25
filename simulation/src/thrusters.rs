@@ -56,7 +56,7 @@ fn advance(mut exhaust: ResMut<DebugExhaust>) {
 fn draw(exhaust: Res<DebugExhaust>, rig: Res<crate::camera::CameraRig>, mut gizmos: Gizmos) {
     // Sensors::setup assigns default gizmos to layer 1. Mounted RGB cameras see
     // only layers 0/2, including while this overlay is visible in a debug view.
-    if rig.mode.sensor().is_some() {
+    if rig.mode.sensor().is_some() || !crate::scene::visual_settings().guides {
         return;
     }
     let cloud = &exhaust.0;

@@ -193,10 +193,11 @@ mod tests {
             assert!(movement.held);
             assert_eq!(movement.axes, [0.0; 3]);
             let mut rig = CameraRig::default();
+            let mode = rig.mode;
             let original = Transform::from_xyz(1.0, 2.0, 3.0);
             let mut transform = original;
             DebugFlight::default().translate(&mut rig, &mut transform, &movement, true, false, 0.1);
-            assert_eq!(rig.mode, CameraMode::Orbit);
+            assert_eq!(rig.mode, mode);
             assert_eq!(transform, original);
         }
     }
@@ -217,6 +218,7 @@ mod tests {
                 let movement = movement(&keys);
                 assert!(matches!(movement.target, MovementTarget::Suppressed));
                 let mut rig = CameraRig::default();
+                let mode = rig.mode;
                 let original = Transform::from_xyz(1.0, 2.0, 3.0);
                 let mut transform = original;
                 DebugFlight::default().translate(
@@ -227,7 +229,7 @@ mod tests {
                     false,
                     0.1,
                 );
-                assert_eq!(rig.mode, CameraMode::Orbit);
+                assert_eq!(rig.mode, mode);
                 assert_eq!(transform, original);
             }
         }
@@ -306,6 +308,8 @@ mod tests {
     fn leaving_sensor_display_uses_the_parked_independent_debug_pose() {
         for mode in [CameraMode::ShipTop, CameraMode::ShipBottom] {
             let mut rig = CameraRig { mode, ..default() };
+            let focus = rig.focus;
+            let distance = rig.distance_km;
             let original = Transform::from_xyz(1.0, 2.0, 3.0)
                 .with_rotation(look_rotation(-0.4, 0.2) * Quat::from_rotation_z(0.6));
             let mut transform = original;
@@ -324,10 +328,10 @@ mod tests {
                 original.translation + Vec3::Y * 0.005,
             );
             same_rotation(transform.rotation, original.rotation);
-            assert_eq!(rig.focus, crate::domain::EntityId::Lander);
+            assert_eq!(rig.focus, focus);
             assert_eq!(rig.pan_offset, Vec3::ZERO);
             assert_eq!(rig.zoom, 1.0);
-            assert_eq!(rig.distance_km, 0.12);
+            assert_eq!(rig.distance_km, distance);
         }
     }
 

@@ -24,7 +24,7 @@ pub(super) fn setup(mut commands: Commands, images: Res<SensorImages>) {
         SensorPanel,
         children![
             (
-                Text::new("Ship camera | 512×512 RGB8/ch\nFixed sensor FOV"),
+                Text::new("Ship camera | 512x512 RGB8/ch\nFixed sensor FOV"),
                 Node {
                     max_width: percent(92),
                     flex_shrink: 0.0,
@@ -151,6 +151,7 @@ pub(super) fn update(
             sampled_yaw,
             sampled_pitch,
         );
+        let value = crate::hud::readable_text(&value);
         if text.0 != value {
             text.0 = value;
         }

@@ -18,11 +18,16 @@ pub(crate) struct CameraRig {
 impl Default for CameraRig {
     fn default() -> Self {
         Self {
-            mode: CameraMode::Orbit,
-            focus: EntityId::Lander,
+            mode: CameraMode::Overview,
+            focus: EntityId::Phobos,
             yaw: -0.72,
             pitch: 0.28,
-            distance_km: 0.12,
+            distance_km: crate::model::phobos_enclosing_radius_m().max(
+                crate::model::phobos_radii_m()
+                    .into_iter()
+                    .fold(0.0_f64, f64::max),
+            ) as f32
+                * 0.005,
             zoom: 1.0,
             speed_mps: 100.0,
             pan_offset: Vec3::ZERO,
@@ -45,12 +50,13 @@ pub struct CameraStatus {
 
 impl Default for CameraStatus {
     fn default() -> Self {
+        let rig = CameraRig::default();
         Self {
-            mode: CameraMode::Orbit,
-            focus: EntityId::Lander,
+            mode: rig.mode,
+            focus: rig.focus,
             position_m: [0.0; 3],
             rotation: [0.0, 0.0, 0.0, 1.0],
-            distance_m: 120.0,
+            distance_m: f64::from(rig.distance_km) * 1_000.0,
             active: false,
             locked: false,
             speed_mps: 100.0,

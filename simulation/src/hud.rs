@@ -1,16 +1,28 @@
 //! Bevy UI for mission control and the local viewer camera.
 
 mod diagnostics;
+mod editors;
 mod input;
 mod model;
 mod policy;
+mod render_text;
 mod systems;
+mod text_layout;
 mod view;
 
 #[cfg(test)]
 mod layout_tests;
 
+pub(crate) use editors::{EditorField, InstrumentEditor, instrument_editing};
 pub(crate) use model::{HudState, LayoutPart, PANEL_GAP_PX, SCREEN_PADDING_PX};
+pub(crate) use render_text::readable as readable_text;
+
+#[cfg(test)]
+pub(crate) fn reset_instrument_editing_for_tests() {
+    let keys = bevy::prelude::ButtonInput::<bevy::prelude::KeyCode>::default();
+    editors::begin_input_frame(false, &keys);
+    editors::begin_input_frame(false, &keys);
+}
 
 pub fn install(app: &mut bevy::prelude::App) {
     systems::install(app);

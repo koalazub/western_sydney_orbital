@@ -20,6 +20,10 @@ fn fresh_app() -> App {
     VIEWPORT.with(|viewport| *viewport.borrow_mut() = ViewportState::default());
     KEYBOARD_PILOT.with(|pilot| *pilot.borrow_mut() = KeyboardPilot::default());
     SPACE_HELD.with(|held| held.set(false));
+    TRIAL_REVISION.with(|revision| revision.set(0));
+    crate::navigation::clear_for_trial();
+    crate::hud::reset_instrument_editing_for_tests();
+    crate::launchpad::reset_for_tests();
     crate::controls::reset_for_tests();
     crate::controls::set_movement_keys(0);
     crate::camera::set_input_active(true, false);
@@ -286,6 +290,7 @@ fn runtime_report_exposes_external_or_manual_control_and_actual_keyboard_state()
         report,
         serde_json::json!({
             "running": true,
+            "trial_revision": 0,
             "controller": "external_python_or_manual",
             "reference_accel_limit_mps2": config.lander.max_accel_mps2,
             "keyboard_thrust": true,
@@ -1017,16 +1022,82 @@ fn flight_telemetry_api_reports_actual_reference_motion_after_runtime_update() {
     assert_eq!(report["units"]["speed"], "m/s");
     assert_eq!(report["actuation"]["practice_boost_active"], false);
     assert_eq!(report["actuation"]["thrust_application"], "manual_nozzles");
-    assert_eq!(
-        metrics["applied_thrust_accel_mps2"],
-        scenario::settings().lander.max_accel_mps2
+    assert!(
+        (metrics["applied_thrust_accel_mps2"].as_f64().unwrap()
+            - scenario::settings().lander.max_accel_mps2)
+            .abs()
+            < 1e-12
     );
     assert!(metrics["speed_mps"].as_f64().unwrap() > 0.0);
     assert!(metrics["radial_climb_mps"].as_f64().unwrap() > 0.0);
-    assert_eq!(
-        metrics["thrust_force_n"].as_f64().unwrap(),
-        scenario::settings().lander.mass_kg * scenario::settings().lander.max_accel_mps2
+    let expected_force =
+        scenario::settings().lander.mass_kg * scenario::settings().lander.max_accel_mps2;
+    assert!(
+        (metrics["thrust_force_n"].as_f64().unwrap() - expected_force).abs()
+            < 1e-12 * expected_force
     );
     assert_eq!(report["provenance"]["hidden_debris_truth_used"], false);
     assert_eq!(report["caveats"]["stp_parity"], false);
+}
+
+#[test]
+fn actual_editor_focus_blocks_lift_and_manual_takeover_without_clearing_python_thrust() {
+    use bevy::input_focus::FocusCause;
+    let mut app = fresh_app();
+    app.init_resource::<InputFocus>();
+    let editor = app
+        .world_mut()
+        .spawn((
+            bevy::ui_widgets::TextInput,
+            crate::hud::InstrumentEditor,
+            crate::hud::EditorField::Mass,
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(editor, FocusCause::Navigated);
+    press(&mut app, &[KeyCode::Space, KeyCode::KeyE, KeyCode::KeyW]);
+    frame(&mut app, STEP);
+    assert!(!is_running());
+    assert_eq!(snapshot().time_s, 0.0);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: [0.12, 0.0, 0.0],
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    frame(&mut app, STEP);
+    assert!(is_running());
+    assert!(!keyboard_owns_command());
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.12, 0.0, 0.0]);
+}
+
+#[test]
+fn focused_launch_setup_button_cannot_also_launch_or_take_over_python_thrust() {
+    use bevy::input_focus::FocusCause;
+    let mut app = fresh_app();
+    app.init_resource::<InputFocus>();
+    let button = app
+        .world_mut()
+        .spawn((bevy::ui_widgets::Button, crate::launchpad::SurfaceControl))
+        .id();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(button, FocusCause::Navigated);
+    press(&mut app, &[KeyCode::Space, KeyCode::KeyE]);
+    frame(&mut app, STEP);
+    assert!(!is_running());
+    assert_eq!(snapshot().time_s, 0.0);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: [0.12, 0.0, 0.0],
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    frame(&mut app, STEP);
+    assert!(is_running());
+    assert!(!keyboard_owns_command());
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.12, 0.0, 0.0]);
 }

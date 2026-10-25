@@ -45,7 +45,7 @@ fn assert_waiting() {
     assert_eq!(report["plan"]["points_world_m"], json!([]));
     assert!(report["plan"]["measured_obstacles"].is_null());
     assert!(report["plan"]["goal_center_m"].is_null());
-    assert!(model::brief().contains("Waiting for notebook"));
+    assert!(model::brief().contains("connect notebook"));
     assert!(model::with_preview(|preview| preview.is_none()));
 }
 
@@ -70,6 +70,72 @@ fn valid_transport_submission_preserves_actual_physics_commands_and_rng() {
     assert!(published["plan"].get("search_failure").is_none());
     assert!(published["plan"].get("replanning").is_none());
     assert_eq!(model::with_preview(|p| p.unwrap().render_points().len()), 2);
+}
+
+#[test]
+fn python_execution_and_real_lookahead_remain_readonly_and_are_reported_together() {
+    let before = reset(settings().default_seed);
+    let mut payload = transport_input(&before);
+    payload["execution"] = json!({"state":"watching","controller":"planned_waypoint_pd","source_time_s":before.time_s,
+        "source_seed":before.seed,"next_waypoint_world_m":[1.0,2.0,3.0],"tuning_revision":0});
+    submit(&payload.to_string()).unwrap();
+    let ray: Value = serde_json::from_str(&crate::lookahead_raycast(
+        r#"{"target_world_m":[0,0,0],"max_distance_m":250}"#,
+    ))
+    .unwrap();
+    assert_eq!(ray["ok"], true);
+    assert_eq!(report()["raycast"], ray["report"]);
+    assert_eq!(report()["plan"], payload);
+    assert!(model::brief().contains("A* + waypoint PD preview"));
+    assert!(model::details().contains("Look-ahead ray:"));
+    submit(&payload.to_string()).unwrap();
+    assert_eq!(
+        report()["raycast"],
+        ray["report"],
+        "a new Python plan must not erase the real physical trace"
+    );
+    assert_eq!(
+        serde_json::to_string(execute(PhysicsCommand::Observe).as_ref()).unwrap(),
+        serde_json::to_string(before.as_ref()).unwrap()
+    );
+    let published = model::status();
+    for execution in [
+        json!({"state":"watching","controller":"native_autopilot","source_time_s":0,"source_seed":before.seed,"next_waypoint_world_m":null,"tuning_revision":0}),
+        json!({"state":"running","controller":"planned_waypoint_pd","source_time_s":-1,"source_seed":before.seed,"next_waypoint_world_m":null,"tuning_revision":0}),
+    ] {
+        let mut invalid = payload.clone();
+        invalid["execution"] = execution;
+        assert!(submit(&invalid.to_string()).is_err());
+        assert_eq!(model::status(), published);
+    }
+    reset((before.seed + 1) % (u64::from(u32::MAX) + 1));
+    assert_waiting();
+    assert!(report()["raycast"].is_null());
+}
+
+#[test]
+fn wrong_trial_preview_has_a_structured_stale_error_without_erasing_current_guidance() {
+    let initial = reset(settings().default_seed);
+    let mut old = transport_input(&initial);
+    old["execution"] = json!({
+        "state": "watching", "controller": "planned_waypoint_pd",
+        "source_time_s": initial.time_s, "source_seed": initial.seed,
+        "next_waypoint_world_m": null, "tuning_revision": initial.tuning_revision,
+        "trial_revision": crate::session::trial_revision(),
+    });
+    submit(&old.to_string()).unwrap();
+    reset(initial.seed);
+    let mut current = old.clone();
+    current["execution"]["trial_revision"] = json!(crate::session::trial_revision());
+    submit(&current.to_string()).unwrap();
+    let physics = crate::session::observation();
+    let navigation = model::status();
+    let rejection: Value =
+        serde_json::from_str(&crate::set_navigation_preview(&old.to_string())).unwrap();
+    assert_eq!(rejection["ok"], false);
+    assert_eq!(rejection["code"], "stale_context");
+    assert_eq!(crate::session::observation(), physics);
+    assert_eq!(model::status(), navigation);
 }
 
 #[test]

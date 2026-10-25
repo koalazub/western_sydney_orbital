@@ -1,4 +1,4 @@
-//! Debug-only framing of the real Phobos and Mars geometry.
+//! Viewer-only framing of the real Phobos and Mars geometry.
 use super::model::CameraRig;
 use crate::{
     domain::{CameraMode, EntityId},
@@ -7,6 +7,28 @@ use crate::{
 use bevy::prelude::*;
 
 const KM: f32 = 0.001;
+
+pub(super) fn update_viewport_aspect(
+    camera: &Camera,
+    window: Option<&Window>,
+    projection: &mut Projection,
+) {
+    let size = camera
+        .viewport
+        .as_ref()
+        .map(|viewport| viewport.physical_size)
+        .or_else(|| window.map(Window::physical_size))
+        .or_else(|| camera.physical_viewport_size());
+    if let Some(size) = size
+        && size.x > 0
+        && size.y > 0
+        && let Projection::Perspective(lens) = projection
+    {
+        // Use this frame's real viewport before Bevy's PostUpdate camera system.
+        // Otherwise the first portrait frame uses the default square aspect.
+        lens.aspect_ratio = size.x as f32 / size.y as f32;
+    }
+}
 
 fn meters(position: [f64; 3]) -> Vec3 {
     Vec3::from_array(position.map(|value| (value * 0.001) as f32))
@@ -102,7 +124,10 @@ pub(super) fn view(rig: &CameraRig, snapshot: &Snapshot, projection: &mut Projec
 mod tests {
     use super::*;
     use crate::physics::Simulation;
-    use bevy::camera::CameraProjection;
+    use bevy::{
+        camera::{CameraProjection, Viewport},
+        window::WindowResolution,
+    };
 
     fn assert_sphere_in_frame(
         transform: &Transform,
@@ -115,6 +140,20 @@ mod tests {
         assert!(view_center.z < -radius);
         let center_ndc = clip.project_point3(view_center);
         assert!(center_ndc.x.abs() < 1.0 && center_ndc.y.abs() < 1.0);
+        let depth = -view_center.z;
+        // Exact perspective silhouette bounds catch clipping between axis samples.
+        for (coordinate, focal) in [
+            (view_center.x, clip.x_axis.x),
+            (view_center.y, clip.y_axis.y),
+        ] {
+            let tangent =
+                radius * (depth * depth + coordinate * coordinate - radius * radius).sqrt();
+            for sign in [-1.0, 1.0] {
+                let edge = focal * (coordinate * depth + sign * tangent)
+                    / (depth * depth - radius * radius);
+                assert!(edge.abs() < 1.0, "silhouette outside frame: {edge}");
+            }
+        }
         // Real surface points, not a fabricated screen-space Mars position.
         for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
             for sign in [-1.0, 1.0] {
@@ -173,5 +212,104 @@ mod tests {
             assert!(lens.far > to_mars.length() + mars_radius);
         }
         assert_eq!(serde_json::to_value(simulation.snapshot()).unwrap(), before);
+    }
+
+    #[test]
+    fn startup_uses_the_real_viewport_and_preserves_projected_body_ratios_at_hidpi() {
+        let snapshot = Simulation::new_default().snapshot();
+        let before = serde_json::to_value(&snapshot).unwrap();
+        let mut reference_ratio: Option<f32> = None;
+        for (width, height) in [(1280, 720), (390, 844), (800, 800), (2520, 840)] {
+            for scale in [1.0, 2.0, 3.0] {
+                let window = Window {
+                    resolution: WindowResolution::new(
+                        (width as f32 * scale) as u32,
+                        (height as f32 * scale) as u32,
+                    )
+                    .with_scale_factor_override(scale),
+                    ..default()
+                };
+                let mut rig = CameraRig::default();
+                assert_eq!(rig.mode, CameraMode::Overview);
+                assert_eq!(rig.focus, EntityId::Phobos);
+                let (transform, projection) =
+                    crate::camera::initial_overview(&mut rig, &snapshot, Some(&window));
+                let Projection::Perspective(lens) = projection else {
+                    panic!("perspective overview")
+                };
+                assert_eq!(lens.aspect_ratio, width as f32 / height as f32);
+                assert_eq!(lens.near, 0.0005);
+                assert_eq!(lens.far, 20_000.0);
+                let phobos_radius = phobos_radius_km(&snapshot);
+                let mars = meters(snapshot.environment.mars_position_m);
+                let mars_radius = snapshot.environment.mars_radius_m as f32 * KM;
+                assert!(transform.translation.length() > phobos_radius);
+                assert!(transform.translation.distance(mars) > mars_radius);
+                assert_sphere_in_frame(&transform, &lens, Vec3::ZERO, phobos_radius);
+                assert_sphere_in_frame(&transform, &lens, mars, mars_radius);
+                let widths =
+                    [(Vec3::ZERO, phobos_radius), (mars, mars_radius)].map(|(center, radius)| {
+                        let relative = center - transform.translation;
+                        let distance = relative.length();
+                        // Rotate around projected camera-up to find horizontal
+                        // limbs. Crossing with camera-up finds vertical limbs,
+                        // whose equal x coordinates cannot measure disk width.
+                        let axis = relative
+                            .normalize()
+                            .cross(transform.rotation * Vec3::X)
+                            .normalize();
+                        let tangent_distance = (distance * distance - radius * radius).sqrt();
+                        let half_angle = (radius / distance).asin();
+                        let clip = lens.get_clip_from_view();
+                        let edge_x = [-1.0, 1.0].map(|sign| {
+                            let ray = Quat::from_axis_angle(axis, sign * half_angle)
+                                * relative.normalize();
+                            let limb = transform.translation + ray * tangent_distance;
+                            assert!((limb.distance(center) - radius).abs() < radius * 0.0001);
+                            let view_point =
+                                transform.rotation.inverse() * (limb - transform.translation);
+                            clip.project_point3(view_point).x
+                        });
+                        (edge_x[1] - edge_x[0]).abs()
+                    });
+                let projected_ratio = widths[1] / widths[0];
+                assert!(
+                    widths.iter().all(|width| width.is_finite() && *width > 0.0),
+                    "Invalid projected widths {widths:?}; viewport {width}x{height} scale {scale}, camera {transform:?}, lens {lens:?}"
+                );
+                // Mars' physical radius is hundreds of times Phobos', but its
+                // actual separation gives a roughly twice-as-wide apparent disk.
+                assert!(mars_radius / phobos_radius > 250.0);
+                assert!((1.5..2.3).contains(&projected_ratio), "{projected_ratio}");
+                if let Some(reference) = reference_ratio {
+                    assert!((projected_ratio - reference).abs() < 1e-5);
+                } else {
+                    reference_ratio = Some(projected_ratio);
+                }
+            }
+        }
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), before);
+    }
+
+    #[test]
+    fn an_explicit_camera_viewport_wins_over_the_full_window_shape() {
+        let window = Window {
+            resolution: WindowResolution::new(2560, 1440).with_scale_factor_override(2.0),
+            ..default()
+        };
+        let camera = Camera {
+            viewport: Some(Viewport {
+                physical_position: UVec2::new(20, 20),
+                physical_size: UVec2::new(600, 1200),
+                ..default()
+            }),
+            ..default()
+        };
+        let mut projection = Projection::Perspective(PerspectiveProjection::default());
+        update_viewport_aspect(&camera, Some(&window), &mut projection);
+        let Projection::Perspective(lens) = projection else {
+            panic!("perspective overview")
+        };
+        assert_eq!(lens.aspect_ratio, 0.5);
     }
 }

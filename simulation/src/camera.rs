@@ -11,7 +11,24 @@ pub(crate) use model::CameraRig;
 pub use model::{CameraError, CameraStatus};
 
 use crate::domain::CameraRequest;
-use bevy::prelude::App;
+use bevy::prelude::*;
+
+pub(crate) fn initial_overview(
+    rig: &mut CameraRig,
+    snapshot: &crate::model::Snapshot,
+    window: Option<&Window>,
+) -> (Transform, Projection) {
+    let mut projection = Projection::Perspective(PerspectiveProjection {
+        near: 0.0005,
+        far: 20_000.0,
+        fov: 60.0_f32.to_radians(),
+        ..default()
+    });
+    overview::update_viewport_aspect(&Camera::default(), window, &mut projection);
+    overview::frame(rig, snapshot);
+    let view = overview::view(rig, snapshot, &mut projection);
+    (view, projection)
+}
 
 pub fn install(app: &mut App) {
     controller::install(app);

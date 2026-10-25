@@ -7,6 +7,7 @@ mod camera;
 mod controls;
 pub mod domain;
 mod hud;
+mod launchpad;
 mod mission;
 pub mod model;
 mod navigation;
@@ -35,6 +36,21 @@ pub fn start_simulation(canvas_selector: &str) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn command(json: &str) -> String {
     api::execute(json)
+}
+
+/// Real control acknowledgement without copying the full debug world into JSON.
+#[wasm_bindgen]
+pub fn control(json: &str) -> String {
+    api::control(json)
+}
+
+/// Local debug physics measurements, not SDK radar or a flight-policy input.
+#[wasm_bindgen]
+pub fn field_diagnostics() -> String {
+    match session::debris_dynamics() {
+        Ok(report) => serde_json::json!({"ok": true, "report": report}).to_string(),
+        Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+    }
 }
 
 #[wasm_bindgen]
@@ -87,6 +103,31 @@ pub fn navigation_status() -> String {
 pub fn set_navigation_preview(json: &str) -> String {
     match navigation::submit(json) {
         Ok(()) => serde_json::json!({"ok": true}).to_string(),
+        Err(api::CommandError::StaleContext) => serde_json::json!({
+            "ok": false, "code": "stale_context", "error": api::CommandError::StaleContext.to_string(),
+        }).to_string(),
+        Err(api::CommandError::Rejected(error)) =>
+            serde_json::json!({"ok": false, "error": error}).to_string(),
+    }
+}
+
+/// Physical practice-world query, drawn only in debug views. Not an SDK sensor.
+#[wasm_bindgen]
+pub fn lookahead_raycast(json: &str) -> String {
+    let result = (|| {
+        if json.len() > 4096 {
+            return Err("Look-ahead query exceeds the 4 KiB limit".to_owned());
+        }
+        let query: model::LookaheadQuery =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
+        session::raycast(&query)
+    })();
+    match result {
+        Ok(report) => {
+            let response = serde_json::json!({"ok": true, "report": &report}).to_string();
+            navigation::publish_raycast(report);
+            response
+        }
         Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
     }
 }

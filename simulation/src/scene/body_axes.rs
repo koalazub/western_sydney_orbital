@@ -12,7 +12,7 @@ pub(crate) fn install(app: &mut App) {
 
 fn draw(rig: Res<crate::camera::CameraRig>, mut gizmos: Gizmos) {
     // Sensors::setup puts default gizmos on layer 1. Mounted cameras use 0/2.
-    if rig.mode.sensor().is_some() {
+    if rig.mode.sensor().is_some() || !crate::scene::visual_settings().guides {
         return;
     }
     let snapshot = crate::snapshot();

@@ -47,7 +47,11 @@ mod tests {
 
     #[test]
     fn log_distance_deltas_zoom_out_and_back_reversibly() {
-        let mut rig = CameraRig::default();
+        let mut rig = CameraRig {
+            mode: CameraMode::Orbit,
+            distance_km: 0.12,
+            ..default()
+        };
         let mut transform = Transform::default();
         let mut projection = Projection::default();
         apply_pinch(
@@ -119,6 +123,7 @@ mod tests {
     fn ship_views_ignore_pinch_without_changing_pose_or_projection() {
         for mode in [CameraMode::ShipTop, CameraMode::ShipBottom] {
             let mut rig = CameraRig { mode, ..default() };
+            let distance = rig.distance_km;
             let mut transform = Transform::from_xyz(1.0, 2.0, 3.0);
             let mut projection = Projection::Perspective(PerspectiveProjection {
                 fov: 0.8,
@@ -133,7 +138,7 @@ mod tests {
                 1.0,
             );
             assert_eq!(transform.translation, Vec3::new(1.0, 2.0, 3.0));
-            assert_eq!(rig.distance_km, 0.12);
+            assert_eq!(rig.distance_km, distance);
             let Projection::Perspective(view) = projection else {
                 panic!("perspective projection changed");
             };
@@ -144,6 +149,7 @@ mod tests {
     #[test]
     fn nonfinite_pinch_deltas_are_ignored() {
         let mut rig = CameraRig::default();
+        let distance = rig.distance_km;
         for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             apply_pinch(
                 &mut rig,
@@ -154,6 +160,6 @@ mod tests {
                 delta,
             );
         }
-        assert_eq!(rig.distance_km, 0.12);
+        assert_eq!(rig.distance_km, distance);
     }
 }

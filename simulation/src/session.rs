@@ -1,13 +1,14 @@
 //! Imperative adapter for the pure playback transition and physical world.
 use crate::{
-    api::Dispatch,
+    api::{CommandContext, CommandError, Dispatch},
     controls::{KeyboardPilot, Movement, MovementTarget, PilotContext, PilotEffect},
-    domain::{EngineAction, MissionStatus, ViewportAction},
+    domain::{EngineAction, MissionStatus, PlaybackRate, ViewportAction},
     model::Snapshot,
     physics::{PhysicsCommand, Simulation},
     runtime::{self, Effect, PlaybackState},
     scenario,
 };
+use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use std::{
     cell::{Cell, RefCell},
@@ -25,6 +26,24 @@ struct ViewportState {
 
 const MAX_ACTIONS: usize = 32;
 
+#[derive(Clone, Copy, Debug)]
+enum QueuedAction {
+    Native(EngineAction),
+    CheckedPlay {
+        rate: PlaybackRate,
+        expected: CommandContext,
+    },
+}
+
+impl QueuedAction {
+    fn engine_action(self) -> EngineAction {
+        match self {
+            Self::Native(action) => action,
+            Self::CheckedPlay { rate, .. } => EngineAction::Play(rate),
+        }
+    }
+}
+
 impl Default for ViewportState {
     fn default() -> Self {
         Self {
@@ -37,19 +56,20 @@ impl Default for ViewportState {
 
 thread_local! {
     static SIMULATION: RefCell<Simulation> = RefCell::new(Simulation::new_default());
-    static ACTIONS: RefCell<VecDeque<EngineAction>> = const { RefCell::new(VecDeque::new()) };
+    static ACTIONS: RefCell<VecDeque<QueuedAction>> = const { RefCell::new(VecDeque::new()) };
     static RUNTIME: RefCell<PlaybackState> = RefCell::new(PlaybackState::default());
     static VIEWPORT: RefCell<ViewportState> = RefCell::new(ViewportState::default());
     static PUBLISHED: RefCell<Option<Rc<Snapshot>>> = const { RefCell::new(None) };
     static KEYBOARD_PILOT: RefCell<KeyboardPilot> = RefCell::new(KeyboardPilot::default());
     static SPACE_HELD: Cell<bool> = const { Cell::new(false) };
+    static TRIAL_REVISION: Cell<u32> = const { Cell::new(0) };
 }
 
 pub(crate) fn request_action(action: EngineAction) {
     ACTIONS.with(|queue| {
         let mut queue = queue.borrow_mut();
         if queue.len() < MAX_ACTIONS {
-            queue.push_back(action);
+            queue.push_back(QueuedAction::Native(action));
         }
     });
 }
@@ -80,7 +100,13 @@ fn refresh() {
 }
 
 pub(crate) fn observation() -> serde_json::Value {
-    SIMULATION.with(|sim| sim.borrow().observation())
+    let mut report = SIMULATION.with(|sim| sim.borrow().observation());
+    report["trial_revision"] = serde_json::json!(trial_revision());
+    report
+}
+
+pub(crate) fn trial_revision() -> u32 {
+    TRIAL_REVISION.with(Cell::get)
 }
 
 pub(crate) fn set_viewport(fullscreen: bool, maximized: bool, message: &str) {
@@ -101,6 +127,7 @@ pub(crate) fn runtime_report() -> String {
             KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command()) && state.running;
         serde_json::json!({
             "running": state.running,
+            "trial_revision": trial_revision(),
             "controller": "external_python_or_manual",
             "reference_accel_limit_mps2": config.lander.max_accel_mps2,
             "keyboard_thrust": keyboard_thrust,
@@ -118,6 +145,10 @@ pub(crate) fn runtime_report() -> String {
 
 pub(crate) fn keyboard_requires_release() -> bool {
     KEYBOARD_PILOT.with(|pilot| pilot.borrow().requires_release())
+}
+
+pub(crate) fn is_running() -> bool {
+    RUNTIME.with(|state| state.borrow().running)
 }
 
 pub(crate) fn block_keyboard_until_release() {
@@ -150,7 +181,127 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
             Ok(snapshot())
         }
         Dispatch::Physics(command) => dispatch_physics(command),
+        Dispatch::CheckedCommand {
+            accel,
+            angular_accel,
+            expected_context,
+        } => dispatch_checked(accel, angular_accel, expected_context)
+            .map_err(|error| error.to_string()),
+        Dispatch::CheckedPlay {
+            rate,
+            expected_context,
+        } => dispatch_play_checked(rate, expected_context).map_err(|error| error.to_string()),
+        Dispatch::CheckedLaunchpad {
+            surface_direction,
+            expected_context,
+        } => dispatch_launchpad_checked(surface_direction, expected_context)
+            .map_err(|error| error.to_string()),
     }
+}
+
+/// The check and real command execute synchronously in the same engine call.
+/// Native edits cannot slip between a Python read and an unchecked write.
+pub(crate) fn dispatch_checked(
+    accel: [f64; 3],
+    angular_accel: [f64; 3],
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    if ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running)) {
+        return Err(CommandError::StaleContext);
+    }
+    dispatch_physics(PhysicsCommand::SetCommand {
+        accel,
+        angular_accel,
+    })
+    .map_err(CommandError::Rejected)
+}
+
+fn validate_context(
+    expected: CommandContext,
+    playback: &PlaybackState,
+) -> Result<(), CommandError> {
+    validate_setup_context(expected, playback)?;
+    if SIMULATION.with(|simulation| simulation.borrow().mission_status().is_terminal())
+        || keyboard_owns_command()
+    {
+        return Err(CommandError::StaleContext);
+    }
+    Ok(())
+}
+
+fn validate_setup_context(
+    expected: CommandContext,
+    playback: &PlaybackState,
+) -> Result<(), CommandError> {
+    let state = PUBLISHED
+        .with(|published| published.borrow().clone())
+        .unwrap_or_else(|| Rc::new(SIMULATION.with(|simulation| simulation.borrow().snapshot())));
+    if expected.trial_revision != trial_revision()
+        || expected.tuning_revision != state.tuning_revision
+        || expected.manual_interventions != state.manual_interventions
+        || expected.seed != state.seed
+        || expected.running != playback.running
+        || !playback.can_control
+    {
+        return Err(CommandError::StaleContext);
+    }
+    Ok(())
+}
+
+fn pending_flight_action(actions: &VecDeque<QueuedAction>, running: bool) -> bool {
+    actions.iter().any(|action| match action.engine_action() {
+        EngineAction::Viewport(_) | EngineAction::CycleRate => false,
+        // A successful explicit setup commits the paused mirror before
+        // its queued Pause reaches Bevy. That no-op pause is already
+        // represented by the observed context; a pending pause of a
+        // running flight is not.
+        EngineAction::Pause => running,
+        EngineAction::TogglePlayback
+        | EngineAction::Play(_)
+        | EngineAction::Step
+        | EngineAction::Reset
+        | EngineAction::DebugUpright => true,
+    })
+}
+
+/// Check before queueing and again at the runtime frame, when Play takes effect.
+/// A tuning/setup change while waiting must not revive an old controller flight.
+pub(crate) fn dispatch_play_checked(
+    rate: PlaybackRate,
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    ACTIONS.with(|actions| {
+        let mut actions = actions.borrow_mut();
+        if pending_flight_action(&actions, playback.running) {
+            return Err(CommandError::StaleContext);
+        }
+        require_pause_slot(
+            &actions,
+            "Let queued actions finish before starting playback",
+        )
+        .map_err(CommandError::Rejected)?;
+        actions.push_back(QueuedAction::CheckedPlay { rate, expected });
+        Ok(snapshot())
+    })
+}
+
+/// A surface gesture is a paused local intervention, never an implicit reset.
+/// Reject a changed trial or pending flight action before touching either body.
+pub(crate) fn dispatch_launchpad_checked(
+    surface_direction: [f64; 3],
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_setup_context(expected, &playback)?;
+    if ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running)) {
+        return Err(CommandError::StaleContext);
+    }
+    dispatch_physics(PhysicsCommand::MoveLaunchpad { surface_direction })
+        .map_err(CommandError::Rejected)
 }
 
 /// Successful execution determines which input and playback state can be committed.
@@ -158,6 +309,26 @@ enum PhysicsExecution {
     KeyboardUnchanged(Snapshot),
     ExternalCommand(Snapshot),
     PausedTrial(Snapshot),
+}
+
+/// Typed native readback from the same Rapier world used by the public API.
+pub(crate) fn applied_physics() -> Result<crate::model::AppliedPhysics, String> {
+    SIMULATION.with(|simulation| simulation.borrow().applied_physics())
+}
+
+/// Native debug field measurements, never an SDK sensor or planner input.
+pub(crate) fn debris_dynamics() -> Result<crate::model::DebrisDynamicsReport, String> {
+    SIMULATION.with(|simulation| simulation.borrow().debris_dynamics())
+}
+
+pub(crate) fn keyboard_owns_command() -> bool {
+    KEYBOARD_PILOT.with(|pilot| pilot.borrow().owns_command())
+}
+
+pub(crate) fn raycast(
+    query: &crate::model::LookaheadQuery,
+) -> Result<crate::model::LookaheadReport, String> {
+    SIMULATION.with(|simulation| simulation.borrow().raycast(query))
 }
 
 fn dispatch_physics(command: PhysicsCommand) -> Result<Rc<Snapshot>, String> {
@@ -174,11 +345,17 @@ fn dispatch_physics(command: PhysicsCommand) -> Result<Rc<Snapshot>, String> {
 fn execute_physics(
     command: PhysicsCommand,
     playback: &PlaybackState,
-    actions: &VecDeque<EngineAction>,
+    actions: &VecDeque<QueuedAction>,
 ) -> Result<PhysicsExecution, String> {
     let execute = |command| SIMULATION.with(|sim| sim.borrow_mut().execute(command));
     match command {
         command @ PhysicsCommand::Observe => {
+            Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
+        }
+        command @ (PhysicsCommand::TuneShip { .. } | PhysicsCommand::TuneDebrisFlow { .. }) => {
+            require_control(playback, "Live tuning is unavailable in view-only mode")?;
+            // Tuning is neither a flight-command handoff nor a new trial. Keep
+            // playback, pending actions and the existing command writer intact.
             Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
         }
         command @ PhysicsCommand::Step { .. } => {
@@ -191,6 +368,7 @@ fn execute_physics(
             Ok(PhysicsExecution::ExternalCommand(execute(command)?))
         }
         command @ (PhysicsCommand::Reset { .. } | PhysicsCommand::Restore { .. }) => {
+            require_trial_revision_capacity()?;
             require_pause_slot(
                 actions,
                 "Let queued actions finish before resetting or restoring the mission",
@@ -198,6 +376,7 @@ fn execute_physics(
             Ok(PhysicsExecution::PausedTrial(execute(command)?))
         }
         command @ PhysicsCommand::DebugUpright => {
+            require_trial_revision_capacity()?;
             require_control(
                 playback,
                 "Upright lander is unavailable in view-only mode. Request control first.",
@@ -208,7 +387,9 @@ fn execute_physics(
             )?;
             Ok(PhysicsExecution::PausedTrial(execute(command)?))
         }
-        command @ PhysicsCommand::ConfigureExperiment { .. } => {
+        command @ (PhysicsCommand::ConfigureExperiment { .. }
+        | PhysicsCommand::ConfigureFlight { .. }) => {
+            require_trial_revision_capacity()?;
             require_control(
                 playback,
                 "World and ship settings are unavailable in view-only mode",
@@ -216,6 +397,39 @@ fn execute_physics(
             require_pause_slot(
                 actions,
                 "Let queued actions finish before applying experiment settings",
+            )?;
+            Ok(PhysicsExecution::PausedTrial(execute(command)?))
+        }
+        command @ PhysicsCommand::PlaceLander { .. } => {
+            require_control(
+                playback,
+                "Lander placement is unavailable in view-only mode",
+            )?;
+            require_trial_revision_capacity()?;
+            require_pause_slot(
+                actions,
+                "Let queued actions finish before placing the lander",
+            )?;
+            Ok(PhysicsExecution::PausedTrial(execute(command)?))
+        }
+        command @ PhysicsCommand::MoveLaunchpad { .. } => {
+            require_control(
+                playback,
+                "Launchpad movement is unavailable in view-only mode. Request control first.",
+            )?;
+            if playback.running {
+                return Err("Pause the simulation before moving the launchpad.".into());
+            }
+            if pending_flight_action(actions, playback.running) {
+                return Err(
+                    "The flight has queued actions. Let them finish before moving the launchpad."
+                        .into(),
+                );
+            }
+            require_trial_revision_capacity()?;
+            require_pause_slot(
+                actions,
+                "Let queued actions finish before moving the launchpad",
             )?;
             Ok(PhysicsExecution::PausedTrial(execute(command)?))
         }
@@ -230,7 +444,20 @@ fn require_control(playback: &PlaybackState, message: &str) -> Result<(), String
     }
 }
 
-fn require_pause_slot(actions: &VecDeque<EngineAction>, message: &str) -> Result<(), String> {
+fn require_trial_revision_capacity() -> Result<(), String> {
+    if trial_revision() == u32::MAX {
+        Err("Local trial revision exhausted. Save the flight and reload the game before another test setup.".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn note_trial_change() {
+    TRIAL_REVISION.with(|revision| revision.set(revision.get() + 1));
+    crate::navigation::clear_for_trial();
+}
+
+fn require_pause_slot(actions: &VecDeque<QueuedAction>, message: &str) -> Result<(), String> {
     if actions.len() < MAX_ACTIONS {
         Ok(())
     } else {
@@ -241,7 +468,7 @@ fn require_pause_slot(actions: &VecDeque<EngineAction>, message: &str) -> Result
 fn commit_physics(
     execution: PhysicsExecution,
     playback: PlaybackState,
-    actions: &mut VecDeque<EngineAction>,
+    actions: &mut VecDeque<QueuedAction>,
 ) -> Rc<Snapshot> {
     let state = match execution {
         PhysicsExecution::KeyboardUnchanged(state) => state,
@@ -266,12 +493,13 @@ fn supersede_keyboard_command() {
 fn commit_paused_trial(
     state: &Snapshot,
     playback: PlaybackState,
-    actions: &mut VecDeque<EngineAction>,
+    actions: &mut VecDeque<QueuedAction>,
 ) {
+    note_trial_change();
     // This successful API commit supersedes all previously queued flight
     // actions, including old Pause. Window actions and rate changes keep their
     // order. A new Play requested after this commit can resume the paused trial.
-    actions.retain(|action| match action {
+    actions.retain(|action| match action.engine_action() {
         EngineAction::Viewport(_) | EngineAction::CycleRate => true,
         EngineAction::TogglePlayback
         | EngineAction::Play(_)
@@ -282,7 +510,7 @@ fn commit_paused_trial(
     });
     // The slot was checked before execution. Replace old pauses with exactly
     // one Pause that reaches the playback runtime before any later flight action.
-    actions.push_front(EngineAction::Pause);
+    actions.push_front(QueuedAction::Native(EngineAction::Pause));
     supersede_keyboard_command();
     let paused = runtime::transition(playback, EngineAction::Pause, state.mission.status).state;
     RUNTIME.with(|runtime| *runtime.borrow_mut() = paused);
@@ -293,8 +521,25 @@ pub(crate) fn advance_world(
     keys: Res<ButtonInput<KeyCode>>,
     hud: Res<crate::hud::HudState>,
     mut state: ResMut<PlaybackState>,
+    input_focus: Option<Res<InputFocus>>,
+    editors: Query<(), With<crate::hud::InstrumentEditor>>,
+    surface_controls: Query<(), With<crate::launchpad::SurfaceControl>>,
 ) {
+    let editor_focused = input_focus
+        .as_ref()
+        .and_then(|focus| focus.get())
+        .is_some_and(|entity| editors.contains(entity));
+    let surface_control_focused = input_focus
+        .as_ref()
+        .and_then(|focus| focus.get())
+        .is_some_and(|entity| surface_controls.contains(entity));
     let movement = crate::controls::movement(&keys);
+    // Movement observes physical key-up and may finish rebinding's release
+    // guard. Read the resulting HUD gate before updating the real pilot.
+    let movement_blocked = hud.movement_blocked()
+        || editor_focused
+        || surface_control_focused
+        || crate::launchpad::input_blocked();
     let space_down = crate::controls::lift_key_down(&keys);
     let fresh_space = SPACE_HELD.with(|held| !held.replace(space_down) && space_down);
     VIEWPORT.with(|context| {
@@ -306,7 +551,7 @@ pub(crate) fn advance_world(
     let actions: Vec<_> = ACTIONS.with(|queue| queue.borrow_mut().drain(..).collect());
     let explicit_playback_action = actions.iter().any(|action| {
         matches!(
-            action,
+            action.engine_action(),
             EngineAction::Pause
                 | EngineAction::TogglePlayback
                 | EngineAction::Reset
@@ -314,7 +559,17 @@ pub(crate) fn advance_world(
                 | EngineAction::Step
         )
     });
-    for action in actions {
+    for queued in actions {
+        let action = match queued {
+            QueuedAction::Native(action) => action,
+            QueuedAction::CheckedPlay { rate, expected } => {
+                if let Err(error) = validate_context(expected, &state) {
+                    state.message = error.to_string();
+                    continue;
+                }
+                EngineAction::Play(rate)
+            }
+        };
         let status = SIMULATION.with(|sim| sim.borrow().mission_status());
         let transition = runtime::transition(state.clone(), action, status);
         *state = transition.state;
@@ -322,7 +577,7 @@ pub(crate) fn advance_world(
             Effect::None => {}
             Effect::Advance => {
                 // A queued pause/step must not advance with stale keyboard thrust.
-                update_keyboard_pilot(&state, movement, hud.movement_blocked());
+                update_keyboard_pilot(&state, movement, movement_blocked);
                 SIMULATION.with(|sim| {
                     sim.borrow_mut()
                         .advance(scenario::settings().integration.fixed_step_s)
@@ -331,8 +586,11 @@ pub(crate) fn advance_world(
             }
             Effect::Reset => {
                 let seed = snapshot().seed;
-                match SIMULATION.with(|sim| sim.borrow_mut().reset(seed)) {
+                let result = require_trial_revision_capacity()
+                    .and_then(|()| SIMULATION.with(|sim| sim.borrow_mut().reset(seed)));
+                match result {
                     Ok(()) => {
+                        note_trial_change();
                         KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
                         refresh();
                     }
@@ -340,9 +598,11 @@ pub(crate) fn advance_world(
                 }
             }
             Effect::DebugUpright => {
-                match SIMULATION.with(|sim| sim.borrow_mut().execute(PhysicsCommand::DebugUpright))
-                {
+                match require_trial_revision_capacity().and_then(|()| {
+                    SIMULATION.with(|sim| sim.borrow_mut().execute(PhysicsCommand::DebugUpright))
+                }) {
                     Ok(snapshot) => {
+                        note_trial_change();
                         KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().cancel_until_release());
                         publish(snapshot);
                     }
@@ -359,7 +619,7 @@ pub(crate) fn advance_world(
         // A fresh lift key must not revive another movement key held across a reset.
         && !keyboard_requires_release()
         && crate::camera::input_active()
-        && !hud.movement_blocked()
+        && !movement_blocked
         && movement.target == MovementTarget::Ship
         && movement.axes[2] > 0.0
         && SIMULATION.with(|sim| sim.borrow().mission_status() == MissionStatus::Running)
@@ -374,7 +634,7 @@ pub(crate) fn advance_world(
         .state;
         KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().rearm_for_launch());
     }
-    update_keyboard_pilot(&state, movement, hud.movement_blocked());
+    update_keyboard_pilot(&state, movement, movement_blocked);
     if state.running && state.can_control {
         let step = scenario::settings().integration.fixed_step_s;
         state.accumulator += time.delta_secs_f64().min(0.1) * state.rate.factor();

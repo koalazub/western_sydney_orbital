@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::{
-    domain::{EntityKind, PlaybackRate},
+    domain::{EntityId, EntityKind, PlaybackRate},
     hud::HudState,
     model::{EntityState, ExperimentSettings},
 };
@@ -20,6 +20,10 @@ fn fresh_app() -> App {
     PUBLISHED.with(|published| *published.borrow_mut() = None);
     KEYBOARD_PILOT.with(|pilot| *pilot.borrow_mut() = KeyboardPilot::default());
     SPACE_HELD.with(|held| held.set(false));
+    TRIAL_REVISION.with(|revision| revision.set(0));
+    crate::navigation::clear_for_trial();
+    crate::hud::reset_instrument_editing_for_tests();
+    crate::launchpad::reset_for_tests();
     crate::controls::reset_for_tests();
     crate::controls::set_movement_keys(0);
     crate::camera::set_input_active(true, false);
@@ -131,6 +135,453 @@ fn custom_experiment() -> ExperimentSettings {
     settings.ship.inertia_scale = 2.5;
     settings.debris.count = 37;
     settings
+}
+
+fn current_context() -> CommandContext {
+    let state = snapshot();
+    CommandContext {
+        trial_revision: trial_revision(),
+        tuning_revision: state.tuning_revision,
+        manual_interventions: state.manual_interventions,
+        seed: state.seed,
+        running: is_running(),
+    }
+}
+
+fn assert_checked_rejected_unchanged(context: CommandContext) {
+    let before = physics_json();
+    let runtime = runtime_report();
+    let actions = queued_actions();
+    let keyboard = keyboard_state();
+    let published = PUBLISHED.with(|cell| cell.borrow().clone());
+    assert!(matches!(
+        dispatch_checked([0.1, 0.0, 0.0], [0.0; 3], context),
+        Err(CommandError::StaleContext)
+    ));
+    assert!(matches!(
+        dispatch_play_checked(PlaybackRate::RealTime, context),
+        Err(CommandError::StaleContext)
+    ));
+    assert_eq!(physics_json(), before);
+    assert_eq!(runtime_report(), runtime);
+    assert_eq!(queued_actions(), actions);
+    assert_eq!(keyboard_state(), keyboard);
+    PUBLISHED.with(|cell| match (&published, &*cell.borrow()) {
+        (None, None) => {}
+        (Some(before), Some(after)) => assert!(Rc::ptr_eq(before, after)),
+        _ => panic!("rejected context changed publication"),
+    });
+}
+
+#[test]
+fn checked_commands_reject_real_native_tuning_and_pending_playback_without_mutation() {
+    let mut app = fresh_app();
+    let stale = current_context();
+    let mut settings = snapshot().ship_tuning();
+    settings.thrust_scale = 2.0;
+    dispatch(Dispatch::Physics(PhysicsCommand::TuneShip { settings })).unwrap();
+    assert_checked_rejected_unchanged(stale);
+    let paused = current_context();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    assert_checked_rejected_unchanged(paused);
+    frame(&mut app, Duration::ZERO);
+    assert_checked_rejected_unchanged(paused);
+    let current = current_context();
+    dispatch_checked([0.0, 0.0, 0.25], [0.0; 3], current).unwrap();
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0, 0.0, 0.25]);
+    frame(&mut app, STEP);
+    assert!(
+        applied_physics()
+            .unwrap()
+            .last_actuator_application
+            .unwrap()
+            .force_body_n[2]
+            > 0.0
+    );
+}
+
+#[test]
+fn checked_commands_do_not_replace_real_manual_nozzle_input_or_initialize_a_rejected_cache() {
+    let _app = running_with_key(KeyCode::KeyE);
+    let context = current_context();
+    assert!(keyboard_owns_command());
+    assert_checked_rejected_unchanged(context);
+    let _app = fresh_app();
+    PUBLISHED.with(|cell| assert!(cell.borrow().is_none()));
+    assert_checked_rejected_unchanged(CommandContext {
+        trial_revision: u32::MAX,
+        tuning_revision: 0,
+        manual_interventions: 0,
+        seed: 100,
+        running: false,
+    });
+}
+
+#[test]
+fn checked_play_acknowledges_a_queue_then_starts_real_physics_after_the_committed_pause() {
+    let mut app = fresh_app();
+    let mut settings = ExperimentSettings::default();
+    settings.debris.count = 0;
+    dispatch(Dispatch::Physics(PhysicsCommand::ConfigureFlight {
+        settings,
+        seed: Some(100),
+        preset: crate::model::FlightPreset::MarsFacingL1,
+    }))
+    .unwrap();
+    let context = current_context();
+    dispatch_checked([0.0, 0.0, 0.5], [0.0; 3], context).unwrap();
+    let before = physics_json();
+    dispatch_play_checked(PlaybackRate::RealTime, context).unwrap();
+    assert!(
+        !is_running(),
+        "an acknowledgement is not a fabricated applied frame"
+    );
+    assert_eq!(physics_json(), before);
+    assert_eq!(queued_actions_for_tests(), 2);
+    frame(&mut app, STEP);
+    assert!(is_running());
+    assert!(snapshot().time_s > 0.0);
+    assert!(ship(&snapshot()).velocity[0] > 0.0);
+}
+
+#[test]
+fn checked_play_rechecks_context_before_the_runtime_frame_and_cannot_revive_a_new_trial() {
+    for new_trial in [false, true] {
+        let mut app = fresh_app();
+        let context = current_context();
+        dispatch_checked([0.0, 0.0, 0.5], [0.0; 3], context).unwrap();
+        dispatch_play_checked(PlaybackRate::RealTime, context).unwrap();
+        if new_trial {
+            dispatch(Dispatch::Physics(PhysicsCommand::Reset {
+                seed: Some(context.seed),
+            }))
+            .unwrap();
+        } else {
+            let mut tuning = snapshot().ship_tuning();
+            tuning.thrust_scale = 2.0;
+            dispatch(Dispatch::Physics(PhysicsCommand::TuneShip {
+                settings: tuning,
+            }))
+            .unwrap();
+        }
+        let before = physics_json();
+        frame(&mut app, STEP);
+        assert!(!is_running());
+        assert_eq!(snapshot().time_s, 0.0);
+        assert_eq!(physics_json(), before);
+        if !new_trial {
+            assert!(runtime_report().contains("flight changed"));
+        }
+    }
+}
+
+#[test]
+fn checked_play_rejects_a_full_independent_action_queue_without_mutation() {
+    let _app = fresh_app();
+    let context = current_context();
+    for _ in 0..MAX_ACTIONS {
+        request_action(EngineAction::CycleRate);
+    }
+    let before = physics_json();
+    let published = snapshot();
+    let queue = queued_actions();
+    let runtime = runtime_report();
+    let keyboard = keyboard_state();
+    assert!(matches!(
+        dispatch_play_checked(PlaybackRate::RealTime, context),
+        Err(CommandError::Rejected(_))
+    ));
+    assert_eq!(physics_json(), before);
+    assert!(Rc::ptr_eq(&published, &snapshot()));
+    assert_eq!(queued_actions(), queue);
+    assert_eq!(runtime_report(), runtime);
+    assert_eq!(keyboard_state(), keyboard);
+}
+
+#[test]
+fn same_seed_zero_time_launch_changes_are_distinct_trials_and_clear_python_guidance() {
+    let _app = fresh_app();
+    let old = current_context();
+    let mut settings = custom_experiment();
+    settings.debris.count = 0;
+    dispatch(Dispatch::Physics(PhysicsCommand::ConfigureFlight {
+        settings,
+        seed: Some(100),
+        preset: crate::model::FlightPreset::MarsFacingL1,
+    }))
+    .unwrap();
+    let state = snapshot();
+    assert_eq!(state.seed, old.seed);
+    assert_eq!(state.time_s, 0.0);
+    assert_eq!(
+        state.flight_preset,
+        crate::model::FlightPreset::MarsFacingL1
+    );
+    assert!(ship(&state).position[0] > 0.0);
+    assert_eq!(
+        state.mission.target_region,
+        crate::domain::LagrangeRegion::L1
+    );
+    assert_eq!(trial_revision(), old.trial_revision + 1);
+    assert!(!is_running());
+    assert_checked_rejected_unchanged(old);
+    let navigation: Value = serde_json::from_str(&crate::navigation::status()).unwrap();
+    assert_eq!(navigation["plan"]["status"], "waiting_for_notebook");
+}
+
+#[test]
+fn explicit_placement_pauses_the_actual_body_at_rest_without_restarting_or_retiming() {
+    let mut app = fresh_app();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    frame(&mut app, STEP);
+    let before = snapshot();
+    let revision = trial_revision();
+    let position_m = [crate::model::phobos_enclosing_radius_m() + 1500.0, 0.0, 0.0];
+    dispatch(Dispatch::Physics(PhysicsCommand::PlaceLander {
+        position_m,
+    }))
+    .unwrap();
+    let after = snapshot();
+    let actual = applied_physics().unwrap();
+    assert_eq!(actual.position_world_m, position_m);
+    assert_eq!(actual.velocity_world_mps, [0.0; 3]);
+    assert_eq!(actual.angular_velocity_world_rad_s, [0.0; 3]);
+    assert_eq!(actual.total_external_force_world_n, [0.0; 3]);
+    assert_eq!(after.time_s, before.time_s);
+    assert_eq!(after.rng_state, before.rng_state);
+    assert_eq!(after.seed, before.seed);
+    assert_eq!(after.ship_tuning(), before.ship_tuning());
+    assert_eq!(after.mission.fuel_used_kg, before.mission.fuel_used_kg);
+    assert_eq!(after.mission.damage, before.mission.damage);
+    assert_eq!(after.manual_interventions, before.manual_interventions + 1);
+    assert_eq!(trial_revision(), revision + 1);
+    assert!(!is_running());
+    frame(&mut app, STEP);
+    assert_eq!(snapshot().time_s, before.time_s);
+    assert_eq!(ship(&snapshot()).position, position_m);
+}
+
+#[test]
+fn invalid_placement_does_not_pause_a_running_world_or_advance_trial_revision() {
+    let _app = running_with_key(KeyCode::KeyE);
+    let revision = trial_revision();
+    assert_rejected_unchanged(PhysicsCommand::PlaceLander {
+        position_m: [0.0; 3],
+    });
+    assert_eq!(trial_revision(), revision);
+    assert!(is_running());
+}
+
+fn assert_launchpad_context_rejected_unchanged(context: CommandContext) {
+    let before = physics_json();
+    let runtime = runtime_report();
+    let actions = queued_actions();
+    let keyboard = keyboard_state();
+    let published = snapshot();
+    assert!(matches!(
+        dispatch_launchpad_checked([1.0, 0.3, 0.2], context),
+        Err(CommandError::StaleContext)
+    ));
+    assert_eq!(physics_json(), before);
+    assert_eq!(runtime_report(), runtime);
+    assert_eq!(queued_actions(), actions);
+    assert_eq!(keyboard_state(), keyboard);
+    assert!(Rc::ptr_eq(&published, &snapshot()));
+}
+
+#[test]
+fn launchpad_move_requires_real_pause_and_does_not_consume_a_queued_flight_action() {
+    let mut app = fresh_app();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    frame(&mut app, STEP);
+    let context = current_context();
+    let error = assert_rejected_unchanged(PhysicsCommand::MoveLaunchpad {
+        surface_direction: [1.0, 0.3, 0.2],
+    });
+    assert!(error.contains("Pause"));
+    request_action(EngineAction::Pause);
+    assert_launchpad_context_rejected_unchanged(context);
+    assert!(is_running(), "a pending pause has not applied yet");
+}
+
+#[test]
+fn launchpad_gesture_context_rejects_real_tuning_and_same_time_setup_changes() {
+    let _app = fresh_app();
+    let context = current_context();
+    let mut tuning = snapshot().ship_tuning();
+    tuning.inertia_scale = 2.0;
+    dispatch(Dispatch::Physics(PhysicsCommand::TuneShip {
+        settings: tuning,
+    }))
+    .unwrap();
+    assert_launchpad_context_rejected_unchanged(context);
+    let context = current_context();
+    dispatch(Dispatch::Physics(PhysicsCommand::Reset {
+        seed: Some(context.seed),
+    }))
+    .unwrap();
+    assert_launchpad_context_rejected_unchanged(context);
+    let context = current_context();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    assert_launchpad_context_rejected_unchanged(context);
+}
+
+#[test]
+fn launchpad_move_is_one_paused_in_place_intervention_without_debris_reset_or_target_relabel() {
+    for preset in [
+        crate::model::FlightPreset::MarsFacingL1,
+        crate::model::FlightPreset::FarSideL2,
+    ] {
+        let mut app = fresh_app();
+        let mut settings = ExperimentSettings::default();
+        settings.debris.count = 5;
+        dispatch(Dispatch::Physics(PhysicsCommand::ConfigureFlight {
+            settings,
+            seed: Some(100),
+            preset,
+        }))
+        .unwrap();
+        dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+            accel: [0.0, 0.0, 0.5],
+            angular_accel: [0.0; 3],
+        }))
+        .unwrap();
+        let before = snapshot();
+        let context = current_context();
+        let direction = [1.0, 0.3, 0.2];
+        let site = crate::terrain::landing_site_at_direction(direction).unwrap();
+        let after = dispatch_launchpad_checked(direction, context).unwrap();
+        let body = applied_physics().unwrap();
+        assert_eq!(body.position_world_m, site.lander_position_m);
+        assert_eq!(body.velocity_world_mps, [0.0; 3]);
+        assert_eq!(body.angular_velocity_world_rad_s, [0.0; 3]);
+        assert_eq!(body.total_external_force_world_n, [0.0; 3]);
+        assert_eq!(after.manual_interventions, before.manual_interventions + 1);
+        assert_eq!(trial_revision(), context.trial_revision + 1);
+        assert_eq!(after.seed, before.seed);
+        assert_eq!(after.time_s, before.time_s);
+        assert_eq!(after.rng_state, before.rng_state);
+        assert_eq!(after.ship_tuning(), before.ship_tuning());
+        assert_eq!(after.mission.fuel_used_kg, before.mission.fuel_used_kg);
+        assert_eq!(after.mission.damage, before.mission.damage);
+        assert_eq!(after.mission.status, before.mission.status);
+        assert_eq!(after.mission.target_region, before.mission.target_region);
+        assert!(
+            keyboard_requires_release(),
+            "placement must fence held manual keys at commit"
+        );
+        for previous in before
+            .assets
+            .iter()
+            .filter(|asset| !matches!(asset.id, EntityId::Lander | EntityId::LandingPad))
+        {
+            let current = after
+                .assets
+                .iter()
+                .find(|asset| asset.id == previous.id)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(current).unwrap(),
+                serde_json::to_value(previous).unwrap()
+            );
+        }
+        frame(&mut app, STEP);
+        assert!(!is_running());
+        assert_eq!(snapshot().time_s, before.time_s);
+        assert_eq!(
+            applied_physics().unwrap().position_world_m,
+            site.lander_position_m
+        );
+        assert!(
+            !keyboard_requires_release(),
+            "an observed physical key-up may rearm manual input"
+        );
+    }
+}
+
+#[test]
+fn launchpad_failure_and_full_queue_leave_the_paused_trial_unchanged() {
+    let _app = fresh_app();
+    assert_rejected_unchanged(PhysicsCommand::MoveLaunchpad {
+        surface_direction: [0.0; 3],
+    });
+    let context = current_context();
+    for _ in 0..MAX_ACTIONS {
+        request_action(EngineAction::CycleRate);
+    }
+    let before = physics_json();
+    let actions = queued_actions();
+    let runtime = runtime_report();
+    let published = snapshot();
+    let rejection = dispatch_launchpad_checked([1.0, 0.3, 0.2], context);
+    assert!(matches!(rejection, Err(CommandError::Rejected(_))));
+    assert_eq!(physics_json(), before);
+    assert_eq!(queued_actions(), actions);
+    assert_eq!(runtime_report(), runtime);
+    assert!(Rc::ptr_eq(&published, &snapshot()));
+}
+
+#[test]
+fn live_tuning_keeps_running_keyboard_ownership_and_every_queued_action() {
+    let _app = running_with_key(KeyCode::KeyW);
+    let before = snapshot();
+    let keyboard = keyboard_state();
+    let runtime = playback_state();
+    for _ in 0..MAX_ACTIONS {
+        request_action(EngineAction::CycleRate);
+    }
+    let actions = queued_actions();
+    let space = SPACE_HELD.with(Cell::get);
+    for request in [
+        serde_json::json!({"op":"tune_ship","settings":{"mass_kg":4321.0,"inertia_scale":1.5,"thrust_scale":2.0}}),
+        serde_json::json!({"op":"tune_debris_flow","settings":{"speed_mps":30.0,"speed_spread_mps":5.0,"stream_axis":"y","stream_sign":-1}}),
+    ] {
+        let command = serde_json::from_value(request).unwrap();
+        let after = dispatch(Dispatch::Physics(command)).unwrap();
+        assert_eq!(after.time_s, before.time_s);
+        assert_eq!(after.seed, before.seed);
+        assert_eq!(after.rng_state, before.rng_state);
+        assert_eq!(after.manual_interventions, before.manual_interventions);
+        assert_eq!(ship(&after).position, ship(&before).position);
+        assert_eq!(ship(&after).rotation, ship(&before).rotation);
+        assert_eq!(ship(&after).velocity, ship(&before).velocity);
+        assert_eq!(
+            ship(&after).angular_velocity_rad_s,
+            ship(&before).angular_velocity_rad_s
+        );
+        assert_eq!(
+            ship(&after).commanded_accel_mps2,
+            ship(&before).commanded_accel_mps2
+        );
+        assert_eq!(keyboard_state(), keyboard);
+        assert_eq!(playback_state(), runtime);
+        assert_eq!(queued_actions(), actions);
+        assert_eq!(SPACE_HELD.with(Cell::get), space);
+    }
+    assert_eq!(ship(&snapshot()).mass_kg, 4321.0);
+    assert!(ship(&snapshot()).thrust_n[0].abs() > ship(&before).thrust_n[0].abs());
+}
+
+#[test]
+fn invalid_or_unauthorized_live_tuning_is_transactional() {
+    let mut app = running_with_key(KeyCode::Space);
+    for request in [
+        serde_json::json!({"op":"tune_ship","settings":{"mass_kg":-1.0,"inertia_scale":1.0,"thrust_scale":1.0}}),
+        serde_json::json!({"op":"tune_debris_flow","settings":{"speed_mps":1.0,"speed_spread_mps":5.0,"stream_axis":"x","stream_sign":1}}),
+    ] {
+        assert_rejected_unchanged(serde_json::from_value(request).unwrap());
+    }
+    app.world_mut().resource_mut::<PlaybackState>().can_control = false;
+    frame(&mut app, Duration::ZERO);
+    for request in [
+        serde_json::json!({"op":"tune_ship","settings":{"mass_kg":4321.0,"inertia_scale":1.0,"thrust_scale":1.0}}),
+        serde_json::json!({"op":"tune_debris_flow","settings":{"speed_mps":30.0,"speed_spread_mps":5.0,"stream_axis":"x","stream_sign":1}}),
+    ] {
+        assert!(
+            assert_rejected_unchanged(serde_json::from_value(request).unwrap())
+                .contains("view-only")
+        );
+    }
 }
 
 fn pausing_commands() -> [PhysicsCommand; 4] {
@@ -491,7 +942,11 @@ fn paused_trial_commit_supersedes_older_flight_actions_and_preserves_independent
         let installed_json = serde_json::to_value(installed.as_ref()).unwrap();
         assert_immediate_pause();
         ACTIONS.with(|actions| {
-            let queued: Vec<_> = actions.borrow().iter().copied().collect();
+            let queued: Vec<_> = actions
+                .borrow()
+                .iter()
+                .map(|action| action.engine_action())
+                .collect();
             assert!(matches!(
                 queued.as_slice(),
                 [
@@ -528,12 +983,15 @@ fn paused_trials_accept_the_last_free_slot_without_discarding_independent_action
         assert_eq!(queued_actions_for_tests(), MAX_ACTIONS);
         ACTIONS.with(|actions| {
             let actions = actions.borrow();
-            assert!(matches!(actions.front(), Some(EngineAction::Pause)));
+            assert!(matches!(
+                actions.front().map(|action| action.engine_action()),
+                Some(EngineAction::Pause)
+            ));
             assert!(
                 actions
                     .iter()
                     .skip(1)
-                    .all(|action| matches!(action, EngineAction::CycleRate))
+                    .all(|action| matches!(action.engine_action(), EngineAction::CycleRate))
             );
         });
         frame(&mut app, STEP);

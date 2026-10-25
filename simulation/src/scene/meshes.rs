@@ -5,9 +5,9 @@ use bevy::{
     prelude::*,
 };
 
-/// These scene materials use physical surface colors, not texture maps.
-/// Primitive UVs otherwise select Bevy 0.20's textured PBR shader, whose
-/// texture/sampler `let` aliases require optional WGSL language support.
+/// Keep UVs off props that have no maps. Planetary meshes deliberately retain
+/// UV0; app.rs inlines the embedded PBR shader's opaque resource aliases for
+/// baseline WebGPU implementations without requesting optional WGSL features.
 pub(super) fn untextured(mesh: impl Into<Mesh>) -> Mesh {
     mesh.into()
         .with_removed_attribute(Mesh::ATTRIBUTE_UV_0)
@@ -16,17 +16,120 @@ pub(super) fn untextured(mesh: impl Into<Mesh>) -> Mesh {
 
 pub(super) fn phobos() -> Mesh {
     let (vertices, triangles) = crate::model::phobos_geometry();
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, default());
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_POSITION,
+    let terrain = &scenario::settings().terrain;
+    textured_grid(
         vertices
             .into_iter()
             .map(|p| p.map(RenderScale::metres))
-            .collect::<Vec<_>>(),
-    );
+            .collect(),
+        triangles,
+        terrain.latitude_segments,
+        terrain.longitude_segments,
+    )
+}
+
+/// The caller supplies the real radius converted to render-space kilometres.
+/// UV orientation matches Phobos and the checked-in north-up planetary maps.
+pub(super) fn mars(radius: f32) -> Mesh {
+    const LATITUDES: usize = 64;
+    const LONGITUDES: usize = 96;
+    let mut positions = Vec::with_capacity((LATITUDES + 1) * (LONGITUDES + 1));
+    for row in 0..=LATITUDES {
+        let latitude =
+            -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * row as f32 / LATITUDES as f32;
+        for col in 0..=LONGITUDES {
+            let longitude = std::f32::consts::TAU * (col % LONGITUDES) as f32 / LONGITUDES as f32;
+            let ring = if row == 0 || row == LATITUDES {
+                0.0
+            } else {
+                latitude.cos()
+            };
+            positions.push([
+                radius * ring * longitude.cos(),
+                radius * latitude.sin(),
+                radius * ring * longitude.sin(),
+            ]);
+        }
+    }
+    let mut triangles = Vec::with_capacity(2 * (LATITUDES - 1) * LONGITUDES);
+    for row in 0..LATITUDES {
+        for col in 0..LONGITUDES {
+            let a = (row * (LONGITUDES + 1) + col) as u32;
+            let b = a + (LONGITUDES + 1) as u32;
+            if row > 0 {
+                triangles.push([a, b, a + 1]);
+            }
+            if row + 1 < LATITUDES {
+                triangles.push([a + 1, b, b + 1]);
+            }
+        }
+    }
+    let mut mesh = textured_grid(positions, triangles, LATITUDES, LONGITUDES);
+    // On a true sphere, radial normals are exact and avoid polar mesh bias.
+    let normals = mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .unwrap()
+        .as_float3()
+        .unwrap()
+        .iter()
+        .map(|p| Vec3::from_array(*p).normalize().to_array())
+        .collect::<Vec<_>>();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh
+}
+
+fn textured_grid(
+    positions: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+    latitudes: usize,
+    longitudes: usize,
+) -> Mesh {
+    // The physical grid already duplicates the longitude seam and poles.
+    // Share only accumulated normals, never positions or triangle indices.
+    let normal_index = |index: usize| {
+        let row = index / (longitudes + 1);
+        let col = index % (longitudes + 1);
+        row * longitudes
+            + if row == 0 || row == latitudes {
+                0
+            } else {
+                col % longitudes
+            }
+    };
+    let mut sums = vec![Vec3::ZERO; (latitudes + 1) * longitudes];
+    for triangle in &triangles {
+        let [a, b, c] = triangle.map(|i| Vec3::from_array(positions[i as usize]));
+        let normal = (b - a).cross(c - a);
+        for &index in triangle {
+            sums[normal_index(index as usize)] += normal;
+        }
+    }
+    let normals = positions
+        .iter()
+        .enumerate()
+        .map(|(index, position)| {
+            sums[normal_index(index)]
+                .try_normalize()
+                .unwrap_or_else(|| Vec3::from_array(*position).normalize())
+                .to_array()
+        })
+        .collect::<Vec<_>>();
+    let uvs = (0..=latitudes)
+        .flat_map(|row| {
+            (0..=longitudes).map(move |col| {
+                [
+                    col as f32 / longitudes as f32,
+                    1.0 - row as f32 / latitudes as f32,
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(triangles.into_iter().flatten().collect()));
-    mesh.compute_smooth_normals();
-    untextured(mesh)
+    mesh
 }
 
 pub(super) fn lander() -> Mesh {
@@ -121,9 +224,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actual_world_meshes_do_not_select_textured_pbr() {
+    fn only_planetary_world_meshes_have_texture_coordinates() {
         for mesh in [
-            phobos(),
             lander(),
             pad(),
             target(),
@@ -135,6 +237,111 @@ mod tests {
             assert!(mesh.contains_attribute(Mesh::ATTRIBUTE_POSITION));
             assert!(mesh.contains_attribute(Mesh::ATTRIBUTE_NORMAL));
             assert!(mesh.count_vertices() > 0);
+        }
+        for mesh in [phobos(), mars(3_389.5)] {
+            assert!(mesh.contains_attribute(Mesh::ATTRIBUTE_UV_0));
+            assert!(!mesh.contains_attribute(Mesh::ATTRIBUTE_UV_1));
+            assert!(!mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT));
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            let normals = mesh
+                .attribute(Mesh::ATTRIBUTE_NORMAL)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+            else {
+                panic!("planetary maps need two-dimensional UV0 coordinates");
+            };
+            assert_eq!(positions.len(), normals.len());
+            assert_eq!(positions.len(), uvs.len());
+            for ((position, normal), uv) in positions.iter().zip(normals).zip(uvs) {
+                assert!(
+                    position
+                        .iter()
+                        .chain(normal)
+                        .chain(uv)
+                        .all(|x| x.is_finite())
+                );
+                assert!((Vec3::from_array(*normal).length() - 1.0).abs() < 1.0e-5);
+                assert!(Vec3::from_array(*position).dot(Vec3::from_array(*normal)) > 0.0);
+                assert!(uv.iter().all(|x| (0.0..=1.0).contains(x)));
+            }
+            let indices = mesh.indices().unwrap().iter().collect::<Vec<_>>();
+            for triangle in indices.chunks_exact(3) {
+                let us = [triangle[0], triangle[1], triangle[2]].map(|index| uvs[index][0]);
+                let min = us.into_iter().fold(f32::INFINITY, f32::min);
+                let max = us.into_iter().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    max - min < 0.02,
+                    "triangle interpolates across the map seam"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn phobos_uvs_and_smoothed_seams_preserve_the_entire_contact_surface() {
+        let (vertices, triangles) = crate::model::phobos_geometry();
+        let mesh = phobos();
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert_eq!(
+            positions,
+            &vertices
+                .into_iter()
+                .map(|p| p.map(RenderScale::metres))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            mesh.indices().unwrap().iter().collect::<Vec<_>>(),
+            triangles
+                .into_iter()
+                .flatten()
+                .map(|i| i as usize)
+                .collect::<Vec<_>>()
+        );
+        let normals = mesh
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("missing planetary UV0");
+        };
+        let terrain = &scenario::settings().terrain;
+        for row in 0..=terrain.latitude_segments {
+            let a = row * (terrain.longitude_segments + 1);
+            let b = a + terrain.longitude_segments;
+            assert!(Vec3::from_array(positions[a]).distance(Vec3::from_array(positions[b])) < 1e-5);
+            assert_eq!(normals[a], normals[b]);
+            assert_eq!(uvs[a][0], 0.0);
+            assert_eq!(uvs[b][0], 1.0);
+            assert_eq!(uvs[a][1], uvs[b][1]);
+        }
+    }
+
+    #[test]
+    fn mars_mesh_uses_the_supplied_radius_without_visual_inflation() {
+        for radius in [0.001_f32, 1.0, 3_389.5, 6_000.0] {
+            let mesh = mars(radius);
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            for position in positions {
+                assert!((Vec3::from_array(*position).length() - radius).abs() < radius * 2e-6);
+            }
+            assert_eq!(positions.len(), 65 * 97);
+            assert_eq!(mesh.indices().unwrap().len(), 2 * 63 * 96 * 3);
         }
     }
 

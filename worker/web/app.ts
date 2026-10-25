@@ -1,5 +1,7 @@
 // Browser responsibilities stop at loading and platform APIs. Camera movement,
 // mission playback, telemetry, inspection and interaction are owned by Bevy.
+import { engineManifest, loadVerifiedEngine, type EngineLoadTimings } from "./engine-loader.ts";
+import planetaryAssets from "./assets/asset-manifest.json";
 type Engine = {
   default: (options: unknown) => Promise<unknown>;
   start_simulation: (selector: string) => void;
@@ -35,12 +37,15 @@ type RendererStatus = {
   submitted_primary_frames: number;
   completed_primary_frame: boolean;
   primary_world_draws: number;
+  primary_planetary_draw_mask: number;
   primary_viewport: [number, number] | null;
   primary_target_size: [number, number] | null;
   adapter: { name: string; backend: string; device_type: string; driver: string } | null;
   compiled_pipelines: number;
   pending_pipelines: number;
   pending_pipeline_labels: string[];
+  surface_maps_ready: boolean;
+  surface_maps_gpu_ready: boolean;
   error: string | null;
 };
 type WebKitDocument = Document & {
@@ -72,6 +77,8 @@ const browserGlobals = globalThis as typeof globalThis & {
     secure_context: boolean;
     visibility: DocumentVisibilityState;
     elapsed_visible_ms: number;
+    engine_load: EngineLoadTimings | null;
+    wasm_instantiation_ms: number | null;
     canvas: {
       width: number;
       height: number;
@@ -99,6 +106,8 @@ let platformMessage = "WebGPU · Click the scene to activate ship and debug cont
 let startupPhase = "checking_graphics";
 let startupVisibleWait = 0;
 let lastRendererStatus: RendererStatus | undefined;
+let engineLoadTimings: EngineLoadTimings | null = null;
+let wasmInstantiationMs: number | null = null;
 let fullscreenPending = false;
 type TrustedAction = "fullscreen" | "notebook";
 let platformPress: { pointerId: number; action: TrustedAction } | null = null;
@@ -237,6 +246,8 @@ function recordStartup(error?: string) {
     secure_context: isSecureContext,
     visibility: document.visibilityState,
     elapsed_visible_ms: Math.round(startupVisibleWait),
+    engine_load: engineLoadTimings,
+    wasm_instantiation_ms: wasmInstantiationMs,
     canvas: {
       width: canvas.width,
       height: canvas.height,
@@ -612,7 +623,9 @@ async function waitForRenderer() {
           furthestStage = milestone;
           lastProgress = startupVisibleWait;
         }
-        const description = startupDescriptions[stage] ?? startupDescriptions.initializing;
+        const description = status.adapter && !status.surface_maps_gpu_ready
+          ? status.surface_maps_ready ? "uploading the planetary and star maps" : "loading the planetary and star maps"
+          : startupDescriptions[stage] ?? startupDescriptions.initializing;
         progressText.textContent = document.hidden
           ? "Startup paused while this tab is hidden. Return to the tab to continue."
           : `WebGPU: ${description}. ${status.compiled_pipelines} pipelines ready, ${status.pending_pipelines} pending.`;
@@ -632,43 +645,17 @@ async function waitForRenderer() {
   });
 }
 
-async function download(url: string, total: number): Promise<Uint8Array> {
-  let response: Response;
-  try {
-    response = await fetch(url);
-  } catch {
-    throw new Error("Engine download failed. Check your connection.");
+function preloadPlanetaryMaps() {
+  for (const asset of planetaryAssets.textures) {
+    const link = document.createElement("link");
+    link.rel = "preload";
+    link.as = "fetch";
+    link.href = `/assets/${asset.path}`;
+    link.type = "image/png";
+    link.crossOrigin = "anonymous";
+    link.fetchPriority = "low";
+    document.head.append(link);
   }
-  if (!response.ok || !response.body) throw new Error(`Engine download returned HTTP ${response.status}`);
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  let lastReport = 0;
-  progress.max = total;
-  progress.value = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    loaded += value.byteLength;
-    if (loaded > 64 * 1048576) {
-      await reader.cancel();
-      throw new Error("Engine download exceeds the 64 MB limit");
-    }
-    chunks.push(value);
-    if (performance.now() - lastReport > 80) {
-      progress.value = loaded;
-      progressText.textContent = `Downloading engine: ${megabytes(loaded)} of ${megabytes(total)}`;
-      lastReport = performance.now();
-    }
-  }
-  if (loaded !== total) throw new Error("Incomplete engine download. Reload to get the current build.");
-  const bytes = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }
 
 async function graphicsPreflight() {
@@ -703,28 +690,36 @@ async function graphicsPreflight() {
 async function start() {
   try {
     recordStartup();
-    browserGlobals.__wsorbGPU = await graphicsPreflight();
+    const [gpu, manifestResponse] = await Promise.all([
+      graphicsPreflight(),
+      fetch("/sim/manifest.json", { cache: "no-cache" }),
+    ]);
+    browserGlobals.__wsorbGPU = gpu;
     startupPhase = "downloading_engine";
     recordStartup();
-    const manifest = await fetch("/sim/manifest.json", { cache: "no-cache" });
-    if (!manifest.ok) throw new Error(`Engine manifest returned HTTP ${manifest.status}`);
-    const metadata = await manifest.json();
+    if (!manifestResponse.ok) throw new Error(`Engine manifest returned HTTP ${manifestResponse.status}`);
+    const metadata = engineManifest(await manifestResponse.json());
+    preloadPlanetaryMaps();
     const moduleUrl = `/sim/wsorb_bevy.js?v=${metadata.sha256}`;
-    const [module, bytes] = await Promise.all([
+    const [module, verified] = await Promise.all([
       import(moduleUrl),
-      download(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata.bytes),
+      loadVerifiedEngine(`/sim/wsorb_bevy_bg.wasm?v=${metadata.sha256}`, metadata, (loaded, total) => {
+        progress.max = total;
+        progress.value = loaded;
+        progressText.textContent = `Loading engine: ${megabytes(loaded)} of ${megabytes(total)}. Compiling while downloading.`;
+      }),
     ]);
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const sha256 = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
-    if (sha256 !== metadata.sha256) throw new Error("Engine integrity check failed. Reload to get the current build.");
+    engineLoadTimings = verified.timings;
     engineBuild = { bytes: metadata.bytes, sha256: metadata.sha256 };
     progress.removeAttribute("value");
     statusText.textContent = "Starting Bevy 0.20";
-    progressText.textContent = `Downloaded ${megabytes(bytes.byteLength)}. Compiling WebAssembly and WebGPU pipelines.`;
-    startupPhase = "compiling_webassembly";
+    progressText.textContent = `Verified ${megabytes(metadata.bytes)}. Initializing WebAssembly and WebGPU pipelines.`;
+    startupPhase = "initializing_webassembly";
     recordStartup();
     const loaded = module as Engine;
-    await loaded.default({ module_or_path: bytes });
+    const initializing = performance.now();
+    await loaded.default({ module_or_path: verified.module });
+    wasmInstantiationMs = performance.now() - initializing;
     engine = loaded;
     clearMovementKeys();
     engine.set_viewport_input(false, false);
