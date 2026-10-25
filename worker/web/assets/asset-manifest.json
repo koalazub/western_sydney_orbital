@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "license_notice": "ATTRIBUTION.md",
+  "sources": [
+    {
+      "path": "source/phobos-viking-dlrcontrol-7200.jpg",
+      "bytes": 5367872,
+      "sha256": "f32a130de30a6f68133a0c040c15fc3f67b060ba43d80431549056a9088ea704",
+      "width": 7200,
+      "height": 3600,
+      "mode": "L",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/a/a9/Phobos_Viking_Mosaic_DLRcontrol_7200.jpg",
+      "page": "https://astrogeology.usgs.gov/search/map/phobos_viking_global_mosaic_5m",
+      "credit": "Phil Stooke / NASA Planetary Data System / USGS"
+    },
+    {
+      "path": "source/mars-viking-nasa.jpg",
+      "bytes": 972896,
+      "sha256": "12ec6bf02ebd42a246edc778cb2ce8c595b4d9f0892badf0bfff8abb2303c780",
+      "width": 1440,
+      "height": 720,
+      "mode": "RGB",
+      "url": "https://assets.science.nasa.gov/content/dam/science/cds/3d/resources/image/mars/Mars.jpg",
+      "page": "https://science.nasa.gov/3d-resources/mars/",
+      "credit": "NASA / Jet Propulsion Laboratory & Caltech; Viking imagery processed by USGS"
+    },
+    {
+      "path": "source/starmap-nasa-svs-4k.jpg",
+      "bytes": 2349902,
+      "sha256": "0b33503895abebeb92fd89d3332e3ca62515b8cc458d243f208e4ca5d8c1452d",
+      "width": 4096,
+      "height": 2048,
+      "mode": "RGB",
+      "url": "https://svs.gsfc.nasa.gov/vis/a000000/a003800/a003895/starmap_4k.jpg",
+      "page": "https://svs.gsfc.nasa.gov/3895/",
+      "credit": "NASA/Goddard Space Flight Center Scientific Visualization Studio; Ernie Wright and Tom Bridgman"
+    }
+  ],
+  "textures": [
+    {
+      "path": "textures/mars-viking-albedo.png",
+      "bytes": 1616419,
+      "sha256": "05989fe1f1d7507cd8bae3ae178af3e91828d09a0106ecd59881c4cb46dc32bc",
+      "width": 1440,
+      "height": 720,
+      "mode": "RGB"
+    },
+    {
+      "path": "textures/phobos-viking-albedo.png",
+      "bytes": 1752058,
+      "sha256": "d5cf1917887118920f3b46609f49255924700262adc4f829825e8111ae974128",
+      "width": 2048,
+      "height": 1024,
+      "mode": "RGB"
+    },
+    {
+      "path": "textures/stars-nasa-svs-cube.png",
+      "bytes": 2280559,
+      "sha256": "4c7c4e45e092709941d116a6a0dcfa2ab146ac6f71534c8794b0bb052c9512e5",
+      "width": 512,
+      "height": 3072,
+      "mode": "RGB"
+    }
+  ],
+  "cube_face_order": [
+    "+X",
+    "-X",
+    "+Y",
+    "-Y",
+    "+Z",
+    "-Z"
+  ],
+  "cube_face_size": 512,
+  "surface_coordinates": "north-up; longitude 0..360 degrees; +Y north, +X zero, +Z east"
+}
