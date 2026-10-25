@@ -15,6 +15,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 wasm-bindgen = "=0.2.129"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "=0.3.106", features = ["Window", "Document", "Element", "Node", "HtmlCanvasElement"] }
+
 [profile.release]
 opt-level = "s"
 lto = true
