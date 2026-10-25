@@ -3,8 +3,31 @@ const POLL_MS = 50;
 const REQUEST_TIMEOUT_MS = 2500;
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
-const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright", "configure_experiment"]);
+const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
 let connected = false;
+
+// Keep the actual transport policy inspectable without a substitute browser or
+// engine. The private fetch call below uses these exact Request options.
+export function bridgeRequestOptions(token, page, path, body, build, signal) {
+  return {
+    method: body === undefined ? "GET" : "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-WSORB-Page": page,
+      ...(path === "poll" ? { "X-WSORB-Build": build.sha256 } : {}),
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body,
+    cache: "no-store",
+    mode: "same-origin",
+    // no-referrer makes same-origin POSTs send Origin: null in browsers.
+    // Keep the API's strict Origin checks rather than weakening the server.
+    referrerPolicy: "same-origin",
+    credentials: "omit",
+    redirect: "error",
+    signal,
+  };
+}
 
 export function connect(token) {
   if (connected) return;
@@ -34,21 +57,8 @@ export function connect(token) {
     activeRequests.add(controller);
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(`/__local/${path}`, {
-        method: body === undefined ? "GET" : "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "X-WSORB-Page": page,
-          ...(path === "poll" ? { "X-WSORB-Build": manifest.sha256 } : {}),
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body,
-        cache: "no-store",
-        mode: "same-origin",
-        credentials: "omit",
-        redirect: "error",
-        signal: controller.signal,
-      });
+      const response = await fetch(`/__local/${path}`,
+        bridgeRequestOptions(token, page, path, body, manifest, controller.signal));
       const reader = response.body.getReader();
       const chunks = [];
       let size = 0;
@@ -90,7 +100,7 @@ export function connect(token) {
     // The app already initialized this exact module. Do not call default() or
     // start_simulation() here, even if rebuilt assets left it uninitialized.
     const module = await import(moduleUrl);
-    const methods = ["observation", "telemetry_status", "navigation_status", "runtime_status", "renderer_status", "command", "set_navigation_preview", "ship_camera_status", "pan_tilt_camera", "ship_camera_capture"];
+    const methods = ["observation", "telemetry_status", "navigation_status", "runtime_status", "renderer_status", "control", "set_navigation_preview", "ship_camera_status", "pan_tilt_camera", "ship_camera_capture", "lookahead_raycast"];
     if (methods.some(name => typeof module[name] !== "function")) {
       throw new Error("This engine build lacks the local practice API. Rebuild and reload the simulation.");
     }
@@ -105,7 +115,10 @@ export function connect(token) {
 
   async function invoke(job) {
     let commandInvoked = false;
-    const failure = error => ({ envelope: { id: job.id, ok: false, error }, commandInvoked });
+    const failure = (error, code) => ({
+      envelope: { id: job.id, ok: false, error, ...(code === "stale_context" ? { code } : {}) },
+      commandInvoked,
+    });
     if (!Number.isSafeInteger(job.deadline_ms) || Date.now() >= job.deadline_ms) {
       return failure("Local call expired before engine invocation; no command was invoked");
     }
@@ -118,9 +131,14 @@ export function connect(token) {
           telemetry: JSON.parse(api.telemetry_status()),
           navigation: JSON.parse(api.navigation_status()),
           runtime: JSON.parse(api.runtime_status()),
+          renderer: JSON.parse(api.renderer_status()),
           engine_build: manifest,
           cameras: JSON.parse(api.ship_camera_status()),
         };
+      } else if (job.method === "raycast") {
+        const result = JSON.parse(api.lookahead_raycast(JSON.stringify(job.query)));
+        if (result.ok !== true) return failure(result.error || "Look-ahead ray was rejected");
+        value = result.report;
       } else if (job.method === "pan_tilt") {
         const result = JSON.parse(api.pan_tilt_camera(job.camera, job.yaw_deg, job.pitch_deg));
         if (result.ok !== true) return failure(result.error || "Camera aim was rejected");
@@ -150,14 +168,17 @@ export function connect(token) {
         const json = JSON.stringify(job.preview);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before preview publication");
         const result = JSON.parse(api.set_navigation_preview(json));
-        if (result.ok !== true) return failure(result.error || "Python preview was rejected");
+        if (result.ok !== true) return failure(result.error || "Python preview was rejected", result.code);
         value = { ok: true };
       } else if (job.method === "command" && COMMANDS.has(job.command?.op)) {
         const json = JSON.stringify(job.command);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before engine invocation; no command was invoked");
         commandInvoked = true;
-        const result = JSON.parse(api.command(json));
-        if (result.ok === false && typeof result.error === "string") return failure(result.error.slice(0, 2048));
+        const result = JSON.parse(api.control(json));
+        if (result.ok === false && typeof result.error === "string") {
+          if (result.code === "stale_context") commandInvoked = false;
+          return failure(result.error.slice(0, 2048), result.code);
+        }
         if (result.ok !== true) throw new Error("Engine did not return a valid command acknowledgement");
         // Pause/play/view can be queued by the engine. This is only an ACK,
         // never a claim that the next Bevy frame has applied their effects.

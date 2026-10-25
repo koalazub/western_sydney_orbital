@@ -9,6 +9,7 @@ const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
 const BODY_TIMEOUT_MS = 3000;
 const CALL_TIMEOUT_MS = 5000;
+const WORLD_CALL_TIMEOUT_MS = 180000;
 const CAPTURE_TIMEOUT_MS = 20000;
 const PAGE_LEASE_MS = 6000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -16,6 +17,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const CAMERA_MODES = new Set([
   "orbit", "mission", "first_person", "third_person", "follow", "free", "overview", "top", "ship_top", "ship_bottom",
 ]);
+const WORLD_COMMANDS = new Set(["configure_experiment", "configure_flight", "reset"]);
+const worldSetup = call => call.method === "command" && WORLD_COMMANDS.has(call.command?.op);
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -33,6 +36,17 @@ function shape(value, required, optional = []) {
     || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) {
     invalid("Unexpected JSON fields or missing required fields");
   }
+}
+
+function validateContext(context) {
+  if (context == null) return;
+  shape(context, ["trial_revision", "tuning_revision", "manual_interventions", "seed", "running"]);
+  for (const field of ["trial_revision", "tuning_revision", "manual_interventions", "seed"]) {
+    if (!Number.isInteger(context[field]) || !finiteBetween(context[field], 0, 4294967295)) {
+      invalid("Command context revisions and seed must be unsigned 32-bit integers");
+    }
+  }
+  if (typeof context.running !== "boolean") invalid("Command context running must be a boolean");
 }
 
 function validateCall(value) {
@@ -58,6 +72,14 @@ function validateCall(value) {
     if (!["top", "bottom"].includes(value.camera)) invalid("Unknown ship camera");
     return;
   }
+  if (value?.method === "raycast") {
+    shape(value, ["method", "query"]);
+    shape(value.query, ["target_world_m", "max_distance_m"]);
+    if (!Array.isArray(value.query.target_world_m) || value.query.target_world_m.length !== 3
+      || !value.query.target_world_m.every(x => finiteBetween(x, -1e7, 1e7))
+      || !finiteBetween(value.query.max_distance_m, 1, 100000)) invalid("Choose a finite world target and ray length from 1 to 100000 m");
+    return;
+  }
   shape(value, ["method", "command"]);
   if (value.method !== "command" || !record(value.command)) invalid("Expected a public snapshot, preview, camera operation or command");
   const command = value.command;
@@ -68,8 +90,9 @@ function validateCall(value) {
       shape(command, ["op"]);
       break;
     case "play":
-      shape(command, ["op"], ["rate"]);
+      shape(command, ["op"], ["rate", "expected_context"]);
       if (command.rate != null && ![1, 5, 10].includes(command.rate)) invalid("rate must be 1, 5 or 10");
+      validateContext(command.expected_context);
       break;
     case "reset":
       shape(command, ["op"], ["seed"]);
@@ -78,19 +101,48 @@ function validateCall(value) {
       }
       break;
     case "configure_experiment":
-      shape(command, ["op", "settings"], ["seed"]);
+    case "configure_flight":
+      shape(command, command.op === "configure_flight" ? ["op", "settings", "preset"] : ["op", "settings"], ["seed"]);
+      if (command.op === "configure_flight" && !["mars_facing_l1", "far_side_l2"].includes(command.preset)) invalid("Choose a Mars-facing L1 or far-side L2 launch setup");
       if (!record(command.settings)) invalid("Experiment settings must be an object");
       finiteJson(command.settings);
       if (command.seed != null && (!Number.isInteger(command.seed) || !finiteBetween(command.seed, 0, 4294967295))) {
         invalid("seed must be an integer from 0 to 4294967295");
       }
       break;
+    case "place_lander":
+      shape(command, ["op", "position_m"]);
+      if (!Array.isArray(command.position_m) || command.position_m.length !== 3
+        || !command.position_m.every(value => finiteBetween(value, -1e7, 1e7))) {
+        invalid("position_m must contain three finite world coordinates between -10000000 and 10000000 m");
+      }
+      break;
+    case "move_launchpad":
+      shape(command, ["op", "surface_direction"], ["expected_context"]);
+      validateContext(command.expected_context);
+      if (!Array.isArray(command.surface_direction) || command.surface_direction.length !== 3
+        || !command.surface_direction.every(value => finiteBetween(value, -1e6, 1e6))
+        || command.surface_direction.every(value => value === 0)) {
+        invalid("Choose a nonzero, finite surface direction with three components");
+      }
+      break;
+    case "tune_ship":
+      shape(command, ["op", "settings"]);
+      shape(command.settings, ["mass_kg", "inertia_scale", "thrust_scale"]);
+      finiteJson(command.settings);
+      break;
+    case "tune_debris_flow":
+      shape(command, ["op", "settings"]);
+      shape(command.settings, ["speed_mps", "speed_spread_mps", "stream_axis", "stream_sign"]);
+      finiteJson(command.settings);
+      break;
     case "step":
       shape(command, ["op", "seconds"]);
       if (!finiteBetween(command.seconds, 0, 30)) invalid("seconds must be finite and between 0 and 30");
       break;
     case "set_command":
-      shape(command, ["op", "accel", "angular_accel"]);
+      shape(command, ["op", "accel", "angular_accel"], ["expected_context"]);
+      validateContext(command.expected_context);
       // This is a transport bound, not the engine's much smaller thrust limit.
       for (const vector of [command.accel, command.angular_accel]) {
         if (!Array.isArray(vector) || vector.length !== 3 || !vector.every(x => finiteBetween(x, -1e6, 1e6))) {
@@ -104,14 +156,14 @@ function validateCall(value) {
       if (command.zoom != null && !finiteBetween(command.zoom, 0.05, 20)) invalid("zoom must be between 0.05 and 20");
       if (command.focus != null) {
         const focus = command.focus;
-        const debris = typeof focus === "string" && /^Debris[1-9][0-9]{0,4}$/.test(focus) && Number(focus.slice(6)) <= 65535;
+        const debris = typeof focus === "string" && /^Debris[1-9][0-9]{0,5}$/.test(focus) && Number(focus.slice(6)) <= 100000;
         if (!["Shuttle", "Lander", "Target", "LandingPad", "Phobos", "Mars", "L1", "L2"].includes(focus) && !debris) {
           invalid("Unknown focus identifier");
         }
       }
       break;
     default:
-      invalid("Allowed command ops: pause, play, step, reset, set_command, stop, view, debug_upright, configure_experiment");
+      invalid("Allowed command ops: pause, play, step, reset, set_command, stop, view, debug_upright, configure_experiment, configure_flight, place_lander, move_launchpad, tune_ship, tune_debris_flow");
   }
 }
 
@@ -262,6 +314,15 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
     if (pending.get(job.id) !== job) return;
     pending.delete(job.id);
     clearTimeout(job.timer);
+    if (job.previousSocketTimeout !== undefined && !job.request.socket.destroyed) {
+      job.request.socket.setTimeout(job.previousSocketTimeout);
+    }
+    if (worldSetup(job.call) && job.delivered && page?.id === job.page) {
+      // A completed or cancelled build no longer holds an extended lease.
+      page.expires = Math.min(page.expires, Date.now() + PAGE_LEASE_MS);
+      clearTimeout(pageTimer);
+      pageTimer = setTimeout(expire, Math.max(1, page.expires - Date.now()));
+    }
     job.response.off("close", job.disconnected);
     if (envelope) send(job.request, job.response, status, envelope);
   }
@@ -286,9 +347,13 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
   function claimPage(id) {
     expire();
     if (page && page.id !== id) throw new HttpError(409, "Another browser page holds the local simulation lease");
-    page = { id, expires: Date.now() + PAGE_LEASE_MS };
+    const expires = Math.max(Date.now() + PAGE_LEASE_MS,
+      ...[...pending.values()]
+        .filter(job => job.page === id && job.delivered && worldSetup(job.call))
+        .map(job => job.deadline));
+    page = { id, expires };
     clearTimeout(pageTimer);
-    pageTimer = setTimeout(expire, PAGE_LEASE_MS);
+    pageTimer = setTimeout(expire, Math.max(1, expires - Date.now()));
   }
 
   function authenticated(request) {
@@ -359,7 +424,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
       }
       expire();
       if (pathname === "/__local/status") {
-        send(request, response, 200, { enabled: true, connected: page !== null, busy: pending.size !== 0, engine_build: engineBuild });
+        send(request, response, 200, { enabled: true, connected: page !== null, busy: pending.size !== 0,
+          busy_operation: [...pending.values()].some(job => worldSetup(job.call)) ? "world_setup" : null,
+          engine_build: engineBuild });
       } else if (pathname === "/__local/poll") {
         const id = pageId(request);
         if (request.headers["x-wsorb-build"] !== engineBuild.sha256) {
@@ -367,7 +434,16 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         }
         claimPage(id);
         const job = [...pending.values()].find(job => !job.delivered);
-        if (job) job.delivered = true;
+        if (job) {
+          job.delivered = true;
+          if (worldSetup(job.call)) {
+            // A real delivered, bounded world-build job may block the WASM
+            // thread, preventing polls. This is a compute lease, not a heartbeat.
+            page.expires = job.deadline;
+            clearTimeout(pageTimer);
+            pageTimer = setTimeout(expire, Math.max(1, job.deadline - Date.now()));
+          }
+        }
         send(request, response, 200, { job: job ? { id: job.id, ...job.call, deadline_ms: job.deadline } : null });
       } else if (pathname === "/__local/call") {
         const call = await readJson(request, response);
@@ -379,8 +455,13 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
           throw new HttpError(409, `A local ${channel} call is already in flight`);
         }
         if (response.destroyed || closed) return;
-        const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS : CALL_TIMEOUT_MS;
+        const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS
+          : worldSetup(call) ? WORLD_CALL_TIMEOUT_MS : CALL_TIMEOUT_MS;
         const job = { id: randomUUID(), call, channel, page: page.id, request, response, deadline: Date.now() + timeout, delivered: false };
+        if (worldSetup(call)) {
+          job.previousSocketTimeout = request.socket.timeout ?? 30000;
+          request.socket.setTimeout(timeout + 5000);
+        }
         job.disconnected = () => settle(job);
         job.timer = setTimeout(() => settle(job, 504, lost(job, "Local call deadline expired")), timeout);
         pending.set(job.id, job);
@@ -396,11 +477,12 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         if (!page || page.id !== id || !job || job.page !== id || !job.delivered || result?.id !== job.id || job.deadline <= Date.now()) {
           throw new HttpError(409, "Stale or expired browser result");
         }
-        shape(result, result.ok === true ? ["id", "ok", "value"] : ["id", "ok", "error"]);
+        shape(result, result.ok === true ? ["id", "ok", "value"] : ["id", "ok", "error"], result.ok === true ? [] : ["code"]);
         if (result.ok !== true && result.ok !== false) invalid("Result ok must be a boolean");
         if (result.ok === false && (typeof result.error !== "string" || !result.error || result.error.length > 2048)) {
           invalid("Result error must be a nonempty string of at most 2048 characters");
         }
+        if (result.ok === false && result.code !== undefined && result.code !== "stale_context") invalid("Unknown command rejection code");
         if (result.ok === true) {
           if (job.call.method === "capture") {
             shape(result.value, ["metadata", "rgb_base64"]);
@@ -409,12 +491,15 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
               || result.value.metadata.bits_per_channel !== 8
               || typeof result.value.rgb_base64 !== "string" || result.value.rgb_base64.length !== 1048576
               || !/^[A-Za-z0-9+/]+$/.test(result.value.rgb_base64)) invalid("Invalid RGB8 camera capture");
+          } else if (job.call.method === "raycast") {
+            shape(result.value, ["source_seed", "source_time_s", "frame", "origin_world_m", "direction_world", "max_distance_m", "hit"]);
+            if (result.value.hit !== null && !record(result.value.hit)) invalid("Raycast hit must be a real hit report or null");
           } else if (job.call.method !== "snapshot") {
             shape(result.value, ["ok"]);
             if (result.value.ok !== true) invalid("Commands return an acknowledgement only");
           } else {
-            shape(result.value, ["observation", "telemetry", "navigation", "runtime", "engine_build", "cameras"]);
-            if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime].every(record)) {
+            shape(result.value, ["observation", "telemetry", "navigation", "runtime", "renderer", "engine_build", "cameras"]);
+            if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime, result.value.renderer].every(record)) {
               invalid("Snapshot reports must be JSON objects");
             }
             shape(result.value.engine_build, ["bytes", "sha256"]);
@@ -424,7 +509,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
           }
           finiteJson(result.value);
         }
-        const envelope = result.ok ? { ok: true, value: result.value } : { ok: false, error: result.error };
+        claimPage(id);
+        const envelope = result.ok ? { ok: true, value: result.value }
+          : { ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) };
         settle(job, 200, envelope);
         send(request, response, 200, { ok: true });
       }

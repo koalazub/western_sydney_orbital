@@ -13,15 +13,21 @@ for await (const line of createInterface({ input: process.stdin })) {
     const request = JSON.parse(line);
     let value;
     if (request.method === "observation") value = JSON.parse(api.observation());
+    else if (request.method === "debug_snapshot") value = JSON.parse(api.command('{"op":"observe"}')).state;
     else if (request.method === "navigation") value = JSON.parse(api.navigation_status());
     else if (request.method === "cameras") value = JSON.parse(api.ship_camera_status());
     else if (request.method === "pan_tilt") value = JSON.parse(api.pan_tilt_camera(request.camera, request.yaw, request.pitch));
     else if (request.method === "bindings") value = JSON.parse(api.key_bindings_status());
     else if (request.method === "set_bindings") value = JSON.parse(api.set_key_bindings(JSON.stringify(request.settings)));
+    else if (request.method === "raycast") value = JSON.parse(api.lookahead_raycast(JSON.stringify(request.query)));
+    else if (request.method === "runtime") value = JSON.parse(api.runtime_status());
+    else if (request.method === "telemetry") value = JSON.parse(api.telemetry_status());
+    else if (request.method === "field_diagnostics") value = JSON.parse(api.field_diagnostics());
+    else if (request.method === "control_result") value = JSON.parse(api.control(JSON.stringify(request.command)));
     else if (request.method === "preview") {
       value = JSON.parse(api.set_navigation_preview(JSON.stringify(request.preview)));
     } else if (request.method === "command") {
-      const result = JSON.parse(api.command(JSON.stringify(request.command)));
+      const result = JSON.parse(api.control(JSON.stringify(request.command)));
       if (!result.ok) throw new Error(result.error);
       value = { ok: true };
     } else throw new Error("Unsupported test driver request");

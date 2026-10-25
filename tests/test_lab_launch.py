@@ -21,7 +21,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 import pytest
 
-from wsorb.cli import _build_parser, main
+from wsorb.cli import _build_parser
 from wsorb.lab import DEFAULT_TOKEN_FILE, NOTEBOOK_PATH, lab_command, lab_port, prepare_token_file
 from wsorb.local_api import LocalSimulation
 
@@ -45,10 +45,13 @@ class _NotebookServer:
     token_file: Path
 
 
-@pytest.fixture(autouse=True)
-def clean_lab_environment(monkeypatch):
-    monkeypatch.delenv("WSORB_LAB_TOKEN_FILE", raising=False)
-    monkeypatch.delenv("WSORB_LAB_PORT", raising=False)
+def _lab_environment(**overrides: str) -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"WSORB_LAB_TOKEN_FILE", "WSORB_LAB_PORT"}
+    }
+    return {**environment, **overrides}
 
 
 def _write_token(path: Path, content: bytes | None = None) -> Path:
@@ -59,27 +62,48 @@ def _write_token(path: Path, content: bytes | None = None) -> Path:
 
 
 def test_token_is_created_privately_once_and_reused(tmp_path):
-    path = prepare_token_file(root=tmp_path)
+    path = prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
     content, info = path.read_bytes(), path.stat()
     assert path == tmp_path.resolve() / DEFAULT_TOKEN_FILE
     assert re.fullmatch(rb"[A-Za-z0-9_-]{43}\n", content)
     assert stat.S_IMODE(info.st_mode) == 0o600
     assert info.st_uid == os.getuid()
     assert info.st_nlink == 1
-    assert prepare_token_file(root=tmp_path) == path
+    assert prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE) == path
     assert path.read_bytes() == content
     assert path.stat().st_ino == info.st_ino
     other = prepare_token_file(root=tmp_path, path="other.token")
     assert other.read_bytes() != content
 
 
-def test_relative_environment_override_is_rooted_at_the_repository(tmp_path, monkeypatch):
+def test_relative_environment_override_is_rooted_at_the_repository(tmp_path):
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
-    monkeypatch.setenv("WSORB_LAB_TOKEN_FILE", "private/editor.token")
-    path = prepare_token_file(root=tmp_path)
-    assert path == tmp_path.resolve() / "private/editor.token"
+    script = """
+import sys
+from pathlib import Path
+from wsorb.lab import prepare_token_file
+
+print(prepare_token_file(root=Path(sys.argv[1])))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=elsewhere,
+        env=_lab_environment(
+            PYTHONPATH=str(ROOT / "src"),
+            WSORB_LAB_TOKEN_FILE="private/editor.token",
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    path = tmp_path.resolve() / "private/editor.token"
+    assert result.stdout.strip() == str(path)
+    assert path.is_file()
     assert not (elsewhere / "private").exists()
 
 
@@ -89,7 +113,7 @@ def test_existing_token_permissions_are_not_silently_repaired(tmp_path, mode):
     original = path.read_bytes()
     path.chmod(mode)
     with pytest.raises(ValueError, match="private regular file"):
-        prepare_token_file(root=tmp_path)
+        prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
     assert stat.S_IMODE(path.stat().st_mode) == mode
     assert path.read_bytes() == original
 
@@ -107,7 +131,7 @@ def test_existing_token_must_be_a_single_regular_file(tmp_path, kind):
     else:
         os.link(_write_token(tmp_path / "secret.token"), path)
     with pytest.raises(ValueError, match="private regular file"):
-        prepare_token_file(root=tmp_path)
+        prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
 
 
 @pytest.mark.parametrize(
@@ -117,7 +141,7 @@ def test_existing_token_must_be_a_single_regular_file(tmp_path, kind):
 def test_token_reads_reject_oversize_and_non_ascii_content(tmp_path, content):
     path = _write_token(tmp_path / DEFAULT_TOKEN_FILE, content)
     with pytest.raises(ValueError, match="token"):
-        prepare_token_file(root=tmp_path)
+        prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
     assert path.read_bytes() == content
 
 
@@ -178,16 +202,27 @@ def test_command_uses_the_canonical_notebook_and_only_a_password_file(tmp_path):
     assert not token_file.exists()
 
 
-def test_parser_and_help_do_not_start_an_editor_or_create_a_token(tmp_path, monkeypatch, capsys):
+def test_parser_and_help_do_not_start_an_editor_or_create_a_token(tmp_path):
     token_file = tmp_path / "uncreated.token"
-    monkeypatch.setenv("WSORB_LAB_TOKEN_FILE", str(token_file))
     parser = _build_parser()
     assert vars(parser.parse_args(["lab"])) == {"command": "lab", "port": None}
     assert vars(parser.parse_args(["lab", "--port", "41234"])) == {"command": "lab", "port": 41234}
-    with pytest.raises(SystemExit) as help_exit:
-        main(["lab", "--help"])
-    assert help_exit.value.code == 0
-    assert "WSORB_LAB_PORT" in capsys.readouterr().out
+    result = subprocess.run(
+        [sys.executable, "-m", "wsorb", "lab", "--help"],
+        cwd=tmp_path,
+        env=_lab_environment(
+            PYTHONPATH=str(ROOT / "src"),
+            WSORB_LAB_TOKEN_FILE=str(token_file),
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "WSORB_LAB_PORT" in result.stdout
+    assert result.stderr == ""
     with pytest.raises(SystemExit) as invalid_port:
         parser.parse_args(["lab", "--port", "0"])
     assert invalid_port.value.code == 2
@@ -197,12 +232,25 @@ def test_parser_and_help_do_not_start_an_editor_or_create_a_token(tmp_path, monk
     assert notebook.notebook_dir == Path("notebook")
 
 
-def test_invalid_environment_port_fails_before_launch(tmp_path, monkeypatch, capsys):
+def test_invalid_environment_port_fails_before_launch(tmp_path):
     token_file = tmp_path / "uncreated.token"
-    monkeypatch.setenv("WSORB_LAB_TOKEN_FILE", str(token_file))
-    monkeypatch.setenv("WSORB_LAB_PORT", "0")
-    assert main(["lab"]) == 2
-    assert "1 to 65535" in capsys.readouterr().err
+    result = subprocess.run(
+        [sys.executable, "-m", "wsorb", "lab"],
+        cwd=tmp_path,
+        env=_lab_environment(
+            PYTHONPATH=str(ROOT / "src"),
+            WSORB_LAB_TOKEN_FILE=str(token_file),
+            WSORB_LAB_PORT="0",
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 2, result.stderr
+    assert result.stdout == ""
+    assert "1 to 65535" in result.stderr
     assert not token_file.exists()
 
 
@@ -222,7 +270,7 @@ try {
 """
     result = subprocess.run(
         [node, "--input-type=module", "-e", script, HELPER.as_uri(), str(root)],
-        env={**os.environ, **overrides},
+        env=_lab_environment(**overrides),
         capture_output=True,
         text=True,
         timeout=5,
@@ -241,7 +289,7 @@ def test_node_resolver_rejects_invalid_port_without_disclosing_a_file_path(tmp_p
 
 def test_node_resolver_returns_null_for_missing_files_and_a_closed_real_port(tmp_path):
     assert _node_resolve(tmp_path) == {"result": None}
-    prepare_token_file(root=tmp_path)
+    prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         port = reserved.getsockname()[1]
@@ -250,7 +298,7 @@ def test_node_resolver_returns_null_for_missing_files_and_a_closed_real_port(tmp
 
 @pytest.mark.parametrize("kind", ["mode", "symlink", "hardlink", "oversize", "non-ascii"])
 def test_node_resolver_rejects_unsafe_files_without_disclosing_secrets(tmp_path, kind):
-    path = prepare_token_file(root=tmp_path)
+    path = prepare_token_file(root=tmp_path, path=DEFAULT_TOKEN_FILE)
     token = path.read_text().strip()
     if kind == "mode":
         path.chmod(0o644)
@@ -290,13 +338,12 @@ def real_marimo(tmp_path_factory):
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         port = reserved.getsockname()[1]
-    environment = {
-        **os.environ,
-        "PATH": executable_path,
-        "PYTHONPATH": str(ROOT / "src"),
-        "WSORB_LAB_TOKEN_FILE": str(token_file),
-        "WSORB_LAB_PORT": str(port),
-    }
+    environment = _lab_environment(
+        PATH=executable_path,
+        PYTHONPATH=str(ROOT / "src"),
+        WSORB_LAB_TOKEN_FILE=str(token_file),
+        WSORB_LAB_PORT=str(port),
+    )
     process = subprocess.Popen(
         [sys.executable, "-m", "wsorb", "lab", "--port", str(port)],
         cwd=directory,
@@ -384,14 +431,13 @@ def notebook_server(tmp_path_factory, real_marimo):
     process = subprocess.Popen(
         [node, "worker/scripts/local.mjs"],
         cwd=ROOT,
-        env={
-            **os.environ,
-            "PORT": "0",
-            "WSORB_LAB": "1",
-            "WSORB_LOCAL_CONNECTION": str(connection),
-            "WSORB_LAB_TOKEN_FILE": str(token_file),
-            "WSORB_LAB_PORT": str(port),
-        },
+        env=_lab_environment(
+            PORT="0",
+            WSORB_LAB="1",
+            WSORB_LOCAL_CONNECTION=str(connection),
+            WSORB_LAB_TOKEN_FILE=str(token_file),
+            WSORB_LAB_PORT=str(port),
+        ),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
