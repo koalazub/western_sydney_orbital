@@ -55,7 +55,14 @@
           };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          utm = pkgs.utm;
+          # Windows DirectX support needs UTM 5; retain nixpkgs' Intel macOS support.
+          utm = pkgs.utm.overrideAttrs (finalAttrs: {
+            version = "5.0.8";
+            src = pkgs.fetchurl {
+              url = "https://github.com/utmapp/UTM/releases/download/v${finalAttrs.version}/UTM.dmg";
+              sha256 = "7b2d7b2e2a02b3de1757ef19a8f36573e6d9cceae8c8cca0abcbcaa4a852019a";
+            };
+          });
         }
       );
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-tree);

@@ -54,6 +54,14 @@ utm-install:
 utm: utm-install
     open "$HOME/Applications/UTM.app"
 
+# Microsoft generates expiring download links after browser validation.
+windows-iso:
+    open "https://www.microsoft.com/en-us/software-download/windows11arm64"
+
+# Use the SHA256 for the selected language from Microsoft's download page.
+windows-iso-verify path sha256:
+    printf '%s  %s\n' {{quote(sha256)}} {{quote(path)}} | shasum -a 256 --check -
+
 # Install the game dependencies without downloading optional Python/dev tools.
 setup:
     nix shell --impure .#game --command npm ci --prefix worker
