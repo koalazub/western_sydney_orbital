@@ -9,6 +9,7 @@ def _():
     import inspect
     import json
     import math
+    import time
     from contextlib import suppress
     from dataclasses import asdict
     from pathlib import Path
@@ -19,6 +20,8 @@ def _():
 
     import wsorb.flight as flight_modules
     from wsorb.experiment import (
+        CHECKPOINT_RUN_LIMIT_S,
+        MAX_CONTROLLER_RUN_S,
         ExperimentRunner,
         FlightStateError,
         LivePolicy,
@@ -34,7 +37,14 @@ def _():
         json_bytes,
         source_manifest,
     )
-    from wsorb.flight import PlannerConfig, basic_command, plan_route, predict_obstacles
+    from wsorb.flight import (
+        PlannerConfig,
+        ResilienceConfig,
+        ResilientGuidance,
+        basic_command,
+        plan_route,
+        predict_obstacles,
+    )
     from wsorb.local_api import (
         MAX_DEBRIS_COUNT,
         LocalApiError,
@@ -42,19 +52,25 @@ def _():
         validate_experiment_settings,
         validate_position,
     )
+    from wsorb.proposals import approve_world_proposal, parse_world_proposal
 
     lab_source_path = Path(__file__).resolve()
     return (
+        CHECKPOINT_RUN_LIMIT_S,
         ExperimentRunner,
         FlightStateError,
         LivePolicy,
         LocalApiError,
         LocalSimulation,
         MAX_DEBRIS_COUNT,
+        MAX_CONTROLLER_RUN_S,
         Path,
         PlannerConfig,
+        ResilienceConfig,
+        ResilientGuidance,
         alt,
         asdict,
+        approve_world_proposal,
         basic_command,
         controller_start_notice,
         experiment_document,
@@ -71,10 +87,12 @@ def _():
         next_waypoint,
         np,
         observed_setup,
+        parse_world_proposal,
         plan_route,
         predict_obstacles,
         source_manifest,
         suppress,
+        time,
         validate_experiment_settings,
         validate_position,
     )
@@ -96,14 +114,147 @@ def _(json, lab_source_path, validate_experiment_settings):
     )
 
 
+@app.cell
+def _(mo):
+    proposal_upload = mo.ui.file(
+        filetypes=[".json"],
+        multiple=False,
+        max_size=65536,
+        label="Local world proposal JSON",
+    )
+    review_proposal = mo.ui.run_button(label="Review proposal")
+    adopt_proposal = mo.ui.run_button(label="Use reviewed proposal as draft")
+    discard_proposal = mo.ui.run_button(label="Discard imported draft")
+    get_reviewed_proposal, set_reviewed_proposal = mo.state(None)
+    get_proposal_draft, set_proposal_draft = mo.state(None)
+    return (
+        adopt_proposal,
+        discard_proposal,
+        get_proposal_draft,
+        get_reviewed_proposal,
+        proposal_upload,
+        review_proposal,
+        set_proposal_draft,
+        set_reviewed_proposal,
+    )
+
+
+@app.cell
+def _(
+    action_error, mo, parse_world_proposal, proposal_upload, review_proposal, set_reviewed_proposal
+):
+    mo.stop(not review_proposal.value)
+    try:
+        _contents = proposal_upload.contents()
+        if _contents is None:
+            raise ValueError("Choose a proposal JSON file before Review proposal.")
+        _proposal = parse_world_proposal(_contents)
+        set_reviewed_proposal(_proposal)
+        mo.output.replace(
+            mo.md(
+                f"Proposal validated. Review content digest `{_proposal.digest}`. "
+                "Check the normalized settings before adopting it. "
+                "No game, file or Git state changed."
+            )
+        )
+    except (RuntimeError, ValueError, TypeError) as _error:
+        set_reviewed_proposal(None)
+        mo.output.replace(action_error("Review proposal", _error))
+    return
+
+
+@app.cell
+def _(
+    action_error,
+    adopt_proposal,
+    approve_world_proposal,
+    get_reviewed_proposal,
+    mo,
+    parse_world_proposal,
+    proposal_upload,
+    set_proposal_draft,
+):
+    mo.stop(not adopt_proposal.value)
+    try:
+        _reviewed = get_reviewed_proposal()
+        _contents = proposal_upload.contents()
+        if _reviewed is None or _contents is None:
+            raise ValueError("Review the proposal before using it as a draft.")
+        _current = parse_world_proposal(_contents)
+        _draft = approve_world_proposal(_current, _reviewed.digest)
+        set_proposal_draft({**_draft, "digest": _current.digest})
+        mo.output.replace(
+            mo.md(
+                "Imported draft selected. The current flight is unchanged. Regenerate world "
+                "will explicitly replace the run using this approved draft."
+            )
+        )
+    except (RuntimeError, ValueError, TypeError) as _error:
+        mo.output.replace(action_error("Adopt proposal draft", _error))
+    return
+
+
+@app.cell
+def _(discard_proposal, mo, set_proposal_draft, set_reviewed_proposal):
+    mo.stop(not discard_proposal.value)
+    set_proposal_draft(None)
+    set_reviewed_proposal(None)
+    mo.output.replace(mo.md("Imported draft discarded. Manual draft controls are active again."))
+    return
+
+
+@app.cell
+def _(
+    default_world_settings,
+    get_proposal_draft,
+    get_reviewed_proposal,
+    json,
+    mo,
+    parse_world_proposal,
+):
+    _template = parse_world_proposal(
+        json.dumps(
+            {
+                "schema": "wsorb.local_world_proposal",
+                "schema_version": 1,
+                "preset": "far_side_l2",
+                "seed": None,
+                "settings": default_world_settings,
+            }
+        )
+    )
+    proposal_template_download = mo.download(
+        _template.to_json_bytes(),
+        filename="local-world-proposal.json",
+        mimetype="application/json",
+        label="Download proposal template",
+    )
+    _reviewed, _draft = get_reviewed_proposal(), get_proposal_draft()
+    proposal_status_view = mo.vstack(
+        [
+            mo.md(f"Active imported draft: `{_draft['digest']}`. Regenerate world uses this draft.")
+            if _draft is not None
+            else mo.md(
+                "No imported draft selected. Regenerate world uses the manual draft controls."
+            ),
+            mo.json(_reviewed.to_document(), label="Validated proposal for review")
+            if _reviewed is not None
+            else mo.md("Upload a local JSON file, then select Review proposal."),
+            mo.json(_draft, label="Approved new-world draft") if _draft is not None else mo.md(""),
+        ]
+    )
+    return proposal_status_view, proposal_template_download
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
     # Flight lab
 
     Connect in Flight to watch the current game without pausing, thrust or reset.
-    Run controller starts the selected Python policy. Keep the game visible for
-    live instruments and launchpad dragging. This notebook does not start its server.
+    Run controller starts the selected Python policy. A browser-backed game must
+    stay visible for live rendering. The explicit native headless backend runs
+    real physics without a display. This notebook does not start either server.
     """)
     return
 
@@ -327,7 +478,7 @@ def _(inspect, suppress):
 
 
 @app.cell
-def _(lab_slider, mo):
+def _(CHECKPOINT_RUN_LIMIT_S, MAX_CONTROLLER_RUN_S, lab_slider, mo):
     connection_file = mo.ui.text(
         value=".devenv/wsorb-local.json",
         label="Private connection file",
@@ -336,19 +487,22 @@ def _(lab_slider, mo):
     connect_refresh = mo.ui.run_button(label="Connect / Refresh")
     controller_mode = mo.ui.dropdown(
         options={
+            "Resilient route with radar failover": "resilient_waypoint_pd",
             "Planned waypoint PD + public radar": "planned_waypoint_pd",
             "Basic PD + public radar": "basic_pd_radar",
             "Coast, zero command": "coast",
         },
-        value="Planned waypoint PD + public radar",
+        value="Resilient route with radar failover",
         allow_select_none=False,
         label="Python controller",
         full_width=True,
     )
     run_controller = mo.ui.run_button(label="Run controller", kind="warn")
-    stop_run = mo.ui.run_button(label="Pause / Stop", kind="danger")
-    duration_s = lab_slider(0.1, 300, 0.1, 30, "Run limit, simulation s")
-    cadence_hz = lab_slider(0.1, 5, 0.1, 2, "Requested controller cadence, Hz")
+    stop_run = mo.ui.run_button(label="Stop Python control", kind="danger")
+    duration_s = lab_slider(
+        0.1, MAX_CONTROLLER_RUN_S, 0.1, CHECKPOINT_RUN_LIMIT_S, "Flight limit, simulation s"
+    )
+    cadence_hz = lab_slider(0.1, 10, 0.1, 8, "Requested controller cadence, Hz")
     experiment_refresh = mo.ui.refresh(
         options=["1s", "2s", "5s"],
         default_interval="1s",
@@ -500,12 +654,15 @@ def _(
 
 
 @app.cell
-def _(lab_slider, mo):
+def _(ResilienceConfig, lab_slider, mo):
+    _forecast_s = ResilienceConfig().planner.forecast_horizon_s
     planner_controls = mo.ui.dictionary(
         {
             "cell_size_m": lab_slider(5, 200, 5, 40, "A* grid cell size, m"),
             "clearance_m": lab_slider(0, 100, 1, 8, "Extra obstacle clearance, m"),
-            "forecast_horizon_s": lab_slider(0.1, 15, 0.1, 3.6, "Forecast horizon, simulation s"),
+            "forecast_horizon_s": lab_slider(
+                0.1, 15, 0.1, _forecast_s, "Forecast horizon, simulation s"
+            ),
             "max_measurement_age_s": lab_slider(0, 30, 0.1, 5.4, "Maximum radar age, s"),
             "unknown_tangential_speed_mps": lab_slider(0, 100, 1, 12, "Sideways allowance, m/s"),
             "sigma_multiplier": lab_slider(0, 8, 0.1, 3, "Sensor uncertainty multiplier"),
@@ -589,6 +746,7 @@ def _(basic_command, next_waypoint, np):
 @app.cell
 def _(
     LivePolicy,
+    ResilienceConfig,
     asdict,
     controller_gains,
     controller_mode,
@@ -606,10 +764,16 @@ def _(
         planner_settings,
         controller=controller_mode.value,
         gains=controller_gains,
+        resilience=ResilienceConfig(planner=planner_settings)
+        if controller_mode.value == "resilient_waypoint_pd"
+        else None,
         config={
             "gains": dict(controller_gains),
             "planner": asdict(planner_settings),
             "replan_interval_sim_s": 0.5,
+            "resilience": asdict(ResilienceConfig(planner=planner_settings))
+            if controller_mode.value == "resilient_waypoint_pd"
+            else None,
             "python_functions": source_manifest(
                 policy_sources(predict_scene, find_path, decide_command)
             ),
@@ -644,12 +808,12 @@ def _(
             _sim = _session["client"]
         else:
             _sim = LocalSimulation.from_file(connection_file.value)
-        _sim.status()
+        _backend_status = _sim.status()
         with _sim.control_transaction():
             _snapshot = _sim.snapshot()
             experiment.record_snapshot(_snapshot, source="connect_refresh")
         if not _status.get("worker_active"):
-            experiment.watch(_sim, live_policy, replan_s=0.5)
+            experiment.watch(_sim, live_policy, poll_hz=10, replan_s=0.5)
         # Seed controls from the confirmed game values, not unbound defaults.
         set_session(
             confirmed_tuning_session(
@@ -660,7 +824,13 @@ def _(
         )
         set_placement_seed(placement_seed(_snapshot))
         mo.output.replace(
-            mo.md(f"[Open the actual local game]({_sim.url}). Snapshot received; watch requested.")
+            mo.md(
+                f"[Open native headless server help]({_sim.url}). "
+                "Actual physics snapshot received; watch requested."
+                if _backend_status.get("backend") == "native_headless"
+                else f"[Open the actual local game]({_sim.url}). "
+                "Snapshot received; watch requested."
+            )
         )
     except (RuntimeError, ValueError) as _error:
         mo.output.replace(action_error("Connect", _error))
@@ -854,34 +1024,199 @@ def _(
 
 
 @app.cell
-def _(action_error, experiment, get_session, mo, stop_run):
+def _(action_error, experiment, mo, stop_run):
     mo.stop(not stop_run.value)
     try:
-        _before_stop = experiment.status()
         _stopped = experiment.stop(timeout_s=10)
         if _stopped.get("worker_active") or _stopped["state"] == "stopping":
             mo.output.replace(mo.md("Stop cleanup is pending. No second writer was started."))
         elif _stopped["error"]:
             mo.output.replace(
-                mo.md(_stopped["error"] + " Check actual pause and thrust in the game.").callout(
-                    kind="danger"
-                )
+                mo.md(
+                    _stopped["error"] + " Inspect actual flight and watchdog state in the game."
+                ).callout(kind="danger")
             )
         else:
-            # The worker owns cleanup when it has commanded flight. An explicit
-            # Stop click while only watching may also stop native/manual flight.
-            _session = get_session()
-            if _session is not None and not _before_stop.get("flight_owned"):
-                _sim = _session["client"]
-                try:
-                    _sim.stop()
-                finally:
-                    _sim.pause()
-                experiment.record_snapshot(_sim.snapshot(), source="explicit_stop")
-            mo.output.replace(mo.md("Stopped. Connect / Refresh to resume read-only guidance."))
+            mo.output.replace(
+                mo.md(
+                    "Python control stopped. Connect / Refresh to resume read-only guidance. "
+                    + (_stopped.get("notice") or "")
+                )
+            )
     except (RuntimeError, ValueError) as _error:
-        mo.output.replace(action_error("Pause / Stop", _error))
+        mo.output.replace(action_error("Stop Python control", _error))
     return
+
+
+@app.cell
+def _(get_session, lab_slider, mo):
+    _disabled = get_session() is None
+    sensor_fault_target = mo.ui.dropdown(
+        options={
+            "Primary radar": "radar_primary",
+            "Backup radar": "radar_backup",
+            "Top camera": "camera_top",
+            "Bottom camera": "camera_bottom",
+            "Shared radar bus": "radar_bus",
+            "Navigation telemetry": "navigation",
+            "All avionics": "all_avionics",
+        },
+        value="Primary radar",
+        allow_select_none=False,
+        label="Failure domain",
+        full_width=True,
+        disabled=_disabled,
+    )
+    sensor_fault_mode = mo.ui.dropdown(
+        options={"Unavailable": "unavailable", "Frozen delivery": "frozen", "Nominal": "nominal"},
+        value="Unavailable",
+        allow_select_none=False,
+        label="Delivery failure",
+        full_width=True,
+        disabled=_disabled,
+    )
+    sensor_fault_duration = lab_slider(
+        0.1, 300, 0.1, 5, "Failure duration, simulation s", disabled=_disabled
+    )
+    apply_sensor_fault = mo.ui.run_button(
+        label="Apply sensor failure", kind="warn", disabled=_disabled
+    )
+    clear_sensor_faults = mo.ui.run_button(label="Restore all sensor delivery", disabled=_disabled)
+    pause_physics = mo.ui.run_button(label="Pause physics", kind="warn", disabled=_disabled)
+    primary_outage_duration = lab_slider(
+        0.1, 300, 0.1, 5, "Primary decision outage, simulation s", disabled=_disabled
+    )
+    interrupt_primary = mo.ui.run_button(
+        label="Interrupt primary decisions", kind="warn", disabled=_disabled
+    )
+    return (
+        apply_sensor_fault,
+        clear_sensor_faults,
+        pause_physics,
+        primary_outage_duration,
+        interrupt_primary,
+        sensor_fault_duration,
+        sensor_fault_mode,
+        sensor_fault_target,
+    )
+
+
+@app.cell
+def _(action_error, experiment, interrupt_primary, mo, primary_outage_duration):
+    mo.stop(not interrupt_primary.value)
+    try:
+        experiment.inject_primary_outage(duration_sim_s=primary_outage_duration.value)
+        mo.output.replace(
+            mo.md(
+                "Primary decisions and renewals interrupted. Native ownership determines "
+                "whether the standby takes over after expiry; no leader result is assumed."
+            )
+        )
+    except (RuntimeError, ValueError) as _error:
+        mo.output.replace(action_error("Interrupt primary decisions", _error))
+    return
+
+
+@app.cell
+def _(action_error, experiment, get_session, mo, pause_physics):
+    mo.stop(not pause_physics.value)
+    try:
+        _session = get_session()
+        if _session is None:
+            raise RuntimeError("Connect / Refresh before pausing physics.")
+        _sim = _session["client"]
+        _sim.pause()
+        experiment.record_snapshot(_sim.snapshot(), source="explicit_pause")
+        mo.output.replace(
+            mo.md("Actual physics paused. Run controller is required to grant control again.")
+        )
+    except (RuntimeError, ValueError) as _error:
+        mo.output.replace(action_error("Pause physics", _error))
+    return
+
+
+@app.cell
+def _(
+    action_error,
+    apply_sensor_fault,
+    clear_sensor_faults,
+    experiment,
+    get_session,
+    mo,
+    sensor_fault_duration,
+    sensor_fault_mode,
+    sensor_fault_target,
+):
+    mo.stop(not (apply_sensor_fault.value or clear_sensor_faults.value))
+    try:
+        _session = get_session()
+        if _session is None:
+            raise RuntimeError("Connect / Refresh before applying a sensor failure.")
+        _sim = _session["client"]
+        if clear_sensor_faults.value:
+            _snapshot = _sim.clear_sensor_faults()
+        else:
+            _snapshot = _sim.set_sensor_fault(
+                sensor_fault_target.value,
+                sensor_fault_mode.value,
+                duration_sim_s=sensor_fault_duration.value,
+            )
+        experiment.record_snapshot(_snapshot, source="sensor_fault_control")
+        mo.output.replace(
+            mo.md(
+                "Native sensor delivery state received. Recovery waits for genuine new samples. "
+                "The world and controller were not reset."
+            )
+        )
+    except (RuntimeError, ValueError) as _error:
+        mo.output.replace(action_error("Sensor failure control", _error))
+    return
+
+
+@app.cell
+def _(experiment, experiment_refresh, mo):
+    _ = experiment_refresh.value
+    _status = experiment.status()
+    _latest = _status.get("latest") or {}
+    _observation = _latest.get("observation") or {}
+    _health = _observation.get("sensor_health")
+    _guidance = _status.get("resilience")
+    resilience_status_view = mo.vstack(
+        [
+            mo.md(
+                f"Python guidance: **{_guidance.get('mode', 'unavailable')}**. "
+                f"{_guidance.get('reason', '')}"
+            )
+            if _guidance is not None
+            else mo.md(
+                "Connect with the resilient route controller to inspect estimates and failover."
+            ),
+            mo.json(_health, label="Native sensor delivery and shared failure domains")
+            if _health is not None
+            else mo.md("Sensor health is unavailable. Build the current engine and reconnect."),
+            mo.json(_guidance, label="Python state estimate, uncertainty and route progress")
+            if _guidance is not None
+            else mo.md("No Python estimate has been produced."),
+            mo.json(_observation.get("command_watchdog"), label="Native command watchdog")
+            if _observation.get("command_watchdog") is not None
+            else mo.md("No native command-watchdog report is available."),
+            mo.json(
+                _observation.get("control_authority"), label="Actual native controller ownership"
+            )
+            if _observation.get("control_authority") is not None
+            else mo.md("No native controller-ownership report is available."),
+            mo.json(_status.get("standby"), label="Separate-process standby status")
+            if _status.get("standby") is not None
+            else mo.md("No standby process report received."),
+        ]
+    )
+    return (resilience_status_view,)
+
+
+@app.cell
+def _(mo):
+    get_step_guidance, set_step_guidance = mo.state(None)
+    return get_step_guidance, set_step_guidance
 
 
 @app.cell
@@ -901,6 +1236,7 @@ def _(
     mo,
     observed_setup,
     place_lander,
+    pause_physics,
     prepare_export,
     regenerate_world,
     reset_run,
@@ -940,6 +1276,7 @@ def _(
                 capture_images,
                 prepare_export,
                 place_lander,
+                pause_physics,
             )
         )
         _calibration_changed = (
@@ -1042,6 +1379,18 @@ def _(
                     f"Mission {_context['mission_status'] or 'unavailable'} · "
                     f"phase {_context['mission_phase'] or 'unavailable'} · "
                     f"controller {_status.get('run_request_state', 'idle')}"
+                ),
+                field_table(
+                    {
+                        "Range to checkpoint, m": _mission.get("target_distance_m"),
+                        "Arrival radius, m": (_observation.get("geometry") or {}).get(
+                            "arrival_radius_m"
+                        ),
+                        "Relative speed, m/s": _mission.get("relative_speed_mps"),
+                        "Damage estimate, J": _mission.get("damage"),
+                        "Navigation source time, s": _observation.get("navigation_sample_time_s"),
+                    },
+                    label="Native checkpoint measurements, not route predictions",
                 ),
                 mo.md(
                     f"Received {_status['sample_count']} samples. "
@@ -1667,6 +2016,7 @@ def _(
     distribution_draft,
     experiment,
     flight_preset,
+    get_proposal_draft,
     get_session,
     mo,
     regenerate_world,
@@ -1677,26 +2027,32 @@ def _(
 ):
     mo.stop(not regenerate_world.value)
     try:
-        _seed = int(world_seed.value) if world_seed.value.strip() else None
+        _approved = get_proposal_draft()
         _session = get_session()
         if _session is None:
             raise FlightStateError("Connect / Refresh before Regenerate world.")
         _sim = _session["client"]
         with _sim.control_transaction():
             _before = _sim.snapshot()["observation"]
-        # Use actual current hardware/flow, never unedited slider defaults.
-        _settings = {
-            "ship": {key: _before["ship_tuning"][key] for key in ("mass_kg", "inertia_scale")},
-            "debris": {
-                **_before["debris_flow"],
-                **structure_controls.value,
-                "distribution": distribution_draft,
-            },
-        }
+        if _approved is not None:
+            _seed, _preset = _approved["seed"], _approved["preset"]
+            _settings = _approved["settings"]
+        else:
+            _seed = int(world_seed.value) if world_seed.value.strip() else None
+            _preset = flight_preset.value
+            # Use actual current hardware/flow, never unedited slider defaults.
+            _settings = {
+                "ship": {key: _before["ship_tuning"][key] for key in ("mass_kg", "inertia_scale")},
+                "debris": {
+                    **_before["debris_flow"],
+                    **structure_controls.value,
+                    "distribution": distribution_draft,
+                },
+            }
         _settings = validate_experiment_settings(_settings)
         _sim = stopped_sim()
-        with mo.status.spinner(title="Building world; large fields can block the browser"):
-            _after = _sim.configure_flight(_settings, flight_preset.value, seed=_seed)
+        with mo.status.spinner(title="Building world; large fields can block the engine"):
+            _after = _sim.configure_flight(_settings, _preset, seed=_seed)
         experiment.record_snapshot(_after, source="regenerate_world")
         mo.output.replace(
             mo.md("World regenerated and paused. Connect / Refresh to resume guidance.")
@@ -1772,18 +2128,22 @@ def _(action_error, experiment, mo, stopped_sim, upright):
 @app.cell
 def _(
     FlightStateError,
+    ResilientGuidance,
     action_error,
     controller_start_notice,
     experiment,
     experiment_schedule_s,
+    get_step_guidance,
     live_policy,
     lookahead_target,
     math,
     mo,
     run_policy_step,
     schedule_slot,
+    set_step_guidance,
     stopped_sim,
     suppress,
+    time,
 ):
     mo.stop(not run_policy_step.value)
     _sim = None
@@ -1801,24 +2161,59 @@ def _(
         ):
             raise ValueError("Step seconds must be finite, greater than zero and at most one")
         _sim = stopped_sim()
+        if live_policy.controller == "resilient_waypoint_pd":
+            _sim.pause()
         _before = _sim.snapshot()
         experiment.record_snapshot(_before, source="paused_policy_input")
         _blocked = controller_start_notice(_before)
         if _blocked:
             raise FlightStateError(_blocked)
         _observation = _before["observation"]
-        _route = live_policy.plan(_observation)
-        _decision = live_policy.decision(_observation, _route)
-        _sim.preview(_route.to_preview())
-        _sim.raycast(
-            lookahead_target(_observation, _route, arrival_m=live_policy.arrival_m).tolist(),
-            max_distance_m=250.0,
+        if live_policy.controller == "resilient_waypoint_pd":
+            _cached = get_step_guidance()
+            if _cached is None or _cached[0] != live_policy.resilience:
+                _cached = (live_policy.resilience, ResilientGuidance(live_policy.resilience))
+                set_step_guidance(_cached)
+            _guidance = _cached[1]
+            _ready = _guidance.update(_observation, wall_time_s=time.monotonic(), running=False)
+            _route = (
+                live_policy.plan(_ready.observation, guidance=_guidance)
+                if _ready.can_command
+                else None
+            )
+            _decision = live_policy.decision(_ready.observation, _route, guidance=_guidance)
+            _sim.preview(_route.to_preview() if _route is not None else None)
+            _sim.set_leased_command(
+                _decision.accel,
+                _decision.angular_accel,
+                _before,
+                lease_sim_s=max(0.05, min(_ready.lease_sim_s, _seconds)),
+            )
+            _sim.command({"op": "step", "seconds": _seconds})
+            _after = _sim.snapshot()
+        else:
+            _route = live_policy.plan(_observation)
+            _decision = live_policy.decision(_observation, _route)
+            _sim.preview(_route.to_preview())
+            _sim.raycast(
+                lookahead_target(_observation, _route, arrival_m=live_policy.arrival_m).tolist(),
+                max_distance_m=250.0,
+            )
+            _after = _sim.run_step(
+                _decision.accel, angular_accel=_decision.angular_accel, seconds=_seconds
+            )
+        experiment.record_snapshot(
+            _after,
+            source="policy_step_leased_result"
+            if live_policy.controller == "resilient_waypoint_pd"
+            else "policy_step_before_cleanup",
         )
-        _after = _sim.run_step(
-            _decision.accel, angular_accel=_decision.angular_accel, seconds=_seconds
+        experiment.record_snapshot(
+            _sim.snapshot(),
+            source="policy_step_lease_readback"
+            if live_policy.controller == "resilient_waypoint_pd"
+            else "policy_step_after_cleanup",
         )
-        experiment.record_snapshot(_after, source="policy_step_before_cleanup")
-        experiment.record_snapshot(_sim.snapshot(), source="policy_step_after_cleanup")
         mo.output.replace(
             mo.md("One paused policy step completed. Connect / Refresh to resume guidance.")
         )
@@ -1844,17 +2239,21 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    adopt_proposal,
     apply_camera_aim,
+    apply_sensor_fault,
     cadence_hz,
     camera_controls,
     capture_camera,
     capture_images,
+    clear_sensor_faults,
     connect_refresh,
     connection_file,
     controller_mode,
     debris_mode,
     debris_readback_view,
     duration_s,
+    discard_proposal,
     experiment_refresh,
     experiment_schedule_s,
     flight_diagnostics_view,
@@ -1862,25 +2261,37 @@ def _(
     flight_preset,
     gain_controls,
     get_selected_tab,
+    get_proposal_draft,
     get_session,
     history_view,
     impact_controls,
+    interrupt_primary,
     lab_stack,
     lab_styles,
     launch_readback_view,
     live_status_view,
     mo,
+    pause_physics,
     place_lander,
     placement_controls,
     planner_controls,
     policy_status_view,
     prepare_export,
+    primary_outage_duration,
+    proposal_status_view,
+    proposal_template_download,
+    proposal_upload,
     raw_snapshot_view,
     regenerate_world,
     reset_run,
+    resilience_status_view,
+    review_proposal,
     run_controller,
     run_policy_step,
     schedule_slot,
+    sensor_fault_duration,
+    sensor_fault_mode,
+    sensor_fault_target,
     set_selected_tab,
     ship_controls,
     ship_readback_view,
@@ -1891,6 +2302,7 @@ def _(
     world_seed,
 ):
     _tuning_session = get_session()
+    _imported_draft = get_proposal_draft()
     _tuning_feedback = mo.md("")
     if _tuning_session is not None:
         _tuning_state = _tuning_session.get("tuning_state", "confirmed")
@@ -1921,12 +2333,60 @@ def _(
                 [
                     connection_file,
                     mo.hstack(
-                        [connect_refresh, run_controller, stop_run], justify="start", wrap=True
+                        [connect_refresh, run_controller, stop_run, pause_physics],
+                        justify="start",
+                        wrap=True,
                     ),
                     live_status_view,
                     mo.md(
                         "Connect only watches. Run controller flies the policy selected in "
-                        "Python policy. Pause / Stop clears thrust and pauses the game."
+                        "Python policy. Stop Python control ends command renewal. In resilient "
+                        "mode the native lease expires without pausing physics. Use P in the "
+                        "game to pause."
+                    ),
+                ]
+            ),
+            "Resilience": lab_stack(
+                [
+                    resilience_status_view,
+                    mo.md("### Test controller failover"),
+                    mo.md(
+                        "An explicit resilient Run starts a separate-process standby with "
+                        "checked-in Python modules and data settings. Unsaved notebook callbacks "
+                        "run only in the primary. Native epoch/term ownership permits one writer; "
+                        "a recovered old primary cannot overwrite a healthy standby or undo a "
+                        "manual pause. Both processes still share this host."
+                    ),
+                    primary_outage_duration,
+                    interrupt_primary,
+                    mo.md("### Test a sensor failure"),
+                    mo.md(
+                        "These controls change real sensor delivery inside this local simulation. "
+                        "They do not fail a production cloud region or replace measurements. "
+                        "Select the resilient controller before testing autonomous failover."
+                    ),
+                    sensor_fault_target,
+                    sensor_fault_mode,
+                    sensor_fault_duration,
+                    mo.hstack([apply_sensor_fault, clear_sensor_faults], wrap=True),
+                    mo.md(
+                        "A radar-bus outage removes both radars. An all-avionics outage also "
+                        "removes navigation telemetry and both cameras. Loss of usable data "
+                        "means zero commanded thrust, not braking or a guaranteed safe orbit. "
+                        "Failures expire on simulation time; Restore all sensor delivery also "
+                        "clears them. Recovery requires genuinely advancing samples."
+                    ),
+                    mo.accordion(
+                        {
+                            "What is and is not redundant": mo.md(
+                                "Backup radar samples the same physical world with its own noise "
+                                "stream. The radars still share a bus and physical environment. "
+                                "Navigation telemetry is one unreplicated source. Camera pixels "
+                                "are not a navigation backup without a vision estimator. A native "
+                                "command lease limits stale thrust if Python or its connection "
+                                "dies."
+                            )
+                        }
                     ),
                 ]
             ),
@@ -1998,6 +2458,12 @@ def _(
             "Launch": lab_stack(
                 [
                     launch_readback_view,
+                    mo.md(
+                        f"Imported draft `{_imported_draft['digest']}` is active. "
+                        "Regenerate world uses that draft, not the manual draft controls."
+                    ).callout(kind="warn")
+                    if _imported_draft is not None
+                    else mo.md(""),
                     mo.md("### Move the launchpad"),
                     mo.md(
                         "In the game's Launch tab, select Place lander, then drag the "
@@ -2032,8 +2498,34 @@ def _(
                                     mo.md(
                                         "Replaces the world and run, clears any custom launch site "
                                         "and starts a paused trial. Uses the target preset below "
-                                        "and the new-world drafts in Debris."
+                                        "and the new-world drafts in Debris unless an approved "
+                                        "imported draft is active."
                                     ).callout(kind="warn"),
+                                    mo.accordion(
+                                        {
+                                            "Import proposal JSON": lab_stack(
+                                                [
+                                                    mo.md(
+                                                        "NotebookLM can suggest JSON. "
+                                                        "It cannot execute commands. "
+                                                        "Download the template and "
+                                                        "upload a proposal. Review it, "
+                                                        "then use it as a draft. "
+                                                        "This does not tune hardware "
+                                                        "or write files or Git. "
+                                                        "Regenerate world replaces "
+                                                        "the actual run. Maximum file size: 64 KiB."
+                                                    ),
+                                                    proposal_template_download,
+                                                    proposal_upload,
+                                                    review_proposal,
+                                                    proposal_status_view,
+                                                    adopt_proposal,
+                                                    discard_proposal,
+                                                ]
+                                            ),
+                                        }
+                                    ),
                                     flight_preset,
                                     mo.md(
                                         "L1/L2 presets select a target and default launch side. "
@@ -2090,8 +2582,10 @@ def _(
                     policy_status_view,
                     controller_mode,
                     mo.md(
-                        "Edit predict_scene, find_path and decide_command in the cells. "
-                        "Connected edits reach the next decision without restarting flight."
+                        "Edit predict_scene and find_path in the cells. Resilient decisions "
+                        "and persistent estimates live in src/wsorb/flight/guidance.py and "
+                        "estimation.py. Baseline controllers use the editable decide_command "
+                        "cell. Connected edits reach the next decision without restarting flight."
                     ),
                     mo.accordion(
                         {
@@ -2103,7 +2597,9 @@ def _(
                     cadence_hz,
                     mo.md(
                         "Timing edits update the existing worker; they never start flight. "
-                        "Shortening the limit below elapsed time stops and pauses the controller."
+                        "Shortening the limit below elapsed time ends control. Resilient mode "
+                        "stops renewal and lets the native lease expire; baseline modes pause "
+                        "during cleanup. Resilient cadence must be faster than its lease interval."
                     ),
                     mo.accordion(
                         {
@@ -2227,6 +2723,7 @@ def _(
     flight_preset,
     get_applied_config,
     get_camera_report,
+    get_proposal_draft,
     history_csv,
     json_bytes,
     lab_source_path,
@@ -2258,7 +2755,13 @@ def _(
                 for path in sorted(_flight_dir.glob("*.py"))
             }
         )
-        for _name in ("experiment.py", "experiment_io.py"):
+        for _name in (
+            "experiment.py",
+            "experiment_io.py",
+            "proposals.py",
+            "standby.py",
+            "local_api.py",
+        ):
             _sources[f"src/wsorb/{_name}, saved file at export"] = (
                 _flight_dir.parent / _name
             ).read_bytes()
@@ -2273,6 +2776,7 @@ def _(
                 "requested_cadence_hz": cadence_hz.value,
                 "selected_schedule_row": schedule_slot.value,
                 "world_geometry_controls": world_settings_draft,
+                "approved_world_proposal": get_proposal_draft(),
                 "flight_preset": flight_preset.value,
                 "debris_distribution": distribution_draft,
                 "placement_xyz_draft_m": dict(placement_controls.value),

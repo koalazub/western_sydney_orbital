@@ -2,7 +2,7 @@ use super::{capture, model::*, optics};
 use crate::{
     camera::SimulationCamera,
     domain::{EntityId, ShipCameraId},
-    model::Snapshot,
+    model::{SensorDelivery, SensorFaultMode, Snapshot},
     scenario::settings,
 };
 use bevy::{
@@ -25,9 +25,86 @@ const AIM_SOURCE_URL: &str = "https://github.com/SimDynamX/STU4-Solution/blob/85
 pub(crate) fn status() -> String {
     let snapshot = crate::snapshot();
     STATE.with(|state| {
-        serde_json::to_string(&report(&state.borrow(), &snapshot))
-            .expect("sensor metadata is finite")
+        let mut value: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&report(&state.borrow(), &snapshot))
+                .expect("finite sensor metadata"),
+        )
+        .expect("valid sensor JSON");
+        let navigation_ready = snapshot
+            .sensor_state
+            .as_ref()
+            .is_none_or(|state| state.navigation_delivery() == SensorDelivery::Ready);
+        let mut views = Vec::new();
+        for camera in [ShipCameraId::Top, ShipCameraId::Bottom] {
+            let mode = capture::mode(&snapshot, camera);
+            let cached = capture::cached_info(camera);
+            let current = &mut value["cameras"][camera.index()];
+            if mode != SensorFaultMode::Nominal {
+                let sample = cached.as_ref().filter(|_| mode == SensorFaultMode::Frozen);
+                current["simulation_time_s"] =
+                    serde_json::json!(sample.map(|sample| sample.simulation_time_s));
+                current["position_m"] = serde_json::json!(sample.map(|sample| sample.position_m));
+                current["rotation"] = serde_json::json!(sample.map(|sample| sample.rotation));
+            }
+            if !navigation_ready {
+                current["position_m"] = serde_json::Value::Null;
+                current["rotation"] = serde_json::Value::Null;
+            }
+            let frame = match mode {
+                SensorFaultMode::Nominal => state.borrow().frames[camera.index()].clone(),
+                SensorFaultMode::Frozen => cached,
+                SensorFaultMode::Unavailable => None,
+            };
+            if let Some(frame) = frame {
+                let mut frame: serde_json::Value = serde_json::from_str(
+                    &serde_json::to_string(&frame).expect("finite frame metadata"),
+                )
+                .expect("valid frame JSON");
+                if !navigation_ready {
+                    frame["position_m"] = serde_json::Value::Null;
+                    frame["rotation"] = serde_json::Value::Null;
+                }
+                views.push(frame);
+            }
+        }
+        value["views"] = serde_json::json!(views);
+        value.to_string()
     })
+}
+
+pub(crate) fn invalidate_trial() {
+    STATE.with(|state| state.borrow_mut().frames = [None, None]);
+}
+
+/// Camera health describes completed RGB readback, not scheduled metadata.
+pub(crate) fn attach_health(
+    report: &mut serde_json::Value,
+    sensor_state: Option<&crate::model::SensorState>,
+) {
+    let Some(units) = report["sensor_health"]["units"].as_array_mut() else {
+        return;
+    };
+    let revision = sensor_state.map_or(0, |state| state.revision);
+    for camera in [ShipCameraId::Top, ShipCameraId::Bottom] {
+        let id = capture::unit(camera);
+        let Some(health) = units
+            .iter_mut()
+            .find(|health| health["id"] == serde_json::json!(id))
+        else {
+            continue;
+        };
+        let mode = sensor_state.map_or(SensorFaultMode::Nominal, |state| state.mode(id));
+        let cached = capture::cached_info(camera);
+        let waiting = mode == SensorFaultMode::Nominal
+            && capture::completed_revision(camera) != Some(revision);
+        let delivery = crate::model::sensor_delivery(mode, cached.is_some(), waiting);
+        health["delivery"] = serde_json::json!(delivery);
+        let delivered = cached
+            .as_ref()
+            .filter(|_| matches!(delivery, SensorDelivery::Ready | SensorDelivery::Frozen));
+        health["sample_time_s"] = serde_json::json!(delivered.map(|frame| frame.simulation_time_s));
+        health["sequence"] = serde_json::json!(delivered.map(|frame| frame.sequence));
+    }
 }
 
 /// Apply the real helper's clipping, not debug-view rotation or optical zoom.
@@ -123,6 +200,7 @@ pub(super) fn setup(
         last_sample_wall_s: f64::NEG_INFINITY,
         sequence: 0,
         frames: [None, None],
+        trial_revision: crate::session::trial_revision(),
     });
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -250,12 +328,22 @@ pub(super) fn update(
     tickets: Query<(Entity, &CaptureTicket)>,
 ) {
     let now = time.elapsed_secs_f64();
+    let trial_revision = crate::session::trial_revision();
+    let sensor_revision = crate::session::sensor_revision();
+    if images.trial_revision != trial_revision {
+        images.trial_revision = trial_revision;
+        images.frames = [None, None];
+        images.last_sample_wall_s = f64::NEG_INFINITY;
+    }
     for (entity, ticket) in &tickets {
-        if now > ticket.deadline_wall_s {
+        if now > ticket.deadline_wall_s
+            || ticket.trial_revision != trial_revision
+            || ticket.sensor_revision != sensor_revision
+        {
             capture::reject(
                 ticket.token,
                 ticket.info.camera,
-                "Sensor readback timed out",
+                "Sensor readback timed out or was invalidated by a policy/trial change",
             );
             commands.entity(entity).despawn();
         }
@@ -270,6 +358,17 @@ pub(super) fn update(
     let aims = STATE.with(|state| state.borrow().aims);
     for (sensor, mut transform, mut camera, mut projection, mut exposure) in &mut cameras {
         let index = sensor.0.index();
+        if capture::mode(&snapshot, sensor.0) != SensorFaultMode::Nominal {
+            camera.is_active = false;
+            for request in requests.iter().filter(|request| request.camera == sensor.0) {
+                capture::reject(
+                    request.token,
+                    request.camera,
+                    "Camera delivery changed before capture rendering.",
+                );
+            }
+            continue;
+        }
         let aim = aims[index];
         *transform = mounted_pose(sensor.0, &snapshot, aim);
         // The debug camera's first-person lens and dolly controls never reach here.
@@ -282,6 +381,16 @@ pub(super) fn update(
         }
         let frame = info(sensor.0, aim, *transform, snapshot.time_s, images.sequence);
         for request in requests.iter().filter(|request| request.camera == sensor.0) {
+            if request.trial_revision != trial_revision
+                || request.sensor_revision != sensor_revision
+            {
+                capture::reject(
+                    request.token,
+                    request.camera,
+                    "Capture request belongs to an earlier sensor policy or trial.",
+                );
+                continue;
+            }
             commands
                 .spawn((
                     ReadbackOnce::texture(images.images[index].clone()),
@@ -289,6 +398,8 @@ pub(super) fn update(
                         token: request.token,
                         info: frame.clone(),
                         deadline_wall_s: now + 15.0,
+                        trial_revision,
+                        sensor_revision,
                     },
                 ))
                 .observe(capture::complete);
@@ -303,6 +414,95 @@ mod tests {
     use super::*;
     use crate::{model::PhysicsCommand, physics::Simulation};
     use bevy::camera::CameraProjection;
+
+    #[test]
+    fn a_native_camera_fault_disables_render_activation_and_never_claims_completed_pixels() {
+        use crate::{
+            api::Dispatch,
+            model::{SensorFaultMode, SensorFaultTarget},
+        };
+        let _restore = RestoreState::fresh();
+        let mut experiment = crate::model::ExperimentSettings::default();
+        experiment.debris.count = 0;
+        crate::session::dispatch(Dispatch::Physics(PhysicsCommand::ConfigureExperiment {
+            settings: experiment,
+            seed: Some(100),
+        }))
+        .unwrap();
+        crate::session::dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+            target: SensorFaultTarget::AllAvionics,
+            mode: SensorFaultMode::Unavailable,
+            duration_sim_s: Some(1.0),
+        }))
+        .unwrap();
+        let mut assets = Assets::<Image>::default();
+        let handles: [Handle<Image>; 2] = std::array::from_fn(|_| {
+            assets.add(Image::new_target_texture(
+                512,
+                512,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            ))
+        });
+        let mut app = App::new();
+        app.insert_resource(assets)
+            .insert_resource(Time::<Real>::default())
+            .insert_resource(SensorImages {
+                images: handles,
+                last_sample_wall_s: f64::NEG_INFINITY,
+                sequence: 0,
+                frames: [None, None],
+                trial_revision: crate::session::trial_revision(),
+            })
+            .add_systems(Update, update);
+        let cameras = [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| {
+            app.world_mut()
+                .spawn((
+                    SensorCamera(id),
+                    Transform::IDENTITY,
+                    Camera::default(),
+                    Projection::Perspective(optics::projection(&settings().ship_cameras)),
+                    Exposure { ev100: 15.0 },
+                ))
+                .id()
+        });
+        app.update();
+        for entity in cameras {
+            assert!(!app.world().get::<Camera>(entity).unwrap().is_active);
+        }
+        assert!(
+            app.world()
+                .resource::<SensorImages>()
+                .frames
+                .iter()
+                .all(Option::is_none)
+        );
+        for camera in [ShipCameraId::Top, ShipCameraId::Bottom] {
+            assert!(capture::cached_info(camera).is_none());
+        }
+        let unavailable: serde_json::Value = serde_json::from_str(&status()).unwrap();
+        for camera in unavailable["cameras"].as_array().unwrap() {
+            assert!(camera["position_m"].is_null());
+            assert!(camera["rotation"].is_null());
+            assert!(camera["simulation_time_s"].is_null());
+        }
+        crate::session::dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+            target: SensorFaultTarget::AllAvionics,
+            mode: SensorFaultMode::Frozen,
+            duration_sim_s: Some(1.0),
+        }))
+        .unwrap();
+        app.update();
+        let frozen: serde_json::Value = serde_json::from_str(&status()).unwrap();
+        assert_eq!(frozen["views"], serde_json::json!([]));
+        for entity in cameras {
+            assert!(!app.world().get::<Camera>(entity).unwrap().is_active);
+        }
+        // No RenderPlugin/readback event is supplied. This tests the real native
+        // gating decision only, not successful GPU rendering or synthetic pixels.
+        crate::session::dispatch(Dispatch::Physics(PhysicsCommand::ClearSensorFaults)).unwrap();
+        crate::session::dispatch(Dispatch::Physics(PhysicsCommand::Step { seconds: 0.1 })).unwrap();
+    }
 
     fn close(actual: Vec3, expected: Vec3) {
         assert!(
@@ -374,6 +574,7 @@ mod tests {
                 last_sample_wall_s: 0.0,
                 sequence: 0,
                 frames: [None, None],
+                trial_revision: crate::session::trial_revision(),
             })
             .add_systems(Update, update);
         let entities = [ShipCameraId::Top, ShipCameraId::Bottom].map(|id| {
@@ -438,6 +639,8 @@ mod tests {
                 token: 23,
                 info: ticket_info,
                 deadline_wall_s: 15.0,
+                trial_revision: crate::session::trial_revision(),
+                sensor_revision: crate::session::sensor_revision(),
             })
             .id();
 
@@ -630,6 +833,8 @@ mod tests {
             token: 23,
             info: sampled.clone(),
             deadline_wall_s: 15.0,
+            trial_revision: crate::session::trial_revision(),
+            sensor_revision: crate::session::sensor_revision(),
         };
         state.frames[camera.index()] = Some(sampled);
         state.pan_tilt(camera, 30.0, -10.0).unwrap();

@@ -12,6 +12,133 @@ use std::time::Duration;
 
 const STEP: Duration = Duration::from_millis(50);
 
+#[test]
+fn leased_commands_reject_changed_sensor_revision_and_expired_decisions_atomically() {
+    let _app = fresh_app();
+    dispatch(Dispatch::Physics(PhysicsCommand::Step { seconds: 0.2 })).unwrap();
+    let state = snapshot();
+    let expected = CommandContext {
+        trial_revision: trial_revision(),
+        tuning_revision: state.tuning_revision,
+        manual_interventions: state.manual_interventions,
+        seed: state.seed,
+        running: false,
+    };
+    let request = crate::model::LeasedCommand {
+        accel: [0.0, 0.0, 0.2],
+        angular_accel: [0.0; 3],
+        lease_sim_s: 0.1,
+        source_time_s: 0.0,
+        controller_fence: None,
+    };
+    let before = physics_json();
+    assert!(matches!(
+        dispatch_leased_checked(request.clone(), expected, sensor_revision()),
+        Err(CommandError::CommandExpired)
+    ));
+    assert_eq!(physics_json(), before);
+    let response: Value = serde_json::from_str(&crate::api::control(&serde_json::json!({
+        "op": "set_leased_command", "accel": request.accel, "angular_accel": request.angular_accel,
+        "lease_sim_s": request.lease_sim_s, "source_time_s": request.source_time_s,
+        "expected_sensor_revision": sensor_revision(),
+        "expected_context": {"trial_revision": expected.trial_revision, "tuning_revision": expected.tuning_revision,
+            "manual_interventions": expected.manual_interventions, "seed": expected.seed, "running": expected.running},
+    }).to_string())).unwrap();
+    assert_eq!(response["code"], "command_expired");
+    assert_eq!(physics_json(), before);
+    let revision = sensor_revision();
+    dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+        target: crate::model::SensorFaultTarget::RadarBackup,
+        mode: crate::model::SensorFaultMode::Unavailable,
+        duration_sim_s: Some(1.0),
+    }))
+    .unwrap();
+    let changed = physics_json();
+    assert!(matches!(
+        dispatch_leased_checked(
+            crate::model::LeasedCommand {
+                source_time_s: state.time_s,
+                ..request
+            },
+            expected,
+            revision
+        ),
+        Err(CommandError::StaleContext)
+    ));
+    assert_eq!(physics_json(), changed);
+}
+
+#[test]
+fn fault_controls_require_authority_and_do_not_take_keyboard_command_ownership() {
+    let mut app = running_with_key(KeyCode::KeyW);
+    let keyboard = keyboard_state();
+    let runtime = playback_state();
+    let source = snapshot();
+    dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+        target: crate::model::SensorFaultTarget::RadarPrimary,
+        mode: crate::model::SensorFaultMode::Frozen,
+        duration_sim_s: Some(0.05),
+    }))
+    .unwrap();
+    assert_eq!(keyboard_state(), keyboard);
+    assert_eq!(playback_state(), runtime);
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        ship(&source).commanded_accel_mps2
+    );
+    frame(&mut app, STEP);
+    assert!(keyboard_owns_command());
+    assert_eq!(
+        ship(&snapshot()).commanded_accel_mps2,
+        ship(&source).commanded_accel_mps2
+    );
+    app.world_mut().resource_mut::<PlaybackState>().can_control = false;
+    frame(&mut app, Duration::ZERO);
+    for command in [
+        PhysicsCommand::SetSensorFault {
+            target: crate::model::SensorFaultTarget::AllAvionics,
+            mode: crate::model::SensorFaultMode::Unavailable,
+            duration_sim_s: Some(1.0),
+        },
+        PhysicsCommand::ClearSensorFaults,
+    ] {
+        assert_rejected_unchanged(command);
+    }
+}
+
+#[test]
+fn autonomous_lease_expires_in_running_native_frames_without_pausing() {
+    let mut app = fresh_app();
+    let source = snapshot();
+    dispatch_leased_checked(
+        crate::model::LeasedCommand {
+            accel: [0.0, 0.0, 0.5],
+            angular_accel: [0.0; 3],
+            lease_sim_s: 0.1,
+            source_time_s: source.time_s,
+            controller_fence: None,
+        },
+        CommandContext {
+            trial_revision: trial_revision(),
+            tuning_revision: source.tuning_revision,
+            manual_interventions: source.manual_interventions,
+            seed: source.seed,
+            running: false,
+        },
+        sensor_revision(),
+    )
+    .unwrap();
+    request_action(EngineAction::Play(PlaybackRate::RealTime));
+    for _ in 0..4 {
+        frame(&mut app, STEP);
+    }
+    assert!(is_running());
+    assert!(snapshot().time_s >= 0.2 - 1e-12);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(observation()["command_watchdog"]["status"], "expired");
+    assert_eq!(snapshot().manual_interventions, source.manual_interventions);
+}
+
 fn fresh_app() -> App {
     SIMULATION.with(|sim| *sim.borrow_mut() = Simulation::new_default());
     ACTIONS.with(|actions| actions.borrow_mut().clear());
@@ -1186,4 +1313,423 @@ fn configure_builds_the_real_profile_and_reset_repeats_the_active_trial() {
         "Reset must repeat the active physical configuration"
     );
     assert_immediate_pause();
+}
+
+fn context_json(context: CommandContext) -> Value {
+    serde_json::json!({
+        "trial_revision": context.trial_revision, "tuning_revision": context.tuning_revision,
+        "manual_interventions": context.manual_interventions, "seed": context.seed,
+        "running": context.running,
+    })
+}
+
+fn control_call(mut request: Value) -> Value {
+    request["expected_context"] = context_json(current_context());
+    serde_json::from_str(&crate::api::control(&request.to_string())).unwrap()
+}
+
+fn control_claim(run: &str, controller: &str, epoch: u32, term: u32, duration: f64) -> Value {
+    serde_json::json!({
+        "op": "claim_control", "run_id": run, "controller_id": controller,
+        "expected_epoch": epoch, "expected_term": term, "source_time_s": snapshot().time_s,
+        "lease_sim_s": duration,
+    })
+}
+
+fn actual_fence() -> crate::model::ControlFence {
+    serde_json::from_value(observation()["control_authority"].clone())
+        .map(|authority: crate::model::ControlAuthority| authority.fence().unwrap())
+        .unwrap()
+}
+
+fn control_lease(fence: &crate::model::ControlFence, duration: f64) -> Value {
+    serde_json::json!({
+        "op": "set_leased_command", "accel": [0.0, 0.0, 0.5], "angular_accel": [0.0, 0.0, 0.0],
+        "lease_sim_s": duration, "source_time_s": snapshot().time_s,
+        "expected_sensor_revision": sensor_revision(), "controller_fence": fence,
+    })
+}
+
+fn assert_control_rejected_unchanged(mut request: Value, code: &str) {
+    if request.get("expected_context").is_none() {
+        request["expected_context"] = context_json(current_context());
+    }
+    let before = physics_json();
+    let published = snapshot();
+    let runtime = playback_state();
+    let keyboard = keyboard_state();
+    let actions = queued_actions();
+    let response: Value = serde_json::from_str(&crate::api::control(&request.to_string())).unwrap();
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(response["code"], code, "{response}");
+    assert_eq!(physics_json(), before);
+    assert!(Rc::ptr_eq(&published, &snapshot()));
+    assert_eq!(playback_state(), runtime);
+    assert_eq!(keyboard_state(), keyboard);
+    assert_eq!(queued_actions(), actions);
+}
+
+#[test]
+fn native_api_excludes_healthy_standby_and_rejects_a_late_primary_with_fresh_context() {
+    let mut app = fresh_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.1)),
+        serde_json::json!({"ok": true})
+    );
+    let primary = actual_fence();
+    assert_eq!(primary.term, 1);
+    assert_eq!(control_call(control_lease(&primary, 0.1))["ok"], true);
+    assert_control_rejected_unchanged(
+        control_claim("run", "standby", primary.epoch, primary.term, 0.2),
+        "stale_context",
+    );
+    dispatch_play_checked(PlaybackRate::RealTime, current_context()).unwrap();
+    for _ in 0..3 {
+        frame(&mut app, STEP);
+    }
+    assert!(is_running());
+    assert_eq!(observation()["control_authority"]["status"], "expired");
+    assert_eq!(observation()["control_authority"]["epoch"], primary.epoch);
+    assert_eq!(
+        control_call(control_claim(
+            "run",
+            "standby",
+            primary.epoch,
+            primary.term,
+            0.3
+        ))["ok"],
+        true
+    );
+    let standby = actual_fence();
+    assert_eq!(standby.term, primary.term + 1);
+    assert_eq!(control_call(control_lease(&standby, 0.3))["ok"], true);
+    assert_control_rejected_unchanged(control_lease(&primary, 0.3), "stale_context");
+    frame(&mut app, STEP);
+    assert!(
+        applied_physics()
+            .unwrap()
+            .last_actuator_application
+            .unwrap()
+            .force_body_n[2]
+            > 0.0
+    );
+    let before = snapshot();
+    let velocity = ship(&before).velocity;
+    assert_eq!(
+        control_call(serde_json::json!({
+            "op": "release_control", "run_id": "run", "expected_epoch": primary.epoch,
+        }))["ok"],
+        true
+    );
+    assert!(is_running(), "release must not synthesize a Pause");
+    assert_eq!(snapshot().time_s, before.time_s);
+    assert_eq!(ship(&snapshot()).velocity, velocity);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    frame(&mut app, STEP);
+    assert!(snapshot().time_s > before.time_s);
+}
+
+#[test]
+fn original_consent_cannot_claim_release_or_resume_after_native_pause() {
+    for start_running in [false, true] {
+        let mut app = fresh_app();
+        assert_eq!(
+            control_call(control_claim("run", "primary", 0, 0, 0.3))["ok"],
+            true
+        );
+        let primary = actual_fence();
+        assert_eq!(control_call(control_lease(&primary, 0.3))["ok"], true);
+        dispatch_play_checked(PlaybackRate::RealTime, current_context()).unwrap();
+        if start_running {
+            frame(&mut app, STEP);
+            assert!(is_running());
+        }
+        let pause_time = snapshot().time_s;
+        // A real native P/Pause intent must supersede a controller start already queued.
+        request_action(EngineAction::Pause);
+        assert_eq!(observation()["control_authority"]["status"], "revoked");
+        assert_eq!(
+            observation()["control_authority"]["epoch"],
+            primary.epoch + 1
+        );
+        frame(&mut app, STEP);
+        assert!(!is_running());
+        assert_eq!(snapshot().time_s, pause_time);
+        assert_control_rejected_unchanged(
+            control_claim("run", "standby", primary.epoch, primary.term, 0.3),
+            "stale_context",
+        );
+        assert_control_rejected_unchanged(
+            serde_json::json!({
+                "op": "play", "rate": 1.0,
+            }),
+            "stale_context",
+        );
+        dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+            accel: [0.0, 0.2, 0.0],
+            angular_accel: [0.0; 3],
+        }))
+        .unwrap();
+        assert_control_rejected_unchanged(
+            serde_json::json!({
+                "op": "release_control", "run_id": "run", "expected_epoch": primary.epoch,
+            }),
+            "stale_context",
+        );
+        assert_control_rejected_unchanged(control_lease(&primary, 0.3), "stale_context");
+        for _ in 0..3 {
+            frame(&mut app, STEP);
+        }
+        assert!(!is_running());
+        assert_eq!(snapshot().time_s, pause_time);
+        assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0, 0.2, 0.0]);
+    }
+}
+
+#[test]
+fn committed_setup_pause_is_internal_sync_and_does_not_revoke_a_new_cohort() {
+    let mut app = fresh_app();
+    let mut settings = ExperimentSettings::default();
+    settings.debris.count = 0;
+    dispatch(Dispatch::Physics(PhysicsCommand::ConfigureFlight {
+        settings,
+        seed: Some(100),
+        preset: crate::model::FlightPreset::MarsFacingL1,
+    }))
+    .unwrap();
+    assert_eq!(queued_actions_for_tests(), 1);
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.3))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.3))["ok"], true);
+    dispatch_play_checked(PlaybackRate::RealTime, current_context()).unwrap();
+    frame(&mut app, STEP);
+    assert!(is_running());
+    assert_eq!(actual_fence(), primary);
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert!(snapshot().mission.fuel_used_kg > 0.0);
+}
+
+#[test]
+fn release_wins_over_queued_checked_play_and_stale_release_cannot_clear_a_new_consent_run() {
+    let mut app = fresh_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.3))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.3))["ok"], true);
+    dispatch_play_checked(PlaybackRate::RealTime, current_context()).unwrap();
+    assert_eq!(
+        control_call(serde_json::json!({
+            "op": "release_control", "run_id": "run", "expected_epoch": primary.epoch,
+        }))["ok"],
+        true
+    );
+    frame(&mut app, STEP);
+    assert!(!is_running());
+    assert_eq!(snapshot().time_s, 0.0);
+    let authority = observation()["control_authority"].clone();
+    assert_eq!(
+        control_call(control_claim(
+            "new-run",
+            "new-primary",
+            authority["epoch"].as_u64().unwrap() as u32,
+            primary.term,
+            0.3
+        ))["ok"],
+        true
+    );
+    let newer = actual_fence();
+    assert_eq!(control_call(control_lease(&newer, 0.3))["ok"], true);
+    assert_control_rejected_unchanged(
+        serde_json::json!({
+            "op": "release_control", "run_id": "run", "expected_epoch": primary.epoch,
+        }),
+        "stale_context",
+    );
+    assert_eq!(actual_fence(), newer);
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0, 0.0, 0.5]);
+}
+
+#[test]
+fn claim_validates_context_and_original_source_deadline_without_mutating_the_session() {
+    let _app = fresh_app();
+    dispatch(Dispatch::Physics(PhysicsCommand::Step { seconds: 0.2 })).unwrap();
+    let mut old = control_claim("run", "primary", 0, 0, 0.1);
+    old["source_time_s"] = serde_json::json!(0.0);
+    assert_control_rejected_unchanged(old, "command_expired");
+    let mut changed = control_claim("run", "primary", 0, 0, 0.3);
+    let context = CommandContext {
+        trial_revision: trial_revision() + 1,
+        ..current_context()
+    };
+    changed["expected_context"] = context_json(context);
+    assert_control_rejected_unchanged(changed, "stale_context");
+}
+
+fn real_clock_app() -> App {
+    let mut app = fresh_app();
+    // Use Bevy's actual automatic runtime clock, not a supplied test timestamp.
+    app.add_plugins(bevy::time::TimePlugin)
+        .edit_schedule(Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+    app.update();
+    app
+}
+
+#[test]
+fn paused_real_runtime_expires_a_dead_primary_before_play_and_allows_same_consent_standby() {
+    for owns_force in [false, true] {
+        let mut app = real_clock_app();
+        assert_eq!(
+            control_call(control_claim("run", "primary", 0, 0, 0.05))["ok"],
+            true
+        );
+        let primary = actual_fence();
+        if owns_force {
+            assert_eq!(control_call(control_lease(&primary, 0.05))["ok"], true);
+        }
+        let before = snapshot();
+        let runtime_start = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+        assert_control_rejected_unchanged(
+            control_claim("run", "standby", primary.epoch, primary.term, 0.3),
+            "stale_context",
+        );
+        // No CheckedPlay is ever sent. Only real elapsed runtime advances.
+        std::thread::sleep(Duration::from_millis(100));
+        app.update();
+        let runtime_now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+        assert!(runtime_now - runtime_start >= 0.05);
+        assert!(!is_running());
+        assert_eq!(snapshot().time_s, before.time_s);
+        assert_eq!(ship(&snapshot()).position, ship(&before).position);
+        assert_eq!(ship(&snapshot()).velocity, ship(&before).velocity);
+        assert_eq!(snapshot().mission.fuel_used_kg, before.mission.fuel_used_kg);
+        assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+        let authority = observation()["control_authority"].clone();
+        assert_eq!(authority.as_object().unwrap().len(), 6);
+        assert_eq!(authority["status"], "expired");
+        assert_eq!(authority["epoch"], primary.epoch);
+        assert_eq!(authority["term"], primary.term);
+        assert_eq!(authority["run_id"], "run");
+        assert_eq!(authority["expires_at_sim_time_s"], before.time_s + 0.05);
+        if owns_force {
+            assert_eq!(observation()["command_watchdog"]["status"], "expired");
+        }
+        assert_eq!(
+            control_call(control_claim(
+                "run",
+                "standby",
+                primary.epoch,
+                primary.term,
+                0.3
+            ))["ok"],
+            true
+        );
+        let standby = actual_fence();
+        assert_eq!(standby.epoch, primary.epoch);
+        assert_eq!(standby.term, primary.term + 1);
+        assert_eq!(control_call(control_lease(&standby, 0.3))["ok"], true);
+        assert_control_rejected_unchanged(control_lease(&primary, 0.3), "stale_context");
+        assert!(
+            !is_running(),
+            "a successful standby claim does not itself resume playback"
+        );
+    }
+}
+
+#[test]
+fn runtime_expiry_cannot_clear_manual_force_or_resume_archived_authority() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.05))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.05))["ok"], true);
+    dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: [0.0, 0.2, 0.0],
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
+    let manual = physics_json();
+    std::thread::sleep(Duration::from_millis(100));
+    app.update();
+    assert_eq!(physics_json(), manual);
+    assert!(!is_running());
+    let revoked = actual_authority();
+    assert_eq!(
+        control_call(control_claim(
+            "new-run",
+            "primary",
+            revoked.epoch,
+            revoked.term,
+            0.05
+        ))["ok"],
+        true
+    );
+    let next = actual_fence();
+    assert_eq!(control_call(control_lease(&next, 0.05))["ok"], true);
+    std::thread::sleep(Duration::from_millis(100));
+    app.update();
+    let expired = snapshot();
+    assert_eq!(observation()["control_authority"]["status"], "expired");
+    assert!(
+        observation()["control_authority"]["expires_at_sim_time_s"]
+            .as_f64()
+            .unwrap()
+            > expired.time_s
+    );
+    dispatch(Dispatch::Physics(PhysicsCommand::Restore {
+        state: Box::new(expired.as_ref().clone()),
+    }))
+    .unwrap();
+    assert_eq!(observation()["control_authority"]["status"], "revoked");
+    let restored = physics_json();
+    std::thread::sleep(Duration::from_millis(100));
+    app.update();
+    assert_eq!(physics_json(), restored);
+    assert_eq!(snapshot().time_s, expired.time_s);
+    assert!(!is_running());
+    assert_control_rejected_unchanged(control_lease(&next, 0.3), "stale_context");
+}
+
+fn actual_authority() -> crate::model::ControlAuthority {
+    serde_json::from_value(observation()["control_authority"].clone()).unwrap()
+}
+
+#[test]
+fn a_new_run_claim_after_runtime_expiry_uses_its_actual_granted_epoch() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.05))["ok"],
+        true
+    );
+    let old = actual_fence();
+    std::thread::sleep(Duration::from_millis(100));
+    app.update();
+    assert_eq!(observation()["control_authority"]["status"], "expired");
+    assert_eq!(
+        control_call(control_claim(
+            "new-run",
+            "new-primary",
+            old.epoch,
+            old.term,
+            0.3
+        ))["ok"],
+        true
+    );
+    let granted = actual_fence();
+    assert_eq!(granted.epoch, old.epoch + 1);
+    assert_eq!(granted.term, old.term + 1);
+    let assumed = crate::model::ControlFence {
+        epoch: old.epoch,
+        ..granted.clone()
+    };
+    assert_control_rejected_unchanged(control_lease(&assumed, 0.3), "stale_context");
+    assert_eq!(control_call(control_lease(&granted, 0.3))["ok"], true);
 }

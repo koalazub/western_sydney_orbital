@@ -139,20 +139,29 @@ Start with the default 500 bodies. Larger trials can request 10,000 or 100,000 r
 
 ## Use Python for guided flights
 
+The same built engine can run without a browser:
+
+```sh
+WSORB_LAB=1 WSORB_HEADLESS=1 just local
+```
+
+This starts an explicit, separate native-headless flight through the existing private loopback API. It runs the actual physics, sensor delivery, playback and telemetry schedules. Renderer status stays unstarted and camera capture reports no sample; no browser or replacement image is involved. The notebook connects using the private connection file as usual. **Pause physics** works without a game window. Starting this mode does not attach to or reset a flight already open in a browser.
+
 In the notebook:
 
 1. Open **Flight** and select **Connect / Refresh**. This watches the existing flight and publishes Python guidance. It does not reset, pause, resume or command thrust.
-2. Open **Python policy** to inspect or edit prediction, path planning and control functions. The suggested route uses A* path search; it remains advisory until a controller sends commands.
+2. Open **Python policy** to inspect prediction and A* search. The default resilient controller keeps state estimates, radar selection and route progress in the Python flight modules. A route remains advisory until a controller sends commands.
 3. Choose the controller and its settings. Changes to connected notebook functions and supported controls reach the existing worker without restarting the flight.
 4. Select **Run controller** to hand over flight control. This can resume an eligible paused flight after its first valid command.
-5. Watch the game and **History** together. A candidate path is not proof that every unseen obstacle or flight-dynamics effect has been checked.
-6. Use **Pause / Stop** to end the notebook worker and request zero thrust and paused physics. To resume read-only guidance afterwards, select **Connect / Refresh** again.
+5. Watch the native mission result and checkpoint range in **Flight**, alongside the game and **History**. A candidate path or a running controller is not checkpoint arrival. The stock local mission must report `success` inside its 50 m arrival region.
+6. Use **Stop Python control** to end the notebook worker and its standby. Resilient mode requests a guarded native release without pausing physics or clearing a newer manual command. If release cannot be confirmed, native expiry still bounds its old command. Use **P** in the game or **Pause physics** in the notebook to pause. The older baseline controllers still stop and pause during cleanup. Select **Connect / Refresh** to resume read-only guidance.
 
 Keep one controller in charge of a game. Manual flight, native pause or a placement/reset can end Python's control; the worker must not overwrite a manual takeover. Playing the simulation again is not the same as requesting another Python-controlled run.
 
 | Notebook tab | Use it for |
 | --- | --- |
 | Flight | Connect, run or stop the controller and inspect its current status. |
+| Resilience | Inspect sensors, estimates, controller ownership and the standby. Interrupt primary decisions or fail and restore sensor delivery. |
 | Ship | Change live ship inputs and inspect their actual readbacks. |
 | Debris | Change live stream inputs and prepare clearly labelled new-world debris drafts. |
 | Launch | Move the launchpad in the game, reset the flight or explicitly regenerate the world. Advanced lander-only placement is separate. |
@@ -164,9 +173,33 @@ Keep one controller in charge of a game. Manual flight, native pause or a placem
 
 Run duration is counted from the original Run action. Shortening it below the elapsed simulation time ends that controller; it does not restart the clock. The requested decision rate controls how often Python tries to make a decision, not the physics step size.
 
+The notebook now starts with a 1,800-simulation-second flight budget and an 8 Hz decision target. This allows a full checkpoint attempt rather than ending after a short movement check. The limit is not an arrival-time prediction; native mission completion can stop flight sooner. The Flight readouts retain the actual range, relative speed, damage and navigation source time.
+
 **Reset flight** restarts the chosen trial while retaining live calibration. **Regenerate world** replaces it with the selected world settings and clears the live overrides, including the local thrust multiplier. Both stop the notebook worker; reconnect before another run.
 
 Notebook edits and supported live parameter changes do not require rebuilding the game. Changes to the Rust simulation do require `just build` and a game-page reload. Save results before rebuilding or reloading a flight you want to keep.
+
+### Review local configuration proposals
+
+In **Launch**, open the proposal importer inside the new-world controls. Download its versioned JSON template for local editing or NotebookLM suggestions. Upload the result, select **Review proposal**, inspect the normalized settings and content digest, then select **Use reviewed proposal as draft**. A changed file cannot reuse the previous review digest.
+
+Import and approval only stage data. They do not tune live hardware, write files or Git, replace the world, or give NotebookLM an execution API. Only the separate **Regenerate world** action applies the approved draft and explicitly replaces the run. An active imported draft is labelled above Launch; **Discard imported draft** restores the manual draft controls. Keep reviewed proposal files in the private repository, never connection descriptors or tokens.
+
+### Sensor failures and redundancy
+
+Select **Resilient route with radar failover** in Python policy. The Python worker selects genuine primary or backup radar readings, maintains an ownship position/velocity estimate with explicit source times and model uncertainty, and follows A* routes with persistent progress and bounded speed. Estimates are not fresh measurements. Radar row order is not an object identity, and unknown sideways debris motion remains an uncertainty allowance.
+
+Cruise speed increases only when a longer modeled stopping corridor clears the inflated observed obstacles. That lookahead does not extend a command lease or make old sensor readings fresh. Close approaches retain the shorter route checks; losing usable data still requests coasting, not automatic braking.
+
+The backup radar samples the actual physical world with a separate noise stream. Both radars still share the simulated radar bus and physical environment. Navigation telemetry is one unreplicated direct-state source. The two RGB cameras share GPU dependencies and do not supply navigation redundancy without a vision estimator.
+
+Open **Resilience** to fail one unit, the shared radar bus, navigation delivery or all avionics. Choose unavailable or frozen delivery and a duration, then select **Apply sensor failure**. These are bounded simulation-time delivery failures, not cloud-region outages or replacement sensor results. Frozen samples keep their original timestamps. An all-avionics blackout also withholds public navigation and physics telemetry from the controller. **Restore all sensor delivery** clears the faults without resetting the world.
+
+An explicit resilient Run starts a separate Python standby process. Native epoch/term checks allow one command writer. The standby can claim expired leadership using the original Run consent, but cannot undo manual pause, placement, reset or release. It uses checked-in algorithms and hot data settings, not unsaved notebook callbacks. **Interrupt primary decisions** withholds the primary's decisions and renewals for the selected simulation duration so actual expiry and takeover can be observed. Both processes share this host; this is not regional redundancy.
+
+Loss of usable data requests zero thrust. Recovery needs advancing authentic samples and a new checked route; polling a held sample cannot count as recovery. The native watchdog independently expires autonomous commands if Python blocks, exits or loses its connection. The default lease is 0.75 simulation seconds, with a native maximum of one second, anchored to the original decision input rather than network arrival. Controller authority also expires on the actual runtime clock, including paused frames. Reads and preview heartbeats never renew it. Use a controller cadence faster than its lease interval. Slow computation or higher playback rates can cause expiry rather than prolonged stale thrust.
+
+Zero thrust means coasting, not braking, hovering or a guaranteed collision-free orbit. The current radar covers a bounded sampled subset of the debris field, not every body in a large world. These controls exercise failure handling in the local model; they do not establish competition-runtime parity or complete hardware redundancy.
 
 ## Understand the camera views
 
@@ -208,7 +241,9 @@ Our practice world uses simplified gravity, terrain, contact, fuel and damage mo
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 
-Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](src/wsorb/stp_api.py) and [controller example](examples/stp_controller.py) are separate from the browser connection. The example begins with a zero-command policy; replace it with reviewed flight logic. Missing SDK access raises an error rather than supplying substitute results.
+Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](src/wsorb/stp_api.py) and [controller example](examples/stp_controller.py) are separate from the local connection. The example now has a reviewed, bounded target/radar/spin-damping baseline in [stp_policy.py](src/wsorb/stp_policy.py), disabled unless explicitly configured. Select exactly one of `WSORB_STP_POLICY_FILE` or `WSORB_STP_POLICY_JSON`; enabling schema `wsorb.stp_policy`, version 1 requires an independently established `radar_clock_offset_s`. SDK bootstrap arguments stay unchanged. No offset is guessed from a reading.
+
+This baseline has no terrain/arrival geometry, vision, independent navigation sensors or native watchdog parity. Its default wall-time budget is 30 seconds, bounded to 300; Python cleanup cannot guarantee zero thrust after process death or a blocked SDK call. Authentic licensed-runtime execution is still required. Missing SDK access raises an error rather than supplying substitute results.
 
 For technical details, use the [API and measurement reference](notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
 

@@ -2,13 +2,59 @@ use super::{calculations::waiting_report, data::*, instruments::*};
 use crate::model::ThrustApplication;
 use std::{cell::RefCell, fmt};
 
-thread_local! { static REPORT: RefCell<Report> = RefCell::new(waiting_report()); }
+thread_local! {
+    static REPORT: RefCell<Report> = RefCell::new(waiting_report());
+    static EXTERNAL_SAMPLE: RefCell<Option<(u32, serde_json::Value)>> = const { RefCell::new(None) };
+}
 
 pub(super) fn publish(report: Report) {
+    let snapshot = crate::snapshot();
+    if snapshot
+        .sensor_state
+        .as_ref()
+        .is_none_or(|state| state.navigation_delivery() == crate::model::SensorDelivery::Ready)
+    {
+        let sample = serde_json::to_value(&report).expect("finite telemetry report");
+        EXTERNAL_SAMPLE
+            .with(|cached| *cached.borrow_mut() = Some((crate::session::trial_revision(), sample)));
+    }
     REPORT.with(|state| *state.borrow_mut() = report);
 }
 
 pub(crate) fn status() -> String {
+    let snapshot = crate::snapshot();
+    if let Some(state) = &snapshot.sensor_state {
+        let delivery = state.navigation_delivery();
+        if delivery == crate::model::SensorDelivery::Frozen {
+            let frozen = EXTERNAL_SAMPLE.with(|cached| {
+                let cached = cached.borrow();
+                let (trial, value) = cached.as_ref()?;
+                let sample_time = state.navigation.sample.as_ref()?.sample_time_s;
+                (*trial == crate::session::trial_revision()
+                    && value["source_time_s"]
+                        .as_f64()
+                        .is_some_and(|time| time <= sample_time))
+                .then(|| value.clone())
+            });
+            if let Some(mut frozen) = frozen {
+                frozen["sensor_delivery"] = serde_json::json!(delivery);
+                return frozen.to_string();
+            }
+        }
+        if delivery != crate::model::SensorDelivery::Ready {
+            // Native instruments may keep their debug readback for the owner.
+            // The serialized external report cannot bypass navigation delivery.
+            let mut unavailable = waiting_report();
+            unavailable.status = ReportStatus::Unavailable;
+            unavailable
+                .input_issues
+                .push(InputIssue::SensorDeliveryUnavailable);
+            let mut value =
+                serde_json::to_value(unavailable).expect("finite unavailable telemetry");
+            value["sensor_delivery"] = serde_json::json!(delivery);
+            return value.to_string();
+        }
+    }
     REPORT.with(|state| {
         serde_json::to_string(&*state.borrow())
             .expect("telemetry reports contain only finite measurements")

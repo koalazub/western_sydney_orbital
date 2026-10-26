@@ -18,6 +18,7 @@ type Engine = {
   key_bindings_status: () => string;
   set_key_bindings: (json: string) => string;
   pinch_zoom: (logDistanceDelta: number) => void;
+  fullscreen_shortcut_allowed?: () => boolean;
   fullscreen_button_at: (x: number, y: number) => boolean;
   fullscreen_button_focused: () => boolean;
   notebook_button_at: (x: number, y: number) => boolean;
@@ -115,6 +116,8 @@ let lastHudStatus: unknown = null;
 let engineLoadTimings: EngineLoadTimings | null = null;
 let wasmInstantiationMs: number | null = null;
 let fullscreenPending = false;
+let fullscreenShortcutInputSample: number | null | undefined;
+let fullscreenShortcutInputSequence = 0;
 type TrustedAction = "fullscreen" | "notebook";
 let platformPress: { pointerId: number; action: TrustedAction } | null = null;
 let gestureScale: number | null = null;
@@ -507,10 +510,46 @@ function fullscreenChanged() {
   window.dispatchEvent(new Event("resize"));
 }
 
+function nativeHudInputSample(): number | null {
+  if (!engine) return null;
+  try {
+    const { samples } = JSON.parse(engine.hud_status());
+    return Number.isSafeInteger(samples) && samples > 0 ? samples : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberNativeShortcutInput(event: KeyboardEvent | PointerEvent) {
+  if (!ready || event.target !== canvas) return;
+  if (event instanceof KeyboardEvent && (event.code === "KeyX" || event.repeat)) return;
+  // Winit can batch R, Tab and pointer focus changes until a redraw. Do not use
+  // the preceding frame's permission before that native input has been handled.
+  const sequence = ++fullscreenShortcutInputSequence;
+  fullscreenShortcutInputSample = null;
+  queueMicrotask(() => {
+    // Sample after this event's handlers and any synchronous focus subevents.
+    // Only a later native frame may clear the fence, never a fullscreen retry.
+    if (sequence === fullscreenShortcutInputSequence) fullscreenShortcutInputSample = nativeHudInputSample();
+  });
+}
+
+function fullscreenShortcutAllowed() {
+  // Older or unavailable engines cannot authorize this shortcut. The native
+  // getter returns a copied bool and releases Rust borrows before any DOM API.
+  if (engine?.fullscreen_shortcut_allowed?.() !== true) return false;
+  if (fullscreenShortcutInputSample === undefined) return true;
+  const sample = nativeHudInputSample();
+  if (sample === null || fullscreenShortcutInputSample === null
+    || sample <= fullscreenShortcutInputSample) return false;
+  fullscreenShortcutInputSample = undefined;
+  return true;
+}
+
 function platformKey(event: KeyboardEvent) {
   if (!ready || !engine || event.isComposing || event.ctrlKey || event.metaKey || event.altKey
     || bindingsCapturing || document.activeElement !== canvas) return;
-  let action: TrustedAction | null = event.code === "KeyX" ? "fullscreen" : null;
+  let action: TrustedAction | null = event.code === "KeyX" && fullscreenShortcutAllowed() ? "fullscreen" : null;
   if (event.code === "Enter") {
     if (engine.fullscreen_button_focused()) action = "fullscreen";
     else if (engine.notebook_button_focused()) action = "notebook";
@@ -561,6 +600,13 @@ document.addEventListener("pointerlockchange", pointerLockChanged);
 for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
   document.addEventListener(name, fullscreenChanged);
 }
+// Record pending native input before Winit or movement-key propagation guards.
+// This only suppresses a stale X press; it never queues a fullscreen request.
+for (const name of ["pointerdown", "pointerup", "pointercancel"] as const) {
+  window.addEventListener(name, rememberNativeShortcutInput, { capture: true });
+}
+window.addEventListener("keydown", rememberNativeShortcutInput, { capture: true });
+window.addEventListener("keyup", rememberNativeShortcutInput, { capture: true });
 window.addEventListener("keydown", event => movementKey(event, true), { capture: true });
 window.addEventListener("keyup", event => movementKey(event, false), { capture: true });
 window.addEventListener("keydown", platformKey, { capture: true });

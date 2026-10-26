@@ -197,6 +197,7 @@ fn commit(state: &mut Placement, operation: Commit) {
         Err(crate::api::CommandError::StaleContext) =>
             "Placement cancelled because the flight changed. Choose the pad again to retry.".into(),
         Err(crate::api::CommandError::Rejected(error)) => format!("Pad unchanged. {error}"),
+        Err(crate::api::CommandError::CommandExpired) => "Pad unchanged. The autonomous command expired.".into(),
     });
 }
 

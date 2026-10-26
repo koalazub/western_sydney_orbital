@@ -1,14 +1,15 @@
-//! Geometry for browser actions that must run during trusted DOM input, before
-//! the next Bevy frame. This records native UI state and makes no browser calls.
+//! Native permission and geometry for browser actions during trusted DOM input,
+//! before the next Bevy frame. This records UI state and makes no browser calls.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use bevy::{
     camera::{RenderTarget, visibility::VisibilitySystems},
     input_focus::InputFocus,
     prelude::*,
+    text::EditableText,
     ui::{InteractionDisabled, UiSystems},
-    ui_widgets::Button,
+    ui_widgets::{Button, TextInput},
     window::{PrimaryWindow, WindowRef},
 };
 
@@ -64,16 +65,54 @@ impl HitTarget {
 
 thread_local! {
     static TARGETS: RefCell<[Option<HitTarget>; 2]> = const { RefCell::new([None, None]) };
+    static FULLSCREEN_SHORTCUT_ALLOWED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn install(app: &mut App) {
     TARGETS.with(|targets| *targets.borrow_mut() = [None, None]);
+    FULLSCREEN_SHORTCUT_ALLOWED.with(|allowed| allowed.set(false));
     app.add_systems(
         PostUpdate,
         register_platform_buttons
             .after(UiSystems::PostLayout)
             .after(VisibilitySystems::VisibilityPropagate),
     );
+    // Focus can change during widget dispatch, overlay updates and text editing.
+    // Publish only after all of those systems, without exporting an ECS borrow.
+    app.add_systems(Last, publish_fullscreen_shortcut_permission);
+}
+
+pub(super) fn fullscreen_shortcut_allowed() -> bool {
+    FULLSCREEN_SHORTCUT_ALLOWED.with(Cell::get) && shortcut_input_available()
+}
+
+fn shortcut_input_available() -> bool {
+    crate::camera::input_active()
+        && !super::instrument_editing()
+        && !crate::controls::binding_actions_blocked()
+        && !crate::launchpad::input_blocked()
+}
+
+type ShortcutFocus = Or<(
+    With<Button>,
+    With<super::InstrumentEditor>,
+    With<TextInput>,
+    With<EditableText>,
+)>;
+
+fn publish_fullscreen_shortcut_permission(
+    hud: Res<HudState>,
+    input_focus: Res<InputFocus>,
+    controls: Query<(), ShortcutFocus>,
+) {
+    // Unlike Enter on an enabled button, the global X shortcut belongs to no
+    // focused native control. Keep the editor and capture release guards too.
+    let allowed = !hud.reset_confirm_open
+        && input_focus
+            .get()
+            .is_none_or(|entity| !controls.contains(entity))
+        && shortcut_input_available();
+    FULLSCREEN_SHORTCUT_ALLOWED.with(|state| state.set(allowed));
 }
 
 pub(super) fn fullscreen_button_at(x: f32, y: f32) -> bool {

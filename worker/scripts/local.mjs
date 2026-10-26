@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const worker = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const publicRoot = resolve(worker, "public");
 const port = Number(process.env.PORT ?? 8787);
+if (process.env.WSORB_HEADLESS === "1" && process.env.WSORB_LAB !== "1") {
+  throw new Error("WSORB_HEADLESS=1 requires the private WSORB_LAB=1 local server.");
+}
 if (!Number.isInteger(port) || port < 0 || port > 65535) {
   throw new Error("PORT must be an integer from 0 to 65535.");
 }
@@ -22,7 +25,9 @@ try {
 if (!process.exitCode) {
   const rootRealPath = await realpath(publicRoot);
   const lab = process.env.WSORB_LAB === "1"
-    ? await (await import("./local-api.mjs")).createLocalApi({ worker, publicRoot, rootRealPath })
+    ? await (await import("./local-api.mjs")).createLocalApi({
+      worker, publicRoot, rootRealPath, headless: process.env.WSORB_HEADLESS === "1",
+    })
     : null;
   const contentTypes = {
     ".css": "text/css; charset=utf-8",
@@ -101,8 +106,8 @@ if (!process.exitCode) {
       const info = await lstat(actualPath);
       if (!info.isFile()) throw new Error("Not a file");
       if (lab && relativePath === "index.html") {
-        const html = await readFile(actualPath, "utf8");
-        const body = /<\/body>/i.test(html)
+        const html = lab.indexPage ?? await readFile(actualPath, "utf8");
+        const body = !lab.indexScript ? html : /<\/body>/i.test(html)
           ? html.replace(/<\/body>/i, `${lab.indexScript}\n</body>`)
           : `${html}\n${lab.indexScript}\n`;
         response.writeHead(200, {

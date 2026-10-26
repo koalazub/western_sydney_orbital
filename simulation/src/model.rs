@@ -7,6 +7,15 @@ pub use crate::terrain::{
     LandingSite, landing_site, landing_site_at_direction, landing_site_for, phobos_geometry,
 };
 use serde::{Deserialize, Serialize};
+#[path = "avionics.rs"]
+mod avionics;
+pub use avionics::{
+    CommandWatchdog, CommandWatchdogStatus, ControlAuthority, ControlAuthorityStatus, ControlClaim,
+    ControlFence, ControlRelease, LeaseError, LeasedCommand, NavigationDeliveryState,
+    NavigationSample, RadarDeliveryState, RadarFrame, RadarRow, SensorDelivery, SensorFault,
+    SensorFaultMode, SensorFaultTarget, SensorState, SensorUnitId, delivery as sensor_delivery,
+    valid_control_id,
+};
 #[path = "experiment_settings.rs"]
 mod experiment_settings;
 pub use experiment_settings::{
@@ -74,6 +83,9 @@ pub struct Snapshot {
     pub rng_state: u64,
     #[serde(default)]
     pub active_contacts: Vec<[EntityId; 2]>,
+    /// Additive sensor extension. Old archives keep their primary samples/RNG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_state: Option<SensorState>,
 }
 
 impl Snapshot {
@@ -249,6 +261,20 @@ pub enum PhysicsCommand {
         accel: [f64; 3],
         angular_accel: [f64; 3],
     },
+    SetLeasedCommand {
+        accel: [f64; 3],
+        angular_accel: [f64; 3],
+        lease_sim_s: f64,
+        source_time_s: f64,
+        controller_fence: Option<ControlFence>,
+    },
+    SetSensorFault {
+        target: SensorFaultTarget,
+        mode: SensorFaultMode,
+        duration_sim_s: Option<f64>,
+    },
+    #[serde(deserialize_with = "deserialize_empty_command")]
+    ClearSensorFaults,
     #[serde(deserialize_with = "deserialize_empty_command")]
     Stop,
     #[serde(deserialize_with = "deserialize_empty_command")]

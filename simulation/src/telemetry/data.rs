@@ -35,6 +35,7 @@ pub(super) enum InputIssue {
     InvalidDamageEstimate,
     NonfiniteDerivedValue,
     LivePhysicsUnavailable,
+    SensorDeliveryUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

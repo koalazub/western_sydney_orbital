@@ -28,6 +28,12 @@ pub fn install(app: &mut bevy::prelude::App) {
     systems::install(app);
 }
 
+/// Settled native permission for the global X shortcut, with live input guards.
+/// False until a HUD input frame has published its state. No browser calls.
+pub(crate) fn fullscreen_shortcut_allowed() -> bool {
+    input::fullscreen_shortcut_allowed()
+}
+
 /// The native button's last laid-out hit target, in canvas-local CSS pixels.
 pub(crate) fn fullscreen_button_at(x: f32, y: f32) -> bool {
     input::fullscreen_button_at(x, y)

@@ -29,6 +29,8 @@ HISTORY_COLUMNS = (
     "observation_clock",
     "frame",
     "radar_clock",
+    "sensor_health",
+    "command_watchdog",
     "rotation_convention",
     "manual_interventions",
     "manual_intervention",

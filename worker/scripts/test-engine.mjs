@@ -24,6 +24,15 @@ for await (const line of createInterface({ input: process.stdin })) {
     else if (request.method === "telemetry") value = JSON.parse(api.telemetry_status());
     else if (request.method === "field_diagnostics") value = JSON.parse(api.field_diagnostics());
     else if (request.method === "control_result") value = JSON.parse(api.control(JSON.stringify(request.command)));
+    else if (request.method === "capture_result") {
+      try {
+        const frame = await api.ship_camera_capture(request.camera);
+        const { rgb, ...metadata } = frame;
+        value = { ok: true, byte_length: rgb.length, metadata };
+      } catch (error) {
+        value = { ok: false, code: error.code ?? null, message: error.message ?? String(error) };
+      }
+    }
     else if (request.method === "renderer_status") value = JSON.parse(api.renderer_status());
     else if (request.method === "renderer_start_result") {
       try {

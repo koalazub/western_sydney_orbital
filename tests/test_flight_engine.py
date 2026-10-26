@@ -11,13 +11,22 @@ import json
 import selectors
 import shutil
 import subprocess
+import time
+from collections import Counter, deque
 from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from wsorb.flight import PlannerConfig, basic_command, plan_route, predict_obstacles
+from wsorb.flight import (
+    PlannerConfig,
+    ResilientGuidance,
+    basic_command,
+    plan_route,
+    predict_obstacles,
+)
+from wsorb.local_api import control_context
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -116,6 +125,322 @@ def test_python_plans_from_genuine_public_sensor_data_without_changing_the_world
     np.testing.assert_allclose(report["points_world_m"][0], observation["shuttle"]["position"])
     assert json.dumps(observation, sort_keys=True) == before
     assert json.dumps(engine.query("observation"), sort_keys=True) == before
+
+
+def _sensor_units(observation):
+    return {unit["id"]: unit for unit in observation["sensor_health"]["units"]}
+
+
+def _leased_command(engine, observation, accel, *, lease_sim_s=0.2):
+    """Use only actual engine receipts for the command's source fence and clock."""
+    return {
+        "op": "set_leased_command",
+        "accel": np.asarray(accel).tolist(),
+        "angular_accel": [0, 0, 0],
+        "source_time_s": observation["time_s"],
+        "lease_sim_s": lease_sim_s,
+        "expected_context": control_context(
+            {"observation": observation, "runtime": engine.query("runtime")}
+        ),
+        "expected_sensor_revision": observation["sensor_health"]["revision"],
+    }
+
+
+def test_real_sensor_domains_freeze_original_samples_without_changing_the_physical_world(engine):
+    before = engine.query("observation")
+    assert before["radar"] and before["radar_backup"]
+    assert before["radar"] != before["radar_backup"]
+    physical = engine.query("debug_snapshot")
+    primary = _sensor_units(before)["radar_primary"]
+    engine.command(op="set_sensor_fault", target="radar_primary", mode="frozen", duration_sim_s=2.0)
+    changed = engine.query("debug_snapshot")
+    assert changed["assets"] == physical["assets"]
+    assert changed["rng_state"] == physical["rng_state"]
+    assert changed["time_s"] == physical["time_s"]
+    engine.command(op="step", seconds=0.24)
+    frozen = engine.query("observation")
+    units = _sensor_units(frozen)
+    assert frozen["radar"] == before["radar"]
+    assert units["radar_primary"]["delivery"] == "frozen"
+    assert units["radar_primary"]["sequence"] == primary["sequence"]
+    assert units["radar_primary"]["sample_time_s"] == primary["sample_time_s"]
+    assert units["radar_backup"]["sample_time_s"] > primary["sample_time_s"]
+    assert engine.query("observation") == frozen, "reads must not renew a frozen sample"
+    engine.command(op="set_sensor_fault", target="radar_bus", mode="unavailable", duration_sim_s=2)
+    lost = engine.query("observation")
+    assert lost["radar"] == lost["radar_backup"] == []
+    assert all(
+        _sensor_units(lost)[unit]["delivery"] == "unavailable"
+        for unit in ("radar_primary", "radar_backup")
+    )
+    engine.command(op="clear_sensor_faults")
+    engine.command(op="step", seconds=0.12)
+    recovered = engine.query("observation")
+    assert _sensor_units(recovered)["radar_primary"]["delivery"] == "ready"
+    assert _sensor_units(recovered)["radar_primary"]["sample_time_s"] > primary["sample_time_s"]
+    assert recovered["time_s"] > before["time_s"]
+    assert recovered["seed"] == before["seed"]
+
+
+def test_real_avionics_blackout_has_no_navigation_or_camera_readback_bypass(engine):
+    before = engine.query("observation")
+    engine.command(
+        op="set_sensor_fault", target="all_avionics", mode="unavailable", duration_sim_s=0.5
+    )
+    lost = engine.query("observation")
+    assert lost["shuttle"] is lost["target"] is lost["applied_physics"] is None
+    assert lost["radar"] == lost["radar_backup"] == []
+    assert lost["time_s"] == before["time_s"]
+    assert lost["manual_interventions"] == before["manual_interventions"]
+    assert engine.query("telemetry")["status"] == "unavailable"
+    blind = engine.query("control_result", command=_leased_command(engine, lost, [0, 0, 0.5]))
+    assert blind["ok"] is False and blind["code"] == "stale_context"
+    assert engine.query("observation") == lost
+    engine.command(**_leased_command(engine, lost, [0, 0, 0]))
+    for camera in ("top", "bottom"):
+        # Genuine early rejection in Node, not a successful GPU/readback test.
+        capture = engine.query("capture_result", camera=camera)
+        assert capture["ok"] is False
+        assert capture["code"] == "sensor_unavailable"
+    engine.command(op="step", seconds=0.6)
+    restored = engine.query("observation")
+    assert restored["shuttle"] is not None
+    assert restored["time_s"] == pytest.approx(before["time_s"] + 0.6)
+    assert restored["sensor_health"]["revision"] > lost["sensor_health"]["revision"]
+
+
+def test_native_command_lease_expires_without_a_python_writer_or_braking(engine):
+    observation = engine.query("observation")
+    command = _leased_command(engine, observation, [0, 0, 0.5])
+    engine.command(**command)
+    engine.command(op="step", seconds=0.05)
+    moving = engine.query("observation")
+    assert moving["shuttle"]["commanded_accel_mps2"] == [0, 0, 0.5]
+    # No command writer or renewal runs during these actual physics substeps.
+    engine.command(op="step", seconds=0.3)
+    expired = engine.query("observation")
+    assert expired["shuttle"]["commanded_accel_mps2"] == [0, 0, 0]
+    assert expired["shuttle"]["commanded_angular_accel_rad_s2"] == [0, 0, 0]
+    assert expired["time_s"] == pytest.approx(observation["time_s"] + 0.35)
+    assert np.linalg.norm(expired["shuttle"]["velocity"]) > 0
+    rejected = engine.query("control_result", command=command)
+    assert rejected["ok"] is False and rejected["code"] == "command_expired"
+    assert engine.query("observation") == expired
+    fresh = _leased_command(engine, expired, [0, 0, 0.5])
+    engine.command(**fresh)
+    engine.command(op="set_command", accel=[0, 0, 0.2], angular_accel=[0, 0, 0])
+    engine.command(op="step", seconds=0.4)
+    assert engine.query("observation")["shuttle"]["commanded_accel_mps2"] == [0, 0, 0.2]
+
+
+def test_python_resilience_uses_actual_backup_then_coasts_through_shared_failure(engine):
+    guidance = ResilientGuidance()
+    config = PlannerConfig()
+
+    def update():
+        observation = engine.query("observation")
+        ready = guidance.update(
+            observation,
+            wall_time_s=time.monotonic(),
+            running=engine.query("runtime")["running"],
+        )
+        route = None
+        if ready.can_command:
+            route = plan_route(
+                guidance.frame_for_planning(predict_obstacles(ready.observation, config)), config
+            )
+        command, angular = guidance.command(ready.observation, route, {})
+        assert np.linalg.norm(command) <= 0.5
+        assert np.linalg.norm(angular) <= 0.05
+        return observation, ready, command
+
+    observation, ready, command = update()
+    for _ in range(4):
+        if ready.can_command:
+            break
+        engine.command(op="step", seconds=0.12)
+        observation, ready, command = update()
+    assert ready.can_command, guidance.report
+    assert np.linalg.norm(command) > 0, "the healthy route controller must actually request lift"
+    engine.command(**_leased_command(engine, observation, command, lease_sim_s=ready.lease_sim_s))
+    engine.command(op="step", seconds=0.05)
+    applied = engine.query("observation")
+    assert applied["time_s"] > observation["time_s"]
+    assert (
+        np.linalg.norm(applied["applied_physics"]["last_actuator_application"]["force_body_n"]) > 0
+    )
+    engine.command(
+        op="set_sensor_fault", target="radar_primary", mode="unavailable", duration_sim_s=2
+    )
+    observation, ready, command = update()
+    assert ready.observation["radar"] == observation["radar_backup"]
+    assert ready.requires_replan
+    engine.command(op="set_sensor_fault", target="radar_bus", mode="unavailable", duration_sim_s=2)
+    _, ready, command = update()
+    assert not ready.can_command
+    np.testing.assert_array_equal(command, np.zeros(3))
+    engine.command(op="clear_sensor_faults")
+    _, recovering, command = update()
+    assert not recovering.can_command, "held pre-recovery samples cannot rearm control"
+    for _ in range(8):
+        engine.command(op="step", seconds=0.12)
+        _, recovering, command = update()
+        if recovering.can_command:
+            break
+    assert recovering.can_command, guidance.report
+
+
+def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine):
+    """Fly the real stock trial, not a preview or asynchronous-runner substitute."""
+    initial = engine.query("observation")
+    assert initial["seed"] == 100
+    assert initial["flight_preset"] == "far_side_l2"
+    assert initial["experiment_settings"] == engine.baseline_settings
+    assert initial["geometry"]["debris_count"] == 500
+    assert initial["geometry"]["arrival_radius_m"] == 50.0
+    guidance = ResilientGuidance()
+    config = guidance.config.planner
+    route = None
+    started = time.monotonic()
+    max_wall_s, max_sim_s = 240.0, 1800.0
+    initial_range = float(
+        np.linalg.norm(np.asarray(initial["target"]["position"]) - initial["shuttle"]["position"])
+    )
+    gates, coasts, route_results = Counter(), Counter(), Counter()
+    recent = deque(maxlen=8)
+    first_coasts = []
+    observation = initial
+    last_thrust_time = initial["time_s"]
+    commands = 0
+    plans = 0
+    progress_times = deque((30.0, 300.0))
+    stop_reason = "simulation budget exhausted"
+
+    def diagnostic():
+        return {
+            "measurement": "real WASM deterministic stepping, not async runner or rendering",
+            "initial_ship_position_m": initial["shuttle"]["position"],
+            "initial_target_position_m": initial["target"]["position"],
+            "initial_range_m": initial_range,
+            "ship_position_m": observation["shuttle"]["position"],
+            "target_position_m": observation["target"]["position"],
+            "navigation_sample_time_s": observation["navigation_sample_time_s"],
+            "range_m": float(
+                np.linalg.norm(
+                    np.asarray(observation["target"]["position"])
+                    - observation["shuttle"]["position"]
+                )
+            ),
+            "time_s": observation["time_s"],
+            "wall_s": time.monotonic() - started,
+            "mission": observation["mission"],
+            "stop_reason": stop_reason,
+            "nonzero_commands": commands,
+            "plans": plans,
+            "readiness_reasons": dict(gates),
+            "coast_reasons": dict(coasts),
+            "route_results": dict(route_results),
+            "first_coasts": first_coasts,
+            "recent_decisions": list(recent),
+            "guidance": guidance.report,
+        }
+
+    print("checkpoint initial " + json.dumps(diagnostic(), sort_keys=True), flush=True)
+    while observation["time_s"] - initial["time_s"] < max_sim_s:
+        if observation["mission"]["status"] == "success":
+            stop_reason = "native mission success"
+            break
+        if observation["mission"]["damage"] > 209_200.0:
+            stop_reason = "native damage threshold exceeded"
+            break
+        if time.monotonic() - started >= max_wall_s:
+            stop_reason = "wall computation budget exhausted"
+            break
+        runtime = engine.query("runtime")
+        readiness = guidance.update(
+            observation, wall_time_s=time.monotonic(), running=runtime["running"]
+        )
+        gates[readiness.report["reason"]] += 1
+        planning_error = None
+        if readiness.requires_replan:
+            route = None
+        if readiness.can_command and route is None:
+            try:
+                frame = guidance.frame_for_planning(
+                    predict_obstacles(readiness.observation, config)
+                )
+                route = plan_route(frame, config)
+                plans += 1
+                route_results[f"{route.status}: {route.detail}"] += 1
+            except ValueError as error:
+                planning_error = str(error)
+        accel, angular = guidance.command(readiness.observation, route, {})
+        report = guidance.report
+        assert np.linalg.norm(accel) <= 0.5 + 1e-12
+        assert np.linalg.norm(angular) <= 0.05 + 1e-12
+        if np.linalg.norm(accel) > 0 or np.linalg.norm(angular) > 0:
+            commands += 1
+            last_thrust_time = observation["time_s"]
+            assert readiness.can_command
+            assert readiness.lease_sim_s >= 0.05
+        else:
+            coasts[planning_error or report["reason"]] += 1
+            if len(first_coasts) < 8:
+                first_coasts.append(
+                    {
+                        "time_s": observation["time_s"],
+                        "readiness_reason": readiness.report["reason"],
+                        "command_reason": report["reason"],
+                        "planning_error": planning_error,
+                        "route_detail": route.detail if route is not None else None,
+                    }
+                )
+        recent.append(
+            {
+                "time_s": observation["time_s"],
+                "reason": report["reason"],
+                "planning_error": planning_error,
+                "route_status": route.status if route is not None else None,
+                "route_detail": route.detail if route is not None else None,
+                "desired_speed_mps": report.get("desired_speed_mps"),
+                "accel_mps2": accel.tolist(),
+                "lease_sim_s": readiness.lease_sim_s,
+            }
+        )
+        if readiness.lease_sim_s >= 0.05:
+            request = _leased_command(engine, observation, accel, lease_sim_s=readiness.lease_sim_s)
+            request["angular_accel"] = angular.tolist()
+            engine.command(**request)
+        else:
+            # The native minimum lease may carry zero thrust, not a fallback decision.
+            np.testing.assert_array_equal(accel, np.zeros(3))
+            np.testing.assert_array_equal(angular, np.zeros(3))
+            engine.command(**_leased_command(engine, observation, accel, lease_sim_s=0.05))
+        step_s = 0.25 if readiness.lease_sim_s >= 0.25 else 0.05
+        before_time = observation["time_s"]
+        engine.command(op="step", seconds=step_s)
+        observation = engine.query("observation")
+        if observation["mission"]["status"] == "running":
+            assert observation["time_s"] == pytest.approx(before_time + step_s)
+        else:
+            # Actual native assessment freezes a terminal mission at its last
+            # physical substep, not at the requested end of a longer step.
+            assert before_time < observation["time_s"] <= before_time + step_s + 1e-6
+        assert observation["manual_interventions"] == initial["manual_interventions"]
+        assert observation["trial_revision"] == initial["trial_revision"]
+        if progress_times and observation["time_s"] - initial["time_s"] >= progress_times[0]:
+            progress_times.popleft()
+            print("checkpoint progress " + json.dumps(diagnostic(), sort_keys=True), flush=True)
+        if commands == 0 and observation["time_s"] - last_thrust_time >= 5.0:
+            stop_reason = "no thrust accepted by default guidance in the first five seconds"
+            break
+
+    result = diagnostic()
+    print("checkpoint result " + json.dumps(result, sort_keys=True), flush=True)
+    assert observation["mission"]["status"] == "success", json.dumps(result, sort_keys=True)
+    assert result["range_m"] <= 50.0, result
+    assert observation["mission"]["target_distance_m"] <= 50.0, result
+    assert observation["mission"]["damage"] <= 209_200.0, result
 
 
 def test_python_preview_publication_is_not_a_flight_command(engine):

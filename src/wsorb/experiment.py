@@ -1,10 +1,11 @@
 """Read-only Python guidance and explicit local controller runs.
 
-Policies receive public observations and return body-frame SI commands. This
-module supplies no controller, planner, physics or STP SDK implementation.
-Only the worker writes flight commands. Connecting a watch never takes flight
-ownership. Stop signals the worker rather than starting a second writer, and a
-slow Python callback cannot be interrupted. Keep callbacks bounded.
+Policies receive public observations and return body-frame SI commands. Flight
+algorithms live in the checked-in Python flight modules, not a physics or STP SDK substitute.
+Connecting a watch never takes flight ownership or starts a process. An explicit
+resilient Run starts a same-host process peer using checked-in algorithms, not
+notebook closures. Native epoch/term authority permits only its leader to write.
+Stop signals both controllers and uses guarded release. Keep callbacks bounded.
 
 Controller cadence is a wall-clock upper target, not an HTTP or physics frequency.
 Guidance replans use simulation time, without repeated plans on a held clock.
@@ -16,6 +17,7 @@ simulation clock. A browser pause, reset or manual intervention ends ownership.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -25,14 +27,34 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import numpy.typing as npt
 
+from .flight import ResilienceConfig, ResilientGuidance
 from .flight.control import reference_to_body
-from .local_api import LocalSimulation, StaleContextError, control_context, validate_position
+from .local_api import (
+    CommandExpiredError,
+    LocalApiError,
+    LocalSimulation,
+    StaleContextError,
+    control_context,
+    validate_position,
+)
+from .standby import (
+    ALGORITHM_SOURCE,
+    StandbyCohort,
+    control_authority,
+    controller_fence,
+    known_busy,
+    read_public_snapshot,
+    standby_policy_data,
+)
 
 HISTORY_LIMIT = 2000
+MAX_CONTROLLER_RUN_S = 3600.0
+CHECKPOINT_RUN_LIMIT_S = 1800.0
 TELEMETRY_FIELDS = (
     "speed_mps",
     "radial_climb_mps",
@@ -133,6 +155,9 @@ def measured_sample(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
         "observation_clock": "local_simulation_elapsed_seconds",
         "frame": observation.get("frame"),
         "radar_clock": observation.get("radar_clock"),
+        "sensor_health": deepcopy(observation.get("sensor_health")),
+        "command_watchdog": deepcopy(observation.get("command_watchdog")),
+        "control_authority": deepcopy(observation.get("control_authority")),
         "rotation_convention": observation.get("rotation_convention"),
         "manual_interventions": counter if type(counter) is int else None,
         **observed_setup(observation),
@@ -385,6 +410,8 @@ def guidance_due(
 def _guidance_key(observation: Mapping[str, Any], revision: int) -> tuple[Any, ...]:
     mission = observation.get("mission")
     mission = mission if isinstance(mission, Mapping) else {}
+    health = observation.get("sensor_health")
+    health = health if isinstance(health, Mapping) else {}
     return (
         observation.get("seed"),
         observation.get("frame"),
@@ -396,6 +423,7 @@ def _guidance_key(observation: Mapping[str, Any], revision: int) -> tuple[Any, .
         observation.get("flight_preset"),
         mission.get("status"),
         mission.get("phase"),
+        health.get("revision"),
         revision,
         observation["time_s"],
     )
@@ -411,8 +439,8 @@ class RunLimits:
     def __post_init__(self) -> None:
         duration = _number(self.duration_s, "duration_s")
         cadence = _number(self.cadence_hz, "cadence_hz")
-        if not 0 < duration <= 300:
-            raise ValueError("duration_s must be > 0 and <= 300")
+        if not 0 < duration <= MAX_CONTROLLER_RUN_S:
+            raise ValueError(f"duration_s must be > 0 and <= {MAX_CONTROLLER_RUN_S:g}")
         if not 0.1 <= cadence <= 10:
             raise ValueError("cadence_hz must be between 0.1 and 10")
         object.__setattr__(self, "duration_s", duration)
@@ -504,6 +532,19 @@ def controller_interruption(
     active: Mapping[str, Any], observation: Mapping[str, Any], runtime: Mapping[str, Any]
 ) -> str | None:
     """Yield to actual native input, pause or reset without erasing a manual command."""
+    if "consent_epoch" in active:
+        try:
+            authority = control_authority({"observation": observation})
+        except ValueError:
+            return "Native controller authority is unavailable. Explicit Run is required."
+        if authority["epoch"] != active["consent_epoch"] or (
+            active.get("authority_claimed")
+            and (
+                authority["run_id"] != active["run_id"]
+                or authority["status"] not in ("active", "expired")
+            )
+        ):
+            return "Native consent ended or another run took over. Python is watching only."
     trial = observation.get("trial_revision", runtime.get("trial_revision"))
     previous_trial = active.get("trial_revision")
     if trial != previous_trial and (trial is not None or previous_trial is not None):
@@ -523,6 +564,16 @@ def controller_interruption(
             "The game was paused. Python guidance is watching only; Run controller resumes control."
         )
     return None
+
+
+def _preview_controller(controller: str) -> str:
+    """Adapt advisory HUD metadata, not the selected policy or native authority.
+
+    The existing native preview protocol calls the A*/waypoint-PD family
+    ``planned_waypoint_pd``. Resilient guidance belongs to that family; its full
+    mode, estimator gates and process ownership remain separate runner reports.
+    """
+    return "planned_waypoint_pd" if controller == "resilient_waypoint_pd" else controller
 
 
 def flight_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -610,8 +661,10 @@ def flight_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
 class LivePolicy:
     """The current editable Python functions and settings, accepted by one worker.
 
-    The notebook replaces this bundle after an edit. A decision never silently
-    keeps an earlier closure. No callback receives a client or debug ray report.
+    The notebook replaces this bundle after an edit. Resilient mode uses the
+    persistent Python guidance module for decisions and still uses the editable
+    prediction/search callbacks. No callback receives a client or debug ray report.
+    A process standby uses only checked-in prediction/search and the data settings.
     """
 
     predict_scene: Callable
@@ -621,13 +674,23 @@ class LivePolicy:
     controller: str = "planned_waypoint_pd"
     gains: Mapping[str, Any] = field(default_factory=dict)
     config: Mapping[str, Any] = field(default_factory=dict)
+    resilience: ResilienceConfig | None = None
 
     def __post_init__(self) -> None:
         for name in ("predict_scene", "find_path", "decide_command"):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
-        if self.controller not in ("coast", "basic_pd_radar", "planned_waypoint_pd"):
+        if self.controller not in (
+            "coast",
+            "basic_pd_radar",
+            "planned_waypoint_pd",
+            "resilient_waypoint_pd",
+        ):
             raise ValueError("Unknown live controller")
+        if self.resilience is not None and not isinstance(self.resilience, ResilienceConfig):
+            raise TypeError("resilience must be a ResilienceConfig")
+        if self.controller == "resilient_waypoint_pd" and self.resilience is None:
+            object.__setattr__(self, "resilience", ResilienceConfig(planner=self.settings))
         if not isinstance(self.gains, Mapping) or not isinstance(self.config, Mapping):
             raise TypeError("gains and config must be mappings")
         arrival = _number(self.gains.get("waypoint_arrival_m", 20.0), "waypoint_arrival_m")
@@ -636,12 +699,24 @@ class LivePolicy:
         object.__setattr__(self, "settings", deepcopy(self.settings))
         object.__setattr__(self, "gains", deepcopy(dict(self.gains)))
         object.__setattr__(self, "config", deepcopy(dict(self.config)))
+        if self.controller == "resilient_waypoint_pd":
+            standby_policy_data(self.settings, self.resilience, self.gains, 0)
 
-    def plan(self, observation: dict) -> Any:
-        return self.find_path(self.predict_scene(observation, self.settings), self.settings)
+    def plan(self, observation: dict, *, guidance: ResilientGuidance | None = None) -> Any:
+        frame = self.predict_scene(observation, self.settings)
+        if guidance is not None:
+            frame = guidance.frame_for_planning(frame)
+        return self.find_path(frame, self.settings)
 
-    def decision(self, observation: dict, route: Any) -> Decision:
-        accel, angular = self.decide_command(observation, route, self.controller, self.gains)
+    def decision(
+        self, observation: dict, route: Any, *, guidance: ResilientGuidance | None = None
+    ) -> Decision:
+        if self.controller == "resilient_waypoint_pd":
+            if guidance is None:
+                raise ValueError("Resilient control requires its persistent guidance state")
+            accel, angular = guidance.command(observation, route, self.gains)
+        else:
+            accel, angular = self.decide_command(observation, route, self.controller, self.gains)
         return Decision(accel, angular)
 
     @property
@@ -650,13 +725,15 @@ class LivePolicy:
 
 
 class ExperimentRunner:
-    """One worker, hot-replaceable Python policy and a read-only status report."""
+    """A watch worker and an explicit resilient cohort with native single-writer fencing."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._worker: threading.Thread | None = None
+        self._standby: StandbyCohort | None = None
+        self._primary_outage: dict[str, Any] | None = None
         self._history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         self._configuration_changes: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         self._live = False
@@ -701,10 +778,14 @@ class ExperimentRunner:
         if not callable(policy):
             raise TypeError("policy must be callable")
         with self._lock:
-            if self._worker is not None and self._worker.is_alive():
+            if (self._worker is not None and self._worker.is_alive()) or (
+                self._standby is not None and self._standby.alive
+            ):
                 raise RuntimeError("An experiment worker is already active; stop and wait first")
             self._stop.clear()
             self._live = False
+            self._standby = None
+            self._primary_outage = None
             self._report.update(
                 state="starting", sample_count=0, elapsed_sim_s=0.0, latest=None, error=None
             )
@@ -749,7 +830,9 @@ class ExperimentRunner:
         if not 0.1 <= replan_s <= 30:
             raise ValueError("replan_s must be between 0.1 and 30")
         with self._lock:
-            if self._worker is not None and self._worker.is_alive():
+            if (self._worker is not None and self._worker.is_alive()) or (
+                self._standby is not None and self._standby.alive
+            ):
                 raise RuntimeError("An experiment worker is already active; stop and wait first")
             self._stop.clear()
             self._wake.clear()
@@ -757,6 +840,8 @@ class ExperimentRunner:
             self._policy = policy
             self._policy_revision += 1
             self._run_request = None
+            self._standby = None
+            self._primary_outage = None
             self._report.update(
                 state="connecting",
                 worker_active=True,
@@ -782,6 +867,12 @@ class ExperimentRunner:
                 notice_source=None,
                 raycast=None,
                 raycast_error=None,
+                resilience=None,
+                primary_resilience=None,
+                control_authority=None,
+                leader_controller_id=None,
+                standby=None,
+                primary_outage=None,
                 error=None,
             )
             self._worker = threading.Thread(
@@ -820,6 +911,7 @@ class ExperimentRunner:
             self._policy = policy
             self._policy_revision += 1
             self._report["requested_policy_revision"] = self._policy_revision
+            self._update_standby()
             self._wake.set()
             return self._policy_revision
 
@@ -833,13 +925,34 @@ class ExperimentRunner:
             requested_run_limits=limits.to_dict(),
         )
         self._wake.set()
+        self._update_standby()
         return self._run_limits_revision
+
+    def _update_standby(self) -> None:
+        """Caller holds the runner lock. Send data even while a notebook callback hangs."""
+        peer, policy = self._standby, self._policy
+        if peer is None or not peer.alive or policy is None:
+            return
+        if policy.controller != "resilient_waypoint_pd":
+            peer.request_stop()
+            return
+        peer.update(
+            standby_policy_data(
+                policy.settings, policy.resilience, policy.gains, self._policy_revision
+            ),
+            {
+                "duration_s": self._run_limits.duration_s,
+                "cadence_hz": self._run_limits.cadence_hz,
+                "revision": self._run_limits_revision,
+            },
+        )
 
     def update_run_limits(self, *, duration_s: float, cadence_hz: float) -> int:
         """Queue hot limits for the watch worker, preserving an active run's origins.
 
         The worker accepts the revision against a real public snapshot. Shortening
-        duration below observed elapsed time ends that controller with Stop/Pause.
+        duration below observed elapsed time ends that controller. Resilient runs
+        release their native cohort without a raw Stop/Pause.
         An idle watch only updates its next-run settings; this never issues Play.
         """
         limits = RunLimits(duration_s, cadence_hz)
@@ -874,6 +987,11 @@ class ExperimentRunner:
                 )
             if self._run_request is not None or self._report.get("controller_running"):
                 raise FlightStateError("The controller is already starting or running")
+            if self._standby is not None and self._standby.alive:
+                raise FlightStateError("The previous standby is still stopping; wait before Run")
+            self._standby = None
+            self._primary_outage = None
+            self._report.update(standby=None, primary_outage=None)
             latest = self._report["latest"] or {}
             notice = controller_start_notice(latest)
             if notice:
@@ -891,7 +1009,14 @@ class ExperimentRunner:
             )
             self._queue_run_limits(limits)
             observation, runtime = latest["observation"], latest["runtime"]
+            consent_epoch = None
+            if self._policy is not None and self._policy.controller == "resilient_waypoint_pd":
+                try:
+                    consent_epoch = control_authority(latest)["epoch"]
+                except ValueError as error:
+                    raise FlightStateError(str(error)) from None
             self._run_request = {
+                "controller": self._policy.controller,
                 "seed": observation["seed"],
                 "counter": observation.get(
                     "manual_interventions", runtime.get("manual_interventions")
@@ -900,6 +1025,8 @@ class ExperimentRunner:
                 "expect_running": runtime["running"],
                 "trial_revision": observation.get("trial_revision", runtime.get("trial_revision")),
             }
+            if consent_epoch is not None:
+                self._run_request["consent_epoch"] = consent_epoch
             self._report.update(
                 state="starting",
                 run_request_state="queued",
@@ -909,8 +1036,42 @@ class ExperimentRunner:
             )
             self._wake.set()
 
+    def inject_primary_outage(self, duration_sim_s: float = 5.0) -> dict[str, Any]:
+        """Explicit local chaos control. Withhold primary decisions and lease renewals.
+
+        The interval starts at the latest actual public simulation time, not a
+        fabricated tick. Only native expiry permits the warm process to take over.
+        Recovery never preempts a healthy standby or captures a new consent epoch.
+        """
+        duration = _number(duration_sim_s, "duration_sim_s")
+        if not 0.05 <= duration <= 300:
+            raise ValueError("duration_sim_s must be between 0.05 and 300")
+        with self._lock:
+            peer = self._standby
+            if peer is None or not peer.alive or not self._report.get("controller_running"):
+                raise FlightStateError("An explicit resilient controller cohort must be active")
+            latest = self._report.get("latest") or {}
+            authority = control_authority(latest)
+            now = _finite(latest.get("observation", {}).get("time_s"))
+            if (
+                now is None
+                or authority["epoch"] != peer.consent_epoch
+                or authority["run_id"] != peer.run_id
+                or authority["status"] not in ("active", "expired")
+            ):
+                raise FlightStateError("The original resilient Run consent is no longer active")
+            self._primary_outage = {
+                "run_id": peer.run_id,
+                "started_at_sim_time_s": now,
+                "until_sim_time_s": now + duration,
+                "duration_sim_s": duration,
+            }
+            self._report["primary_outage"] = {**self._primary_outage, "active": True}
+            self._wake.set()
+            return deepcopy(self._report["primary_outage"])
+
     def stop(self, timeout_s: float = 10.0) -> dict:
-        """Signal and bounded-join the worker, without writing network commands.
+        """Signal both controllers and bounded-join, without a second network writer.
 
         A timed-out join leaves the state stopping and prevents a second writer.
         In-flight HTTP and policy calls can delay cleanup beyond this timeout.
@@ -918,15 +1079,26 @@ class ExperimentRunner:
         timeout_s = _number(timeout_s, "timeout_s")
         if not 0 <= timeout_s <= threading.TIMEOUT_MAX:
             raise ValueError("timeout_s is outside the supported non-negative join range")
+        deadline = time.monotonic() + timeout_s
         with self._lock:
             worker = self._worker
+            peer = self._standby
+            if peer is not None:
+                peer.request_stop()
             if worker is not None and worker.is_alive():
                 self._stop.set()
                 self._wake.set()
                 if self._report["state"] not in ("finished", "error"):
                     self._report["state"] = "stopping"
         if worker is not None and worker.is_alive() and worker is not threading.current_thread():
-            worker.join(timeout=timeout_s)
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A process may have finished spawning while Stop joined the worker.
+        with self._lock:
+            peer = self._standby
+            if peer is not None:
+                peer.request_stop()
+        if peer is not None:
+            peer.join(max(0.0, deadline - time.monotonic()))
         return self.status()
 
     def place_lander(
@@ -963,9 +1135,90 @@ class ExperimentRunner:
         return after
 
     def status(self) -> dict:
-        """Copy actual reports without contacting the browser or exposing a client."""
+        """Copy last observed native authority and per-process reports, without I/O to flight."""
         with self._lock:
-            return deepcopy(self._report)
+            report = deepcopy(self._report)
+            if self._standby is not None:
+                peer = self._standby.status()
+                report["standby"] = peer
+                observation = (report.get("latest") or {}).get("observation", {})
+                authority = observation.get("control_authority")
+                peer_authority = peer.get("control_authority")
+                source_time = observation.get("time_s")
+                if isinstance(peer_authority, Mapping) and (
+                    not isinstance(authority, Mapping)
+                    or (peer_authority["epoch"], peer_authority["term"])
+                    > (authority["epoch"], authority["term"])
+                    or (
+                        peer_authority["epoch"] == authority["epoch"]
+                        and peer_authority["term"] == authority["term"]
+                        and (
+                            peer.get("authority_source_time_s", -1) > (source_time or 0)
+                            or (
+                                peer.get("authority_source_time_s") == source_time
+                                and peer_authority["status"] == "expired"
+                                and authority["status"] == "active"
+                            )
+                        )
+                    )
+                ):
+                    authority = peer_authority
+                    source_time = peer["authority_source_time_s"]
+                report.update(
+                    control_authority=deepcopy(authority),
+                    authority_source_time_s=source_time,
+                    authority_report_kind="last_received_native_observation_not_a_liveness_probe",
+                    primary_controller_id=self._standby.primary_controller_id,
+                    primary_pid=os.getpid(),
+                )
+                leader = (
+                    authority.get("controller_id")
+                    if isinstance(authority, Mapping) and authority.get("status") == "active"
+                    else None
+                )
+                report["leader_controller_id"] = leader
+                authorized = (
+                    isinstance(authority, Mapping)
+                    and authority["epoch"] == self._standby.consent_epoch
+                    and authority["run_id"] == self._standby.run_id
+                    and authority["status"] in ("active", "expired")
+                )
+                if not authorized or (not peer["alive"] and not report.get("worker_active")):
+                    report["controller_running"] = False
+                report["flight_owned"] = (
+                    report.get("controller_running") is True
+                    and leader == self._standby.primary_controller_id
+                )
+                if leader == self._standby.controller_id:
+                    report["primary_plan_count"] = report.get("plan_count")
+                    report["primary_last_plan_time_s"] = report.get("last_plan_time_s")
+                    report["plan_count"] = peer.get("plan_count", 0)
+                    report["last_plan_time_s"] = peer.get("last_plan_time_s")
+                    report["leader_plan"] = deepcopy(peer.get("last_plan"))
+                    report["resilience"] = deepcopy(peer.get("resilience"))
+                    report["leader_algorithm_source"] = ALGORITHM_SOURCE
+                    report["last_command_time_s"] = peer.get("last_command_time_s")
+                    report["last_command_policy_revision"] = peer.get(
+                        "last_command_policy_revision"
+                    )
+                    report["last_command_fence"] = deepcopy(peer.get("last_command_fence"))
+                    report["last_command_context"] = deepcopy(peer.get("last_command_context"))
+                else:
+                    report["leader_algorithm_source"] = (
+                        "primary notebook policy"
+                        if leader == self._standby.primary_controller_id
+                        else "external_native_authority_not_this_cohort"
+                        if leader
+                        else None
+                    )
+                    if leader is not None and leader != self._standby.primary_controller_id:
+                        report["resilience"] = None
+                if peer["alive"] and peer["stop_requested"]:
+                    report["state"] = "stopping"
+                elif not peer["alive"] and report["state"] == "primary_failed_standby_active":
+                    report.update(state="error", run_request_state="failed")
+                report["peer_active"] = peer["alive"]
+            return report
 
     def history(self) -> list[dict[str, Any]]:
         """Copy at most 2000 received rows, including labelled same-clock tuning reads."""
@@ -989,6 +1242,7 @@ class ExperimentRunner:
                     accepted_policy_revision=revision,
                     accepted_config=config,
                     controller=policy.controller,
+                    preview_controller_family=_preview_controller(policy.controller),
                 )
                 self._configuration_changes.append(
                     {
@@ -1005,6 +1259,7 @@ class ExperimentRunner:
                         "config": config,
                     }
                 )
+            self._update_standby()
             return policy, revision
 
     def _accept_run_limits(self, observation: Mapping[str, Any]) -> tuple[RunLimits, int]:
@@ -1035,6 +1290,7 @@ class ExperimentRunner:
                         "run_limits": limits.to_dict(),
                     }
                 )
+            self._update_standby()
             return limits, revision
 
     def record_snapshot(self, snapshot: dict, *, source: str = "manual_read") -> None:
@@ -1049,6 +1305,17 @@ class ExperimentRunner:
         row = measured_sample(snapshot)
         with self._lock:
             observation = snapshot.get("observation")
+            if isinstance(observation, Mapping) and isinstance(
+                observation.get("control_authority"), Mapping
+            ):
+                authority = observation["control_authority"]
+                self._report.update(
+                    control_authority=deepcopy(authority),
+                    authority_source_time_s=observation.get("time_s"),
+                    leader_controller_id=authority.get("controller_id")
+                    if authority.get("status") == "active"
+                    else None,
+                )
             previous_snapshot = self._report["latest"] or {}
             previous_observation = previous_snapshot.get("observation") or {}
             setup = observed_setup(observation) if isinstance(observation, Mapping) else {}
@@ -1085,6 +1352,28 @@ class ExperimentRunner:
                         "applied_physics": deepcopy(observation.get("applied_physics")),
                     }
                 )
+            if isinstance(observation, Mapping) and observation.get("sensor_health") != (
+                previous_observation.get("sensor_health")
+            ):
+                health = observation.get("sensor_health")
+                previous_health = previous_observation.get("sensor_health")
+                revision = health.get("revision") if isinstance(health, Mapping) else None
+                previous_revision = (
+                    previous_health.get("revision")
+                    if isinstance(previous_health, Mapping)
+                    else None
+                )
+                if revision != previous_revision:
+                    self._configuration_changes.append(
+                        {
+                            "kind": "reported_sensor_fault_state",
+                            "sample_source": source,
+                            "source_time_s": _finite(observation.get("time_s")),
+                            "source_seed": observation.get("seed"),
+                            "sensor_health": deepcopy(health),
+                            "command_watchdog": deepcopy(observation.get("command_watchdog")),
+                        }
+                    )
             if (
                 isinstance(observation, Mapping)
                 and type(observation.get("tuning_revision")) is int
@@ -1208,12 +1497,41 @@ class ExperimentRunner:
         revision = 0
         fatal: str | None = None
         last_publication_wall = 0.0
+        guidance: ResilientGuidance | None = None
+        guidance_config: ResilienceConfig | None = None
+        readiness = None
+
+        def refresh_guidance(result: Mapping[str, Any]) -> None:
+            nonlocal guidance, guidance_config, readiness, route, preview, previous_plan
+            if policy is None:
+                return
+            if policy.controller != "resilient_waypoint_pd":
+                guidance, guidance_config, readiness = None, None, None
+                with self._lock:
+                    self._report.update(resilience=None, primary_resilience=None)
+                return
+            if guidance is None or guidance_config != policy.resilience:
+                guidance_config = policy.resilience
+                guidance = ResilientGuidance(guidance_config)
+                route, preview, previous_plan = None, None, None
+            readiness = guidance.update(
+                result["observation"],
+                wall_time_s=time.monotonic(),
+                running=result["runtime"]["running"],
+            )
+            if readiness.requires_replan:
+                route, preview, previous_plan = None, None, None
+            with self._lock:
+                self._report.update(
+                    resilience=deepcopy(guidance.report),
+                    primary_resilience=deepcopy(guidance.report),
+                )
 
         def read(*, check_owner: bool = True) -> dict:
             nonlocal phase, owned, active, route, preview, previous_plan
             phase = "Reading public snapshot"
             with sim.control_transaction():
-                result = sim.snapshot()
+                result = read_public_snapshot(sim, self._stop)
                 self.record_snapshot(result, source="guidance_worker")
             observation, runtime = result.get("observation"), result.get("runtime")
             if not isinstance(observation, dict) or not isinstance(runtime, dict):
@@ -1241,6 +1559,8 @@ class ExperimentRunner:
                 # A real manual command has superseded ours. Do not send a
                 # cleanup Stop/Pause that would erase the user's new command.
                 owned, active = False, None
+                if self._standby is not None:
+                    self._standby.request_stop()
                 route, preview, previous_plan = None, None, None
                 with self._lock:
                     self._report.update(
@@ -1258,6 +1578,8 @@ class ExperimentRunner:
                     completed = terminal_mission_notice(observation) is not None
                     elapsed = now - active["origin"] if seed == active["seed"] else None
                     owned, active = False, None
+                    if self._standby is not None:
+                        self._standby.request_stop()
                     route, preview, previous_plan = None, None, None
                     with self._lock:
                         self._report.update(
@@ -1272,6 +1594,21 @@ class ExperimentRunner:
                         if elapsed is not None and elapsed >= 0:
                             self._report["elapsed_sim_s"] = elapsed
                 else:
+                    if "consent_epoch" in active:
+                        authority = control_authority(result)
+                        owned = (
+                            authority["status"] == "active"
+                            and authority["controller_id"] == active["controller_id"]
+                        )
+                        with self._lock:
+                            self._report.update(
+                                control_authority=authority,
+                                authority_source_time_s=now,
+                                leader_controller_id=authority["controller_id"]
+                                if authority["status"] == "active"
+                                else None,
+                                flight_owned=owned,
+                            )
                     if active["awaiting_play"] and runtime["running"]:
                         active.update(awaiting_play=False, expect_running=True)
                         with self._lock:
@@ -1279,6 +1616,12 @@ class ExperimentRunner:
                     active["last_time"] = now
                     with self._lock:
                         self._report["elapsed_sim_s"] = now - active["origin"]
+                        outage = self._primary_outage
+                        if outage is not None and outage["run_id"] == active.get("run_id"):
+                            self._report["primary_outage"] = {
+                                **outage,
+                                "active": now < outage["until_sim_time_s"],
+                            }
             mission = observation.get("mission")
             if (
                 isinstance(mission, Mapping)
@@ -1290,6 +1633,7 @@ class ExperimentRunner:
                         self._report.update(
                             notice=None, notice_source=None, run_request_state="idle"
                         )
+            refresh_guidance(result)
             return result
 
         def accept_limits(observation: Mapping[str, Any]) -> tuple[RunLimits, int]:
@@ -1304,7 +1648,7 @@ class ExperimentRunner:
             nonlocal owned, active, snapshot, route, preview, previous_plan
             previous_owned = owned
             owned = False
-            if path:
+            if path and (active is None or "consent_epoch" not in active):
                 active = None  # A path from another trial cannot retain flight ownership.
             route, preview, previous_plan = None, None, None
             with self._lock:
@@ -1317,6 +1661,8 @@ class ExperimentRunner:
             try:
                 snapshot = read()
             except BaseException as error:
+                if active is not None and "consent_epoch" in active:
+                    raise  # Keep the independent peer alive after a primary read failure.
                 active = None
                 with self._lock:
                     self._report.update(
@@ -1327,7 +1673,8 @@ class ExperimentRunner:
                     )
                 return
             if active is not None:
-                owned = previous_owned
+                if "consent_epoch" not in active:
+                    owned = previous_owned
                 # A command/Play rejected in the previous context cannot require
                 # the paused simulation clock to advance before a fresh decision.
                 active.update(decision_time=None, next_decision=time.monotonic())
@@ -1355,6 +1702,41 @@ class ExperimentRunner:
             nonlocal owned, active, snapshot
             errors = [reason] if reason else []
             cleanup_requested = owned or active is not None
+            if active is not None and "consent_epoch" in active:
+                cohort = active
+                if self._standby is not None:
+                    self._standby.request_stop()
+                release_state = "unconfirmed_native_watchdog"
+                try:
+                    # Native release atomically validates original consent and
+                    # context, revokes the cohort and clears only its own force.
+                    # A manual command between read and release remains intact.
+                    current = read_public_snapshot(sim, self._stop)
+                    self.record_snapshot(current, source="cohort_release_check")
+                    sim.release_control(cohort["run_id"], cohort["consent_epoch"], current)
+                    release_state = "acknowledged"
+                    snapshot = read_public_snapshot(sim, self._stop)
+                    self.record_snapshot(snapshot, source="cohort_release")
+                except StaleContextError:
+                    release_state = "rejected_after_takeover_no_fallback"
+                except BaseException as error:
+                    errors.append(_failure("Guarded cohort release", error))
+                owned, active = False, None
+                message = "; ".join(errors) or None
+                with self._lock:
+                    self._report.update(
+                        state="error" if message else "watching",
+                        controller_running=False,
+                        flight_owned=False,
+                        run_request_state="failed" if message else "completed",
+                        release_state=release_state,
+                        notice=(notice or "Python control ended.")
+                        + " The cohort was signalled. Release never pauses or brakes flight. "
+                        + "Unconfirmed cleanup remains bounded by the native watchdog.",
+                        notice_source="resilience",
+                        error=message,
+                    )
+                return message
             if cleanup_requested:
                 with sim.control_transaction():
                     try:
@@ -1446,6 +1828,15 @@ class ExperimentRunner:
             nonlocal phase, last_publication_wall, route, preview, previous_plan
             if snapshot is None or policy is None:
                 return False
+            if active is not None and "consent_epoch" in active:
+                authority = control_authority(snapshot)
+                if (
+                    authority["status"] == "active"
+                    and authority["controller_id"] != active["controller_id"]
+                ):
+                    # The peer publishes its own route. A live but stale primary
+                    # never replaces that with its notebook path or heartbeat.
+                    return True
             observation = snapshot["observation"]
             packet = deepcopy(preview)
             if failure is not None or packet is None:
@@ -1457,10 +1848,18 @@ class ExperimentRunner:
                     last_publication_wall = time.monotonic()
                     return True
             current_route = route if failure is None and preview is not None else None
-            waypoint = next_waypoint(observation, current_route, policy.arrival_m)
+            waypoint = (
+                next_waypoint(observation, current_route, policy.arrival_m)
+                if guidance is None
+                else None
+            )
+            if guidance is not None and guidance.report.get("next_waypoint_world_m") is not None:
+                waypoint = _world_vector(
+                    guidance.report["next_waypoint_world_m"], "next_waypoint_world_m"
+                )
             packet["execution"] = {
                 "state": state,
-                "controller": policy.controller,
+                "controller": _preview_controller(policy.controller),
                 "source_time_s": observation["time_s"],
                 "source_seed": observation["seed"],
                 "next_waypoint_world_m": waypoint.tolist() if waypoint is not None else None,
@@ -1474,8 +1873,12 @@ class ExperimentRunner:
             except StaleContextError:
                 recover_stale(path=True)
                 return False
+            except LocalApiError as error:
+                if not known_busy(error):
+                    raise
+                return True
             last_publication_wall = time.monotonic()
-            if query and not self._stop.is_set():
+            if query and guidance is None and not self._stop.is_set():
                 # Debug truth is deliberately kept out of observation, prediction
                 # and control. The query itself publishes the real native trace.
                 try:
@@ -1496,10 +1899,32 @@ class ExperimentRunner:
             with self._lock:
                 return revision != self._policy_revision
 
+        def primary_can_decide(result: Mapping[str, Any]) -> bool:
+            if active is None or "consent_epoch" not in active:
+                return True
+            with self._lock:
+                outage = self._primary_outage
+                if (
+                    outage is not None
+                    and outage["run_id"] == active["run_id"]
+                    and result["observation"]["time_s"] < outage["until_sim_time_s"]
+                ):
+                    return False
+            authority = control_authority(result)
+            return authority["status"] != "active" or (
+                authority["controller_id"] == active["controller_id"]
+            )
+
         try:
             while not self._stop.is_set():
                 try:
                     snapshot = read()
+                except LocalApiError as error:
+                    if not known_busy(error):
+                        raise
+                    self._wake.wait(1 / poll_hz)
+                    self._wake.clear()
+                    continue
                 except _RunError as error:
                     if active is None:
                         raise
@@ -1515,13 +1940,38 @@ class ExperimentRunner:
                     break
                 observation = snapshot["observation"]
                 policy, revision = self._accept_policy(observation)
+                refresh_guidance(snapshot)
                 limits, limits_revision = accept_limits(observation)
+                if active is not None and ("consent_epoch" in active) != (
+                    policy.controller == "resilient_waypoint_pd"
+                ):
+                    finish_run(notice="Controller mode changed. Explicit Run is required again.")
+                new_guidance_consent = False
                 with self._lock:
                     request, self._run_request = self._run_request, None
                     if request is not None:
                         blocked = controller_start_notice(snapshot) or controller_interruption(
                             request, observation, snapshot["runtime"]
                         )
+                        if blocked is None and request["controller"] != policy.controller:
+                            blocked = "Controller mode changed after consent. Press Run again."
+                        if (
+                            blocked is None
+                            and policy.controller == "resilient_waypoint_pd"
+                            and "consent_epoch" not in request
+                        ):
+                            blocked = (
+                                "A resilient Run must capture the original native consent epoch."
+                            )
+                        if (
+                            blocked is None
+                            and policy.resilience is not None
+                            and limits.cadence_hz * policy.resilience.lease_sim_s <= 1
+                        ):
+                            blocked = (
+                                "Increase controller cadence so its interval is shorter than "
+                                "the native command lease before Run controller."
+                            )
                         if blocked:
                             self._report.update(
                                 state="watching",
@@ -1535,6 +1985,7 @@ class ExperimentRunner:
                                 error=None,
                             )
                         else:
+                            new_guidance_consent = guidance is not None
                             self._run_index += 1
                             self._new_run = True
                             wall_origin = time.monotonic()
@@ -1561,6 +2012,13 @@ class ExperimentRunner:
                                 "awaiting_play": False,
                                 "play_deadline": None,
                             }
+                            if new_guidance_consent:
+                                active.update(
+                                    consent_epoch=request["consent_epoch"],
+                                    run_id=uuid4().hex,
+                                    controller_id=uuid4().hex,
+                                    authority_claimed=False,
+                                )
                             self._report.update(
                                 state="starting",
                                 controller_running=True,
@@ -1585,6 +2043,70 @@ class ExperimentRunner:
                                 }
                             )
 
+                if new_guidance_consent:
+                    # A manual/setup discontinuity remains latched in the
+                    # estimator until this new explicit Run consent.
+                    guidance, guidance_config = None, None
+                    refresh_guidance(snapshot)
+                    phase = "Claiming native controller authority"
+                    try:
+                        grant = sim.claim_control(
+                            active["run_id"],
+                            active["controller_id"],
+                            snapshot,
+                            expected_epoch=active["consent_epoch"],
+                            lease_sim_s=policy.resilience.lease_sim_s,
+                        )
+                        fence = controller_fence(grant)
+                        if (
+                            fence["run_id"] != active["run_id"]
+                            or fence["controller_id"] != active["controller_id"]
+                        ):
+                            raise _RunError("The native claim did not grant this primary authority")
+                    except (StaleContextError, CommandExpiredError):
+                        # No native ownership was acquired. Never adopt a newer
+                        # manual epoch or silently start a new cohort.
+                        owned, active = False, None
+                        with self._lock:
+                            self._report.update(
+                                state="watching",
+                                controller_running=False,
+                                flight_owned=False,
+                                run_request_state="rejected",
+                                notice="Native claim rejected. Inspect flight and press Run again.",
+                                notice_source="native",
+                            )
+                        continue
+                    # Only the initial explicit Run can mint a new cohort epoch
+                    # when replacing a different expired run. Keep the actual
+                    # native grant forever after this boundary, including on the
+                    # standby. No later manual epoch can refresh this consent.
+                    active.update(
+                        consent_epoch=fence["epoch"],
+                        authority_claimed=True,
+                        controller_fence=fence,
+                    )
+                    owned = True
+                    snapshot = read()
+                    if active is None or self._stop.is_set():
+                        continue
+                    phase = "Starting warm standby process"
+                    peer = StandbyCohort(
+                        sim,
+                        active,
+                        standby_policy_data(
+                            policy.settings, policy.resilience, policy.gains, revision
+                        ),
+                        poll_hz=poll_hz,
+                        replan_s=replan_s,
+                    )
+                    with self._lock:
+                        self._standby = peer
+                        self._update_standby()
+                        if self._stop.is_set():
+                            peer.request_stop()
+                    observation = snapshot["observation"]
+
                 if active is not None and run_limit_notice(active):
                     reason = finish_run(notice=run_limit_notice(active))
                     publish("error" if reason else "watching", failure=reason)
@@ -1597,9 +2119,16 @@ class ExperimentRunner:
                     phase = "Python prediction and A*"
                     guidance_error = None
                     try:
-                        route = policy.plan(deepcopy(observation))
-                        preview = route.to_preview()
-                        next_waypoint(observation, route, policy.arrival_m)
+                        if guidance is not None and not readiness.can_command:
+                            route, preview = None, None
+                        else:
+                            planning_observation = (
+                                readiness.observation if guidance is not None else observation
+                            )
+                            route = policy.plan(deepcopy(planning_observation), guidance=guidance)
+                            preview = route.to_preview()
+                            if guidance is None:
+                                next_waypoint(observation, route, policy.arrival_m)
                     except BaseException as error:
                         route, preview = None, None
                         guidance_error = _failure("Python guidance", error)
@@ -1611,6 +2140,7 @@ class ExperimentRunner:
                     current = after["observation"]
                     changed = _guidance_key(current, revision)[:-1] != planning_key[:-1]
                     changed |= current["time_s"] < observation["time_s"]
+                    changed |= guidance is not None and readiness.requires_replan
                     snapshot = after
                     accept_limits(current)
                     if changed or policy_changed():
@@ -1656,15 +2186,53 @@ class ExperimentRunner:
                                 "Play was acknowledged but actual runtime did not start in time"
                             )
                             publish("error", failure=self.status()["error"])
-                    elif time.monotonic() >= active["next_decision"] and (
-                        active["decision_time"] is None
-                        or active["last_time"] > active["decision_time"]
+                    elif (
+                        primary_can_decide(snapshot)
+                        and time.monotonic() >= active["next_decision"]
+                        and (
+                            active["decision_time"] is None
+                            or active["last_time"] > active["decision_time"]
+                        )
                     ):
                         phase = "Python controller"
                         tick_started = time.monotonic()
-                        decision_context = _guidance_key(snapshot["observation"], revision)
+                        decision_source = deepcopy(snapshot)
+                        decision_context = _guidance_key(decision_source["observation"], revision)
+                        decision_lease = readiness.lease_sim_s if guidance is not None else None
                         try:
-                            decision = policy.decision(deepcopy(snapshot["observation"]), route)
+                            decision_observation = (
+                                readiness.observation
+                                if guidance is not None
+                                else decision_source["observation"]
+                            )
+                            decision = policy.decision(
+                                deepcopy(decision_observation), route, guidance=guidance
+                            )
+                            if guidance is not None:
+                                if decision_lease == 0.0:
+                                    # No positive-thrust validity remains. This
+                                    # separate, bounded zero request permits an
+                                    # explicitly started run to coast while real
+                                    # sensor samples recover.
+                                    decision = Decision(np.zeros(3), np.zeros(3))
+                                    decision_lease = policy.resilience.lease_sim_s
+                                if route is not None and (
+                                    np.any(decision.accel) or np.any(decision.angular_accel)
+                                ):
+                                    remaining_horizon = (
+                                        route.frame.source_time_s
+                                        + route.frame.forecast_horizon_s
+                                        - decision_source["observation"]["time_s"]
+                                    )
+                                    decision_lease = min(decision_lease, remaining_horizon)
+                                    if not math.isfinite(decision_lease) or decision_lease < 0.05:
+                                        decision = Decision(np.zeros(3), np.zeros(3))
+                                        decision_lease = 0.05
+                                with self._lock:
+                                    self._report.update(
+                                        resilience=deepcopy(guidance.report),
+                                        primary_resilience=deepcopy(guidance.report),
+                                    )
                         except BaseException as error:
                             reason = finish_run(_failure("Python controller", error))
                             route, preview = None, None
@@ -1674,7 +2242,12 @@ class ExperimentRunner:
                             break
                         with sim.control_transaction():
                             snapshot = read()
-                            if self._stop.is_set() or active is None or policy_changed():
+                            if (
+                                self._stop.is_set()
+                                or active is None
+                                or policy_changed()
+                                or not primary_can_decide(snapshot)
+                            ):
                                 continue
                             accept_limits(snapshot["observation"])
                             if (
@@ -1697,23 +2270,82 @@ class ExperimentRunner:
                                 continue
                             if time.monotonic() < active["next_decision"]:
                                 continue
-                            expected = control_context(snapshot)
+                            if (
+                                guidance is not None
+                                and not readiness.can_command
+                                and (np.any(decision.accel) or np.any(decision.angular_accel))
+                            ):
+                                route, preview, previous_plan = None, None, None
+                                continue
+                            if guidance is not None and (
+                                snapshot["observation"]["time_s"]
+                                >= decision_source["observation"]["time_s"] + decision_lease
+                            ):
+                                # This computed decision is already expired. Do
+                                # not attach it to the newer snapshot's clock.
+                                active["next_decision"] = time.monotonic() + 1 / active["cadence"]
+                                continue
+                            source = decision_source if guidance is not None else snapshot
+                            expected = control_context(source)
                             previous_owned = owned
                             owned = True  # An uncertain transport response requires cleanup.
                             with self._lock:
                                 self._report["flight_owned"] = True
                             phase = "Applying body-frame command"
                             try:
-                                sim.set_command_checked(
-                                    decision.accel, decision.angular_accel, snapshot
-                                )
+                                if guidance is not None:
+                                    grant = snapshot
+                                    authority = control_authority(snapshot)
+                                    if authority["status"] != "active":
+                                        grant = sim.claim_control(
+                                            active["run_id"],
+                                            active["controller_id"],
+                                            snapshot,
+                                            expected_epoch=active["consent_epoch"],
+                                            lease_sim_s=policy.resilience.lease_sim_s,
+                                        )
+                                        active["controller_fence"] = controller_fence(grant)
+                                    fence = active["controller_fence"]
+                                    if fence != controller_fence(grant):
+                                        raise _RunError(
+                                            "Primary has no matching actual claim receipt"
+                                        )
+                                    if (
+                                        fence["epoch"] != active["consent_epoch"]
+                                        or fence["run_id"] != active["run_id"]
+                                        or fence["controller_id"] != active["controller_id"]
+                                    ):
+                                        raise _RunError(
+                                            "Native renewal did not grant this primary authority"
+                                        )
+                                    active["controller_fence"] = fence
+                                    if self._stop.is_set() or not primary_can_decide(snapshot):
+                                        continue
+                                    sim.set_leased_command(
+                                        decision.accel,
+                                        decision.angular_accel,
+                                        source,
+                                        lease_sim_s=decision_lease,
+                                        controller_fence=fence,
+                                    )
+                                else:
+                                    sim.set_command_checked(
+                                        decision.accel, decision.angular_accel, snapshot
+                                    )
+                            except CommandExpiredError:
+                                # Native rejection proves no new command was
+                                # installed. Existing leases are never renewed
+                                # by a read, preview or failed decision.
+                                owned = previous_owned
+                                active["next_decision"] = time.monotonic() + 1 / active["cadence"]
+                                continue
                             except StaleContextError:
                                 # The engine guarantees that this command did not
                                 # mutate flight. Never Stop/Pause a native takeover.
                                 owned = previous_owned
                                 recover_stale()
                                 continue
-                            active["decision_time"] = snapshot["observation"]["time_s"]
+                            active["decision_time"] = source["observation"]["time_s"]
                             active["last_decision_wall"] = tick_started
                             active["next_decision"] = tick_started + 1 / active["cadence"]
                             with self._lock:
@@ -1727,11 +2359,15 @@ class ExperimentRunner:
                                     last_command_time_s=active["decision_time"],
                                     last_command_policy_revision=revision,
                                     last_command_context=expected,
+                                    last_command_fence=deepcopy(active.get("controller_fence")),
                                 )
                             if not snapshot["runtime"]["running"]:
                                 phase = "Starting real-time playback"
                                 try:
-                                    sim.play_checked(snapshot)
+                                    if guidance is not None:
+                                        sim.play_checked(grant)
+                                    else:
+                                        sim.play_checked(snapshot)
                                 except StaleContextError:
                                     recover_stale()
                                     continue
@@ -1750,14 +2386,24 @@ class ExperimentRunner:
         except BaseException as error:
             fatal = _failure(phase, error)
         finally:
-            if active is not None or owned:
+            peer_continues = (
+                fatal is not None
+                and not self._stop.is_set()
+                and active is not None
+                and "consent_epoch" in active
+                and self._standby is not None
+                and self._standby.alive
+            )
+            if not peer_continues and (active is not None or owned):
                 fatal = finish_run(fatal)
             # A watch-only disconnect never clears force, pauses or claims flight.
             # It may replace its own advisory so native HUD ownership stays honest.
             try:
                 if fatal:
                     route, preview = None, None
-                if fatal and (snapshot is None or policy is None):
+                if peer_continues:
+                    pass  # A failed primary must not clear its independent peer's advisory.
+                elif fatal and (snapshot is None or policy is None):
                     sim.preview(None)
                 else:
                     publish("error" if fatal else "stopped", failure=fatal)
@@ -1771,11 +2417,19 @@ class ExperimentRunner:
                 self._live = False
                 self._run_request = None
                 self._report.update(
-                    state="error" if fatal else "finished",
+                    state="primary_failed_standby_active"
+                    if peer_continues
+                    else "error"
+                    if fatal
+                    else "finished",
                     worker_active=False,
-                    controller_running=False,
+                    controller_running=peer_continues,
                     flight_owned=False,
-                    run_request_state="failed" if fatal else "stopped",
+                    run_request_state="standby_active"
+                    if peer_continues
+                    else "failed"
+                    if fatal
+                    else "stopped",
                     error=fatal,
                 )
 

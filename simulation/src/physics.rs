@@ -25,6 +25,7 @@ mod debris;
 mod live_tuning;
 mod lookahead;
 mod placement;
+mod resilience;
 mod spatial_index;
 mod surface_placement;
 use live_tuning::{apply_actuator_forces, inertia_matrix, reconcile_ship_wrench};
@@ -58,6 +59,7 @@ pub struct Simulation {
     rng: u64,
     // Runtime readback only. An archive never supplies purported measured forces.
     last_actuator_application: Option<AppliedActuatorWrench>,
+    control_runtime: resilience::ControlRuntimeClock,
 }
 
 impl Simulation {
@@ -101,7 +103,10 @@ impl Simulation {
         let seed = seed.unwrap_or(self.state.seed);
         validate_seed(seed)?;
         experiment.validate()?;
-        let replacement = Self::with_flight_profile(seed, Some(experiment), preset)?;
+        let authority = self.revoked_control_authority()?;
+        let mut replacement = Self::with_flight_profile(seed, Some(experiment), preset)?;
+        replacement.retain_control_runtime_from(self);
+        replacement.install_control_authority(authority);
         *self = replacement;
         Ok(())
     }
@@ -109,6 +114,7 @@ impl Simulation {
     /// The replacement is constructed first, so invalid input cannot clear a run.
     pub fn reset(&mut self, seed: u64) -> Result<(), String> {
         validate_seed(seed)?;
+        let authority = self.revoked_control_authority()?;
         let mut state = initial_for_flight(
             seed,
             self.state.experiment_settings,
@@ -126,6 +132,8 @@ impl Simulation {
         }
         replacement.sample_radar();
         replacement.state.rng_state = replacement.rng;
+        replacement.retain_control_runtime_from(self);
+        replacement.install_control_authority(authority);
         *self = replacement;
         Ok(())
     }
@@ -166,6 +174,7 @@ impl Simulation {
             collider_ids: HashMap::with_capacity(capacity),
             touching,
             last_actuator_application: None,
+            control_runtime: resilience::ControlRuntimeClock::default(),
         };
         sim.integration.dt = settings().integration.fixed_step_s;
         for e in &sim.state.assets {
@@ -226,6 +235,7 @@ impl Simulation {
         );
         sim.handles.insert(EntityId::Phobos, phobos);
         sim.collider_ids.insert(collider, EntityId::Phobos);
+        sim.restore_command_lease();
         sim
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -334,7 +344,7 @@ impl Simulation {
                     "normal_world": (*q * Vector::Z).to_array(),
                 })
             });
-        json!({
+        let mut report = json!({
             "time_s": self.state.time_s,
             "seed": self.state.seed,
             "manual_interventions": self.state.manual_interventions,
@@ -381,7 +391,9 @@ impl Simulation {
             "fuel_unlimited": config.lander.fuel_unlimited,
             "max_accel_mps2": config.lander.max_accel_mps2,
             "max_angular_accel_rad_s2": config.lander.max_angular_accel_rad_s2,
-        })
+        });
+        self.project_sensor_delivery(&mut report);
+        report
     }
     pub fn radar(&self, n: usize) -> Vec<Observation> {
         self.state
@@ -392,6 +404,19 @@ impl Simulation {
             .collect()
     }
     pub fn set_command(&mut self, accel: [f64; 3], angular_accel: [f64; 3]) -> Result<(), String> {
+        let authority = self.revoked_control_authority()?;
+        self.set_bounded_command(accel, angular_accel)?;
+        self.cancel_command_lease();
+        self.install_control_authority(authority);
+        Ok(())
+    }
+    /// Shared finite/bounded actuator path. Authority and watchdog ownership are
+    /// committed separately by the manual and autonomous entry points.
+    fn set_bounded_command(
+        &mut self,
+        accel: [f64; 3],
+        angular_accel: [f64; 3],
+    ) -> Result<(), String> {
         let cfg = settings().lander;
         if !accel
             .iter()
@@ -402,7 +427,13 @@ impl Simulation {
         }
         let a = clamp_vec(accel, cfg.max_accel_mps2);
         let aa = clamp_vec(angular_accel, cfg.max_angular_accel_rad_s2);
-        self.apply_command(a, aa, ThrustApplication::CenterOfMass)
+        self.apply_command(a, aa, ThrustApplication::CenterOfMass)?;
+        Ok(())
+    }
+    pub(crate) fn clear_terminal_command(&mut self) -> Result<(), String> {
+        self.set_bounded_command([0.0; 3], [0.0; 3])?;
+        self.cancel_command_lease();
+        Ok(())
     }
     fn apply_command(
         &mut self,
@@ -452,6 +483,7 @@ impl Simulation {
     /// Local test intervention, never an actuator command or a new flight.
     /// Align to the actual pad body without translating or braking the lander.
     pub fn debug_upright(&mut self) -> Result<(), String> {
+        let authority = self.revoked_control_authority()?;
         let interventions = self.state.manual_interventions.checked_add(1).ok_or(
             "Local test reset counter exhausted. Reset the run before using Upright lander.",
         )?;
@@ -495,6 +527,8 @@ impl Simulation {
             lander.status = EntityStatus::Coasting;
         }
         self.state.manual_interventions = interventions;
+        self.cancel_command_lease();
+        self.install_control_authority(authority);
         event(
             &mut self.state,
             EntityId::Lander,
@@ -506,6 +540,7 @@ impl Simulation {
     // and notebook commands use the reference actuator limit.
     #[cfg(test)]
     pub(crate) fn set_space_thrust(&mut self, accel: [f64; 3]) -> Result<(), String> {
+        let authority = self.revoked_control_authority()?;
         // The input adapter has already scaled positive body-Z. This method must
         // never amplify horizontal motion or admit a boosted downward request.
         if !accel.iter().all(|v| v.is_finite()) {
@@ -521,7 +556,10 @@ impl Simulation {
             clamp_vec(accel, accel_limit(ThrustApplication::PracticeBoost)),
             [0.0; 3],
             ThrustApplication::PracticeBoost,
-        )
+        )?;
+        self.cancel_command_lease();
+        self.install_control_authority(authority);
+        Ok(())
     }
     pub fn execute(&mut self, command: PhysicsCommand) -> Result<Snapshot, String> {
         match command {
@@ -541,16 +579,26 @@ impl Simulation {
             } => {
                 self.configure_flight(settings, seed, preset)?;
             }
-            PhysicsCommand::PlaceLander { position_m } => self.place_lander(position_m)?,
+            PhysicsCommand::PlaceLander { position_m } => {
+                let authority = self.revoked_control_authority()?;
+                self.place_lander(position_m)?;
+                self.install_control_authority(authority);
+            }
             PhysicsCommand::MoveLaunchpad { surface_direction } => {
+                let authority = self.revoked_control_authority()?;
                 self.move_launchpad(surface_direction)?;
+                self.install_control_authority(authority);
             }
             PhysicsCommand::TuneShip { settings } => self.tune_ship(settings)?,
             PhysicsCommand::TuneDebrisFlow { settings } => self.tune_debris_flow(settings)?,
             PhysicsCommand::Observe => {}
             PhysicsCommand::Restore { state } => {
                 validate(&state)?;
-                *self = Self::from_state(*state);
+                let authority = self.authority_after_restore(&state)?;
+                let mut replacement = Self::from_state(*state);
+                replacement.retain_control_runtime_from(self);
+                replacement.install_control_authority(authority);
+                *self = replacement;
             }
             PhysicsCommand::Step { seconds } => {
                 if !(0.0..=settings().integration.maximum_command_step_s).contains(&seconds) {
@@ -559,12 +607,35 @@ impl Simulation {
                         settings().integration.maximum_command_step_s
                     ));
                 }
+                self.revoke_control()?;
                 self.advance(seconds)
             }
             PhysicsCommand::SetCommand {
                 accel,
                 angular_accel,
             } => self.set_command(accel, angular_accel)?,
+            PhysicsCommand::SetLeasedCommand {
+                accel,
+                angular_accel,
+                lease_sim_s,
+                source_time_s,
+                controller_fence,
+            } => {
+                self.set_leased_command(crate::model::LeasedCommand {
+                    accel,
+                    angular_accel,
+                    lease_sim_s,
+                    source_time_s,
+                    controller_fence,
+                })
+                .map_err(|error| error.to_string())?;
+            }
+            PhysicsCommand::SetSensorFault {
+                target,
+                mode,
+                duration_sim_s,
+            } => self.set_sensor_fault(target, mode, duration_sim_s)?,
+            PhysicsCommand::ClearSensorFaults => self.clear_sensor_faults()?,
             PhysicsCommand::Stop => {
                 self.set_command([0.0; 3], [0.0; 3])?;
             }
@@ -582,6 +653,7 @@ impl Simulation {
         let h = seconds / n as f64;
         self.integration.dt = h;
         for _ in 0..n {
+            self.enforce_sensor_and_command_deadlines();
             if self.state.mission.status.is_terminal() {
                 break;
             }
@@ -707,7 +779,9 @@ impl Simulation {
             self.recycle_debris();
             let before = self.state.time_s;
             self.state.time_s += h;
+            self.enforce_sensor_and_command_deadlines();
             self.update_mission();
+            self.sample_navigation_delivery();
             let cadence = settings().sensors.cadence_hz;
             if (self.state.time_s * cadence).floor() > (before * cadence).floor() {
                 self.sample_radar();
@@ -920,6 +994,7 @@ impl Simulation {
         // independently of its unclipped closest-range and diameter samples.
         rows.sort_by(|a, b| norm(a.relative_position_m).total_cmp(&norm(b.relative_position_m)));
         self.state.observations = rows;
+        self.sample_sensor_deliveries();
     }
 }
 
@@ -1125,6 +1200,7 @@ fn initial_for_flight(
         observations: vec![],
         rng_state: rng,
         active_contacts: vec![],
+        sensor_state: Some(crate::model::SensorState::new(seed)),
     })
 }
 
@@ -1342,6 +1418,7 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
         && e.max_thrust_n == settings().lander.mass_kg * settings().lander.max_accel_mps2
 }
 fn validate(s: &Snapshot) -> Result<(), String> {
+    resilience::validate_sensor_state(s)?;
     if let Some(experiment) = s.experiment_settings {
         experiment.validate()?;
     }
@@ -2416,7 +2493,7 @@ mod tests {
     }
 
     #[test]
-    fn holding_a_body_left_push_naturally_tips_over_on_the_real_default_pad() {
+    fn holding_positive_body_y_thrust_naturally_tips_over_on_the_real_default_pad() {
         let mut sim = Simulation::new_default();
         let up = rotation(lander(&sim)) * Vector::Z;
         let dt = settings().integration.fixed_step_s;
@@ -2427,7 +2504,7 @@ mod tests {
             .unwrap();
 
         // No pose, angular velocity, gravity, inertia, or contact changes. This is
-        // the same sustained +Y force the A key requests on the configured pad.
+        // a sustained positive body-Y force, not the A binding, which requests -Y.
         for _ in 0..(12.0 / dt).ceil() as usize {
             sim.advance(dt);
             let rb = rigid_body(&sim);

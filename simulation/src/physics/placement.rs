@@ -196,6 +196,7 @@ impl Simulation {
         self.state.active_contacts = self.touching.iter().copied().collect();
         self.state.active_contacts.sort();
         self.state.observations.clear();
+        self.invalidate_sensor_samples();
         if let Some(target) = self
             .state
             .assets

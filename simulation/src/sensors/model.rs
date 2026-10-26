@@ -71,6 +71,7 @@ pub(crate) struct SensorImages {
     pub last_sample_wall_s: f64,
     pub sequence: u64,
     pub frames: [Option<FrameInfo>; 2],
+    pub trial_revision: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +168,8 @@ pub(super) struct CaptureTicket {
     pub token: u32,
     pub info: FrameInfo,
     pub deadline_wall_s: f64,
+    pub trial_revision: u32,
+    pub sensor_revision: u32,
 }
 
 #[derive(Component)]

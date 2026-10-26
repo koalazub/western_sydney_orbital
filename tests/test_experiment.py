@@ -6,6 +6,7 @@ interruption and command delivery require the owner's actual browser check.
 
 from __future__ import annotations
 
+import json
 import secrets
 import threading
 from copy import deepcopy
@@ -16,6 +17,7 @@ import pytest
 
 from wsorb.experiment import (
     HISTORY_LIMIT,
+    MAX_CONTROLLER_RUN_S,
     Decision,
     ExperimentRunner,
     FlightStateError,
@@ -35,7 +37,14 @@ from wsorb.experiment import (
     run_limit_notice,
     terminal_mission_notice,
 )
-from wsorb.flight import PlannerConfig, basic_command, coast_command, plan_route, predict_obstacles
+from wsorb.flight import (
+    PlannerConfig,
+    ResilienceConfig,
+    basic_command,
+    coast_command,
+    plan_route,
+    predict_obstacles,
+)
 from wsorb.local_api import (
     MAX_DEBRIS_COUNT,
     LocalApiError,
@@ -46,6 +55,7 @@ from wsorb.local_api import (
     validate_experiment_settings,
     validate_position,
 )
+from wsorb.standby import control_authority, controller_fence, standby_policy_data
 
 
 def test_decision_copies_body_frame_vectors_without_clamping_or_sending():
@@ -435,7 +445,12 @@ def test_idle_live_updates_and_run_requests_cannot_start_a_worker(numeric_live_p
 
 @pytest.mark.parametrize(
     ("parameter", "value"),
-    [("duration_s", 0), ("duration_s", 301), ("cadence_hz", 0), ("cadence_hz", 11)],
+    [
+        ("duration_s", 0),
+        ("duration_s", MAX_CONTROLLER_RUN_S + 1),
+        ("cadence_hz", 0),
+        ("cadence_hz", 11),
+    ],
 )
 def test_run_current_policy_validates_limits_without_a_connection(parameter, value):
     runner = ExperimentRunner()
@@ -588,7 +603,15 @@ def test_tuning_report_without_telemetry_is_configuration_not_an_invented_measur
 
 @pytest.mark.parametrize(
     ("duration", "cadence"),
-    [(0, 2), (301, 2), (True, 2), (np.nan, 2), (30, 0), (30, 11), (30, np.inf)],
+    [
+        (0, 2),
+        (MAX_CONTROLLER_RUN_S + 1, 2),
+        (True, 2),
+        (np.nan, 2),
+        (30, 0),
+        (30, 11),
+        (30, np.inf),
+    ],
 )
 def test_hot_run_limits_reject_invalid_numbers_without_any_worker(duration, cadence):
     with pytest.raises(ValueError):
@@ -611,6 +634,19 @@ def test_hot_run_limits_are_data_only_and_cannot_start_an_idle_runner():
     assert runner.status()["state"] == "idle"
     assert runner._worker is None
     assert runner.history() == runner.configuration_changes() == []
+
+
+def test_explicit_full_flight_budget_is_bounded_without_starting_a_controller():
+    assert RunLimits(MAX_CONTROLLER_RUN_S, 8).to_dict() == {
+        "duration_s": MAX_CONTROLLER_RUN_S,
+        "requested_cadence_hz": 8.0,
+    }
+    runner = ExperimentRunner()
+    with pytest.raises(FlightStateError, match="Connect"):
+        runner.run_controller(duration_s=1200, cadence_hz=8)
+    assert runner._worker is None
+    assert runner._standby is None
+    assert runner._run_request is None
 
 
 def test_worker_accepts_hot_timing_once_with_an_actual_source_clock_not_a_restart(
@@ -1087,3 +1123,116 @@ def test_xyz_bounds_and_pose_readback_math_do_not_use_a_request_echo():
     assert not placement_readback_matches(values, [15_000, 0, 0])
     values["observation"]["applied_physics"]["velocity_world_mps"] = [1, 0, 0]
     assert not placement_readback_matches(values, [14_000, 0, 0])
+
+
+def test_standby_configuration_contains_data_not_notebook_functions(numeric_live_policy):
+    policy = replace(numeric_live_policy, controller="resilient_waypoint_pd")
+    data = standby_policy_data(policy.settings, policy.resilience, policy.gains, 7)
+    assert json.loads(json.dumps(data, allow_nan=False)) == data
+    assert set(data) == {"planner", "resilience", "gains", "policy_revision"}
+    assert data["policy_revision"] == 7
+    assert data["resilience"]["planner"] == data["planner"]
+    data["gains"]["waypoint_arrival_m"] = 100
+    assert policy.gains["waypoint_arrival_m"] == 20
+    assert policy.predict_scene is numeric_live_policy.predict_scene
+    assert policy.find_path is numeric_live_policy.find_path
+    runner = ExperimentRunner()
+    assert runner._standby is None
+    assert runner.status()["sample_count"] == 0
+
+
+@pytest.mark.parametrize("value", [0, 0.049, 300.01, True, "5", None, np.nan, np.inf])
+def test_invalid_primary_outage_cannot_start_a_process_or_contact_flight(value):
+    runner = ExperimentRunner()
+    with pytest.raises(ValueError, match="duration_sim_s"):
+        runner.inject_primary_outage(value)
+    assert runner._standby is runner._worker is None
+    assert runner.status()["state"] == "idle"
+
+
+def test_valid_outage_requires_an_explicit_active_resilient_cohort():
+    runner = ExperimentRunner()
+    with pytest.raises(FlightStateError, match="explicit resilient"):
+        runner.inject_primary_outage()
+    assert runner._standby is runner._worker is None
+
+
+def test_resilient_fence_projection_requires_native_grant_fields_and_copies_them():
+    """Protocol data parsing only. This does not replace a native claim response."""
+    authority = {
+        "epoch": 12,
+        "term": 15,
+        "status": "active",
+        "run_id": "numeric_run",
+        "controller_id": "numeric_primary",
+        "expires_at_sim_time_s": 10.75,
+    }
+    metadata = {"observation": {"control_authority": authority}}
+    fence = controller_fence(metadata)
+    assert fence == {
+        "epoch": 12,
+        "term": 15,
+        "run_id": "numeric_run",
+        "controller_id": "numeric_primary",
+    }
+    fence["term"] = 99
+    assert authority["term"] == 15
+    authority["expires_at_runtime_s"] = 120.75
+    assert controller_fence(metadata)["epoch"] == 12
+    assert "expires_at_runtime_s" not in controller_fence(metadata)
+    del authority["expires_at_runtime_s"]
+    for field in authority:
+        missing = deepcopy(metadata)
+        del missing["observation"]["control_authority"][field]
+        with pytest.raises(ValueError):
+            control_authority(missing)
+    for status in ("idle", "expired", "revoked"):
+        authority["status"] = status
+        with pytest.raises(ValueError, match="active native grant"):
+            controller_fence(metadata)
+
+
+def test_resilient_consent_guard_accepts_peer_term_but_never_a_new_manual_epoch(
+    numeric_guidance_input,
+):
+    """Pure lifecycle metadata, not fabricated SDK, engine or network results."""
+    observation = deepcopy(numeric_guidance_input)
+    observation["control_authority"] = {
+        "epoch": 12,
+        "term": 16,
+        "status": "active",
+        "run_id": "numeric_run",
+        "controller_id": "numeric_peer",
+        "expires_at_sim_time_s": 10.75,
+    }
+    active = {
+        "seed": 100,
+        "counter": 0,
+        "last_time": 9.5,
+        "expect_running": True,
+        "consent_epoch": 12,
+        "run_id": "numeric_run",
+        "authority_claimed": True,
+    }
+    runtime = {"running": True}
+    assert controller_interruption(active, observation, runtime) is None
+    observation["control_authority"]["status"] = "expired"
+    assert controller_interruption(active, observation, runtime) is None
+    observation["control_authority"].update(epoch=13, status="revoked", controller_id=None)
+    assert "consent ended" in controller_interruption(active, observation, runtime)
+    assert active["consent_epoch"] == 12
+    observation["control_authority"].update(
+        epoch=12,
+        status="active",
+        run_id="numeric_other_run",
+        controller_id="numeric_foreign_owner",
+    )
+    assert "another run" in controller_interruption(active, observation, runtime)
+
+
+def test_standby_rejects_non_data_or_nonfinite_algorithm_settings_before_process_start():
+    with pytest.raises(ValueError, match="PlannerConfig"):
+        standby_policy_data(object(), ResilienceConfig(), {}, 1)
+    for value in (True, "1", float("inf"), float("nan"), object(), -1):
+        with pytest.raises(ValueError, match="gains"):
+            standby_policy_data(PlannerConfig(), ResilienceConfig(), {"position_gain_s2": value}, 1)

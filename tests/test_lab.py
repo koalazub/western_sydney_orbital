@@ -42,9 +42,18 @@ def test_lab_default_graph_stays_disconnected_and_idle(lab_defs) -> None:
     assert all(
         callable(lab_defs[name]) for name in ("predict_scene", "find_path", "decide_command")
     )
-    assert lab_defs["controller_mode"].value == "planned_waypoint_pd"
+    assert lab_defs["controller_mode"].value == "resilient_waypoint_pd"
+    assert lab_defs["live_policy"].resilience is not None
+    assert lab_defs["planner_settings"] == lab_defs["live_policy"].resilience.planner
+    assert lab_defs["planner_settings"].forecast_horizon_s == 6.0
+    assert lab_defs["duration_s"].value == lab_defs["CHECKPOINT_RUN_LIMIT_S"]
+    assert lab_defs["duration_s"].stop == lab_defs["MAX_CONTROLLER_RUN_S"]
+    assert lab_defs["cadence_hz"].value == 8
     assert lab_defs["get_session"]() is None
     assert lab_defs["get_placement_seed"]() is None
+    assert lab_defs["get_reviewed_proposal"]() is None
+    assert lab_defs["get_proposal_draft"]() is None
+    assert not lab_defs["proposal_upload"].value
     assert lab_defs["flight_preset"].value == "far_side_l2"
     assert lab_defs["debris_mode"].value == "directed_stream"
     assert lab_defs["placement_controls"].value == {"x": None, "y": None, "z": None}
@@ -75,6 +84,13 @@ def test_lab_default_graph_stays_disconnected_and_idle(lab_defs) -> None:
         "capture_images",
         "prepare_export",
         "place_lander",
+        "apply_sensor_fault",
+        "clear_sensor_faults",
+        "pause_physics",
+        "review_proposal",
+        "adopt_proposal",
+        "discard_proposal",
+        "interrupt_primary",
     ):
         assert lab_defs[name].value is False
     assert lab_defs["get_applied_config"]() is None
@@ -101,6 +117,7 @@ def test_lab_task_tabs_are_real_marimo_tabs_with_flight_selected(lab_defs, lab_p
     assert isinstance(tabs, mo.ui.tabs)
     assert list(lab_panels) == [
         "Flight",
+        "Resilience",
         "Ship",
         "Debris",
         "Launch",
@@ -116,12 +133,51 @@ def test_lab_task_tabs_are_real_marimo_tabs_with_flight_selected(lab_defs, lab_p
     assert tabs._on_change is lab_defs["set_selected_tab"]
 
 
+def test_resilience_controls_are_explicit_and_disabled_without_a_connection(lab_defs, lab_panels):
+    """Inspect the real default notebook graph, not a simulated sensor or browser."""
+    assert lab_defs["sensor_fault_target"].value == "radar_primary"
+    assert lab_defs["sensor_fault_mode"].value == "unavailable"
+    assert lab_defs["sensor_fault_duration"].value == 5
+    assert lab_defs["primary_outage_duration"].value == 5
+    assert lab_defs["get_step_guidance"]() is None
+    for name in (
+        "sensor_fault_target",
+        "sensor_fault_mode",
+        "sensor_fault_duration",
+        "apply_sensor_fault",
+        "clear_sensor_faults",
+        "pause_physics",
+        "primary_outage_duration",
+        "interrupt_primary",
+    ):
+        assert lab_defs[name]._component_args["disabled"] is True
+    assert "do not fail a production cloud region" in lab_panels["Resilience"].text
+    assert "Navigation telemetry is one unreplicated source" in lab_panels["Resilience"].text
+    assert lab_defs["experiment"]._worker is None
+    assert lab_defs["experiment"].history() == []
+
+
 def test_each_existing_widget_appears_once_in_its_task_tab(lab_defs, lab_panels):
     """Rendered component inventory, not browser interaction or GPU evidence."""
     import marimo as mo
 
     inventory = {
-        "Flight": ("connection_file", "connect_refresh", "run_controller", "stop_run"),
+        "Flight": (
+            "connection_file",
+            "connect_refresh",
+            "run_controller",
+            "stop_run",
+            "pause_physics",
+        ),
+        "Resilience": (
+            "primary_outage_duration",
+            "interrupt_primary",
+            "sensor_fault_target",
+            "sensor_fault_mode",
+            "sensor_fault_duration",
+            "apply_sensor_fault",
+            "clear_sensor_faults",
+        ),
         "Ship": ("ship_controls",),
         "Debris": ("flow_controls", "debris_mode", "structure_controls", "impact_controls"),
         "Launch": (
@@ -132,6 +188,10 @@ def test_each_existing_widget_appears_once_in_its_task_tab(lab_defs, lab_panels)
             "placement_controls",
             "place_lander",
             "upright",
+            "proposal_upload",
+            "review_proposal",
+            "adopt_proposal",
+            "discard_proposal",
         ),
         "Python policy": (
             "controller_mode",

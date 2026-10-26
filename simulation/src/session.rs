@@ -8,8 +8,7 @@ use crate::{
     runtime::{self, Effect, PlaybackState},
     scenario,
 };
-use bevy::input_focus::InputFocus;
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, input_focus::InputFocus, prelude::*};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -26,20 +25,23 @@ struct ViewportState {
 
 const MAX_ACTIONS: usize = 32;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum QueuedAction {
     Native(EngineAction),
+    InternalPause,
     CheckedPlay {
         rate: PlaybackRate,
         expected: CommandContext,
+        controller_fence: Option<crate::model::ControlFence>,
     },
 }
 
 impl QueuedAction {
-    fn engine_action(self) -> EngineAction {
+    fn engine_action(&self) -> EngineAction {
         match self {
-            Self::Native(action) => action,
-            Self::CheckedPlay { rate, .. } => EngineAction::Play(rate),
+            Self::Native(action) => *action,
+            Self::InternalPause => EngineAction::Pause,
+            Self::CheckedPlay { rate, .. } => EngineAction::Play(*rate),
         }
     }
 }
@@ -66,12 +68,39 @@ thread_local! {
 }
 
 pub(crate) fn request_action(action: EngineAction) {
+    let _ = enqueue_native_action(action);
+}
+
+fn enqueue_native_action(action: EngineAction) -> Result<(), String> {
     ACTIONS.with(|queue| {
         let mut queue = queue.borrow_mut();
-        if queue.len() < MAX_ACTIONS {
-            queue.push_back(QueuedAction::Native(action));
+        require_pause_slot(
+            &queue,
+            "Let queued actions finish before requesting another action",
+        )?;
+        let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+        let takeover = match action {
+            EngineAction::Pause => true,
+            EngineAction::TogglePlayback
+            | EngineAction::Play(_)
+            | EngineAction::Step
+            | EngineAction::Reset
+            | EngineAction::DebugUpright
+            | EngineAction::CycleRate => playback.can_control,
+            EngineAction::Viewport(_) => false,
+        };
+        if takeover {
+            let changed = SIMULATION.with(|sim| sim.borrow_mut().revoke_control())?;
+            // A Play queued before deliberate native intent cannot undo that intent,
+            // even if both requests observed the same paused timestamp.
+            queue.retain(|queued| !matches!(queued, QueuedAction::CheckedPlay { .. }));
+            if changed {
+                refresh();
+            }
         }
-    });
+        queue.push_back(QueuedAction::Native(action));
+        Ok(())
+    })
 }
 
 /// The explicit placement button pauses playback without replacing the world.
@@ -100,10 +129,14 @@ pub(crate) fn pause_for_launchpad_placement() -> Result<PlaybackState, String> {
             &actions,
             "Let queued actions finish, then choose Place lander again.",
         )?;
+        let changed = SIMULATION.with(|sim| sim.borrow_mut().revoke_control())?;
         let mission = SIMULATION.with(|sim| sim.borrow().mission_status());
         let paused = runtime::transition(playback, EngineAction::Pause, mission).state;
-        actions.push_back(QueuedAction::Native(EngineAction::Pause));
+        actions.push_back(QueuedAction::InternalPause);
         RUNTIME.with(|runtime| *runtime.borrow_mut() = paused.clone());
+        if changed {
+            refresh();
+        }
         Ok(paused)
     })
 }
@@ -125,6 +158,22 @@ pub(crate) fn snapshot() -> Rc<Snapshot> {
 
 fn publish(state: Snapshot) -> Rc<Snapshot> {
     let state = Rc::new(state);
+    let revision = state
+        .sensor_state
+        .as_ref()
+        .map_or(0, |state| state.revision);
+    let changed = PUBLISHED.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|previous| {
+            previous
+                .sensor_state
+                .as_ref()
+                .map_or(0, |state| state.revision)
+                != revision
+        })
+    });
+    if changed {
+        crate::sensors::invalidate_pending();
+    }
     PUBLISHED.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&state)));
     state
 }
@@ -134,9 +183,18 @@ fn refresh() {
 }
 
 pub(crate) fn observation() -> serde_json::Value {
-    let mut report = SIMULATION.with(|sim| sim.borrow().observation());
+    let mut report = SIMULATION.with(|sim| {
+        let simulation = sim.borrow();
+        let mut report = simulation.observation();
+        crate::sensors::attach_health(&mut report, simulation.sensor_delivery_state());
+        report
+    });
     report["trial_revision"] = serde_json::json!(trial_revision());
     report
+}
+
+pub(crate) fn sensor_revision() -> u32 {
+    SIMULATION.with(|simulation| simulation.borrow().sensor_revision())
 }
 
 pub(crate) fn trial_revision() -> u32 {
@@ -185,6 +243,10 @@ pub(crate) fn is_running() -> bool {
     RUNTIME.with(|state| state.borrow().running)
 }
 
+pub(crate) fn playback_state() -> PlaybackState {
+    RUNTIME.with(|state| state.borrow().clone())
+}
+
 pub(crate) fn block_keyboard_until_release() {
     KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().block_until_release());
 }
@@ -207,7 +269,7 @@ fn platform_effect(action: ViewportAction) {
 pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
     match request {
         Dispatch::Action(action) => {
-            request_action(action);
+            enqueue_native_action(action)?;
             Ok(snapshot())
         }
         Dispatch::View(request) => {
@@ -221,10 +283,24 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
             expected_context,
         } => dispatch_checked(accel, angular_accel, expected_context)
             .map_err(|error| error.to_string()),
+        Dispatch::CheckedLease {
+            request,
+            expected_context,
+            expected_sensor_revision,
+        } => dispatch_leased_checked(request, expected_context, expected_sensor_revision)
+            .map_err(|error| error.to_string()),
         Dispatch::CheckedPlay {
             rate,
             expected_context,
         } => dispatch_play_checked(rate, expected_context).map_err(|error| error.to_string()),
+        Dispatch::ClaimControl {
+            request,
+            expected_context,
+        } => dispatch_claim_control(request, expected_context).map_err(|error| error.to_string()),
+        Dispatch::ReleaseControl {
+            request,
+            expected_context,
+        } => dispatch_release_control(request, expected_context).map_err(|error| error.to_string()),
         Dispatch::CheckedLaunchpad {
             surface_direction,
             expected_context,
@@ -250,6 +326,82 @@ pub(crate) fn dispatch_checked(
         angular_accel,
     })
     .map_err(CommandError::Rejected)
+}
+
+pub(crate) fn dispatch_leased_checked(
+    request: crate::model::LeasedCommand,
+    expected: CommandContext,
+    expected_sensor_revision: u32,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    if sensor_revision() != expected_sensor_revision
+        || ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running))
+    {
+        return Err(CommandError::StaleContext);
+    }
+    let state = SIMULATION
+        .with(|simulation| {
+            let mut simulation = simulation.borrow_mut();
+            simulation
+                .set_leased_command(request)
+                .map(|()| simulation.snapshot())
+        })
+        .map_err(lease_command_error)?;
+    supersede_keyboard_command();
+    Ok(publish(state))
+}
+
+fn lease_command_error(error: crate::model::LeaseError) -> CommandError {
+    match error {
+        crate::model::LeaseError::Expired => CommandError::CommandExpired,
+        crate::model::LeaseError::Unavailable | crate::model::LeaseError::StaleContext => {
+            CommandError::StaleContext
+        }
+        crate::model::LeaseError::Rejected(error) => CommandError::Rejected(error),
+    }
+}
+
+pub(crate) fn dispatch_claim_control(
+    request: crate::model::ControlClaim,
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    if ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running)) {
+        return Err(CommandError::StaleContext);
+    }
+    let state = SIMULATION
+        .with(|simulation| {
+            let mut simulation = simulation.borrow_mut();
+            simulation
+                .claim_control(request)
+                .map(|()| simulation.snapshot())
+        })
+        .map_err(lease_command_error)?;
+    supersede_keyboard_command();
+    Ok(publish(state))
+}
+
+pub(crate) fn dispatch_release_control(
+    request: crate::model::ControlRelease,
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    // A stop may release the whole cohort after its primary expires or the mission
+    // finishes. It still cannot cross a manual/setup/playback context change.
+    validate_setup_context(expected, &playback)?;
+    // A controller Play may still be queued. Revocation must win now; that Play
+    // will fail its captured-fence check when the runtime consumes it.
+    let state = SIMULATION
+        .with(|simulation| {
+            let mut simulation = simulation.borrow_mut();
+            simulation
+                .release_control(request)
+                .map(|()| simulation.snapshot())
+        })
+        .map_err(lease_command_error)?;
+    Ok(publish(state))
 }
 
 fn validate_context(
@@ -284,19 +436,19 @@ fn validate_setup_context(
     Ok(())
 }
 
-fn pending_flight_action(actions: &VecDeque<QueuedAction>, running: bool) -> bool {
-    actions.iter().any(|action| match action.engine_action() {
-        EngineAction::Viewport(_) | EngineAction::CycleRate => false,
-        // A successful explicit setup commits the paused mirror before
-        // its queued Pause reaches Bevy. That no-op pause is already
-        // represented by the observed context; a pending pause of a
-        // running flight is not.
-        EngineAction::Pause => running,
-        EngineAction::TogglePlayback
-        | EngineAction::Play(_)
-        | EngineAction::Step
-        | EngineAction::Reset
-        | EngineAction::DebugUpright => true,
+fn pending_flight_action(actions: &VecDeque<QueuedAction>, _running: bool) -> bool {
+    actions.iter().any(|action| match action {
+        QueuedAction::InternalPause => false,
+        QueuedAction::CheckedPlay { .. } => true,
+        QueuedAction::Native(action) => match action {
+            EngineAction::Viewport(_) | EngineAction::CycleRate => false,
+            EngineAction::Pause => true,
+            EngineAction::TogglePlayback
+            | EngineAction::Play(_)
+            | EngineAction::Step
+            | EngineAction::Reset
+            | EngineAction::DebugUpright => true,
+        },
     })
 }
 
@@ -308,6 +460,9 @@ pub(crate) fn dispatch_play_checked(
 ) -> Result<Rc<Snapshot>, CommandError> {
     let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
     validate_context(expected, &playback)?;
+    let controller_fence = SIMULATION
+        .with(|simulation| simulation.borrow().control_fence_for_play())
+        .map_err(lease_command_error)?;
     ACTIONS.with(|actions| {
         let mut actions = actions.borrow_mut();
         if pending_flight_action(&actions, playback.running) {
@@ -318,7 +473,11 @@ pub(crate) fn dispatch_play_checked(
             "Let queued actions finish before starting playback",
         )
         .map_err(CommandError::Rejected)?;
-        actions.push_back(QueuedAction::CheckedPlay { rate, expected });
+        actions.push_back(QueuedAction::CheckedPlay {
+            rate,
+            expected,
+            controller_fence,
+        });
         Ok(snapshot())
     })
 }
@@ -392,15 +551,19 @@ fn execute_physics(
             // playback, pending actions and the existing command writer intact.
             Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
         }
+        command @ (PhysicsCommand::SetSensorFault { .. } | PhysicsCommand::ClearSensorFaults) => {
+            require_control(playback, "Sensor faults are unavailable in view-only mode")?;
+            Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
+        }
         command @ PhysicsCommand::Step { .. } => {
             if playback.running {
                 return Err("Pause the mission before stepping manually".into());
             }
             Ok(PhysicsExecution::KeyboardUnchanged(execute(command)?))
         }
-        command @ (PhysicsCommand::SetCommand { .. } | PhysicsCommand::Stop) => {
-            Ok(PhysicsExecution::ExternalCommand(execute(command)?))
-        }
+        command @ (PhysicsCommand::SetCommand { .. }
+        | PhysicsCommand::SetLeasedCommand { .. }
+        | PhysicsCommand::Stop) => Ok(PhysicsExecution::ExternalCommand(execute(command)?)),
         command @ (PhysicsCommand::Reset { .. } | PhysicsCommand::Restore { .. }) => {
             require_trial_revision_capacity()?;
             require_pause_slot(
@@ -489,6 +652,7 @@ fn require_trial_revision_capacity() -> Result<(), String> {
 fn note_trial_change() {
     TRIAL_REVISION.with(|revision| revision.set(revision.get() + 1));
     crate::navigation::clear_for_trial();
+    crate::sensors::invalidate_trial();
 }
 
 fn require_pause_slot(actions: &VecDeque<QueuedAction>, message: &str) -> Result<(), String> {
@@ -544,14 +708,20 @@ fn commit_paused_trial(
     });
     // The slot was checked before execution. Replace old pauses with exactly
     // one Pause that reaches the playback runtime before any later flight action.
-    actions.push_front(QueuedAction::Native(EngineAction::Pause));
+    actions.push_front(QueuedAction::InternalPause);
     supersede_keyboard_command();
     let paused = runtime::transition(playback, EngineAction::Pause, state.mission.status).state;
     RUNTIME.with(|runtime| *runtime.borrow_mut() = paused);
 }
 
+#[derive(SystemParam)]
+pub(crate) struct RuntimeClocks<'w> {
+    frame: Res<'w, Time>,
+    real: Option<Res<'w, Time<Real>>>,
+}
+
 pub(crate) fn advance_world(
-    time: Res<Time>,
+    clocks: RuntimeClocks,
     keys: Res<ButtonInput<KeyCode>>,
     hud: Res<crate::hud::HudState>,
     mut state: ResMut<PlaybackState>,
@@ -559,6 +729,11 @@ pub(crate) fn advance_world(
     editors: Query<(), With<crate::hud::InstrumentEditor>>,
     surface_controls: Query<(), With<crate::launchpad::SurfaceControl>>,
 ) {
+    if let Some(real_time) = clocks.real.as_ref()
+        && SIMULATION.with(|simulation| simulation.borrow_mut().update_control_runtime(real_time))
+    {
+        refresh();
+    }
     let editor_focused = input_focus
         .as_ref()
         .and_then(|focus| focus.get())
@@ -596,9 +771,20 @@ pub(crate) fn advance_world(
     for queued in actions {
         let action = match queued {
             QueuedAction::Native(action) => action,
-            QueuedAction::CheckedPlay { rate, expected } => {
+            QueuedAction::InternalPause => EngineAction::Pause,
+            QueuedAction::CheckedPlay {
+                rate,
+                expected,
+                controller_fence,
+            } => {
                 if let Err(error) = validate_context(expected, &state) {
                     state.message = error.to_string();
+                    continue;
+                }
+                let current =
+                    SIMULATION.with(|simulation| simulation.borrow().control_fence_for_play());
+                if current.is_err() || current.ok() != Some(controller_fence) {
+                    state.message = CommandError::StaleContext.to_string();
                     continue;
                 }
                 EngineAction::Play(rate)
@@ -671,7 +857,7 @@ pub(crate) fn advance_world(
     update_keyboard_pilot(&state, movement, movement_blocked);
     if state.running && state.can_control {
         let step = scenario::settings().integration.fixed_step_s;
-        state.accumulator += time.delta_secs_f64().min(0.1) * state.rate.factor();
+        state.accumulator += clocks.frame.delta_secs_f64().min(0.1) * state.rate.factor();
         let steps = (state.accumulator / step).floor().min(20.0) as u32;
         if steps > 0 {
             SIMULATION.with(|sim| {
@@ -680,7 +866,7 @@ pub(crate) fn advance_world(
                     sim.advance(step);
                     if sim.mission_status() != MissionStatus::Running {
                         state.running = false;
-                        let _ = sim.set_command([0.0; 3], [0.0; 3]);
+                        let _ = sim.clear_terminal_command();
                         break;
                     }
                 }

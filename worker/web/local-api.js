@@ -3,7 +3,10 @@ const POLL_MS = 50;
 const REQUEST_TIMEOUT_MS = 2500;
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
-const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
+const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
+const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
+// Only these native rejections establish that an invoked command was unapplied.
+const UNAPPLIED_COMMAND_CODES = new Set(["stale_context", "command_expired"]);
 let connected = false;
 
 // Keep the actual transport policy inspectable without a substitute browser or
@@ -40,7 +43,13 @@ export function connect(token) {
   let capturing = false;
   let api;
   let manifest;
-  const message = error => error instanceof Error ? error.message : String(error);
+  const message = error => {
+    const detail = typeof error?.message === "string" && error.message ? error.message
+      : typeof error?.error === "string" && error.error ? error.error
+        : typeof error === "string" && error ? error : "Unrecognized browser engine error";
+    return detail.replaceAll(token, "[redacted]");
+  };
+  const errorCode = error => ERROR_CODES.has(error?.code) ? error.code : undefined;
   const report = (state, error = null) => {
     status.status = state;
     status.error = error;
@@ -73,7 +82,12 @@ export function connect(token) {
         chunks.push(value);
       }
       const value = JSON.parse(await new Blob(chunks).text());
-      if (!response.ok) throw new Error(value.error || `Local bridge returned HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(value?.error || value?.message ? message(value) : `Local bridge returned HTTP ${response.status}`);
+        const code = errorCode(value);
+        if (code) error.code = code;
+        throw error;
+      }
       return value;
     } finally {
       clearTimeout(timer);
@@ -116,7 +130,7 @@ export function connect(token) {
   async function invoke(job) {
     let commandInvoked = false;
     const failure = (error, code) => ({
-      envelope: { id: job.id, ok: false, error, ...(code === "stale_context" ? { code } : {}) },
+      envelope: { id: job.id, ok: false, error: message(error).slice(0, 2048), ...(ERROR_CODES.has(code) ? { code } : {}) },
       commandInvoked,
     });
     if (!Number.isSafeInteger(job.deadline_ms) || Date.now() >= job.deadline_ms) {
@@ -137,11 +151,11 @@ export function connect(token) {
         };
       } else if (job.method === "raycast") {
         const result = JSON.parse(api.lookahead_raycast(JSON.stringify(job.query)));
-        if (result.ok !== true) return failure(result.error || "Look-ahead ray was rejected");
+        if (result.ok !== true) return failure(result.error || result.message || "Look-ahead ray was rejected", result.code);
         value = result.report;
       } else if (job.method === "pan_tilt") {
         const result = JSON.parse(api.pan_tilt_camera(job.camera, job.yaw_deg, job.pitch_deg));
-        if (result.ok !== true) return failure(result.error || "Camera aim was rejected");
+        if (result.ok !== true) return failure(result.error || result.message || "Camera aim was rejected", result.code);
         value = { ok: true };
       } else if (job.method === "capture") {
         let timer;
@@ -168,16 +182,16 @@ export function connect(token) {
         const json = JSON.stringify(job.preview);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before preview publication");
         const result = JSON.parse(api.set_navigation_preview(json));
-        if (result.ok !== true) return failure(result.error || "Python preview was rejected", result.code);
+        if (result.ok !== true) return failure(result.error || result.message || "Python preview was rejected", result.code);
         value = { ok: true };
       } else if (job.method === "command" && COMMANDS.has(job.command?.op)) {
         const json = JSON.stringify(job.command);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before engine invocation; no command was invoked");
         commandInvoked = true;
         const result = JSON.parse(api.control(json));
-        if (result.ok === false && typeof result.error === "string") {
-          if (result.code === "stale_context") commandInvoked = false;
-          return failure(result.error.slice(0, 2048), result.code);
+        if (result.ok === false && (typeof result.error === "string" || typeof result.message === "string")) {
+          if (UNAPPLIED_COMMAND_CODES.has(result.code)) commandInvoked = false;
+          return failure(result, result.code);
         }
         if (result.ok !== true) throw new Error("Engine did not return a valid command acknowledgement");
         // Pause/play/view can be queued by the engine. This is only an ACK,
@@ -186,9 +200,11 @@ export function connect(token) {
       } else return failure("Unsupported local browser job");
       return { envelope: { id: job.id, ok: true, value }, commandInvoked };
     } catch (error) {
+      const code = errorCode(error);
+      if (commandInvoked && UNAPPLIED_COMMAND_CODES.has(code)) commandInvoked = false;
       return failure(commandInvoked
-        ? "Engine command did not return a valid acknowledgement; outcome is indeterminate. Inspect live state before further flight control."
-        : `Browser engine request failed: ${message(error).slice(0, 1800)}`);
+        ? `Engine command failed: ${message(error).slice(0, 1600)}. Outcome is indeterminate. Inspect live state before further flight control.`
+        : `Browser engine request failed: ${message(error).slice(0, 1800)}`, code);
     }
   }
 

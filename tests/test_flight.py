@@ -18,6 +18,8 @@ import pytest
 
 from wsorb.flight import (
     PlannerConfig,
+    ResilienceConfig,
+    ResilientGuidance,
     RoutePlan,
     basic_command,
     coast_command,
@@ -25,6 +27,7 @@ from wsorb.flight import (
     predict_obstacles,
 )
 from wsorb.flight.control import reference_to_body
+from wsorb.flight.estimation import NavigationSample, StateEstimator
 from wsorb.flight.geometry import Capsule, CollisionIndex, segment_clear
 from wsorb.flight.planning import MAX_PREVIEW_POINTS, _Corridor, search_route
 
@@ -740,3 +743,747 @@ def test_algorithm_modules_do_not_import_backend_sdk_notebook_or_simulation() ->
             else:
                 continue
             assert all(not prohibited.intersection(name.split(".")) for name in names), path
+
+
+def resilient_numeric_input(time_s=10.0, sequence=100) -> dict:
+    """Constructed versioned-contract inputs, never sensor or backend evidence."""
+    observation = public_input()
+    observation.update(
+        time_s=time_s,
+        trial_revision=1,
+        tuning_revision=0,
+        manual_interventions=0,
+        radar_clock="simulation_elapsed_seconds",
+        navigation_sample_time_s=time_s,
+        ship_tuning={"mass_kg": 3388.7, "inertia_scale": 1.0, "thrust_scale": 1.0},
+    )
+    observation["shuttle"]["velocity"] = [0.0, 0.0, 0.0]
+    observation["radar"][0][2][0] = time_s
+    observation["radar_backup"] = [[[0.0, -300.0, 0.0], [299.0, -1.0, 2.0], [time_s, 0.0, 0.0]]]
+    identities = ("radar_primary", "radar_backup", "camera_top", "camera_bottom", "navigation")
+    observation["sensor_health"] = {
+        "schema_version": 1,
+        "revision": 0,
+        "units": [
+            {
+                "id": identity,
+                "delivery": "ready",
+                "active_faults": [],
+                "sample_time_s": time_s,
+                "sequence": sequence,
+                "provenance": f"Constructed numeric {identity} contract, not observed data",
+                "noise": dict(observation["sensor_model"]),
+                "shared_fault_domains": ["radar_bus", "all_avionics"]
+                if identity.startswith("radar_")
+                else ["all_avionics"],
+            }
+            for identity in identities
+        ],
+    }
+    return observation
+
+
+def numeric_unit(observation, identity):
+    return next(unit for unit in observation["sensor_health"]["units"] if unit["id"] == identity)
+
+
+def numeric_checked_route(guidance, receipt):
+    settings = guidance.config.planner
+    frame = guidance.frame_for_planning(predict_obstacles(receipt.observation, settings))
+    return plan_route(frame, settings)
+
+
+def test_resilience_defaults_are_immutable_bounded_and_respect_planner_freshness():
+    config = ResilienceConfig()
+    assert config.lease_sim_s == 0.75
+    assert config.arrival_inset_m == 1.0
+    assert config.planner.forecast_horizon_s == 6.0
+    assert PlannerConfig().forecast_horizon_s == 3.6
+    assert config.recovery_samples >= 2
+    assert config.recovery_dwell_s > 0
+    assert config.radar_age_s <= config.planner.max_measurement_age_s
+    strict = replace(config, planner=replace(config.planner, max_measurement_age_s=0.2))
+    assert strict.radar_age_s == 0.2
+    with pytest.raises(FrozenInstanceError):
+        config.lease_sim_s = 1.0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"lease_sim_s": 0.049},
+        {"lease_sim_s": 1.001},
+        {"lease_sim_s": True},
+        {"wall_no_progress_s": math.inf},
+        {"recovery_samples": 1},
+        {"recovery_dwell_s": 0.0},
+        {"history_limit": 4097},
+        {"history_window_s": 301.0},
+        {"position_allowance_m": 21.0},
+        {"velocity_allowance_mps": -1.0},
+        {"max_accel_mps2": 0.51},
+        {"degraded_max_accel_mps2": 0.6},
+        {"degraded_max_speed_mps": 9.0},
+        {"arrival_inset_m": 0.0},
+        {"max_stopping_horizon_s": 0.0},
+        {"max_stopping_horizon_s": 60.1},
+        {"planner": None},
+    ],
+)
+def test_resilience_rejects_invalid_assumptions_without_any_engine(changes):
+    with pytest.raises(ValueError):
+        ResilienceConfig(**changes)
+
+
+def test_direct_state_estimator_corrects_only_new_samples_and_propagates_model_uncertainty():
+    config = ResilienceConfig()
+    estimator = StateEstimator(config)
+    sample = NavigationSample(2.0, (10.0, 20.0, 0.0), (2.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
+    assert estimator.correct(sample)
+    assert not estimator.correct(sample)
+    later = estimator.estimate(3.0)
+    assert later.position_m == (12.0, 20.0, 0.0)
+    assert later.velocity_mps == sample.velocity_mps
+    assert later.source_time_s == 2.0
+    assert later.position_uncertainty_m > config.position_allowance_m
+    assert later.velocity_uncertainty_mps > config.velocity_allowance_mps
+    assert "model_allowances" in later.to_report()["uncertainty_kind"]
+    assert estimator.at(1.0) is None
+    with pytest.raises(ValueError, match="without a new source timestamp"):
+        estimator.correct(replace(sample, position_m=(11.0, 20.0, 0.0)))
+    with pytest.raises(ValueError, match="rewound"):
+        estimator.correct(replace(sample, time_s=1.0))
+
+
+def test_estimator_history_has_time_and_count_bounds():
+    config = ResilienceConfig(history_limit=3, history_window_s=1.0)
+    estimator = StateEstimator(config)
+    for timestamp in (1.0, 1.4, 1.8, 2.2, 4.0):
+        estimator.correct(
+            NavigationSample(
+                timestamp, (timestamp, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+            )
+        )
+        assert len(estimator.history) <= 3
+        assert timestamp - estimator.history[0].time_s <= config.history_window_s
+    assert len(estimator.history) == 1
+
+
+def test_resilient_update_preserves_actual_rows_and_raw_navigation_with_defensive_copies():
+    observation = resilient_numeric_input()
+    before = copy.deepcopy(observation)
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=1.0, running=False)
+    assert receipt.can_command and receipt.requires_replan
+    assert receipt.lease_sim_s == 0.75
+    assert receipt.report["selected_channel"] == "radar_primary"
+    assert receipt.report["next_waypoint_world_m"] is None
+    assert receipt.report["source_time_s"] == observation["time_s"]
+    assert receipt.observation["radar"] == observation["radar"]
+    assert receipt.observation["shuttle"] == observation["shuttle"]
+    assert receipt.observation["target"] == observation["target"]
+    receipt.observation["shuttle"]["position"][0] = 99
+    receipt.report["mode"] = "invented"
+    assert receipt.observation["shuttle"]["position"][0] == 1000.0
+    assert guidance.report["mode"] == "nominal"
+    assert observation == before
+    assert json.loads(json.dumps(guidance.report, allow_nan=False)) == guidance.report
+    with pytest.raises(FrozenInstanceError):
+        receipt.can_command = False
+
+
+def test_resilient_planning_only_adds_uncertainty_and_requires_registered_frames():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    original = predict_obstacles(receipt.observation, guidance.config.planner)
+    inflated = guidance.frame_for_planning(original)
+    for before, after in zip(original.obstacles, inflated.obstacles, strict=True):
+        assert before.from_m == after.from_m and before.to_m == after.to_m
+        assert after.radius_m > before.radius_m
+    assert receipt.observation["radar"] == observation["radar"]
+    unregistered = plan_route(original, original.config)
+    np.testing.assert_array_equal(guidance.command(observation, unregistered, {})[0], np.zeros(3))
+    route = plan_route(inflated, inflated.config)
+    acceleration, angular = guidance.command(observation, route, {})
+    assert 0.0 < math.hypot(*acceleration) <= 0.5
+    np.testing.assert_array_equal(angular, np.zeros(3))
+    assert guidance.report["next_waypoint_world_m"] == route.points_world_m[1].tolist()
+
+
+def test_primary_loss_selects_actual_backup_and_invalidates_old_route_immediately():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    initial = guidance.update(observation, wall_time_s=0.0, running=True)
+    old_route = numeric_checked_route(guidance, initial)
+    nominal, _ = guidance.command(observation, old_route, {})
+    failed = copy.deepcopy(observation)
+    failed["sensor_health"]["revision"] += 1
+    primary = numeric_unit(failed, "radar_primary")
+    primary.update(delivery="unavailable", active_faults=["radar_primary"])
+    receipt = guidance.update(failed, wall_time_s=0.1, running=True)
+    assert receipt.can_command and receipt.requires_replan
+    assert receipt.report["selected_channel"] == "radar_backup"
+    assert receipt.report["mode"] == "degraded"
+    assert receipt.observation["radar"] == failed["radar_backup"]
+    assert receipt.observation["sensor_model"] == numeric_unit(failed, "radar_backup")["noise"]
+    np.testing.assert_array_equal(guidance.command(failed, old_route, {})[0], np.zeros(3))
+    route = numeric_checked_route(guidance, receipt)
+    degraded, _ = guidance.command(failed, route, {})
+    assert 0.0 < math.hypot(*degraded) < math.hypot(*nominal)
+    assert guidance.report["reference_accel_limit_mps2"] == 0.25
+
+
+@pytest.mark.parametrize("fault", ["radar_bus", "all_avionics"])
+def test_shared_failure_domains_block_ready_units_without_hidden_fallback(fault):
+    observation = resilient_numeric_input()
+    # Deliberately contradictory numeric metadata checks domain gating itself.
+    numeric_unit(observation, "radar_primary")["active_faults"] = [fault]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    assert not receipt.can_command and receipt.lease_sim_s == 0.0
+    assert receipt.report["selected_channel"] is None
+    assert receipt.observation["radar"] == []
+    assert receipt.report["navigation_redundancy"] == "none"
+    assert receipt.report["camera_navigation"] == "not_implemented"
+    np.testing.assert_array_equal(guidance.command(observation, None, {})[0], np.zeros(3))
+
+
+def test_frozen_navigation_is_not_replaced_by_radar_camera_or_physics_truth():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    guidance.update(observation, wall_time_s=0.0, running=True)
+    frozen = copy.deepcopy(observation)
+    frozen["time_s"] += 0.5
+    frozen["sensor_health"]["revision"] += 1
+    numeric_unit(frozen, "navigation").update(delivery="frozen", active_faults=["navigation"])
+    frozen["applied_physics"] = {"position_world_m": [1e6, 1e6, 1e6]}
+    receipt = guidance.update(frozen, wall_time_s=0.5, running=True)
+    assert not receipt.can_command
+    assert receipt.observation["shuttle"] == observation["shuttle"]
+    assert receipt.report["estimate"]["source_time_s"] == 10.0
+    assert receipt.report["estimate"]["position_world_m"] == [1000.0, 0.0, 0.0]
+    assert receipt.report["estimate"]["age_s"] == 0.5
+
+
+def test_outage_recovery_requires_distinct_samples_dwell_and_a_new_checked_route():
+    config = ResilienceConfig(recovery_samples=3, recovery_dwell_s=0.5)
+    guidance = ResilientGuidance(config)
+    observation = resilient_numeric_input()
+    initial = guidance.update(observation, wall_time_s=0.0, running=True)
+    old_route = numeric_checked_route(guidance, initial)
+    failed = copy.deepcopy(observation)
+    failed["sensor_health"]["revision"] = 1
+    numeric_unit(failed, "radar_primary")["active_faults"] = ["radar_bus"]
+    assert not guidance.update(failed, wall_time_s=0.1, running=True).can_command
+    recovered = resilient_numeric_input(10.1, 101)
+    recovered["sensor_health"]["revision"] = 2
+    first = guidance.update(recovered, wall_time_s=0.2, running=True)
+    assert not first.can_command and first.report["recovery_samples"] == 1
+    for wall in (0.3, 0.4, 0.5):
+        repeated = guidance.update(recovered, wall_time_s=wall, running=True)
+        assert not repeated.can_command
+        assert repeated.report["recovery_samples"] == 1
+    second = resilient_numeric_input(10.2, 102)
+    second["sensor_health"]["revision"] = 2
+    assert not guidance.update(second, wall_time_s=0.6, running=True).can_command
+    third = resilient_numeric_input(10.8, 103)
+    third["sensor_health"]["revision"] = 2
+    ready = guidance.update(third, wall_time_s=0.8, running=True)
+    assert ready.can_command and ready.requires_replan
+    np.testing.assert_array_equal(guidance.command(third, old_route, {})[0], np.zeros(3))
+    fresh_route = numeric_checked_route(guidance, ready)
+    assert math.hypot(*guidance.command(third, fresh_route, {})[0]) > 0.0
+
+
+def test_primary_failback_has_its_own_distinct_sample_hysteresis():
+    guidance = ResilientGuidance()
+    observation = resilient_numeric_input()
+    numeric_unit(observation, "radar_primary")["delivery"] = "unavailable"
+    initial = guidance.update(observation, wall_time_s=0.0, running=True)
+    assert initial.can_command and initial.report["selected_channel"] == "radar_backup"
+    for index, timestamp in enumerate((10.1, 10.2, 10.7), start=1):
+        restored = resilient_numeric_input(timestamp, 100 + index)
+        receipt = guidance.update(restored, wall_time_s=float(index), running=True)
+        expected = "radar_primary" if index == 3 else "radar_backup"
+        assert receipt.report["selected_channel"] == expected
+    assert receipt.requires_replan
+
+
+def test_running_wall_stall_expires_even_when_simulation_time_is_held():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    assert guidance.update(observation, wall_time_s=0.0, running=True).can_command
+    held = guidance.update(observation, wall_time_s=2.01, running=True)
+    assert not held.can_command
+    assert held.report["ownship_history_samples"] == 1
+    paused = ResilientGuidance()
+    assert paused.update(observation, wall_time_s=0.0, running=False).can_command
+    assert paused.update(observation, wall_time_s=100.0, running=False).can_command
+
+
+@pytest.mark.parametrize("change", ["missing", "version", "duplicate", "domain", "future"])
+def test_malformed_health_fails_closed_despite_valid_legacy_radar(change):
+    observation = resilient_numeric_input()
+    if change == "missing":
+        del observation["sensor_health"]
+    elif change == "version":
+        observation["sensor_health"]["schema_version"] = True
+    elif change == "duplicate":
+        observation["sensor_health"]["units"][1]["id"] = "radar_primary"
+    elif change == "domain":
+        numeric_unit(observation, "radar_backup")["shared_fault_domains"] = ["all_avionics"]
+    else:
+        numeric_unit(observation, "radar_primary")["sample_time_s"] += 1.0
+    receipt = ResilientGuidance().update(observation, wall_time_s=0.0, running=True)
+    assert not receipt.can_command and receipt.observation["radar"] == []
+    json.dumps(receipt.report, allow_nan=False)
+
+
+def test_ready_empty_scans_are_reported_but_never_assumed_clear():
+    observation = resilient_numeric_input()
+    observation["radar"] = observation["radar_backup"] = []
+    receipt = ResilientGuidance().update(observation, wall_time_s=0.0, running=True)
+    assert not receipt.can_command
+    assert all(unit["delivery"] == "ready" for unit in receipt.report["units"])
+    assert "Ready empty scan" in receipt.report["assessments"]["radar_primary"]["reason"]
+
+
+def test_same_timestamp_mutation_or_sequence_only_progress_cannot_refresh_navigation():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    guidance.update(observation, wall_time_s=0.0, running=True)
+    changed = copy.deepcopy(observation)
+    changed["shuttle"]["position"][0] += 1.0
+    assert not guidance.update(changed, wall_time_s=0.1, running=True).can_command
+    sequence_only = copy.deepcopy(observation)
+    numeric_unit(sequence_only, "navigation")["sequence"] += 1
+    assert not guidance.update(sequence_only, wall_time_s=0.2, running=True).can_command
+    assert guidance.report["ownship_history_samples"] == 1
+
+
+@pytest.mark.parametrize("change", ["manual", "trial", "frame", "rewind"])
+def test_context_discontinuities_clear_history_and_never_auto_resume_consent(change):
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    guidance.update(observation, wall_time_s=0.0, running=True)
+    changed = resilient_numeric_input(11.0, 110)
+    if change == "manual":
+        changed["manual_interventions"] += 1
+    elif change == "trial":
+        changed["trial_revision"] += 1
+    elif change == "frame":
+        changed["frame"] = "another constructed reference frame"
+    else:
+        changed = resilient_numeric_input(9.0, 90)
+    receipt = guidance.update(changed, wall_time_s=0.1, running=True)
+    assert not receipt.can_command and receipt.report["requires_consent"]
+    assert receipt.report["ownship_history_samples"] == 1
+    repeated = guidance.update(changed, wall_time_s=0.2, running=True)
+    assert not repeated.can_command and repeated.report["requires_consent"]
+
+
+def test_lease_is_shortened_to_stricter_sample_horizon_or_disabled_by_uncertainty():
+    observation = resilient_numeric_input()
+    settings = replace(PlannerConfig(), max_measurement_age_s=0.2)
+    guidance = ResilientGuidance(ResilienceConfig(planner=settings))
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    assert receipt.can_command and receipt.lease_sim_s == pytest.approx(0.2)
+    blocked = ResilientGuidance(ResilienceConfig(max_position_uncertainty_m=0.25))
+    result = blocked.update(observation, wall_time_s=0.0, running=True)
+    assert not result.can_command and result.lease_sim_s == 0.0
+
+
+def test_command_uses_cv_estimate_without_relabelling_the_held_raw_navigation():
+    observation = resilient_numeric_input()
+    observation["shuttle"]["velocity"] = [1.0, 0.0, 0.0]
+    guidance = ResilientGuidance()
+    guidance.update(observation, wall_time_s=0.0, running=True)
+    held = copy.deepcopy(observation)
+    held["time_s"] = 10.2
+    receipt = guidance.update(held, wall_time_s=0.2, running=True)
+    assert receipt.can_command
+    assert receipt.observation["shuttle"]["position"] == [1000.0, 0.0, 0.0]
+    assert receipt.report["estimate"]["position_world_m"] == pytest.approx([1000.2, 0.0, 0.0])
+    assert receipt.report["ownship_history_samples"] == 1
+    route = numeric_checked_route(guidance, receipt)
+    assert np.isfinite(guidance.command(held, route, {})[0]).all()
+
+
+def test_route_progress_is_monotonic_and_reported_target_matches_the_controller():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    original = numeric_checked_route(guidance, receipt)
+    route = replace(
+        original,
+        points_world_m=(
+            (1000.0, 0.0, 0.0),
+            (1100.0, 0.0, 0.0),
+            (1200.0, 0.0, 0.0),
+            tuple(original.points_world_m[-1]),
+        ),
+    )
+    assert math.hypot(*guidance.command(observation, route, {})[0]) > 0
+    for index, position in enumerate((1090.0, 1125.0), start=1):
+        current = resilient_numeric_input(10.0 + 0.1 * index, 100 + index)
+        current["shuttle"]["position"][0] = position
+        guidance.update(current, wall_time_s=0.1 * index, running=True)
+        assert math.hypot(*guidance.command(current, route, {})[0]) > 0
+        assert guidance.report["waypoint_index"] == 2
+        assert guidance.report["next_waypoint_world_m"] == [1200.0, 0.0, 0.0]
+        assert guidance.report["source_time_s"] == current["time_s"]
+
+
+def test_stale_route_or_mismatched_decision_source_returns_only_zero_vectors():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    route = numeric_checked_route(guidance, receipt)
+    mismatched = copy.deepcopy(observation)
+    mismatched["time_s"] += 0.1
+    np.testing.assert_array_equal(guidance.command(mismatched, route, {})[0], np.zeros(3))
+    later = resilient_numeric_input(10.3, 103)
+    receipt = guidance.update(later, wall_time_s=0.3, running=True)
+    assert receipt.can_command and receipt.requires_replan
+    np.testing.assert_array_equal(guidance.command(later, route, {})[0], np.zeros(3))
+    assert "whole lease" in guidance.report["reason"]
+
+
+def test_current_obstacle_envelopes_can_veto_a_previously_clear_route():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    route = numeric_checked_route(guidance, receipt)
+    current = resilient_numeric_input(10.1, 101)
+    current["radar"][0][:2] = [[20.0, 0.0, 0.0], [20.0, -1.0, 2.0]]
+    guidance.update(current, wall_time_s=0.1, running=True)
+    np.testing.assert_array_equal(guidance.command(current, route, {})[0], np.zeros(3))
+    assert "intersects an uncertainty envelope" in guidance.report["reason"]
+
+
+def test_immediate_swept_motion_is_checked_even_when_waypoint_connector_is_clear():
+    settings = replace(
+        PlannerConfig(),
+        forecast_horizon_s=2.0,
+        clearance_m=0.0,
+        unknown_tangential_speed_mps=0.0,
+        sigma_multiplier=0.0,
+    )
+    guidance = ResilientGuidance(ResilienceConfig(planner=settings))
+    observation = resilient_numeric_input()
+    observation["shuttle"]["velocity"] = [0.0, 20.0, 0.0]
+    observation["radar"][0][:2] = [[0.0, 20.0, 0.0], [20.0, 0.0, 2.0]]
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    route = numeric_checked_route(guidance, receipt)
+    assert route.status == "candidate"
+    np.testing.assert_array_equal(guidance.command(observation, route, {})[0], np.zeros(3))
+    assert "Immediate swept command path" in guidance.report["reason"]
+
+
+def test_planning_provenance_cannot_reuse_primary_rows_after_backup_selection():
+    observation = resilient_numeric_input()
+    settings = PlannerConfig()
+    primary_frame = predict_obstacles(observation, settings)
+    numeric_unit(observation, "radar_primary")["delivery"] = "unavailable"
+    guidance = ResilientGuidance()
+    assert guidance.update(observation, wall_time_s=0.0, running=True).can_command
+    with pytest.raises(ValueError, match="selected actual radar input"):
+        guidance.frame_for_planning(primary_frame)
+
+
+def test_history_anchoring_adds_uncertainty_without_moving_anonymous_radar_capsules():
+    observation = resilient_numeric_input()
+    observation["shuttle"]["velocity"] = [1.0, 0.0, 0.0]
+    guidance = ResilientGuidance()
+    guidance.update(observation, wall_time_s=0.0, running=True)
+    current = resilient_numeric_input(10.2, 102)
+    current["shuttle"].update(position=[1001.0, 0.0, 0.0], velocity=[3.0, 0.0, 0.0])
+    current["radar"] = copy.deepcopy(observation["radar"])
+    unit = numeric_unit(current, "radar_primary")
+    unit.update(sample_time_s=10.0, sequence=100)
+    receipt = guidance.update(current, wall_time_s=0.2, running=True)
+    assert receipt.can_command
+    frame = predict_obstacles(receipt.observation, guidance.config.planner)
+    inflated = guidance.frame_for_planning(frame)
+    assert inflated.obstacles[3].from_m == frame.obstacles[3].from_m
+    assert inflated.obstacles[3].to_m == frame.obstacles[3].to_m
+    assert inflated.obstacles[3].radius_m > frame.obstacles[3].radius_m
+    assert receipt.observation["radar"] == observation["radar"]
+    assert receipt.report["ownship_history_samples"] == 2
+
+
+def test_changed_sensor_revision_invalidates_route_even_without_a_clock_tick():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    route = numeric_checked_route(guidance, receipt)
+    changed = copy.deepcopy(observation)
+    changed["sensor_health"]["revision"] = 1
+    numeric_unit(changed, "camera_top")["delivery"] = "unavailable"
+    numeric_unit(changed, "camera_top")["active_faults"] = ["camera_top"]
+    receipt = guidance.update(changed, wall_time_s=0.1, running=True)
+    assert receipt.can_command and receipt.requires_replan
+    np.testing.assert_array_equal(guidance.command(changed, route, {})[0], np.zeros(3))
+
+
+def test_engine_lower_command_cap_and_edited_velocity_gain_reach_resilient_control():
+    observation = resilient_numeric_input()
+    observation["max_accel_mps2"] = 0.1
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=True)
+    route = numeric_checked_route(guidance, receipt)
+    slow, angular = guidance.command(observation, route, {"velocity_gain_s": 0.01})
+    fast, _ = guidance.command(observation, route, {"velocity_gain_s": 10.0})
+    assert 0.0 < math.hypot(*slow) < math.hypot(*fast) <= 0.1
+    np.testing.assert_array_equal(angular, np.zeros(3))
+    assert guidance.report["reference_accel_limit_mps2"] == 0.1
+
+
+@pytest.mark.parametrize("horizon, fresh_cap", [(3.6, 0.6625), (6.0, 1.2625)])
+@pytest.mark.parametrize("navigation_age", [0.0, 0.5])
+def test_speed_budget_reports_forecast_and_real_source_age_limits(
+    horizon, fresh_cap, navigation_age
+):
+    observation = resilient_numeric_input()
+    settings = replace(PlannerConfig(), forecast_horizon_s=horizon)
+    guidance = ResilientGuidance(ResilienceConfig(planner=settings, max_stopping_horizon_s=horizon))
+    guidance.update(observation, wall_time_s=0.0, running=False)
+    held = copy.deepcopy(observation)
+    held["time_s"] += navigation_age
+    receipt = guidance.update(held, wall_time_s=navigation_age, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    accel, _ = guidance.command(held, route, {})
+    cap = fresh_cap - 0.5 * navigation_age
+    report = guidance.report
+    assert report["speed_limiter"] == "forecast_braking_time"
+    assert report["desired_speed_mps"] == pytest.approx(cap)
+    assert accel[0] == pytest.approx(0.07 * cap)
+    assert report["constant_speed_route_time_s"] == pytest.approx(
+        report["route_remaining_distance_m"] / cap
+    )
+    assert report["braking_model_kind"] == "assumed_active_braking_not_fault_coasting"
+    assert receipt.lease_sim_s == 0.75
+    assert receipt.report["estimate"]["source_time_s"] == observation["time_s"]
+    assert receipt.observation["radar"] == observation["radar"]
+
+
+@pytest.mark.parametrize("range_m", [50.01, 50.24])
+def test_checkpoint_interior_goal_does_not_coast_just_outside_the_real_region(range_m):
+    observation = resilient_numeric_input()
+    observation["shuttle"]["position"][0] = observation["target"]["position"][0] - range_m
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    assert route.status == "candidate"
+    assert route.frame.goal_radius_m == observation["geometry"]["arrival_radius_m"] == 50.0
+    assert math.dist(route.points_world_m[-1], observation["target"]["position"]) == pytest.approx(
+        49.0
+    )
+    accel, _ = guidance.command(observation, route, {})
+    assert accel[0] > 0.0
+    assert guidance.report["arrival_goal_kind"] == "interior_candidate_not_mission_success"
+    assert guidance.report["arrival_goal_inset_m"] == pytest.approx(1.0)
+
+
+def test_checkpoint_inset_keeps_obstacles_and_rejects_an_unfittable_approach():
+    observation = resilient_numeric_input()
+    settings = PlannerConfig()
+    guidance = ResilientGuidance(ResilienceConfig(arrival_inset_m=15.0))
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    frame = predict_obstacles(receipt.observation, settings)
+    with pytest.raises(ValueError, match="Interior checkpoint approach intersects"):
+        guidance.frame_for_planning(frame)
+    assert frame.goal_radius_m == 50.0
+    assert frame.goal_center_m == tuple(observation["target"]["position"])
+    assert frame.goal_world_m[0] == pytest.approx(1450.01)
+
+
+def test_default_resilient_forecast_raises_cruise_budget_without_extending_source_leases():
+    observation = resilient_numeric_input()
+    # Check the original short-forecast fallback independently of adaptive cruise.
+    guidance = ResilientGuidance(ResilienceConfig(max_stopping_horizon_s=6.0))
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    accel, _ = guidance.command(observation, route, {})
+    assert route.frame.forecast_horizon_s == 6.0
+    assert route.frame.obstacles[2].radius_m == pytest.approx(41.55)
+    assert guidance.report["desired_speed_mps"] == pytest.approx(1.2625)
+    assert accel[0] == pytest.approx(0.088375)
+    assert receipt.lease_sim_s == 0.75
+    assert guidance.report["route_valid_until_s"] == observation["time_s"] + 1.0
+    assert guidance.report["decision_valid_until_s"] == observation["time_s"] + 0.75
+    # This is a speed-budget calculation, not an observed flight or arrival.
+    assert (3537.6122605878836 - 50.0) / guidance.report["desired_speed_mps"] < 2800.0
+
+
+def test_refreshed_identical_route_suffix_does_not_restart_a_passed_waypoint():
+    observation = resilient_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    original = numeric_checked_route(guidance, receipt)
+    route = replace(
+        original,
+        points_world_m=(
+            (1000.0, 0.0, 0.0),
+            (1100.0, 0.0, 0.0),
+            (1200.0, 0.0, 0.0),
+            tuple(original.points_world_m[-1]),
+        ),
+    )
+    guidance.command(observation, route, {})
+    near_corner = resilient_numeric_input(10.1, 101)
+    near_corner["shuttle"]["position"][0] = 1090.0
+    guidance.update(near_corner, wall_time_s=0.1, running=False)
+    guidance.command(near_corner, route, {})
+    assert guidance.report["waypoint_index"] == 2
+    current = resilient_numeric_input(10.2, 102)
+    current["shuttle"]["position"][0] = 1125.0
+    receipt = guidance.update(current, wall_time_s=0.2, running=False)
+    fresh = numeric_checked_route(guidance, receipt)
+    refreshed = replace(
+        fresh, points_world_m=(tuple(current["shuttle"]["position"]), *route.points_world_m[1:])
+    )
+    assert math.hypot(*guidance.command(current, refreshed, {})[0]) > 0
+    assert guidance.report["waypoint_index"] == 2
+    assert guidance.report["next_waypoint_world_m"] == [1200.0, 0.0, 0.0]
+    changed = replace(
+        fresh,
+        points_world_m=(
+            tuple(current["shuttle"]["position"]),
+            (1160.0, 0.0, 0.0),
+            (1300.0, 0.0, 0.0),
+            tuple(original.points_world_m[-1]),
+        ),
+    )
+    assert math.hypot(*guidance.command(current, changed, {})[0]) > 0
+    assert guidance.report["waypoint_index"] == 1
+    assert guidance.report["next_waypoint_world_m"] == [1160.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("lateral_speed, allowed", [(0.5, True), (2.0, False)])
+def test_radial_departure_cancels_sideways_velocity_without_relaxing_its_gate(
+    lateral_speed, allowed
+):
+    observation = resilient_numeric_input()
+    observation["geometry"]["phobos_enclosing_radius_m"] = 1000.0
+    observation["shuttle"].update(status="landed", velocity=[0.0, lateral_speed, 0.0])
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    assert route.frame.has_surface_departure
+    accel, _ = guidance.command(observation, route, {})
+    if not allowed:
+        np.testing.assert_array_equal(accel, np.zeros(3))
+        assert "supported outward radial segment" in guidance.report["reason"]
+        return
+    assert 0.0 < math.hypot(*accel) <= 0.5
+    assert accel[0] > 0.0 and accel[1] < 0.0
+    lease = receipt.lease_sim_s
+    lateral_travel = lateral_speed * lease + 0.5 * accel[1] * lease * lease
+    assert lateral_travel <= receipt.report["estimate"]["position_uncertainty_m"] + 0.01
+    assert lateral_speed * lease > receipt.report["estimate"]["position_uncertainty_m"] + 0.01
+    assert guidance.report["terrain_clearance_verified"] is False
+
+
+def cruise_numeric_input():
+    """A spacious constructed numeric scene, not observed flight evidence."""
+    observation = resilient_numeric_input()
+    observation["shuttle"]["position"] = [2000.0, 0.0, 0.0]
+    observation["target"]["position"] = [10000.0, 0.0, 0.0]
+    observation["radar"][0][:2] = [[0.0, 2000.0, 0.0], [2000.0, 0.0, 2.0]]
+    return observation
+
+
+def test_adaptive_cruise_checks_full_long_forecast_only_on_finite_stopping_prefix():
+    observation = cruise_numeric_input()
+    before = copy.deepcopy(observation)
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    accel, angular = guidance.command(observation, route, {})
+    report = guidance.report
+    assert report["desired_speed_mps"] == 8.0
+    assert report["short_forecast_speed_mps"] == pytest.approx(1.2625)
+    assert report["speed_limiter"] == "adaptive_stopping_corridor"
+    assert report["planning_forecast_horizon_s"] == 6.0
+    assert report["command_stopping_horizon_s"] == pytest.approx(32.95)
+    assert report["command_stop_position_allowance_m"] > 270.0
+    assert report["short_forecast_speed_limits_mps"]["forecast_braking_time"] == pytest.approx(
+        1.2625
+    )
+    assert report["speed_limits_mps"]["forecast_braking_time"] == pytest.approx(8.0)
+    assert len(report["stopping_candidates"]) == 1
+    assert accel[0] == pytest.approx(0.5)
+    np.testing.assert_array_equal(angular, np.zeros(3))
+    settings = replace(guidance.config.planner, forecast_horizon_s=32.95)
+    long = guidance._inflate(predict_obstacles(receipt.observation, settings))
+    assert long.obstacles[2].radius_m > route.frame.goal_radius_m
+    # The distant final goal is blocked under this horizon, but the whole
+    # finite cruise/stop prefix remains clear of the unchanged inflated target.
+    assert not segment_clear(
+        tuple(route.points_world_m[-1]), tuple(route.points_world_m[-1]), long.obstacles
+    )
+    connector = np.array(observation["shuttle"]["position"])
+    connector[0] += report["stopping_candidates"][0]["distance_m"]
+    assert segment_clear(
+        tuple(observation["shuttle"]["position"]), tuple(connector), long.obstacles
+    )
+    for short, extended in zip(route.frame.obstacles, long.obstacles, strict=True):
+        assert extended.radius_m > short.radius_m
+    assert long.oldest_measurement_time_s == route.frame.oldest_measurement_time_s == 10.0
+    assert report["decision_valid_until_s"] == 10.75
+    assert report["route_valid_until_s"] == 11.0
+    assert receipt.lease_sim_s == 0.75
+    assert observation == before
+
+
+@pytest.mark.parametrize("radar_distance, expected_speed", [(200.0, 2.0), (130.0, 1.2625)])
+def test_adaptive_cruise_falls_back_when_full_long_radar_uncertainty_blocks_it(
+    radar_distance, expected_speed
+):
+    observation = cruise_numeric_input()
+    observation["radar"][0][:2] = [[0.0, radar_distance, 0.0], [radar_distance, 0.0, 2.0]]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    accel, _ = guidance.command(observation, route, {})
+    report = guidance.report
+    assert report["desired_speed_mps"] == pytest.approx(expected_speed)
+    assert len(report["stopping_candidates"]) == 3
+    assert report["stopping_candidates"][0]["reason"] == "long forecast stopping/swept envelope"
+    assert report["stopping_candidates"][1]["reason"] == "long forecast stopping/swept envelope"
+    assert accel[0] == pytest.approx(0.07 * expected_speed)
+    assert receipt.observation["radar"] == observation["radar"]
+
+
+def test_adaptive_cruise_keeps_long_known_body_inflation_and_finite_work_budget():
+    observation = cruise_numeric_input()
+    observation["shuttle"]["position"] = [200.0, 0.0, 0.0]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    guidance.command(observation, route, {})
+    report = guidance.report
+    assert report["desired_speed_mps"] == 4.0
+    assert report["stopping_candidates"][0]["reason"] == "long forecast known-body envelope"
+    assert len(report["stopping_candidates"]) == 2
+    assert report["command_stopping_horizon_s"] == pytest.approx(16.95)
+
+
+def test_long_horizon_budget_failure_requests_active_braking_not_unchecked_cruise():
+    observation = cruise_numeric_input()
+    observation["shuttle"]["velocity"] = [8.0, 0.0, 0.0]
+    guidance = ResilientGuidance(ResilienceConfig(max_stopping_horizon_s=6.0))
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    route = numeric_checked_route(guidance, receipt)
+    accel, _ = guidance.command(observation, route, {})
+    report = guidance.report
+    assert report["desired_speed_mps"] == pytest.approx(1.2625)
+    assert report["active_braking_to_short_forecast"] is True
+    assert -0.5 <= accel[0] <= -guidance.config.braking_accel_mps2
+    assert len(report["stopping_candidates"]) == 3
+    assert all(
+        item["reason"] == "stopping horizon budget" for item in report["stopping_candidates"]
+    )
+    assert receipt.lease_sim_s == 0.75

@@ -57,6 +57,322 @@ fn hidpi_and_enlarged_ui_keep_real_native_targets_reachable() {
 }
 
 #[test]
+fn fullscreen_shortcut_tracks_native_reset_focus_and_editor_release() {
+    use bevy::{input_focus::FocusCause, text::EditableText, ui_widgets::TextInput};
+
+    let (mut app, window) = fullscreen_shortcut_app();
+    let unchanged = crate::snapshot();
+    let queued = crate::session::queued_actions_for_tests();
+    assert!(super::fullscreen_shortcut_allowed());
+    crate::camera::set_input_active(false, false);
+    assert!(!super::fullscreen_shortcut_allowed());
+    crate::camera::set_input_active(true, false);
+    assert!(super::fullscreen_shortcut_allowed());
+
+    let before: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
+    for (code, text) in [(KeyCode::KeyR, "r"), (KeyCode::KeyX, "x")] {
+        queue_key(
+            &mut app,
+            window,
+            code,
+            Key::Character(text.into()),
+            ButtonState::Pressed,
+        );
+    }
+    app.update();
+    assert!(app.world().resource::<HudState>().reset_confirm_open);
+    assert!(!super::fullscreen_shortcut_allowed());
+    let after: serde_json::Value = serde_json::from_str(&super::status()).unwrap();
+    assert!(after["samples"].as_u64().unwrap() > before["samples"].as_u64().unwrap());
+    assert_eq!(crate::session::queued_actions_for_tests(), queued);
+    for (code, text) in [(KeyCode::KeyR, "r"), (KeyCode::KeyX, "x")] {
+        key_frame(
+            &mut app,
+            window,
+            code,
+            Key::Character(text.into()),
+            ButtonState::Released,
+        );
+    }
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert!(
+        !super::fullscreen_shortcut_allowed(),
+        "the reset modal blocks X even without a focused modal button"
+    );
+    tap_key(&mut app, window, KeyCode::Escape, Key::Escape);
+    app.update();
+    assert!(!app.world().resource::<HudState>().reset_confirm_open);
+    assert!(super::fullscreen_shortcut_allowed());
+
+    let run = app
+        .world_mut()
+        .query::<(Entity, &HudAction)>()
+        .iter(app.world())
+        .find_map(|(entity, action)| (*action == HudAction::TogglePlayback).then_some(entity))
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(run, FocusCause::Navigated);
+    app.update();
+    assert!(
+        !super::fullscreen_shortcut_allowed(),
+        "native buttons own X just as they do in HUD keyboard routing"
+    );
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.world_mut().resource_mut::<HudState>().panel = super::model::SidePanel::Ship;
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(super::fullscreen_shortcut_allowed());
+    let mass = app
+        .world_mut()
+        .query::<(Entity, &super::EditorField)>()
+        .iter(app.world())
+        .find_map(|(entity, field)| (*field == super::EditorField::Mass).then_some(entity))
+        .unwrap();
+    assert!(app.world().get::<TextInput>(mass).is_some());
+    assert!(app.world().get::<EditableText>(mass).is_some());
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(mass, FocusCause::Navigated);
+    app.update();
+    assert!(!super::fullscreen_shortcut_allowed());
+    key_frame(
+        &mut app,
+        window,
+        KeyCode::KeyX,
+        Key::Character("x".into()),
+        ButtonState::Pressed,
+    );
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    for _ in 0..2 {
+        app.update();
+        assert!(super::instrument_editing());
+        assert!(
+            !super::fullscreen_shortcut_allowed(),
+            "blurring an editor cannot rearm its still-held key"
+        );
+    }
+    key_frame(
+        &mut app,
+        window,
+        KeyCode::KeyX,
+        Key::Character("x".into()),
+        ButtonState::Released,
+    );
+    app.update();
+    assert!(!super::instrument_editing());
+    assert!(super::fullscreen_shortcut_allowed());
+    assert_eq!(crate::session::queued_actions_for_tests(), queued);
+    assert!(std::rc::Rc::ptr_eq(&unchanged, &crate::snapshot()));
+}
+
+#[test]
+fn fullscreen_shortcut_keeps_binding_and_placement_guards_separate_from_buttons() {
+    use super::model::{PlatformButton, SidePanel};
+    use crate::controls::{self, Action};
+    use bevy::input_focus::FocusCause;
+
+    let (mut app, window) = fullscreen_shortcut_app();
+    let unchanged = crate::snapshot();
+    app.world_mut().resource_mut::<HudState>().panel = SidePanel::Controls;
+    app.update();
+    assert!(super::fullscreen_shortcut_allowed());
+    controls::begin_capture(Action::Front);
+    assert!(
+        !super::fullscreen_shortcut_allowed(),
+        "live capture invalidates an allowed cache before the next frame"
+    );
+    app.update();
+    assert!(!super::fullscreen_shortcut_allowed());
+    key_frame(
+        &mut app,
+        window,
+        KeyCode::KeyB,
+        Key::Character("b".into()),
+        ButtonState::Pressed,
+    );
+    assert!(!controls::binding_capture_active());
+    assert!(controls::binding_actions_blocked());
+    app.update();
+    assert!(!super::fullscreen_shortcut_allowed());
+    key_frame(
+        &mut app,
+        window,
+        KeyCode::KeyB,
+        Key::Character("b".into()),
+        ButtonState::Released,
+    );
+    assert!(!controls::manual_input_blocked());
+    assert!(controls::binding_actions_blocked());
+    assert!(
+        !super::fullscreen_shortcut_allowed(),
+        "capture's final release frame still owns X without native button focus"
+    );
+    app.update();
+    assert!(super::fullscreen_shortcut_allowed());
+
+    // This HUD fixture processes the real queued-intent gate, not the launchpad
+    // adapter's physical placement. No placement state or geometry is invented.
+    crate::launchpad::request(crate::launchpad::LaunchpadAction::PlaceOnSurface);
+    assert!(!super::fullscreen_shortcut_allowed());
+    app.update();
+    assert!(!super::fullscreen_shortcut_allowed());
+    crate::launchpad::request(crate::launchpad::LaunchpadAction::Cancel);
+    app.update();
+    assert!(!super::fullscreen_shortcut_allowed());
+    crate::launchpad::reset_for_tests();
+    app.update();
+    assert!(super::fullscreen_shortcut_allowed());
+
+    app.world_mut().resource_mut::<HudState>().panel = SidePanel::Camera;
+    let fullscreen = app
+        .world_mut()
+        .query::<(Entity, &PlatformButton)>()
+        .iter(app.world())
+        .find_map(|(entity, button)| (*button == PlatformButton::Fullscreen).then_some(entity))
+        .unwrap();
+    app.world_mut()
+        .resource_mut::<InputFocus>()
+        .set(fullscreen, FocusCause::Navigated);
+    crate::launchpad::request(crate::launchpad::LaunchpadAction::PlaceOnSurface);
+    for _ in 0..3 {
+        app.update();
+    }
+    let point = app
+        .world()
+        .get::<UiGlobalTransform>(fullscreen)
+        .unwrap()
+        .transform_point2(Vec2::ZERO)
+        * app
+            .world()
+            .get::<ComputedNode>(fullscreen)
+            .unwrap()
+            .inverse_scale_factor()
+        * app.world().resource::<UiScale>().0;
+    assert!(!super::fullscreen_shortcut_allowed());
+    assert!(
+        super::fullscreen_button_focused(),
+        "explicit enabled Fullscreen Enter keeps the native action policy"
+    );
+    assert!(
+        super::fullscreen_button_at(point.x, point.y),
+        "explicit Fullscreen pointer input keeps its real laid-out target"
+    );
+    crate::launchpad::reset_for_tests();
+    controls::reset_for_tests();
+    app.world_mut().resource_mut::<InputFocus>().clear();
+    app.update();
+    assert!(super::fullscreen_shortcut_allowed());
+    assert!(std::rc::Rc::ptr_eq(&unchanged, &crate::snapshot()));
+}
+
+#[test]
+fn fullscreen_dom_source_keeps_native_permission_and_trusted_event_wiring() {
+    // Source-contract checks only. No DOM, browser, fullscreen result or user
+    // activation is fabricated by this native test.
+    let source = include_str!("../../../worker/web/app-runtime.ts");
+    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        source
+            .split_once(start)
+            .unwrap()
+            .1
+            .split_once(end)
+            .unwrap()
+            .0
+    }
+    let permission = section(
+        source,
+        "function fullscreenShortcutAllowed()",
+        "function platformKey(",
+    );
+    assert!(permission.contains("engine?.fullscreen_shortcut_allowed?.() !== true"));
+    assert!(permission.contains("sample <= fullscreenShortcutInputSample"));
+    let handler = section(
+        source,
+        "function platformKey(",
+        "function preventViewportScroll(",
+    );
+    assert!(handler.contains("event.code === \"KeyX\" && fullscreenShortcutAllowed()"));
+    assert!(handler.contains("engine.fullscreen_button_focused()"));
+    let enter = section(handler, "if (event.code === \"Enter\")", "if (!action)");
+    assert!(!enter.contains("fullscreenShortcutAllowed"));
+    assert!(handler.contains("if (!event.repeat) trustedAction(action)"));
+    assert!(!handler.contains("await"));
+    assert!(!handler.contains("requestAnimationFrame"));
+    assert!(
+        source.contains("window.addEventListener(\"keydown\", platformKey, { capture: true })")
+    );
+    let pending_input = section(
+        source,
+        "function rememberNativeShortcutInput(",
+        "function fullscreenShortcutAllowed()",
+    );
+    assert!(pending_input.contains("event.target !== canvas"));
+    assert!(pending_input.contains("event.code === \"KeyX\" || event.repeat"));
+    assert!(pending_input.contains("fullscreenShortcutInputSample = null"));
+    assert!(pending_input.contains("queueMicrotask(() =>"));
+    assert!(pending_input.contains("sequence === fullscreenShortcutInputSequence"));
+    assert!(pending_input.contains("fullscreenShortcutInputSample = nativeHudInputSample()"));
+    assert!(
+        source
+            .find("window.addEventListener(\"keydown\", rememberNativeShortcutInput")
+            .unwrap()
+            < source
+                .find("window.addEventListener(\"keydown\", event => movementKey")
+                .unwrap()
+    );
+    assert!(source.contains(
+        "window.addEventListener(\"keyup\", rememberNativeShortcutInput, { capture: true })"
+    ));
+    assert!(source.contains("[\"pointerdown\", \"pointerup\", \"pointercancel\"] as const"));
+    let trusted_action = section(source, "function trustedAction(", "function pinch(");
+    assert!(trusted_action.contains("if (action === \"fullscreen\") void fullscreen()"));
+    let fullscreen = section(
+        source,
+        "async function fullscreen()",
+        "function platformButtonAt(",
+    );
+    assert!(fullscreen.contains("await viewport.requestFullscreen()"));
+    assert!(fullscreen.contains("await viewport.webkitRequestFullscreen()"));
+    for deferred in [
+        "requestAnimationFrame",
+        "setTimeout",
+        "queueMicrotask",
+        "maximize(",
+    ] {
+        assert!(
+            !fullscreen.contains(deferred),
+            "fullscreen must not use {deferred}"
+        );
+    }
+}
+
+fn fullscreen_shortcut_app() -> (App, Entity) {
+    let (mut app, _) = hud_app(1280, 800, 1.0, 1.0);
+    app.add_systems(
+        PreUpdate,
+        super::systems::capture_binding_input
+            .after(bevy::input::InputSystems)
+            .before(InputFocusSystems::Dispatch),
+    )
+    .add_systems(
+        Update,
+        (super::systems::interactions, super::systems::update_buttons).chain(),
+    );
+    super::diagnostics::install(&mut app);
+    crate::camera::set_input_active(true, false);
+    app.update();
+    let window = app
+        .world_mut()
+        .query_filtered::<Entity, With<bevy::window::PrimaryWindow>>()
+        .single(app.world())
+        .unwrap();
+    (app, window)
+}
+
+#[test]
 fn placement_toolbar_keeps_native_controls_reachable_and_the_pad_center_clear() {
     use super::model::{BUTTON_HEIGHT_PX, LaunchpadControl, LayoutPart, Overlay, SidePanel};
     use bevy::input_focus::FocusCause;
@@ -592,6 +908,10 @@ fn hud_app(width: u32, height: u32, window_scale: f32, ui_scale: f32) -> (App, E
                 .before(update_frusta),
         );
     super::input::install(&mut app);
+    assert!(
+        !super::fullscreen_shortcut_allowed(),
+        "a HUD must publish real input state before authorizing a shortcut"
+    );
     super::text_layout::install(&mut app);
     super::editors::install(&mut app);
     let camera = app

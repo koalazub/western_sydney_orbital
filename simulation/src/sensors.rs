@@ -5,8 +5,13 @@ mod optics;
 mod systems;
 mod view;
 
-pub(crate) use capture::request_capture;
-pub(crate) use systems::{pan_tilt, pose, status};
+pub(crate) use capture::{invalidate_pending, request_capture};
+pub(crate) use systems::{attach_health, pan_tilt, pose, status};
+
+pub(crate) fn invalidate_trial() {
+    capture::invalidate_trial();
+    systems::invalidate_trial();
+}
 
 pub(crate) fn install(app: &mut bevy::prelude::App) {
     use bevy::prelude::*;

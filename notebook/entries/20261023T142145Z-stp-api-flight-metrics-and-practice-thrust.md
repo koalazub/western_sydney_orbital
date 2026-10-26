@@ -9,6 +9,10 @@ tags = ["escape_from_phobos", "api", "telemetry", "practice_limits"]
 
 # STP strategy API, flight metrics and practice thrust
 
+## Historical guidance, supersession recorded 2026-10-28
+
+The original research body below is preserved unchanged. Its Space practice-boost selector and profile-selection instructions are superseded. Beads `wso-sal.41.5`, completed 2026-10-24, removed live boost selection. Space and E now share the 0.5 m/s² reference command cap; normal angular requests remain capped at 0.05 rad/s². Local actuator gain is a separate calibration, not the retired boost selector or a change to those command limits. See the [current README controls](../../README.md#play-directly-in-the-game), [live calibration](../../README.md#edit-inputs-and-inspect-the-result) and [practice limits](../../README.md#what-local-practice-does-not-prove). The boost acceptance criteria in `wso-sal.32` describe the old implementation, not the current UI.
+
 This reference checks the published official sources. It does not establish licensed-runtime execution or exact parity between this Bevy/Rapier practice model and Space Teams Pro.
 
 ## Thrust profiles

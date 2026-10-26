@@ -454,6 +454,193 @@ fn native_side_keys_fire_the_existing_opposite_force_indexed_mounts() {
 }
 
 #[test]
+fn sustained_native_key_a_tips_beyond_ninety_degrees_with_real_stock_pad_contact() {
+    use crate::{
+        domain::{EntityId, EntityKind},
+        model::{ActuationRequest, ActuationState, ThrustApplication},
+    };
+    use bevy::math::{DQuat, DVec3};
+
+    let config = scenario::settings();
+    assert_eq!(config.lander.max_accel_mps2, 0.5);
+    assert_eq!(config.lander.max_angular_accel_rad_s2, 0.05);
+    assert_eq!(STEP.as_secs_f64(), config.integration.fixed_step_s);
+    let mut app = running_app();
+    let initial = snapshot();
+    assert_eq!(initial.experiment_settings.unwrap().debris.count, 500);
+    assert_eq!(
+        initial
+            .assets
+            .iter()
+            .filter(|actor| actor.kind == EntityKind::Debris)
+            .count(),
+        500
+    );
+    let lander = ship(&initial);
+    let pad = initial
+        .assets
+        .iter()
+        .find(|actor| actor.id == EntityId::LandingPad)
+        .unwrap();
+    let pad_up = DQuat::from_array(pad.rotation) * DVec3::Z;
+    let request = ActuationRequest {
+        application: ThrustApplication::ManualNozzles,
+        accel_body_mps2: [0.0, -config.lander.max_accel_mps2, 0.0],
+        angular_accel_body_rad_s2: [0.0; 3],
+    };
+    let force_body = DVec3::from_array(request.accel_body_mps2) * lander.mass_kg;
+    let mount = config.lander.manual_nozzles_body_m[3];
+    assert_eq!(mount, [0.0, 2.5, -2.55]);
+    let torque_body = DVec3::from_array(mount).cross(force_body);
+    assert!(
+        torque_body.x < 0.0,
+        "KeyA's -Y force has a negative body-X moment"
+    );
+    let baseline = applied_physics().unwrap();
+
+    // Press the physical key once. Native routing and KeyboardPilot own every
+    // subsequent command; no direct force, pose, mission or contact writes.
+    press(&mut app, &[KeyCode::KeyA]);
+    frame(&mut app, Duration::ZERO);
+    let commanded = snapshot();
+    let jets = crate::propulsion::applied_jets(ship(&commanded));
+    assert_eq!(jets.len(), 1);
+    assert_eq!(jets[0].point_body_m, mount);
+    assert_eq!(jets[0].force_body_n, force_body.to_array());
+    assert_eq!(ship(&commanded).torque_nm, torque_body.to_array());
+    let mut previous = applied_physics().unwrap();
+    assert!(keyboard_owns_command());
+    assert_eq!(previous.requested, request);
+    assert_eq!(previous.actuator_gain, 1.0);
+    assert_eq!(
+        previous.actuation_state,
+        ActuationState::AwaitingApplication
+    );
+    assert_eq!(previous.last_actuator_application, None);
+    assert_eq!(previous.position_world_m, baseline.position_world_m);
+    assert_eq!(
+        previous.rotation_body_to_world_xyzw,
+        baseline.rotation_body_to_world_xyzw
+    );
+    assert_eq!(previous.velocity_world_mps, baseline.velocity_world_mps);
+    assert_eq!(
+        previous.angular_velocity_world_rad_s,
+        baseline.angular_velocity_world_rad_s
+    );
+
+    let mut minimum_up_alignment = 1.0_f64;
+    let mut peak_roll_rate = 0.0_f64;
+    let mut pad_contact_frames = 0;
+    // Keep the original 12 s / >90 degree acceptance, now for actual mapped A,
+    // rather than the old +Y physics-only test, which currently matches KeyD.
+    for _ in 0..240 {
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::KeyA)
+        );
+        assert!(keyboard_owns_command());
+        frame(&mut app, STEP);
+        let state = snapshot();
+        let actual = applied_physics().unwrap();
+        let applied = actual
+            .last_actuator_application
+            .expect("Rapier must apply the held-key thrust");
+        assert_eq!(applied.requested, request);
+        assert_eq!(applied.actuator_gain, 1.0);
+        assert_eq!(applied.application_time_s, previous.source_time_s);
+        assert_eq!(
+            applied.rotation_body_to_world_xyzw,
+            previous.rotation_body_to_world_xyzw
+        );
+        assert_eq!(actual.source_time_s, state.time_s);
+        assert_eq!(actual.mass_kg, baseline.mass_kg);
+        assert_eq!(actual.inertia_body_kg_m2, baseline.inertia_body_kg_m2);
+        assert_eq!(actual.rotation_body_to_world_xyzw, ship(&state).rotation);
+        assert_eq!(
+            actual.angular_velocity_world_rad_s,
+            ship(&state).angular_velocity_rad_s
+        );
+        let application_rotation = DQuat::from_array(applied.rotation_body_to_world_xyzw);
+        let gravity = crate::astrophysics::acceleration(
+            DVec3::from_array(previous.position_world_m),
+            DVec3::from_array(previous.velocity_world_mps),
+            config.gravity,
+        );
+        for (name, measured, expected) in [
+            ("body force", applied.force_body_n, force_body),
+            ("body torque", applied.torque_body_nm, torque_body),
+            (
+                "world force",
+                applied.force_world_n,
+                application_rotation * force_body,
+            ),
+            (
+                "world torque",
+                applied.torque_world_nm,
+                application_rotation * torque_body,
+            ),
+            (
+                "Rapier force accumulator",
+                actual.total_external_force_world_n,
+                application_rotation * force_body + gravity * actual.mass_kg,
+            ),
+            (
+                "Rapier torque accumulator",
+                actual.total_external_torque_world_nm,
+                application_rotation * torque_body,
+            ),
+        ] {
+            assert!(
+                (DVec3::from_array(measured) - expected).length() < 1e-6,
+                "{name} at {} s: measured {measured:?}, expected {expected:?}",
+                state.time_s
+            );
+        }
+
+        let rotation = DQuat::from_array(actual.rotation_body_to_world_xyzw);
+        minimum_up_alignment = minimum_up_alignment.min(pad_up.dot(rotation * DVec3::Z));
+        peak_roll_rate = peak_roll_rate.max(
+            (rotation.inverse() * DVec3::from_array(actual.angular_velocity_world_rad_s))
+                .x
+                .abs(),
+        );
+        if state
+            .active_contacts
+            .contains(&[EntityId::Lander, EntityId::LandingPad])
+        {
+            pad_contact_frames += 1;
+        }
+        previous = actual;
+        if (pad_contact_frames > 0 && minimum_up_alignment < 0.0)
+            || state.mission.status.is_terminal()
+        {
+            break;
+        }
+    }
+
+    let after = snapshot();
+    assert!(
+        pad_contact_frames > 0 && minimum_up_alignment < 0.0 && peak_roll_rate > 0.05,
+        "actual KeyA is -Y, not the legacy test's +Y: require stock pad contact, >90 degree tip and >0.05 rad/s roll; by {} s minimum up dot {minimum_up_alignment}, peak roll {peak_roll_rate} rad/s, pad-contact frames {pad_contact_frames}, mission {:?}, damage {} J, contacts {:?}",
+        after.time_s,
+        after.mission.status,
+        after.mission.damage,
+        after.active_contacts
+    );
+    assert!(after.mission.fuel_used_kg > initial.mission.fuel_used_kg);
+    assert_eq!(after.manual_interventions, 0);
+    assert_eq!(after.tuning_revision, 0);
+    let final_pad = after
+        .assets
+        .iter()
+        .find(|actor| actor.id == EntityId::LandingPad)
+        .unwrap();
+    assert_eq!(final_pad.position, pad.position);
+    assert_eq!(final_pad.rotation, pad.rotation);
+}
+
+#[test]
 fn rebinding_releases_owned_thrust_once_and_waits_for_old_and_new_physical_keys() {
     let mut app = running_app();
     press(&mut app, &[KeyCode::KeyW]);

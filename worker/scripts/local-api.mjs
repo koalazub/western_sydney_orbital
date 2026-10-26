@@ -14,16 +14,19 @@ const CAPTURE_TIMEOUT_MS = 20000;
 const PAGE_LEASE_MS = 6000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
+const INVALID_CONTROL_ID = /[^A-Za-z0-9_-]/;
 const CAMERA_MODES = new Set([
   "orbit", "mission", "first_person", "third_person", "follow", "free", "overview", "top", "ship_top", "ship_bottom",
 ]);
 const WORLD_COMMANDS = new Set(["configure_experiment", "configure_flight", "reset"]);
+const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 const worldSetup = call => call.method === "command" && WORLD_COMMANDS.has(call.command?.op);
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -38,8 +41,8 @@ function shape(value, required, optional = []) {
   }
 }
 
-function validateContext(context) {
-  if (context == null) return;
+function validateContext(context, required = false) {
+  if (context == null && !required) return;
   shape(context, ["trial_revision", "tuning_revision", "manual_interventions", "seed", "running"]);
   for (const field of ["trial_revision", "tuning_revision", "manual_interventions", "seed"]) {
     if (!Number.isInteger(context[field]) || !finiteBetween(context[field], 0, 4294967295)) {
@@ -47,6 +50,33 @@ function validateContext(context) {
     }
   }
   if (typeof context.running !== "boolean") invalid("Command context running must be a boolean");
+}
+
+function validateUnsigned(value, name) {
+  if (!Number.isInteger(value) || !finiteBetween(value, 0, 4294967295)) {
+    invalid(`${name} must be an unsigned 32-bit integer`);
+  }
+}
+
+function validateId(value, name) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 64 || INVALID_CONTROL_ID.test(value)) {
+    invalid(`${name} must contain 1 to 64 ASCII letters, digits, underscores or hyphens`);
+  }
+}
+
+function validateLease(command) {
+  if (!finiteBetween(command.lease_sim_s, 0.05, 1)) invalid("lease_sim_s must be finite and between 0.05 and 1");
+  if (typeof command.source_time_s !== "number" || !Number.isFinite(command.source_time_s) || command.source_time_s < 0) {
+    invalid("source_time_s must be a finite non-negative number");
+  }
+}
+
+function validateFence(fence) {
+  shape(fence, ["epoch", "term", "run_id", "controller_id"]);
+  validateUnsigned(fence.epoch, "controller_fence.epoch");
+  validateUnsigned(fence.term, "controller_fence.term");
+  validateId(fence.run_id, "run_id");
+  validateId(fence.controller_id, "controller_id");
 }
 
 function validateCall(value) {
@@ -87,6 +117,7 @@ function validateCall(value) {
     case "pause":
     case "stop":
     case "debug_upright":
+    case "clear_sensor_faults":
       shape(command, ["op"]);
       break;
     case "play":
@@ -150,6 +181,43 @@ function validateCall(value) {
         }
       }
       break;
+    case "set_leased_command":
+      shape(command, ["op", "accel", "angular_accel", "lease_sim_s", "source_time_s", "expected_context", "expected_sensor_revision"], ["controller_fence"]);
+      validateContext(command.expected_context, true);
+      validateUnsigned(command.expected_sensor_revision, "expected_sensor_revision");
+      validateLease(command);
+      if (Object.hasOwn(command, "controller_fence")) validateFence(command.controller_fence);
+      for (const [name, limit] of [["accel", 0.5], ["angular_accel", 0.05]]) {
+        const vector = command[name];
+        if (!Array.isArray(vector) || vector.length !== 3 || !vector.every(x => finiteBetween(x, -limit, limit))
+          || Math.hypot(...vector) > limit) invalid(`${name} must contain three finite numbers with vector norm at most ${limit}`);
+      }
+      break;
+    case "claim_control":
+      shape(command, ["op", "run_id", "controller_id", "expected_epoch", "expected_term", "source_time_s", "lease_sim_s", "expected_context"]);
+      validateId(command.run_id, "run_id");
+      validateId(command.controller_id, "controller_id");
+      validateUnsigned(command.expected_epoch, "expected_epoch");
+      validateUnsigned(command.expected_term, "expected_term");
+      validateContext(command.expected_context, true);
+      validateLease(command);
+      break;
+    case "release_control":
+      shape(command, ["op", "run_id", "expected_epoch", "expected_context"]);
+      validateId(command.run_id, "run_id");
+      validateUnsigned(command.expected_epoch, "expected_epoch");
+      validateContext(command.expected_context, true);
+      break;
+    case "set_sensor_fault":
+      shape(command, ["op", "target", "mode"], ["duration_sim_s"]);
+      if (!["radar_primary", "radar_backup", "camera_top", "camera_bottom", "radar_bus", "navigation", "all_avionics"].includes(command.target)) {
+        invalid("Unknown sensor fault target");
+      }
+      if (!["nominal", "unavailable", "frozen"].includes(command.mode)) invalid("Sensor fault mode must be nominal, unavailable or frozen");
+      if (Object.hasOwn(command, "duration_sim_s") ? !finiteBetween(command.duration_sim_s, 0.05, 300) : command.mode !== "nominal") {
+        invalid("Non-nominal sensor faults require duration_sim_s; any supplied duration must be finite and between 0.05 and 300");
+      }
+      break;
     case "view":
       shape(command, ["op"], ["mode", "focus", "zoom"]);
       if (command.mode != null && !CAMERA_MODES.has(command.mode)) invalid("Unknown camera mode");
@@ -163,7 +231,7 @@ function validateCall(value) {
       }
       break;
     default:
-      invalid("Allowed command ops: pause, play, step, reset, set_command, stop, view, debug_upright, configure_experiment, configure_flight, place_lander, move_launchpad, tune_ship, tune_debris_flow");
+      invalid("Allowed command ops: pause, play, step, reset, set_command, set_leased_command, claim_control, release_control, set_sensor_fault, clear_sensor_faults, stop, view, debug_upright, configure_experiment, configure_flight, place_lander, move_launchpad, tune_ship, tune_debris_flow");
   }
 }
 
@@ -222,7 +290,7 @@ const inside = (root, path) => {
   return !rel || (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep));
 };
 
-export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
+export async function createLocalApi({ worker, publicRoot, rootRealPath, headless = false }) {
   const token = randomBytes(32).toString("base64url");
   const authorization = Buffer.from(`Bearer ${token}`);
   const requestedPath = resolve(process.env.WSORB_LOCAL_CONNECTION || resolve(worker, "..", ".devenv/wsorb-local.json"));
@@ -280,6 +348,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
   }
   const clientSource = await readFile(resolve(worker, "web/local-api.js"), "utf8");
   const notebookHelp = await readFile(resolve(worker, "web/notebook.html"), "utf8");
+  const native = headless
+    ? await (await import("./headless.mjs")).createHeadless({ publicRoot, rootRealPath, engineBuild })
+    : null;
   let origin;
   let closed = false;
   let publication = Promise.resolve();
@@ -288,6 +359,42 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
   // One control request and one GPU readback may coexist. A capture must not
   // hold the command channel while Python is controlling a flying vehicle.
   const pending = new Map();
+  const nativePending = new Map();
+
+  function validateResult(result, call, browser = false) {
+    const id = browser ? ["id"] : [];
+    shape(result, result.ok === true ? [...id, "ok", "value"] : [...id, "ok", "error"], result.ok === true ? [] : ["code"]);
+    if (result.ok !== true && result.ok !== false) invalid("Result ok must be a boolean");
+    if (result.ok === false && (typeof result.error !== "string" || !result.error || result.error.length > 2048)) {
+      invalid("Result error must be a nonempty string of at most 2048 characters");
+    }
+    if (result.ok === false && result.code !== undefined && !ERROR_CODES.has(result.code)) invalid("Unknown engine rejection code");
+    if (result.ok !== true) return;
+    if (call.method === "capture") {
+      shape(result.value, ["metadata", "rgb_base64"]);
+      if (!record(result.value.metadata) || result.value.metadata.width !== 512
+        || result.value.metadata.height !== 512 || result.value.metadata.channels !== 3
+        || result.value.metadata.bits_per_channel !== 8
+        || typeof result.value.rgb_base64 !== "string" || result.value.rgb_base64.length !== 1048576
+        || !/^[A-Za-z0-9+/]+$/.test(result.value.rgb_base64)) invalid("Invalid RGB8 camera capture");
+    } else if (call.method === "raycast") {
+      shape(result.value, ["source_seed", "source_time_s", "frame", "origin_world_m", "direction_world", "max_distance_m", "hit"]);
+      if (result.value.hit !== null && !record(result.value.hit)) invalid("Raycast hit must be a real hit report or null");
+    } else if (call.method !== "snapshot") {
+      shape(result.value, ["ok"]);
+      if (result.value.ok !== true) invalid("Commands return an acknowledgement only");
+    } else {
+      shape(result.value, ["observation", "telemetry", "navigation", "runtime", "renderer", "engine_build", "cameras"]);
+      if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime, result.value.renderer].every(record)) {
+        invalid("Snapshot reports must be JSON objects");
+      }
+      shape(result.value.engine_build, ["bytes", "sha256"]);
+      if (result.value.engine_build.bytes !== engineBuild.bytes || result.value.engine_build.sha256 !== engineBuild.sha256) {
+        invalid("Snapshot engine build does not match this lab server");
+      }
+    }
+    finiteJson(result.value);
+  }
 
   function send(request, response, status, value, type = "application/json; charset=utf-8") {
     if (response.destroyed || response.writableEnded) return;
@@ -414,7 +521,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         // authenticate instead; an unadorned GET must not reveal the bootstrap.
         if (site !== "same-origin" && !authorized) throw new HttpError(403, "Local modules require a same-origin browser request");
         const source = pathname === "/__local/client.js" ? clientSource
-          : `import { connect } from "/__local/client.js";\nconnect(${JSON.stringify(token)});\n`;
+          : native ? "export {};\n" : `import { connect } from "/__local/client.js";\nconnect(${JSON.stringify(token)});\n`;
         send(request, response, 200, source, "text/javascript; charset=utf-8");
         return;
       }
@@ -424,10 +531,13 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
       }
       expire();
       if (pathname === "/__local/status") {
-        send(request, response, 200, { enabled: true, connected: page !== null, busy: pending.size !== 0,
-          busy_operation: [...pending.values()].some(job => worldSetup(job.call)) ? "world_setup" : null,
-          engine_build: engineBuild });
+        const active = [...pending.values()].map(job => job.call).concat([...nativePending.values()]);
+        send(request, response, 200, { enabled: true, connected: page !== null, busy: active.length !== 0,
+          busy_operation: active.some(worldSetup) ? "world_setup" : null,
+          engine_build: engineBuild,
+          ...(native ? { backend: "native_headless", ...native.status() } : {}) });
       } else if (pathname === "/__local/poll") {
+        if (native) throw new HttpError(409, "The native headless backend does not lease a browser page");
         const id = pageId(request);
         if (request.headers["x-wsorb-build"] !== engineBuild.sha256) {
           throw new HttpError(409, "Browser engine build differs from the lab server; restart the local lab and reload the simulation");
@@ -449,10 +559,29 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         const call = await readJson(request, response);
         validateCall(call);
         expire();
-        if (!page) throw new HttpError(503, "No ready browser is connected to the local simulation");
         const channel = call.method === "capture" ? "capture" : "control";
+        if (native) {
+          if (nativePending.has(channel)) throw new HttpError(409, `A local ${channel} call is already in flight`, "local_busy");
+          if (response.destroyed || closed) return;
+          const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS
+            : worldSetup(call) ? WORLD_CALL_TIMEOUT_MS : CALL_TIMEOUT_MS;
+          const previousSocketTimeout = request.socket.timeout ?? 30000;
+          if (worldSetup(call)) request.socket.setTimeout(timeout + 5000);
+          nativePending.set(channel, call);
+          try {
+            const result = await native.invoke(call, Date.now() + timeout);
+            validateResult(result, call);
+            if (result.ok === false) result.error = result.error.replaceAll(token, "[redacted]");
+            send(request, response, 200, result);
+          } finally {
+            nativePending.delete(channel);
+            if (worldSetup(call) && !request.socket.destroyed) request.socket.setTimeout(previousSocketTimeout);
+          }
+          return;
+        }
+        if (!page) throw new HttpError(503, "No ready browser is connected to the local simulation");
         if ([...pending.values()].some(job => job.channel === channel)) {
-          throw new HttpError(409, `A local ${channel} call is already in flight`);
+          throw new HttpError(409, `A local ${channel} call is already in flight`, "local_busy");
         }
         if (response.destroyed || closed) return;
         const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS
@@ -467,6 +596,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         pending.set(job.id, job);
         response.once("close", job.disconnected);
       } else {
+        if (native) throw new HttpError(409, "The native headless backend does not accept browser results");
         const id = pageId(request);
         if (!page || page.id !== id || ![...pending.values()].some(job => job.page === id && job.delivered)) {
           throw new HttpError(409, "No delivered call belongs to this browser page");
@@ -477,38 +607,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
         if (!page || page.id !== id || !job || job.page !== id || !job.delivered || result?.id !== job.id || job.deadline <= Date.now()) {
           throw new HttpError(409, "Stale or expired browser result");
         }
-        shape(result, result.ok === true ? ["id", "ok", "value"] : ["id", "ok", "error"], result.ok === true ? [] : ["code"]);
-        if (result.ok !== true && result.ok !== false) invalid("Result ok must be a boolean");
-        if (result.ok === false && (typeof result.error !== "string" || !result.error || result.error.length > 2048)) {
-          invalid("Result error must be a nonempty string of at most 2048 characters");
-        }
-        if (result.ok === false && result.code !== undefined && result.code !== "stale_context") invalid("Unknown command rejection code");
-        if (result.ok === true) {
-          if (job.call.method === "capture") {
-            shape(result.value, ["metadata", "rgb_base64"]);
-            if (!record(result.value.metadata) || result.value.metadata.width !== 512
-              || result.value.metadata.height !== 512 || result.value.metadata.channels !== 3
-              || result.value.metadata.bits_per_channel !== 8
-              || typeof result.value.rgb_base64 !== "string" || result.value.rgb_base64.length !== 1048576
-              || !/^[A-Za-z0-9+/]+$/.test(result.value.rgb_base64)) invalid("Invalid RGB8 camera capture");
-          } else if (job.call.method === "raycast") {
-            shape(result.value, ["source_seed", "source_time_s", "frame", "origin_world_m", "direction_world", "max_distance_m", "hit"]);
-            if (result.value.hit !== null && !record(result.value.hit)) invalid("Raycast hit must be a real hit report or null");
-          } else if (job.call.method !== "snapshot") {
-            shape(result.value, ["ok"]);
-            if (result.value.ok !== true) invalid("Commands return an acknowledgement only");
-          } else {
-            shape(result.value, ["observation", "telemetry", "navigation", "runtime", "renderer", "engine_build", "cameras"]);
-            if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime, result.value.renderer].every(record)) {
-              invalid("Snapshot reports must be JSON objects");
-            }
-            shape(result.value.engine_build, ["bytes", "sha256"]);
-            if (result.value.engine_build.bytes !== engineBuild.bytes || result.value.engine_build.sha256 !== engineBuild.sha256) {
-              invalid("Snapshot engine build does not match this lab server");
-            }
-          }
-          finiteJson(result.value);
-        }
+        validateResult(result, job.call, true);
         claimPage(id);
         const envelope = result.ok ? { ok: true, value: result.value }
           : { ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) };
@@ -518,6 +617,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
     } catch (error) {
       send(request, response, error instanceof HttpError ? error.status : 500, {
         ok: false, error: error instanceof HttpError ? error.message : "Local bridge failed",
+        ...(error instanceof HttpError && error.code ? { code: error.code } : {}),
       });
     }
   }
@@ -525,7 +625,8 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
   return {
     handle,
     acceptsHost: request => origin && request.headers.host === new URL(origin).host,
-    indexScript: '<script type="module" src="/__local/bootstrap.js"></script>',
+    indexScript: native ? "" : '<script type="module" src="/__local/bootstrap.js"></script>',
+    indexPage: native ? '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Headless simulation</title><body><main><h1>Headless simulation</h1><p>The native physics runtime is running without a browser renderer. This page is not a live telemetry view.</p><p>Use the authenticated local API or <a href="/notebook.html">open the notebook</a> to inspect the actual flight.</p></main></body></html>' : null,
     async listen(port) {
       const url = `http://127.0.0.1:${port}`;
       origin = new URL(url).origin;
@@ -553,6 +654,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath }) {
     },
     async close() {
       closed = true;
+      native?.close();
       clearTimeout(pageTimer);
       page = null;
       for (const job of [...pending.values()]) settle(job, 503, lost(job, "Local lab is shutting down"));

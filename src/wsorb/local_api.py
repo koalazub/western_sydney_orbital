@@ -1,11 +1,14 @@
-"""Python access to the real local browser simulation, not the STP SDK.
+"""Python access to the real local WASM simulation, not the STP SDK.
 
 Start the built game with ``WSORB_LAB=1 just --no-deps local`` and open its
 printed URL in a WebGPU browser. The loopback server relays requests to that
-browser's existing WASM instance. No browser means no simulation results.
+browser's existing WASM instance. With ``WSORB_HEADLESS=1`` as well, the private
+server runs that same built engine's native physics/runtime without a renderer.
 
-Use one command writer. Raw commands can leave thrust installed until ``stop``;
+Use one command writer. Raw ``set_command`` writes are latched until replaced or stopped;
 ``run_step`` instead pauses, advances a bounded interval and stops in ``finally``.
+Autonomous decisions can use ``set_leased_command`` with their original snapshot.
+The native lease expires at that snapshot's time plus the requested interval.
 No request is retried, since a lost response does not prove a command failed.
 """
 
@@ -47,6 +50,11 @@ COMMANDS = frozenset(
         "step",
         "reset",
         "set_command",
+        "set_leased_command",
+        "claim_control",
+        "release_control",
+        "set_sensor_fault",
+        "clear_sensor_faults",
         "stop",
         "view",
         "debug_upright",
@@ -61,11 +69,35 @@ COMMANDS = frozenset(
 
 
 class LocalApiError(RuntimeError):
-    """The local transport or actual browser engine rejected a request."""
+    """The local transport or actual WASM engine rejected a request."""
+
+
+class LocalBusyError(LocalApiError):
+    """The private server rejected a contended call before engine dispatch."""
+
+    code = "local_busy"
 
 
 class StaleContextError(LocalApiError):
     """The engine rejected a checked command before changing the current flight."""
+
+    code = "stale_context"
+
+
+class CommandExpiredError(LocalApiError):
+    """The native decision lease expired before invocation; no command was applied."""
+
+    code = "command_expired"
+
+
+class SensorUnavailableError(LocalApiError):
+    """A real capture was unavailable or had no actual sample to deliver."""
+
+    def __init__(self, message: str, *, code: str = "sensor_unavailable") -> None:
+        if code not in ("sensor_unavailable", "sensor_no_sample"):
+            raise ValueError("Unsupported sensor rejection code")
+        super().__init__(message)
+        self.code = code
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -255,6 +287,226 @@ def control_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return context
 
 
+def _identifier(value: Any, name: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is None:
+        raise ValueError(
+            f"{name} must contain 1 to 64 ASCII letters, digits, underscores or hyphens"
+        )
+    return value
+
+
+def _source_time(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError("source_time_s must be a finite non-negative number")
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ValueError("source_time_s must be a finite non-negative number") from error
+    if not math.isfinite(result):
+        raise ValueError("source_time_s must be a finite non-negative number")
+    return result
+
+
+def _expected_context(context: Any) -> dict[str, Any]:
+    fields = ("trial_revision", "tuning_revision", "manual_interventions", "seed")
+    if not isinstance(context, Mapping) or set(context) != {*fields, "running"}:
+        raise ValueError("Checked commands require the complete five-field expected_context")
+    if type(context["running"]) is not bool:
+        raise ValueError("expected_context.running must be a boolean")
+    return {
+        **{name: _integer(context[name], name, 0xFFFFFFFF) for name in fields},
+        "running": context["running"],
+    }
+
+
+def _controller_fence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "epoch",
+        "term",
+        "run_id",
+        "controller_id",
+    }:
+        raise ValueError("controller_fence requires exactly epoch, term, run_id and controller_id")
+    return {
+        "epoch": _integer(value["epoch"], "controller_fence.epoch", 0xFFFFFFFF),
+        "term": _integer(value["term"], "controller_fence.term", 0xFFFFFFFF),
+        "run_id": _identifier(value["run_id"], "run_id"),
+        "controller_id": _identifier(value["controller_id"], "controller_id"),
+    }
+
+
+def _control_authority(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    observation = snapshot.get("observation") if isinstance(snapshot, Mapping) else None
+    authority = observation.get("control_authority") if isinstance(observation, Mapping) else None
+    if not isinstance(authority, Mapping) or set(authority) != {
+        "epoch",
+        "term",
+        "status",
+        "run_id",
+        "controller_id",
+        "expires_at_sim_time_s",
+    }:
+        raise ValueError("Control ownership requires actual observation.control_authority")
+    parsed = {
+        "epoch": _integer(authority["epoch"], "control_authority.epoch", 0xFFFFFFFF),
+        "term": _integer(authority["term"], "control_authority.term", 0xFFFFFFFF),
+    }
+    if authority["status"] not in ("idle", "active", "expired", "revoked"):
+        raise ValueError("Unknown control_authority.status")
+    parsed["status"] = authority["status"]
+    for name in ("run_id", "controller_id"):
+        value = authority[name]
+        parsed[name] = None if value is None else _identifier(value, name)
+    expiry = authority["expires_at_sim_time_s"]
+    parsed["expires_at_sim_time_s"] = None if expiry is None else _source_time(expiry)
+    if parsed["status"] == "active" and any(
+        parsed[name] is None for name in ("run_id", "controller_id", "expires_at_sim_time_s")
+    ):
+        raise ValueError("Active control authority requires actual owner IDs and expiry")
+    return parsed
+
+
+def controller_fence(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Read an active native fence from a real receipt, never from a claim request."""
+    authority = _control_authority(snapshot)
+    if authority["status"] != "active":
+        raise ValueError("The actual control authority is not active")
+    return _controller_fence(
+        {name: authority[name] for name in ("epoch", "term", "run_id", "controller_id")}
+    )
+
+
+def _ownership_command(request: Mapping[str, Any]) -> dict[str, Any]:
+    op = request.get("op")
+    fields = {"op", "run_id", "expected_epoch", "expected_context"}
+    if op == "claim_control":
+        fields |= {"controller_id", "expected_term", "source_time_s", "lease_sim_s"}
+    elif op != "release_control":
+        raise ValueError("Unsupported ownership command")
+    if set(request) != fields:
+        raise ValueError(f"{op} requires exactly {', '.join(sorted(fields))}")
+    parsed = {
+        "op": op,
+        "run_id": _identifier(request["run_id"], "run_id"),
+        "expected_epoch": _integer(request["expected_epoch"], "expected_epoch", 0xFFFFFFFF),
+        "expected_context": _expected_context(request["expected_context"]),
+    }
+    if op == "claim_control":
+        parsed.update(
+            controller_id=_identifier(request["controller_id"], "controller_id"),
+            expected_term=_integer(request["expected_term"], "expected_term", 0xFFFFFFFF),
+            source_time_s=_source_time(request["source_time_s"]),
+            lease_sim_s=_bounded_number(request["lease_sim_s"], "lease_sim_s", 0.05, 1.0),
+        )
+    return parsed
+
+
+def _resilience_command(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the bounded delivery/lease operations before any transport I/O."""
+    op = request.get("op")
+    if op == "clear_sensor_faults":
+        if set(request) != {"op"}:
+            raise ValueError("clear_sensor_faults requires only op")
+        return {"op": op}
+    if op == "set_sensor_fault":
+        required = {"op", "target", "mode"}
+        if not required.issubset(request) or set(request) - required - {"duration_sim_s"}:
+            raise ValueError("Sensor faults require op, target, mode and optional duration_sim_s")
+        target, mode = request["target"], request["mode"]
+        if not isinstance(target, str) or target not in (
+            "radar_primary",
+            "radar_backup",
+            "camera_top",
+            "camera_bottom",
+            "radar_bus",
+            "navigation",
+            "all_avionics",
+        ):
+            raise ValueError("Unknown sensor fault target")
+        if not isinstance(mode, str) or mode not in ("nominal", "unavailable", "frozen"):
+            raise ValueError("Sensor fault mode must be nominal, unavailable or frozen")
+        parsed = {"op": op, "target": target, "mode": mode}
+        if "duration_sim_s" in request:
+            parsed["duration_sim_s"] = _bounded_number(
+                request["duration_sim_s"], "duration_sim_s", 0.05, 300.0
+            )
+        elif mode != "nominal":
+            raise ValueError(
+                "Non-nominal sensor faults require duration_sim_s between 0.05 and 300"
+            )
+        return parsed
+    if op != "set_leased_command":
+        raise ValueError("Unsupported resilience command")
+    required = {
+        "op",
+        "accel",
+        "angular_accel",
+        "lease_sim_s",
+        "source_time_s",
+        "expected_context",
+        "expected_sensor_revision",
+    }
+    if not required.issubset(request) or set(request) - required - {"controller_fence"}:
+        raise ValueError(
+            "Leased commands require exact vectors, lease, source time and both contexts"
+        )
+    parsed_context = _expected_context(request["expected_context"])
+    source = _source_time(request["source_time_s"])
+    fence = (
+        _controller_fence(request["controller_fence"]) if "controller_fence" in request else None
+    )
+    vectors = {}
+    for name, limit in (("accel", 0.5), ("angular_accel", 0.05)):
+        vector = _vector(request[name], name)
+        if any(isinstance(component, (bool, np.bool_)) for component in request[name]):
+            raise ValueError(f"{name} must be a finite real vector without boolean components")
+        if math.hypot(*vector) > limit:
+            raise ValueError(f"{name} must have vector norm at most {limit}")
+        vectors[name] = vector
+    return {
+        "op": op,
+        **vectors,
+        "lease_sim_s": _bounded_number(request["lease_sim_s"], "lease_sim_s", 0.05, 1.0),
+        "source_time_s": source,
+        "expected_context": parsed_context,
+        "expected_sensor_revision": _integer(
+            request["expected_sensor_revision"], "expected_sensor_revision", 0xFFFFFFFF
+        ),
+        **({"controller_fence": fence} if fence is not None else {}),
+    }
+
+
+def _leased_command_request(
+    accel: Sequence[float],
+    angular_accel: Sequence[float],
+    snapshot: Mapping[str, Any],
+    *,
+    lease_sim_s: float,
+    controller_fence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = control_context(snapshot)
+    observation = snapshot["observation"]
+    health = observation.get("sensor_health")
+    if (
+        not isinstance(health, Mapping)
+        or type(health.get("schema_version")) is not int
+        or health["schema_version"] != 1
+    ):
+        raise ValueError("Leased commands require actual schema-version-1 sensor_health")
+    return _resilience_command(
+        {
+            "op": "set_leased_command",
+            "accel": accel,
+            "angular_accel": angular_accel,
+            "lease_sim_s": lease_sim_s,
+            "source_time_s": observation.get("time_s"),
+            "expected_context": context,
+            "expected_sensor_revision": health.get("revision"),
+            **({"controller_fence": controller_fence} if controller_fence is not None else {}),
+        }
+    )
+
+
 def _trial_revision(snapshot: Mapping[str, Any]) -> int:
     observation, runtime = snapshot.get("observation", {}), snapshot.get("runtime", {})
     return _integer(
@@ -336,7 +588,7 @@ def _connection(value: Any) -> tuple[str, str]:
 
 
 class LocalSimulation:
-    """A synchronous, authenticated client for one local browser engine."""
+    """A synchronous, authenticated client for one real local WASM engine."""
 
     topCamera = "top"
     bottomCamera = "bottom"
@@ -391,14 +643,9 @@ class LocalSimulation:
                 detail = error.read(8192)
             try:
                 failure = json.loads(detail)
-                if isinstance(failure, dict) and failure.get("code") == "stale_context":
-                    raise StaleContextError(
-                        "The local flight context changed; the checked command was not applied."
-                    ) from error
-                message = failure.get("error", f"HTTP {error.code}")
-            except (ValueError, AttributeError):
-                message = f"HTTP {error.code}"
-            raise LocalApiError(str(message)) from error
+            except ValueError:
+                failure = None
+            raise self._rejection(failure, f"HTTP {error.code}") from error
         except (OSError, URLError) as error:
             raise LocalApiError(
                 f"Local simulator unavailable at {self.url}. Command outcome may be unknown; "
@@ -414,8 +661,33 @@ class LocalSimulation:
             raise LocalApiError("Local simulator returned an invalid response")
         return result
 
+    def _rejection(self, failure: Any, fallback: str) -> LocalApiError:
+        if not isinstance(failure, Mapping):
+            return LocalApiError(fallback)
+        message = failure.get("error")
+        if not isinstance(message, str) or not message:
+            message = failure.get("message")
+        if not isinstance(message, str) or not message:
+            message = fallback
+        message = message.replace(self._token, "[redacted]")
+        code = failure.get("code")
+        if code == "local_busy":
+            return LocalBusyError(message)
+        if code == "stale_context":
+            return StaleContextError(message)
+        if code == "command_expired":
+            return CommandExpiredError(message)
+        if code in ("sensor_unavailable", "sensor_no_sample"):
+            return SensorUnavailableError(message, code=code)
+        return LocalApiError(message)
+
     def status(self) -> dict[str, Any]:
-        """Read connection readiness without issuing a browser or flight command."""
+        """Read backend lifecycle without issuing a flight command.
+
+        Headless physics_ready follows the actual native scheduler lifecycle.
+        A failed driver retains its last report with physics_status_cached=true.
+        connected refers only to a browser page and remains false for headless.
+        """
         return self._request("status")
 
     def _call(
@@ -429,14 +701,10 @@ class LocalSimulation:
         with channel:
             result = self._request("call", payload, timeout_s=timeout_s)
         if result.get("ok") is not True:
-            if result.get("code") == "stale_context":
-                raise StaleContextError(
-                    "The local flight context changed; the checked command was not applied."
-                )
-            raise LocalApiError(str(result.get("error", "Local browser request failed")))
+            raise self._rejection(result, "Local engine request failed")
         value = result.get("value")
         if not isinstance(value, dict):
-            raise LocalApiError("Local browser returned an invalid result")
+            raise LocalApiError("Local engine returned an invalid result")
         return value
 
     def snapshot(self) -> dict[str, Any]:
@@ -473,6 +741,7 @@ class LocalSimulation:
 
         The licensed STPClient implements this same helper with real SetParam
         calls. Neither policy code nor its commands need Marimo or Rust imports.
+        This raw command is latched until replaced or explicitly stopped.
         """
         accel = _vector(accelCommand, "accelCommand")
         angular_accel = _vector(angAccelCommand, "angAccelCommand")
@@ -485,6 +754,7 @@ class LocalSimulation:
 
         The return value is an ACK, not a physics snapshot or actuator measurement.
         This never pauses, plays or retries. The SDK-shaped SetCommand stays raw.
+        A successful checked command is still latched, not time-limited.
         """
         request = {
             "op": "set_command",
@@ -493,6 +763,123 @@ class LocalSimulation:
             "expected_context": control_context(snapshot),
         }
         return self.command(request)
+
+    def set_leased_command(
+        self,
+        accel: Sequence[float],
+        angular_accel: Sequence[float],
+        snapshot: Mapping[str, Any],
+        *,
+        lease_sim_s: float = 0.75,
+        controller_fence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send one native, bounded decision lease using only its original snapshot.
+
+        Returns an ACK, not an actuator measurement. Native expiry is the supplied
+        observation.time_s plus lease_sim_s, never transport arrival time. The
+        original control context and sensor revision must still match. No fresh
+        snapshot, pause, playback change or retry is performed here.
+        A supplied controller_fence must come from actual active ownership;
+        omission is the explicit legacy, unfenced path, not automatic ownership.
+
+        Lease duration is 0.05..1.0 sim seconds. Vector norms are bounded to 0.5
+        m/s² and 0.05 rad/s². StaleContextError and CommandExpiredError mean native
+        rejection before application; other failures can leave the outcome unknown.
+        """
+        request = _leased_command_request(
+            accel,
+            angular_accel,
+            snapshot,
+            lease_sim_s=lease_sim_s,
+            controller_fence=controller_fence,
+        )
+        return self.command(request)
+
+    def claim_control(
+        self,
+        run_id: str,
+        controller_id: str,
+        snapshot: Mapping[str, Any],
+        *,
+        expected_epoch: int | None = None,
+        lease_sim_s: float = 0.75,
+    ) -> dict[str, Any]:
+        """Claim once, then return actual authority-bearing readback after the ACK.
+
+        The default epoch is for the initial explicit grant only. A standby must
+        supply its original Run consent epoch and a fresh snapshot for the term.
+        Source time stays that of the supplied snapshot. No mutation is retried.
+        """
+        authority = _control_authority(snapshot)
+        request = _ownership_command(
+            {
+                "op": "claim_control",
+                "run_id": run_id,
+                "controller_id": controller_id,
+                "expected_epoch": authority["epoch"] if expected_epoch is None else expected_epoch,
+                "expected_term": authority["term"],
+                "source_time_s": snapshot["observation"].get("time_s"),
+                "lease_sim_s": lease_sim_s,
+                "expected_context": control_context(snapshot),
+            }
+        )
+        with self.control_transaction():
+            self.command(request)
+            readback = self.snapshot()
+        try:
+            fence = controller_fence(readback)
+        except ValueError as error:
+            raise LocalApiError(
+                "Control claim was acknowledged but active ownership was not read back. "
+                "Inspect actual state; no claim was retried."
+            ) from error
+        if any(fence[name] != request[name] for name in ("run_id", "controller_id")):
+            raise LocalApiError(
+                "Control claim was acknowledged but actual ownership differs. "
+                "Inspect actual state; no claim was retried."
+            )
+        return readback
+
+    def release_control(
+        self, run_id: str, expected_epoch: int, snapshot: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Release only this native run/epoch. Never fall back to raw Stop or Pause."""
+        request = _ownership_command(
+            {
+                "op": "release_control",
+                "run_id": run_id,
+                "expected_epoch": expected_epoch,
+                "expected_context": control_context(snapshot),
+            }
+        )
+        return self.command(request)
+
+    def set_sensor_fault(
+        self, target: str, mode: str, *, duration_sim_s: float = 5.0
+    ) -> dict[str, Any]:
+        """Change native sensor delivery once, then read the actual public snapshot.
+
+        Faults affect delivery, not physics or playback, and use a separate sensor
+        revision. The readback may already show recovery if sim time has elapsed.
+        duration_sim_s must be finite and between 0.05 and 300 sim seconds.
+        """
+        request = _resilience_command(
+            {
+                "op": "set_sensor_fault",
+                "target": target,
+                "mode": mode,
+                "duration_sim_s": duration_sim_s,
+            }
+        )
+        with self.control_transaction():
+            self.command(request)
+            return self.snapshot()
+
+    def clear_sensor_faults(self) -> dict[str, Any]:
+        """Clear native delivery faults once and read actual state without pausing."""
+        with self.control_transaction():
+            self.command({"op": "clear_sensor_faults"})
+            return self.snapshot()
 
     def play_checked(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
         """Resume an explicitly requested local run only in the same engine context.
@@ -627,6 +1014,8 @@ class LocalSimulation:
         Returns metadata plus immutable uint8 RGB of shape (512,512,3).
         The readback has its own bounded channel, separate from flight writes.
         This local convenience is not the SDK's CaptureImageBlocking function.
+        Native delivery failures raise SensorUnavailableError, with code
+        sensor_unavailable or sensor_no_sample and the actual rejection message.
         """
         if camera not in (self.topCamera, self.bottomCamera):
             raise ValueError("camera must be topCamera or bottomCamera")
@@ -661,6 +1050,10 @@ class LocalSimulation:
         op = request.get("op")
         if not isinstance(op, str) or op not in COMMANDS:
             raise ValueError("Unsupported local lab command; read data through snapshot()")
+        if op in ("set_sensor_fault", "clear_sensor_faults", "set_leased_command"):
+            request = _resilience_command(request)
+        elif op in ("claim_control", "release_control"):
+            request = _ownership_command(request)
         timeout = max(self.timeout_s, WORLD_CALL_TIMEOUT_S) if op in WORLD_OPERATIONS else None
         return self._call({"method": "command", "command": dict(request)}, timeout_s=timeout)
 

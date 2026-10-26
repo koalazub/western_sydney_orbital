@@ -77,6 +77,8 @@ pub(super) fn update(
     let Some(id) = selected else {
         return;
     };
+    let snapshot = crate::snapshot();
+    let delivery_mode = super::capture::mode(&snapshot, id);
     let config = &settings().ship_cameras;
     let scale = if ui_scale.0.is_finite() && ui_scale.0 > 0.0 {
         ui_scale.0
@@ -117,6 +119,12 @@ pub(super) fn update(
         .min((height - top - bottom - caption_height - 8.0).max(0.0))
         .min(config.resolution_px[0] as f32);
     for (mut node, mut image) in &mut pictures {
+        node.display = if delivery_mode == crate::model::SensorFaultMode::Nominal {
+            Display::Flex
+        } else {
+            // Hide the live texture rather than substituting black/fake pixels.
+            Display::None
+        };
         if node.width != px(size) {
             node.width = px(size);
         }
@@ -151,6 +159,16 @@ pub(super) fn update(
             sampled_yaw,
             sampled_pitch,
         );
+        let value = match delivery_mode {
+            crate::model::SensorFaultMode::Nominal => value,
+            crate::model::SensorFaultMode::Unavailable => {
+                format!("Ship {} | Sensor delivery unavailable", id.label())
+            }
+            crate::model::SensorFaultMode::Frozen => format!(
+                "Ship {} | Sensor delivery frozen\nCapture returns only previously completed RGB, if available",
+                id.label()
+            ),
+        };
         let value = crate::hud::readable_text(&value);
         if text.0 != value {
             text.0 = value;

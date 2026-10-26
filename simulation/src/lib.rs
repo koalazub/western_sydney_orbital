@@ -6,6 +6,7 @@ pub mod astrophysics;
 mod camera;
 mod controls;
 pub mod domain;
+mod headless;
 mod hud;
 mod launchpad;
 mod mission;
@@ -30,7 +31,37 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub fn start_simulation(canvas_selector: &str) -> Result<(), JsValue> {
+    if headless::started() {
+        return Err(runtime_error(
+            "engine_owner_conflict",
+            "The headless runtime already owns this engine instance. Start the rendered game in a separate instance.",
+        ));
+    }
     app::start(canvas_selector)
+}
+
+/// Start the actual physics/runtime scheduler without a drawing surface.
+#[wasm_bindgen]
+pub fn headless_start() -> Result<(), JsValue> {
+    headless::start().map_err(|message| runtime_error("headless_start_failed", &message))
+}
+
+/// Advance native schedules with the hosting process's real elapsed wall time.
+#[wasm_bindgen]
+pub fn headless_tick(delta_wall_s: f64) -> Result<(), JsValue> {
+    headless::tick(delta_wall_s).map_err(|message| runtime_error("headless_tick_failed", &message))
+}
+
+#[wasm_bindgen]
+pub fn headless_status() -> String {
+    headless::status().to_string()
+}
+
+fn runtime_error(code: &str, message: &str) -> JsValue {
+    let error = js_sys::Error::new(message);
+    error.set_name("WSORuntimeError");
+    let _ = js_sys::Reflect::set(&error, &JsValue::from_str("code"), &JsValue::from_str(code));
+    error.into()
 }
 
 #[wasm_bindgen]
@@ -108,6 +139,9 @@ pub fn set_navigation_preview(json: &str) -> String {
         }).to_string(),
         Err(api::CommandError::Rejected(error)) =>
             serde_json::json!({"ok": false, "error": error}).to_string(),
+        Err(api::CommandError::CommandExpired) => serde_json::json!({
+            "ok": false, "code": "command_expired", "error": api::CommandError::CommandExpired.to_string(),
+        }).to_string(),
     }
 }
 
@@ -191,6 +225,12 @@ pub fn fullscreen_button_at(x: f32, y: f32) -> bool {
 #[wasm_bindgen]
 pub fn fullscreen_button_focused() -> bool {
     hud::fullscreen_button_focused()
+}
+
+/// Permission from actual native modal, focus and input ownership state.
+#[wasm_bindgen]
+pub fn fullscreen_shortcut_allowed() -> bool {
+    hud::fullscreen_shortcut_allowed()
 }
 
 #[wasm_bindgen]

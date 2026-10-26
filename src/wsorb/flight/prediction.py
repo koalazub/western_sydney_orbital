@@ -56,6 +56,9 @@ class PlanningFrame:
     newest_measurement_time_s: float | None
     assumed_tangential_speed_allowance_mps: float
     has_surface_departure: bool = False
+    # Python-derived provenance of the complete anonymous input array, not IDs.
+    # It is deliberately absent from the external renderer/SDK schema.
+    radar_fingerprint: bytes = b""
 
 
 def radar_rows(value: Any) -> npt.NDArray[np.float64]:
@@ -280,4 +283,5 @@ def predict_obstacles(observation: Mapping[str, Any], config: PlannerConfig) -> 
         newest_measurement_time_s=float(max(times)),
         assumed_tangential_speed_allowance_mps=float(config.unknown_tangential_speed_mps),
         has_surface_departure=has_departure,
+        radar_fingerprint=rows.tobytes(),
     )

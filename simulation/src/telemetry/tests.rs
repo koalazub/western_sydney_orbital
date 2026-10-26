@@ -13,6 +13,56 @@ use crate::{
 };
 use bevy::{math::DVec3, prelude::App};
 
+#[test]
+fn external_telemetry_cannot_bypass_native_navigation_delivery_faults() {
+    use crate::{
+        api::Dispatch,
+        model::{PhysicsCommand, SensorFaultMode, SensorFaultTarget},
+    };
+    let mut experiment = crate::model::ExperimentSettings::default();
+    experiment.debris.count = 0;
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::ConfigureExperiment {
+        settings: experiment,
+        seed: Some(100),
+    }))
+    .unwrap();
+    let original = crate::snapshot();
+    presentation::publish(measure(&original).report);
+    let initial: serde_json::Value = serde_json::from_str(&presentation::status()).unwrap();
+    assert_eq!(initial["source_time_s"], 0.0);
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+        target: SensorFaultTarget::Navigation,
+        mode: SensorFaultMode::Frozen,
+        duration_sim_s: Some(1.0),
+    }))
+    .unwrap();
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::Step { seconds: 0.1 })).unwrap();
+    presentation::publish(measure(&crate::snapshot()).report);
+    let frozen: serde_json::Value = serde_json::from_str(&presentation::status()).unwrap();
+    assert_eq!(frozen["source_time_s"], initial["source_time_s"]);
+    assert_eq!(frozen["ship"], initial["ship"]);
+    assert_eq!(frozen["sensor_delivery"], "frozen");
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+        target: SensorFaultTarget::AllAvionics,
+        mode: SensorFaultMode::Unavailable,
+        duration_sim_s: Some(1.0),
+    }))
+    .unwrap();
+    let before = serde_json::to_value(crate::snapshot().as_ref()).unwrap();
+    let unavailable: serde_json::Value = serde_json::from_str(&presentation::status()).unwrap();
+    assert_eq!(unavailable["status"], "unavailable");
+    assert!(unavailable["source_time_s"].is_null());
+    assert!(unavailable["ship"]["position_m"].is_null());
+    assert!(unavailable["applied_physics"].is_null());
+    assert!(unavailable["metrics"]["speed_mps"].is_null());
+    assert_eq!(
+        serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+        before
+    );
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::ClearSensorFaults)).unwrap();
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::Step { seconds: 0.1 })).unwrap();
+}
+
 fn own(state: &Snapshot) -> &EntityState {
     state
         .assets
