@@ -36,13 +36,14 @@
             modules = [ ./devenv.nix ];
           };
       });
-      packages = forAllSystems (system: {
-        rust = inputs.self.devShells.${system}.default.config.languages.rust.toolchainPackage;
-        game =
-          let
-            pkgs = nixpkgs.legacyPackages.${system};
-          in
-          pkgs.buildEnv {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          rust = inputs.self.devShells.${system}.default.config.languages.rust.toolchainPackage;
+          game = pkgs.buildEnv {
             name = "phobos-build-tools";
             paths = [
               inputs.self.packages.${system}.rust
@@ -52,7 +53,11 @@
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc ];
           };
-      });
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          utm = pkgs.utm;
+        }
+      );
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-tree);
     };
 }

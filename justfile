@@ -27,6 +27,33 @@ environment-build:
 platform-check:
     nix flake check --all-systems --no-build --impure
 
+# Keep the VM app separate from the development shell and preserve existing apps.
+utm-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" != Darwin ]]; then
+        echo 'UTM is only available on macOS.' >&2
+        exit 1
+    fi
+    app="$HOME/Applications/UTM.app"
+    source="$PWD/.devenv/utm/Applications/UTM.app"
+    if [[ -e "$app" || -L "$app" ]]; then
+        if [[ ! -L "$app" || "$(readlink "$app")" != "$source" ]]; then
+            echo "Refusing to replace an existing app: $app" >&2
+            exit 1
+        fi
+    fi
+    mkdir -p .devenv "$HOME/Applications"
+    nix build --impure .#utm --out-link .devenv/utm
+    test -d "$source"
+    if [[ ! -L "$app" ]]; then
+        ln -s "$source" "$app"
+    fi
+    echo "UTM installed at $app"
+
+utm: utm-install
+    open "$HOME/Applications/UTM.app"
+
 # Install the game dependencies without downloading optional Python/dev tools.
 setup:
     nix shell --impure .#game --command npm ci --prefix worker
