@@ -961,8 +961,15 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
 
 def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadline: float) -> None:
     """Wait using reads only. Never claim, Play, adopt a fence or retry actuation."""
+    from .diagnostics import Diagnostics, _error_fields
+
     end = min(deadline, time.monotonic() + options.wait_for_owner_s)
     original_timeout = client.timeout_s
+    read_timeout = (
+        max(original_timeout, 8.0) if isinstance(client, RoomSimulation) else original_timeout
+    )
+    wait_log = Diagnostics(max_events=128, max_events_per_second=2) if options.diagnostics else None
+    previous_error = None
     previous_frame = None
     next_progress = 0.0
     try:
@@ -975,7 +982,7 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
                     flush=True,
                 )
                 next_progress = now + 30
-            client.timeout_s = min(original_timeout, max(0.001, end - now))
+            client.timeout_s = min(read_timeout, max(0.001, end - now))
             try:
                 native_ready = False
                 may_read = True
@@ -990,7 +997,7 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
                         native_ready or status.get("connected") is True
                     )
                 if may_read and time.monotonic() < end:
-                    client.timeout_s = min(original_timeout, max(0.001, end - time.monotonic()))
+                    client.timeout_s = min(read_timeout, max(0.001, end - time.monotonic()))
                     snapshot = client.snapshot()
                     authority = _observation(snapshot).get("control_authority", {})
                     if options.run and authority.get("status") in ("active", "expired"):
@@ -1008,7 +1015,20 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
             except LocalBusyError:
                 pass  # Actual pre-dispatch read contention, not a flight retry.
             except LocalApiError as error:
-                if getattr(error, "code", None) != "owner_unavailable":
+                fields = _error_fields(error)
+                if wait_log is not None and (
+                    fields["code"] != "owner_unavailable" or previous_error != fields["code"]
+                ):
+                    status = getattr(error, "http_status", None)
+                    wait_log.emit(
+                        "error",
+                        stage="collector",
+                        transport="room" if isinstance(client, RoomSimulation) else "local",
+                        **fields,
+                        **({"http_status": status} if type(status) is int else {}),
+                    )
+                previous_error = fields["code"]
+                if fields["code"] not in ("owner_unavailable", "transport_unavailable"):
                     raise CheckpointError(
                         "owner_wait_failed", "Engine readiness read failed; no command was sent."
                     ) from error

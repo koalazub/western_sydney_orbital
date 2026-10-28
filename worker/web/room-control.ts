@@ -235,6 +235,7 @@ export function connectRoom(
   // Non-browser peers provide their actual endpoint origin explicitly. The
   // shipped page always uses its own location, never an origin from the link.
   pageOrigin: string | undefined = typeof location === "undefined" ? undefined : location.origin,
+  canObserve: () => boolean = isReady,
 ): { disconnect: () => void } {
   let pageId = diagnosticPageId();
   const notify = (status: string, error?: string) => {
@@ -259,6 +260,7 @@ export function connectRoom(
   let anyCommandInvoked = false;
   const seen = new Map<string, number>();
   const ready = () => { try { return isReady() === true; } catch { return false; } };
+  const observable = () => { try { return canObserve() === true; } catch { return false; } };
   // Browser close() accepts 1000 or application codes, not reserved 1008/1009.
   const stop = (status: string, error?: string, code: 1000 | 4003 | 4008 | 4009 = 1000) => {
     if (stopped) return;
@@ -356,7 +358,8 @@ export function connectRoom(
       recordDiagnostic("room.received", () => ({ page_id: pageId, id: message.id, diagnostics,
         method: (message.command as Record<string, unknown>)?.method }));
       const execution: Execution = { commandInvoked: false, engineFailed: false };
-      const engineReady = ready();
+      const readOnly = record(message.command) && message.command.method === "snapshot";
+      const engineReady = readOnly ? observable() : ready();
       const result: Result = engineReady
         ? runCall(api, build, message.command as Record<string, unknown>, execution, diagnostics, { id: message.id, page_id: pageId })
         : { ok: false, error: "Browser engine is not ready; no command was invoked." };
@@ -376,7 +379,7 @@ export function connectRoom(
           : "Room result could not be sent; no command was invoked for this call.");
         return;
       }
-      if (!engineReady) stop("error", "Browser engine is no longer ready. Room control stopped without a flight command.");
+      if (!engineReady && !readOnly) stop("error", "Browser engine is no longer ready. Room control stopped without a flight command.");
       else if (execution.engineFailed && !result.ok) stop(execution.commandInvoked ? "indeterminate" : "error", result.error);
     } else if (message.type === "error") {
       stop("error", "Room server rejected the connection.");

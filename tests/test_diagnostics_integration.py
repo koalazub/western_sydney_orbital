@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import secrets
+import socket
+import subprocess
 import time
 import uuid
 from urllib.error import HTTPError
@@ -12,6 +15,7 @@ from urllib.error import HTTPError
 import pytest
 
 from test_local_api import _http, _running_local_server
+from test_room_integration import ROOT, await_owner
 from test_room_integration import actual_room as actual_room
 from test_room_integration import room_owner as room_owner
 from test_room_integration import room_worker as room_worker
@@ -189,3 +193,68 @@ def test_owner_wait_does_not_replace_an_actual_native_controller(tmp_path):
             assert actual["runtime"]["running"] is False
         finally:
             client.release_control("existing_run", authority["epoch"], client.snapshot())
+
+
+def test_owner_wait_retries_only_read_only_network_unavailability_until_its_bound(capsys):
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        client = RoomSimulation(
+            f"http://127.0.0.1:{reserved.getsockname()[1]}",
+            str(uuid.uuid4()),
+            secrets.token_urlsafe(32),
+            allow_loopback=True,
+        )
+        options = CheckpointOptions(
+            room_file="explicit.json", run=True, wait_for_owner_s=0.05, diagnostics=True
+        )
+        with pytest.raises(CheckpointError) as expired:
+            wait_for_owner(client, options, deadline=time.monotonic() + 1)
+        assert expired.value.code == "owner_wait_timeout"
+    records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert records[0]["code"] == "transport_unavailable"
+    assert records[0]["error_type"] == "RoomApiError"
+
+
+def test_owner_wait_logs_authentication_failure_and_does_not_retry_it(actual_room, capsys):
+    origin, _, room, _ = actual_room
+    client = RoomSimulation(origin, room["id"], "x" * 43, allow_loopback=True)
+    options = CheckpointOptions(
+        room_file="explicit.json", run=True, wait_for_owner_s=3, diagnostics=True
+    )
+    with pytest.raises(CheckpointError) as rejected:
+        wait_for_owner(client, options, deadline=time.monotonic() + 3)
+    assert rejected.value.code == "owner_wait_failed"
+    records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert len(records) == 1
+    assert records[0]["http_status"] == 401
+    assert "x" * 43 not in json.dumps(records)
+
+
+def test_real_room_can_observe_when_flight_command_permission_is_not_ready(actual_room):
+    origin, node, _, path = actual_room
+    process = subprocess.Popen(
+        [node, "tests/room-owner.mjs", str(path)],
+        cwd=ROOT,
+        env={**os.environ, "WSORB_ROOM_READ_ONLY": "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert await_owner(process)["state"] == "owner_connected"
+        client = RoomSimulation.from_file(path, allow_loopback=True)
+        for _ in range(2):
+            snapshot = client.snapshot()
+            assert snapshot["runtime"]["running"] is False
+            assert snapshot["observation"]["time_s"] == 0
+            assert snapshot["observation"]["control_authority"]["status"] == "idle"
+            assert snapshot["renderer"]["ready"] is False
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)

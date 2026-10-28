@@ -219,7 +219,10 @@ function offerPythonConnection() {
         disconnect.hidden = ended;
         roomSessionActive = !ended;
         if (ended) sessionEvents.abort();
-      }, () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true);
+      },
+      () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true,
+      undefined,
+      () => ready && !failed && engine === loaded && JSON.parse(loaded.renderer_status()).ready === true);
       const disconnectRoom = () => {
         session.disconnect();
         disconnect.hidden = true;

@@ -33,7 +33,8 @@ const owner = connectRoom(
   },
   // This peer truthfully gates on native physics, not invented browser/GPU
   // readiness. Its snapshot still reports the renderer and cameras unstarted.
-  () => native.status().physics_ready === true,
+  () => native.status().physics_ready === true && process.env.WSORB_ROOM_READ_ONLY !== "1",
   connection.url,
+  () => native.status().physics_ready === true,
 );
 process.once("SIGTERM", () => { native.close(); owner.disconnect(); setTimeout(() => process.exit(), 200).unref(); });
