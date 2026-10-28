@@ -157,8 +157,17 @@ _PRESENTATION = {
             "real_elapsed_s": "number",
         },
         "simulation_time_basis": _enum("simulation_elapsed_seconds"),
-        "scene_snapshot_clock": _enum("not_exposed_by_scene_api"),
+        "scene_snapshot_clock": _enum(
+            "not_exposed_by_scene_api", "scene_cache_snapshot", "missing_scene_cache"
+        ),
         "scene_snapshot_source_time_s": "number",
+        "scene_snapshot": {
+            "source_time_s": "number",
+            "source_seed": "int",
+            "tuning_revision": "int",
+            "lander": _POSE,
+            "landing_pad": _POSE,
+        },
         "published_snapshot": {
             "source_time_s": "number",
             "trial_revision": "int",

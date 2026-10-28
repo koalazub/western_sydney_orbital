@@ -116,8 +116,11 @@ const presentation = object({
   measurement: oneOf("bevy_main_world_transforms_not_gpu_pixels"),
   sample: object({
     collection: object({ stage: oneOf("post_update_after_transform_propagation"), bevy_frame: nullable(number), real_elapsed_s: nullable(number) }),
-    simulation_time_basis: oneOf("simulation_elapsed_seconds"), scene_snapshot_clock: oneOf("not_exposed_by_scene_api"),
+    simulation_time_basis: oneOf("simulation_elapsed_seconds"),
+    scene_snapshot_clock: oneOf("not_exposed_by_scene_api", "scene_cache_snapshot", "missing_scene_cache"),
     scene_snapshot_source_time_s: nullable(number),
+    scene_snapshot: object({ source_time_s: number, source_seed: number, tuning_revision: number,
+      frame, lander: bodyPose, landing_pad: bodyPose }),
     published_snapshot: object({ source_time_s: number, source_seed: number, trial_revision: number, tuning_revision: number,
       frame, lander: bodyPose, landing_pad: bodyPose }),
     native_lander: object({ state: oneOf("observed", "unavailable"), source_time_s: number, tuning_revision: number, frame, pose: bodyPose }),

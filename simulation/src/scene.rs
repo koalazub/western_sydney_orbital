@@ -11,6 +11,7 @@ pub(crate) use model::{AssetVisual, PlanetarySurface};
 pub(crate) use presentation::{
     IlluminationMode, VisualAction, VisualSettings, request_visual_action, visual_settings,
 };
+pub(crate) use systems::CachedSceneSnapshot;
 pub use systems::{setup, sync_scene};
 pub(crate) use textures::SurfaceMaps;
 

@@ -1,7 +1,7 @@
 use super::data::{
     BodyPose, CollectionClock, CollectionStage, LocalTransform, NativeLander, PositionDifferences,
-    PresentationSample, PropagatedGlobalTransform, PublishedSnapshot, SceneSnapshotClock,
-    SimulationTimeBasis, VisualObservation, VisualTransforms,
+    PresentationSample, PropagatedGlobalTransform, PublishedSnapshot, SceneSnapshot,
+    SceneSnapshotClock, SimulationTimeBasis, VisualObservation, VisualTransforms,
 };
 use crate::{
     domain::{EntityId, EntityKind},
@@ -37,6 +37,7 @@ type VisualComponents = (
 fn collect(
     _main_thread: NonSend<MainWorldDiagnostics>,
     visuals: Query<VisualComponents>,
+    scene: crate::scene::CachedSceneSnapshot,
     frame: Option<Res<FrameCount>>,
     real: Option<Res<Time<Real>>>,
 ) {
@@ -59,6 +60,24 @@ fn collect(
         super::scene_unavailable();
         return;
     }
+
+    // Read the scene's retained publication only after the opt-in check. No full
+    // snapshot is cloned or serialized, and no scene state is changed here.
+    let scene_snapshot = scene.snapshot().map(|snapshot| SceneSnapshot {
+        source_time_s: snapshot.time_s,
+        source_seed: snapshot.seed,
+        tuning_revision: snapshot.tuning_revision,
+        frame: snapshot.frame.clone(),
+        lander: published_pose(snapshot, EntityId::Lander, EntityKind::Lander),
+        landing_pad: published_pose(snapshot, EntityId::LandingPad, EntityKind::LandingPad),
+    });
+    let (scene_snapshot_clock, scene_snapshot_source_time_s) = match &scene_snapshot {
+        Some(snapshot) => (
+            SceneSnapshotClock::SceneCacheSnapshot,
+            Some(snapshot.source_time_s),
+        ),
+        None => (SceneSnapshotClock::MissingSceneCache, None),
+    };
 
     // Rc clone of the actual current publication, not a new full snapshot/JSON.
     let snapshot = crate::snapshot();
@@ -116,10 +135,9 @@ fn collect(
             real_elapsed_s: real.map(|time| time.elapsed_secs_f64()),
         },
         simulation_time_basis: SimulationTimeBasis::SimulationElapsedSeconds,
-        // AssetVisual exposes no authoritative scene-sync timestamp. Never label
-        // the separately read current snapshot clock as the visual's source time.
-        scene_snapshot_clock: SceneSnapshotClock::NotExposedBySceneApi,
-        scene_snapshot_source_time_s: None,
+        scene_snapshot_clock,
+        scene_snapshot_source_time_s,
+        scene_snapshot,
         published_snapshot,
         native_lander,
         lander_visual,

@@ -167,6 +167,21 @@ pub struct SceneSynchronization<'w> {
     entity_changes: ResMut<'w, SceneEntityChanges>,
 }
 
+/// Read-only access to the publication last consumed by sync_scene, not the
+/// session's possibly newer publication. This does not expose mutable SceneState.
+#[derive(SystemParam)]
+pub(crate) struct CachedSceneSnapshot<'w> {
+    state: Option<NonSend<'w, SceneState>>,
+}
+
+impl CachedSceneSnapshot<'_> {
+    pub(crate) fn snapshot(&self) -> Option<&crate::model::Snapshot> {
+        self.state
+            .as_ref()
+            .and_then(|state| state.snapshot.as_deref())
+    }
+}
+
 pub fn sync_scene(
     mut commands: Commands,
     assets: Res<SceneAssets>,

@@ -287,6 +287,38 @@ def test_native_presentation_shape_preserves_clocks_transforms_and_camera_withou
     assert len(sink.getvalue().encode()) < d.MAX_LINE_BYTES
 
 
+def test_presentation_projection_retains_the_actual_scene_cache_clock_and_own_poses():
+    # Projection input only. The Rust suite verifies actual scene-clock sampling.
+    value = {
+        "diagnostics": {
+            "presentation": {
+                "schema": "wsorb.presentation_diagnostics.v1",
+                "enabled": True,
+                "available": True,
+                "state": "observed",
+                "sample": {
+                    "scene_snapshot_clock": "scene_cache_snapshot",
+                    "scene_snapshot_source_time_s": 12.5,
+                    "scene_snapshot": {
+                        "source_time_s": 12.5,
+                        "source_seed": 100,
+                        "tuning_revision": 0,
+                        "lander": {"position_world_m": [1, 2, 3]},
+                        "landing_pad": {"position_world_m": [0, 0, 0]},
+                        "unrelated_payload": "not-loggable",
+                    },
+                },
+            }
+        }
+    }
+    sample = d.public_snapshot(value)["presentation"]["sample"]
+    assert sample["scene_snapshot_clock"] == "scene_cache_snapshot"
+    assert sample["scene_snapshot_source_time_s"] == 12.5
+    assert sample["scene_snapshot"]["source_time_s"] == 12.5
+    assert sample["scene_snapshot"]["lander"]["position_world_m"] == [1, 2, 3]
+    assert "unrelated_payload" not in sample["scene_snapshot"]
+
+
 def test_trace_metadata_preserves_original_source_lease_and_fence_without_command_vectors():
     sink = io.StringIO()
     source = {

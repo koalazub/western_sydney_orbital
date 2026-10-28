@@ -1,18 +1,22 @@
 use super::{data::Diagnostics, install};
 use crate::{
-    domain::{EntityId, EntityKind},
+    api::Dispatch,
+    domain::{CameraMode, EngineAction, EntityId, EntityKind, PlaybackRate},
+    physics::PhysicsCommand,
     scene::AssetVisual,
 };
 use bevy::{
     asset::{AssetApp, AssetMetaCheck, AssetPlugin},
     diagnostic::FrameCount,
+    ecs::system::RunSystemOnce,
     gizmos::GizmoPlugin,
     input_focus::InputFocus,
     prelude::*,
     render::RenderApp,
+    time::TimeUpdateStrategy,
 };
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 fn report() -> Value {
     serde_json::from_str(&crate::presentation_diagnostics()).unwrap()
@@ -167,8 +171,11 @@ fn actual_scene_local_and_propagated_world_transforms_are_paired_with_native_bod
         sample["collection"]["real_elapsed_s"],
         app.world().resource::<Time<Real>>().elapsed_secs_f64()
     );
-    assert_eq!(sample["scene_snapshot_clock"], "not_exposed_by_scene_api");
-    assert!(sample["scene_snapshot_source_time_s"].is_null());
+    assert_eq!(sample["scene_snapshot_clock"], "scene_cache_snapshot");
+    assert_eq!(sample["scene_snapshot_source_time_s"], snapshot.time_s);
+    assert_eq!(sample["scene_snapshot"]["source_time_s"], snapshot.time_s);
+    assert_eq!(sample["scene_snapshot"]["source_seed"], snapshot.seed);
+    assert_eq!(sample["scene_snapshot"]["frame"], snapshot.frame);
     assert_eq!(
         sample["published_snapshot"]["source_time_s"],
         snapshot.time_s
@@ -197,6 +204,10 @@ fn actual_scene_local_and_propagated_world_transforms_are_paired_with_native_bod
         let global = app.world().get::<GlobalTransform>(entity).unwrap();
         let visual = &sample[key]["transforms"];
         assert_eq!(sample[key]["state"], "observed");
+        assert_eq!(
+            sample["scene_snapshot"][published_key],
+            sample["published_snapshot"][published_key]
+        );
         assert_eq!(visual["has_parent"], false);
         assert_eq!(
             visual["local_transform"]["translation_parent_m"],
@@ -460,4 +471,194 @@ fn duplicates_are_bounded_and_scene_loss_or_app_drop_clears_old_samples() {
     assert_eq!(report()["state"], "waiting_for_scene");
     assert_eq!(report()["available"], false);
     assert!(report()["sample"].is_null());
+}
+
+#[test]
+fn real_startup_without_scene_sync_has_no_invented_scene_cache_clock() {
+    let mut app = scene_app();
+    app.world_mut().run_schedule(Startup);
+    app.world_mut().run_schedule(PostUpdate);
+    assert_eq!(report()["state"], "disabled");
+
+    crate::set_presentation_diagnostics(true);
+    app.world_mut().run_schedule(PostUpdate);
+    let unsynced = report();
+    assert_eq!(unsynced["available"], true, "startup spawned real visuals");
+    assert_eq!(
+        unsynced["sample"]["scene_snapshot_clock"],
+        "missing_scene_cache"
+    );
+    assert!(unsynced["sample"]["scene_snapshot_source_time_s"].is_null());
+    assert!(unsynced["sample"]["scene_snapshot"].is_null());
+
+    app.world_mut().run_schedule(Update);
+    app.world_mut().run_schedule(PostUpdate);
+    let synced = report();
+    assert_eq!(
+        synced["sample"]["scene_snapshot_clock"],
+        "scene_cache_snapshot"
+    );
+    assert_eq!(
+        synced["sample"]["scene_snapshot_source_time_s"],
+        crate::snapshot().time_s
+    );
+}
+
+#[test]
+fn native_runtime_motion_updates_the_actual_scene_lander_without_dragging_the_pad() {
+    let mut app = scene_app();
+    let tick = Duration::from_millis(100);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(tick));
+    crate::set_presentation_diagnostics(true);
+    app.update();
+    let renderer = crate::renderer_status();
+    let before = crate::snapshot();
+    let lander = own_entity(&mut app, EntityId::Lander);
+    let pad = own_entity(&mut app, EntityId::LandingPad);
+    let lander_before = *app.world().get::<GlobalTransform>(lander).unwrap();
+    let pad_before = *app.world().get::<GlobalTransform>(pad).unwrap();
+    let native_pad_before = crate::session::observation()["launchpad"].clone();
+    let native_lander_before = crate::session::applied_physics().unwrap();
+    {
+        let mut rig = app.world_mut().resource_mut::<crate::camera::CameraRig>();
+        rig.mode = CameraMode::Orbit;
+        rig.focus = EntityId::Lander;
+    }
+
+    // Test-process control only. The real session/Rapier runtime advances two
+    // fixed steps, then the installed scene and transform systems consume it.
+    crate::session::dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+        accel: [0.0, 0.0, crate::scenario::settings().lander.max_accel_mps2],
+        angular_accel: [0.0; 3],
+    }))
+    .unwrap();
+    crate::request_action(EngineAction::Play(PlaybackRate::RealTime));
+    app.update();
+    let published = crate::snapshot();
+    let native = crate::session::applied_physics().unwrap();
+    let observed = report();
+    let sample = &observed["sample"];
+    assert!(!Rc::ptr_eq(&before, &published));
+    assert!((published.time_s - before.time_s - 0.1).abs() < 1.0e-12);
+    assert_ne!(
+        native.position_world_m,
+        native_lander_before.position_world_m
+    );
+    assert_ne!(
+        *app.world().get::<GlobalTransform>(lander).unwrap(),
+        lander_before
+    );
+    assert_eq!(
+        *app.world().get::<GlobalTransform>(pad).unwrap(),
+        pad_before
+    );
+    let native_pad = crate::session::observation()["launchpad"].clone();
+    assert_eq!(native_pad["position"], native_pad_before["position"]);
+    assert_eq!(native_pad["rotation"], native_pad_before["rotation"]);
+    assert_eq!(sample["scene_snapshot_source_time_s"], published.time_s);
+    assert_eq!(
+        sample["native_lander"]["source_time_s"],
+        native.source_time_s
+    );
+    assert_eq!(
+        sample["scene_snapshot"]["lander"]["position_world_m"],
+        json!(native.position_world_m)
+    );
+    assert_eq!(
+        sample["scene_snapshot"]["landing_pad"]["position_world_m"],
+        native_pad["position"]
+    );
+    for (id, key, entity) in [
+        (EntityId::Lander, "lander", lander),
+        (EntityId::LandingPad, "landing_pad", pad),
+    ] {
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query::<&AssetVisual>()
+                .iter(world)
+                .filter(|visual| visual.id == id)
+                .count(),
+            1,
+            "the production scene owns one visual per native actor"
+        );
+        let actor = published
+            .assets
+            .iter()
+            .find(|actor| actor.id == id)
+            .unwrap();
+        let local = world.get::<Transform>(entity).unwrap();
+        let global = world.get::<GlobalTransform>(entity).unwrap();
+        assert!(world.get::<ChildOf>(entity).is_none());
+        let expected_km =
+            Vec3::from_array(actor.position.map(|component| (component / 1_000.0) as f32));
+        assert_eq!(local.translation, expected_km);
+        assert_eq!(global.translation(), expected_km);
+        assert_eq!(
+            sample["scene_snapshot"][key],
+            sample["published_snapshot"][key]
+        );
+    }
+
+    // Deliberately run the actual runtime without scene sync for one short tick.
+    // The report must retain the older scene source, not relabel it with the
+    // newer native/publication clock. No fabricated cache or body pose is supplied.
+    app.world_mut().resource_mut::<Time>().advance_by(tick);
+    app.world_mut()
+        .resource_mut::<Time<Real>>()
+        .advance_by(tick);
+    app.world_mut()
+        .run_system_once(crate::session::advance_world)
+        .unwrap();
+    let newer = crate::snapshot();
+    let native_newer = crate::session::applied_physics().unwrap();
+    assert!(newer.time_s > published.time_s);
+    app.world_mut().run_schedule(PostUpdate);
+    let lagging = report();
+    assert_eq!(
+        lagging["sample"]["scene_snapshot_source_time_s"],
+        published.time_s
+    );
+    assert_eq!(
+        lagging["sample"]["scene_snapshot"],
+        sample["scene_snapshot"]
+    );
+    assert_eq!(
+        lagging["sample"]["published_snapshot"]["source_time_s"],
+        newer.time_s
+    );
+    assert_eq!(
+        lagging["sample"]["native_lander"]["source_time_s"],
+        native_newer.source_time_s
+    );
+    assert_eq!(crate::session::applied_physics().unwrap(), native_newer);
+
+    app.world_mut()
+        .run_system_once(crate::scene::sync_scene)
+        .unwrap();
+    app.world_mut().run_schedule(PostUpdate);
+    let caught_up = report();
+    assert_eq!(
+        caught_up["sample"]["scene_snapshot_source_time_s"],
+        newer.time_s
+    );
+    assert_eq!(
+        caught_up["sample"]["scene_snapshot"]["lander"],
+        caught_up["sample"]["published_snapshot"]["lander"]
+    );
+    near(
+        vector(&caught_up["sample"]["position_differences"]["lander_global_minus_native_m"]),
+        [0.0; 3],
+        0.002,
+    );
+    assert_eq!(
+        *app.world().get::<GlobalTransform>(pad).unwrap(),
+        pad_before
+    );
+    assert_eq!(crate::session::applied_physics().unwrap(), native_newer);
+    assert!(app.get_sub_app(RenderApp).is_none());
+    assert_eq!(crate::renderer_status(), renderer);
+    let renderer: Value = serde_json::from_str(&renderer).unwrap();
+    assert_eq!(renderer["started"], false);
+    assert_eq!(renderer["ready"], false);
 }

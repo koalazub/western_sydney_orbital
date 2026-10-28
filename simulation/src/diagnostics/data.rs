@@ -49,7 +49,8 @@ pub(super) enum SimulationTimeBasis {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum SceneSnapshotClock {
-    NotExposedBySceneApi,
+    SceneCacheSnapshot,
+    MissingSceneCache,
 }
 
 #[derive(Serialize)]
@@ -73,6 +74,16 @@ pub(super) struct PublishedSnapshot {
     pub source_time_s: f64,
     pub source_seed: u64,
     pub trial_revision: u32,
+    pub tuning_revision: u32,
+    pub frame: String,
+    pub lander: Option<BodyPose>,
+    pub landing_pad: Option<BodyPose>,
+}
+
+#[derive(Serialize)]
+pub(super) struct SceneSnapshot {
+    pub source_time_s: f64,
+    pub source_seed: u64,
     pub tuning_revision: u32,
     pub frame: String,
     pub lander: Option<BodyPose>,
@@ -141,9 +152,11 @@ pub(super) struct PositionDifferences {
 pub(super) struct PresentationSample {
     pub collection: CollectionClock,
     pub simulation_time_basis: SimulationTimeBasis,
-    /// SceneState is private. The current public snapshot is not its sync clock.
+    /// Clock of the publication actually consumed by scene sync, not a current
+    /// session read relabelled as the scene's source time.
     pub scene_snapshot_clock: SceneSnapshotClock,
     pub scene_snapshot_source_time_s: Option<f64>,
+    pub scene_snapshot: Option<SceneSnapshot>,
     pub published_snapshot: PublishedSnapshot,
     pub native_lander: NativeLander,
     pub lander_visual: VisualObservation,
