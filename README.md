@@ -201,6 +201,22 @@ devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.jso
 
 Keep the link and connection file private. A room cannot replace an already connected owner. Room calls read fresh public observations, not saved room state or hidden debris truth. Flight control uses the native ownership fence and original-source expiring commands. A disconnect never retries thrust, resets the game or extends a decision's validity. Manual ship input or pausing ends the run. The hosted bridge deliberately excludes reset, tuning, raw latched thrust and private local-lab endpoints. Network latency may exhaust a lease and end an attempt; this connection is not STP runtime validation.
 
+### Opt-in flight diagnostics
+
+Diagnostics are off by default. Collect a short, read-only log from an existing flight without starting a controller or changing its playback:
+
+```sh
+devenv shell uv run --locked wsorb diagnostics --connection-file .devenv/wsorb-local.json --duration-s 5 --output .devenv/flight-debug.jsonl
+```
+
+Use `--room-file` for a hosted flight. The output path must be unused; logs are private mode-0600 JSONL. The collector skips a busy local API rather than competing with the controller. It records actual source clocks, ownership, Rapier motion and renderer counters. Page identity, debug camera and Bevy visual transforms are included only when the loaded bridge/engine supplies them; older builds report them unavailable.
+
+Add `--diagnostics` to an explicit checkpoint invocation for correlated transport logs on stderr, or set `WSORB_DIAGNOSTICS=1` before starting Python or the local backend. Unset the flag to return to the default. Python calls `wsorb.diagnostics.enable()` and `disable()` affect the current Python context; the environment flag also covers worker threads.
+
+An instrumented browser exposes `globalThis.__wsorbDiagnostics.enable(true)` and `enable(false)`. A new game can also opt in with `?diagnostics=1`. Do not navigate or reload an active flight just to enable logs. Browser events are bounded, and disabling clears native collection; per-request native collection otherwise expires after two seconds. Visual-transform samples are main-world Bevy measurements, not proof of GPU pixels.
+
+All logging passes through dedicated helpers. Tokens, capability URLs, raw error text, camera pixels, radar rows and hidden debris state are excluded. No collector command resets, reloads, claims control or retries actuation.
+
 ### Run from the notebook
 
 In the notebook:
