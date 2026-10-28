@@ -280,6 +280,26 @@ deploy-http2:
 tasks:
     bd list --status open --json --sandbox
 
+# Script-first seeded experiments with replaceable policies in the example script.
+flight-sweep config="examples/flight_sweep.json" output="":
+    devenv shell uv run --locked --extra lab python examples/flight_sweep.py --config {{quote(config)}} --output {{quote(output)}}
+
+flight-analyze output:
+    devenv shell uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output {{quote(output)}}
+
+python-check +paths:
+    devenv shell uv run --locked --extra lab pytest {{paths}}
+
+python-format +paths:
+    devenv shell uv run --locked ruff format {{paths}}
+    devenv shell uv run --locked ruff check --fix {{paths}}
+
+notebook-check path:
+    devenv shell uv run --locked --extra lab marimo check --strict {{quote(path)}}
+
+flight-notebook:
+    devenv shell uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py
+
 task-create title description parent assignee:
     bd create {{quote(title)}} --description {{quote(description)}} --parent {{quote(parent)}} --assignee {{quote(assignee)}} --type task --priority 0 --status open --silent --sandbox
 
