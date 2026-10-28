@@ -14,10 +14,12 @@ does not establish equivalent physics or SDK/interpreter compatibility.
 from __future__ import annotations
 
 import importlib
+import platform
 import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from types import ModuleType, TracebackType
 from typing import Any
 
@@ -34,9 +36,17 @@ OFFICIAL_CONTROLLER_URL = (
     "https://raw.githubusercontent.com/SimDynamX/STU4-Solution/"
     f"{OFFICIAL_SOLUTION_COMMIT}/Controller.py"
 )
+OFFICIAL_RADAR_URL = (
+    f"https://raw.githubusercontent.com/SimDynamX/STU4-Sim/{OFFICIAL_SIM_COMMIT}/Systems/Radar.py"
+)
+OFFICIAL_SCORING_URL = (
+    f"https://raw.githubusercontent.com/SimDynamX/STU4-Sim/{OFFICIAL_SIM_COMMIT}/Systems/Scoring.py"
+)
 
 __all__ = [
     "OFFICIAL_CONTROLLER_URL",
+    "OFFICIAL_RADAR_URL",
+    "OFFICIAL_SCORING_URL",
     "OFFICIAL_SIM_COMMIT",
     "OFFICIAL_SOLUTION_COMMIT",
     "OFFICIAL_USER_API_URL",
@@ -92,8 +102,8 @@ class STPClient:
     """Connected SDK handles. Construct through ``connect_from_argv``.
 
     SetCommand, GetNearestDebrisLocations and PanTiltCamera retain the official
-    helper names. read_state, elapsed_time_s, loop_frequency_hz, capture_image
-    and close are adapter conveniences, not claimed SDK methods. Entity and
+    helper names. read_state, elapsed_time_s, loop_frequency_hz, capture_image,
+    read_only_probe and close are adapter conveniences, not SDK methods. Entity and
     frame attributes retain the starter's names and are real SDK objects.
     """
 
@@ -241,6 +251,148 @@ class STPClient:
         """
         self._ensure_open()
         return self._st.camera.CaptureImageBlocking(camera, properties)
+
+    def read_only_probe(
+        self,
+        *,
+        radar_clock_offset_s: float | None = None,
+        max_radar_age_s: float = 1.5,
+    ) -> dict[str, Any]:
+        """Read actual runtime data without camera aiming or jet commands.
+
+        The report includes no argv, server URL, tokens or raw SDK handle reprs.
+        Unknown SDK versions and running source revisions remain unknown. Source
+        pins document the reviewed interface, not the installed server version.
+        This method is project reporting, not an invented SDK probe endpoint.
+        """
+        self._ensure_open()
+        if __package__:
+            from .control_contract import STP_PHOBOS_FRAME, radar_rows, scalar
+        else:
+            from control_contract import STP_PHOBOS_FRAME, radar_rows, scalar
+
+        maximum_age = scalar(max_radar_age_s, "max_radar_age_s")
+        if radar_clock_offset_s is not None:
+            offset = _finite_real_vector([radar_clock_offset_s], 1, "radar_clock_offset_s")[0]
+            radar_clock_offset_s = float(offset)
+        sdk_version = getattr(self._st, "__version__", None)
+        sdk_version_source = "spaceteams.__version__"
+        if not isinstance(sdk_version, str) or not sdk_version.strip():
+            try:
+                sdk_version = version("spaceteams")
+                sdk_version_source = "installed spaceteams distribution metadata"
+            except PackageNotFoundError:
+                sdk_version = None
+                sdk_version_source = None
+        # Radar first reduces future row times relative to the later state read.
+        # It does not turn either sequential report into an atomic snapshot.
+        debris = self.GetNearestDebrisLocations(500)
+        state = self.read_state()
+        now = self.elapsed_time_s()
+        frequency = self.loop_frequency_hz
+        radar_report: dict[str, Any] = {
+            "configured_max_radar_age_s": maximum_age,
+            "declared_radar_clock_offset_s": radar_clock_offset_s,
+            "observed_min_radar_age_s": None,
+            "observed_max_radar_age_s": None,
+            "source_clock": "radar-loop startup, not necessarily mission StartDateTAI",
+            "atomic": False,
+            "failure_reasons": [],
+        }
+        try:
+            rows = radar_rows(debris)
+            radar_report["rows"] = len(rows)
+            if not len(rows):
+                radar_report["failure_reasons"].append("Empty radar is not evidence of clear space")
+            else:
+                radar_report["oldest_source_radar_time_s"] = float(np.min(rows[:, 2, 0]))
+                radar_report["newest_source_radar_time_s"] = float(np.max(rows[:, 2, 0]))
+                radar_report["source_time_spread_s"] = float(np.ptp(rows[:, 2, 0]))
+                if radar_clock_offset_s is None:
+                    radar_report["failure_reasons"].append(
+                        "Radar age is unknown without an independently declared clock offset"
+                    )
+                else:
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        times = rows[:, 2, 0] + radar_clock_offset_s
+                        ages = now - times
+                    if not np.isfinite(times).all() or not np.isfinite(ages).all():
+                        raise ValueError("Radar clock conversion is not representable")
+                    radar_report["observed_min_radar_age_s"] = float(np.min(ages))
+                    radar_report["observed_max_radar_age_s"] = float(np.max(ages))
+                    if np.any(times < 0.0) or np.any(times > state.elapsed_time_s):
+                        radar_report["failure_reasons"].append("Negative or future radar timestamp")
+                    if np.any(ages > maximum_age):
+                        radar_report["failure_reasons"].append(
+                            "Radar exceeds configured maximum age"
+                        )
+        except (ValueError, TypeError, OverflowError, FloatingPointError) as error:
+            radar_report["failure_reasons"].append(str(error))
+        return {
+            "schema": "wsorb.stp_read_only_probe",
+            "schema_version": 1,
+            "commands_written": False,
+            "runtime_versions": {
+                "python": platform.python_version(),
+                "python_implementation": platform.python_implementation(),
+                "operating_system": platform.system(),
+                "machine": platform.machine(),
+                "numpy": np.__version__,
+                "sdk": sdk_version,
+                "sdk_version_source": sdk_version_source,
+            },
+            "reviewed_source_pins": {
+                "solution": OFFICIAL_SOLUTION_COMMIT,
+                "simulation": OFFICIAL_SIM_COMMIT,
+                "user_api_url": OFFICIAL_USER_API_URL,
+                "controller_url": OFFICIAL_CONTROLLER_URL,
+                "radar_url": OFFICIAL_RADAR_URL,
+                "scoring_url": OFFICIAL_SCORING_URL,
+                "running_server_revision": None,
+            },
+            "resolved_handles": {
+                name: getattr(self, name) is not None
+                for name in (
+                    "this",
+                    "phobos",
+                    "phobosFrame",
+                    "shuttle",
+                    "shuttleFrame",
+                    "target",
+                    "topCamera",
+                    "topCameraFrame",
+                    "bottomCamera",
+                    "bottomCameraFrame",
+                )
+            },
+            "clocks": {
+                "mission_start_date_tai": self._start_date_tai.isoformat(),
+                "state_elapsed_time_s": state.elapsed_time_s,
+                "later_elapsed_time_s": now,
+                "loop_frequency_hz": frequency,
+                "reads_are_sequential": True,
+            },
+            "state_source_kind": "stp_adapter_numeric_report",
+            "state_frame": STP_PHOBOS_FRAME,
+            "rotation_convention": "passive_xyzw",
+            "sdk_surface_available": {
+                "Shuttle.SetParam": callable(getattr(self.shuttle, "SetParam", None)),
+                "Shuttle.GetParamArray": callable(getattr(self.shuttle, "GetParamArray", None)),
+                "Shuttle.getLocVelAcc": callable(getattr(self.shuttle, "getLocVelAcc", None)),
+                "write_path_tested": False,
+                "scope": "Actual bound attributes only; no command was written by this probe",
+            },
+            "state_measurements": {
+                "mass_kg": state.mass_kg,
+                "fuel_used_kg": state.fuel_used_kg,
+                "damage_j": state.damage_j,
+            },
+            "radar": radar_report,
+            "limitations": (
+                "No command-path, physics-parity or full-flight validation; no published "
+                "mission.status read; radius and sensor-health evidence are unavailable here"
+            ),
+        }
 
     def close(self) -> None:
         """Leave the real simulation once, without implicitly changing commands."""
