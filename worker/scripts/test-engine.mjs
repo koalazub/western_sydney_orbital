@@ -1,2 +1,2 @@
-// Keep the existing integration-test entry point on the shared actual engine.
+// Keep the integration tests on the same actual engine driver as experiments.
 import "./engine-driver.mjs";

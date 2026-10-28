@@ -248,7 +248,18 @@ def _post_json(
         except HTTPError as error:
             if trace is not None:
                 http_status = error.code
-            error.close()
+            with error:
+                failure_body = error.read(8193)
+            try:
+                failure = json.loads(failure_body) if len(failure_body) <= 8192 else None
+            except ValueError:
+                failure = None
+            if error.code == 503 and failure == {"error": "No connected room owner"}:
+                unavailable = RoomApiError(
+                    "Hosted room has no connected owner. This request was not dispatched."
+                )
+                unavailable.code = "owner_unavailable"
+                raise unavailable from None
             raise RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}") from None
         except (OSError, URLError, HTTPException):
             raise RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}") from None
