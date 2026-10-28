@@ -260,9 +260,13 @@ def _post_json(
                 )
                 unavailable.code = "owner_unavailable"
                 raise unavailable from None
-            raise RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}") from None
+            rejected = RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}")
+            rejected.http_status = error.code
+            raise rejected from None
         except (OSError, URLError, HTTPException):
-            raise RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}") from None
+            unavailable = RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}")
+            unavailable.code = "transport_unavailable"
+            raise unavailable from None
         if len(body) > MAX_RESPONSE_BYTES:
             raise RoomApiError(f"Room response exceeds the 2 MiB limit. {_UNKNOWN_OUTCOME}")
         try:
