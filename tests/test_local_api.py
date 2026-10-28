@@ -748,6 +748,45 @@ def test_real_server_requires_an_actual_ready_browser(local_server):
         assert "/__local/" in response.read().decode()
 
 
+def test_local_game_has_an_accessible_connection_status_region(local_server):
+    from html.parser import HTMLParser
+
+    class Elements(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids = {}
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if "id" in attributes:
+                self.ids[attributes["id"]] = (tag, attributes)
+
+    with _http(local_server, "/") as response:
+        page = response.read().decode()
+    elements = Elements()
+    elements.feed(page)
+    assert elements.ids["local-python-connection"][1]["aria-label"] == "Local Python connection"
+    assert elements.ids["local-python-status"][1]["role"] == "status"
+    assert elements.ids["python-permission"][0] == "dialog"
+    assert local_server.status()["connected"] is False
+
+
+def test_separate_game_does_not_redirect_notebook_to_another_backend(local_server):
+    # The fixture deliberately uses its own explicit descriptor, not the owner's
+    # default one. Its notebook route must not silently attach another flight.
+    with _http(
+        local_server,
+        "/notebook.html",
+        headers={"Authorization": f"Bearer {local_server._token}"},
+    ) as response:
+        assert response.status == 200
+        page = response.read().decode()
+    assert "Separate game connection" in page
+    assert "will not redirect you to that editor" in page
+    assert "--connection-file" in page
+    assert local_server._token not in page
+
+
 def test_new_world_placement_and_checked_commands_validate_before_requiring_a_real_browser(
     local_server,
 ):
@@ -1139,17 +1178,18 @@ console.log('PASS');
     assert result.stdout.strip() == "PASS"
 
 
-def test_notebook_button_falls_back_to_setup_without_publishing_a_secret(local_server):
+def test_notebook_button_falls_back_to_explicit_setup_without_publishing_a_secret(local_server):
     client = local_server
     with _http(client, "/notebook.html") as response:
         assert response.headers["Cache-Control"] == "no-store"
         text = response.read().decode()
-    assert "devenv up lab simulation" in text
+    assert "Separate game connection" in text
+    assert "--connection-file" in text
     assert "access_token=" not in text
     with _http(
         client, "/notebook.html", headers={"Authorization": f"Bearer {client._token}"}
     ) as response:
-        assert "devenv up lab simulation" in response.read().decode()
+        assert "--connection-file" in response.read().decode()
 
 
 def test_camera_and_experiment_inputs_are_validated_before_reaching_a_browser():

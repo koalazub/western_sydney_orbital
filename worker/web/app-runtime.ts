@@ -65,7 +65,7 @@ type ScaleGesture = Event & { scale: number };
 type GPUPreflight = Awaited<ReturnType<typeof graphicsPreflight>>;
 
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const roomConnection = readRoomConnection();
+let roomConnection = readRoomConnection();
 const canvas = createEngineCanvas();
 const viewport = byId<WebKitElement>("simulation-viewport");
 const boot = byId<HTMLElement>("boot-screen");
@@ -107,11 +107,13 @@ const browserGlobals = globalThis as typeof globalThis & {
   } | null;
   __wsorbPlatformAction?: typeof platformAction;
   __wsorbEngineError?: typeof fail;
+  __wsorbLocalApi?: { status: string; error: string | null; page_id?: string };
 };
 
 let engine: Engine | undefined;
 let engineBuild: { bytes: number; sha256: string } | undefined;
 let ready = false;
+let roomSessionActive = false;
 let failed = false;
 let platformMessage = "WebGPU · Click the scene to activate ship and debug controls";
 let startupPhase = "checking_graphics";
@@ -174,15 +176,17 @@ function readRoomConnection(): { origin: string; id: string; key: string } | nul
 
 function offerPythonConnection() {
   if (!roomConnection || !engine || !engineBuild) return;
+  const connection = roomConnection;
   const panel = byId("python-room");
   const text = byId("python-room-status");
   const disconnect = byId<HTMLButtonElement>("disconnect-python");
   const permission = byId<HTMLDialogElement>("python-permission");
   panel.hidden = false;
-  if (!roomConnection.id || !roomConnection.key) {
+  if (!connection.id || !connection.key) {
     text.textContent = "This Python room link is invalid. Open the private HTTPS link printed by wsorb room create.";
     return;
   }
+  if (permission.open || roomSessionActive) return;
   text.textContent = "Python is not connected. Choose whether to allow this private room.";
   permission.addEventListener("close", () => {
     canvas.focus({ preventScroll: true });
@@ -196,8 +200,10 @@ function offerPythonConnection() {
       text.textContent = "The game is no longer ready. No Python connection was opened.";
       return;
     }
+    const sessionEvents = new AbortController();
+    roomSessionActive = true;
     try {
-      const session = connectRoom(roomConnection, loaded, build, (status, error) => {
+      const session = connectRoom(connection, loaded, build, (status, error) => {
         const messages: Record<string, string> = {
           connecting: "Connecting to your private Python room.",
           claiming: "Requesting this room's browser ownership. An existing owner will not be replaced.",
@@ -209,14 +215,17 @@ function offerPythonConnection() {
         };
         text.textContent = messages[status] ?? "Python room stopped. Inspect the game before reconnecting.";
         if (error) text.textContent += ` ${error}`;
-        disconnect.hidden = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
+        const ended = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
+        disconnect.hidden = ended;
+        roomSessionActive = !ended;
+        if (ended) sessionEvents.abort();
       }, () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true);
       const disconnectRoom = () => {
         session.disconnect();
         disconnect.hidden = true;
         canvas.focus({ preventScroll: true });
       };
-      disconnect.addEventListener("click", disconnectRoom, { once: true });
+      disconnect.addEventListener("click", disconnectRoom, { once: true, signal: sessionEvents.signal });
       // Tab belongs to the native HUD while the canvas has focus. Keep the
       // platform disconnect available without trapping keyboard-only users.
       window.addEventListener("keydown", event => {
@@ -225,14 +234,80 @@ function offerPythonConnection() {
         event.preventDefault();
         event.stopImmediatePropagation();
         disconnectRoom();
-      }, { capture: true });
-      addEventListener("pagehide", () => session.disconnect(), { once: true });
+      }, { capture: true, signal: sessionEvents.signal });
+      addEventListener("pagehide", () => session.disconnect(), { once: true, signal: sessionEvents.signal });
     } catch {
+      sessionEvents.abort();
+      roomSessionActive = false;
       text.textContent = "The private Python room could not connect. No flight command was sent.";
       disconnect.hidden = true;
     }
   }, { once: true });
+  // Escape must not reuse a previous dialog's "allow" return value.
+  permission.returnValue = "";
   permission.showModal();
+}
+
+addEventListener("hashchange", () => {
+  const requested = readRoomConnection();
+  if (!requested) return;
+  const permission = byId<HTMLDialogElement>("python-permission");
+  if (roomSessionActive || permission.open) {
+    byId("python-room").hidden = false;
+    byId("python-room-status").textContent = "A Python room is already connected or awaiting your choice. Finish that connection before opening another room. No existing flight was changed.";
+    return;
+  }
+  // Pairing an already-loaded game must not initialize another WASM instance
+  // or reset its physics. A fresh explicit permission choice is still required.
+  roomConnection = requested;
+  if (ready && !failed) offerPythonConnection();
+});
+
+function monitorLocalPythonConnection() {
+  const panel = byId("local-python-connection");
+  const text = byId("local-python-status");
+  let previous = "";
+  const update = () => {
+    const connection = browserGlobals.__wsorbLocalApi;
+    if (!connection) return;
+    const signature = `${connection.status}\n${connection.error ?? ""}\n${connection.page_id ?? ""}\n${diagnostics.enabled}`;
+    if (signature === previous) return;
+    previous = signature;
+    panel.hidden = false;
+    const otherOwner = connection.error?.includes("Another browser page holds the local simulation lease");
+    const messages: Record<string, string> = {
+      waiting_for_engine: "Local Python API is waiting for this game's renderer.",
+      connected: "Local Python API is connected to this tab. This does not mean a controller has started.",
+      disconnected: "Local Python API is disconnected from this tab.",
+      error: "Local Python API stopped. Inspect its error before sending more flight commands.",
+    };
+    const message = otherOwner
+      ? "The local Python API is attached to another tab. This tab is not receiving its calls. Switch to the connected game; do not reset either flight."
+      : messages[connection.status] ?? "Local Python API is not connected to this tab.";
+    text.textContent = `${message} ${location.origin}`;
+    if (diagnostics.enabled && connection.page_id) text.textContent += ` · page ${connection.page_id.slice(0, 8)}`;
+    if (connection.error && !otherOwner) text.textContent += ` ${connection.error}`;
+    if (otherOwner || connection.status === "error") announce(message);
+  };
+  // Older already-running local backends serve a cached bridge without custom
+  // events. Reading its token-free status also makes those conflicts visible.
+  update();
+  const timer = setInterval(update, 250);
+  addEventListener("pagehide", () => clearInterval(timer), { once: true });
+}
+
+function requestInitialFollowView() {
+  if (!engine || new URLSearchParams(location.search).get("follow") !== "lander") return;
+  try {
+    const result = JSON.parse(engine.control(JSON.stringify({
+      op: "view", mode: "orbit", focus: "Shuttle", zoom: 1,
+    })));
+    publishPlatform(result.ok === true
+      ? "Follow lander view requested. Python connection status identifies the controlled tab."
+      : "Follow view could not be requested. Press F in the game to follow the lander.");
+  } catch {
+    publishPlatform("Follow view could not be requested. Press F in the game to follow the lander.");
+  }
 }
 
 function syncBindings(persist = true) {
@@ -867,6 +942,8 @@ async function start() {
     // Loading may finish after the user has moved to another tab or HTML control.
     if (document.hasFocus() && !document.hidden && pageBackgroundFocused()) canvas.focus({ preventScroll: true });
     inputState();
+    requestInitialFollowView();
+    monitorLocalPythonConnection();
     offerPythonConnection();
   } catch (error) {
     fail(error);

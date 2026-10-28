@@ -39,6 +39,9 @@
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
+    <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
+      <p id="local-python-status" role="status"></p>
+    </section>
     <section id="python-room" class="python-room" aria-label="Python connection" hidden>
       <p id="python-room-status" role="status"></p>
       <button id="disconnect-python" type="button" aria-keyshortcuts="Shift+Escape" hidden>Disconnect Python</button>

@@ -348,7 +348,16 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     throw new Error("Invalid local engine manifest");
   }
   const clientSource = await readFile(resolve(worker, "web/local-api.js"), "utf8");
-  const notebookHelp = await readFile(resolve(worker, "web/notebook.html"), "utf8");
+  const alternateConnection = requestedPath !== resolve(worker, "..", ".devenv/wsorb-local.json");
+  const relativeConnection = relative(resolve(worker, ".."), descriptorPath);
+  const connectionLabel = inside(resolve(worker, ".."), descriptorPath)
+    ? relativeConnection : "PATH_TO_THIS_GAME_CONNECTION";
+  const escapedConnection = connectionLabel.replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+  const notebookHelp = alternateConnection
+    ? `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect Python to this game</title><style>:root{color-scheme:dark;font:1rem/1.6 system-ui,sans-serif;background:#101923;color:#edf3f7}body{max-width:42rem;margin:2rem auto;padding:0 1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><main><h1>Separate game connection</h1><p>This game uses a separate Python API connection. The existing notebook may control another flight, so this page will not redirect you to that editor.</p><p>Inspect this game's public state with its explicit connection file:</p><pre>devenv shell uv run --locked wsorb checkpoint --connection-file ${escapedConnection}</pre><p>Add <code>--run --progress</code> only when you want to fly this game. If a controller is already running, do not start a second one.</p><p>Close this help tab to return to your existing game window. Do not reload or reset it.</p></main></html>`
+    : await readFile(resolve(worker, "web/notebook.html"), "utf8");
   const native = headless
     ? await (await import("./headless.mjs")).createHeadless({ publicRoot, rootRealPath, engineBuild })
     : null;
@@ -521,6 +530,12 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       }
       const authorized = authenticated(request);
       if (notebookRoute) {
+        // A separately selected backend must never open an editor whose default
+        // descriptor points at another game. Keep the current editor/flight intact.
+        if (alternateConnection) {
+          send(request, response, 200, notebookHelp, "text/html; charset=utf-8");
+          return;
+        }
         const activatedNavigation = site === "none" && request.headers["sec-fetch-mode"] === "navigate"
           && request.headers["sec-fetch-dest"] === "document" && request.headers["sec-fetch-user"] === "?1";
         if (site !== "same-origin" && !activatedNavigation && !authorized) {
