@@ -33,6 +33,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 import numpy as np
 
+from . import diagnostics
 from .flight.control import reference_to_body
 
 DEFAULT_CONNECTION = Path(".devenv/wsorb-local.json")
@@ -629,36 +630,51 @@ class LocalSimulation:
         timeout_s: float | None = None,
     ) -> dict[str, Any]:
         data = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
+        trace = diagnostics.start_request(
+            "local", "http", payload, method="status" if route == "status" else None
+        )
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        if trace is not None:
+            headers.update(diagnostics.request_headers(trace))
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = Request(f"{self.url}/__local/{route}", data=data, headers=headers)
+        http_status = None
         try:
-            with self._http.open(
-                request, timeout=self.timeout_s if timeout_s is None else timeout_s
-            ) as response:
-                body = response.read(MAX_RESPONSE_BYTES + 1)
-        except HTTPError as error:
-            with error:
-                detail = error.read(8192)
             try:
-                failure = json.loads(detail)
-            except ValueError:
-                failure = None
-            raise self._rejection(failure, f"HTTP {error.code}") from error
-        except (OSError, URLError) as error:
-            raise LocalApiError(
-                f"Local simulator unavailable at {self.url}. Command outcome may be unknown; "
-                "do not automatically retry thrust. Check the game and reconnect."
-            ) from error
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise LocalApiError("Local simulator response exceeds the 2 MiB limit")
-        try:
-            result = json.loads(body)
-        except ValueError as error:
-            raise LocalApiError("Local simulator returned invalid JSON") from error
-        if not isinstance(result, dict):
-            raise LocalApiError("Local simulator returned an invalid response")
+                with self._http.open(
+                    request, timeout=self.timeout_s if timeout_s is None else timeout_s
+                ) as response:
+                    if trace is not None:
+                        http_status = response.status
+                    body = response.read(MAX_RESPONSE_BYTES + 1)
+            except HTTPError as error:
+                if trace is not None:
+                    http_status = error.code
+                with error:
+                    detail = error.read(8192)
+                try:
+                    failure = json.loads(detail)
+                except ValueError:
+                    failure = None
+                raise self._rejection(failure, f"HTTP {error.code}") from error
+            except (OSError, URLError) as error:
+                raise LocalApiError(
+                    f"Local simulator unavailable at {self.url}. Command outcome may be unknown; "
+                    "do not automatically retry thrust. Check the game and reconnect."
+                ) from error
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise LocalApiError("Local simulator response exceeds the 2 MiB limit")
+            try:
+                result = json.loads(body)
+            except ValueError as error:
+                raise LocalApiError("Local simulator returned invalid JSON") from error
+            if not isinstance(result, dict):
+                raise LocalApiError("Local simulator returned an invalid response")
+        except BaseException as error:
+            diagnostics.finish_request(trace, error=error, http_status=http_status)
+            raise
+        diagnostics.finish_request(trace, response=result, http_status=http_status)
         return result
 
     def _rejection(self, failure: Any, fallback: str) -> LocalApiError:

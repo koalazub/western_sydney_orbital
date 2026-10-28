@@ -25,13 +25,14 @@ import time
 import uuid
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from . import diagnostics
 from .local_api import (
     CommandExpiredError,
     LocalBusyError,
@@ -91,9 +92,10 @@ class CheckpointOptions:
     cadence_hz: float = 10.0
     playback_rate: int | None = None
     progress: bool = False
+    diagnostics: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("isolated", "run", "progress"):
+        for name in ("isolated", "run", "progress", "diagnostics"):
             if type(getattr(self, name)) is not bool:
                 raise CheckpointError(
                     "invalid_options", "Consent and scope flags must be booleans."
@@ -170,6 +172,9 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
         "--playback-rate", type=int, choices=(1, 5), help="default 1; rate 5 requires owned scope"
     )
     parser.add_argument("--progress", action="store_true", help="bounded progress JSON on stderr")
+    parser.add_argument(
+        "--diagnostics", action="store_true", help="opt in to bounded, allowlisted JSONL on stderr"
+    )
     return CheckpointOptions(**vars(parser.parse_args(argv)))
 
 
@@ -936,6 +941,11 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
     """Inspect or run once. Comparison creates two independent matching owned worlds."""
     if not isinstance(options, CheckpointOptions):
         raise CheckpointError("invalid_options", "Validated CheckpointOptions are required.")
+    with diagnostics.diagnostics_context() if options.diagnostics else nullcontext():
+        return _run_checkpoint(options)
+
+
+def _run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
     if os.name != "posix":
         raise CheckpointError(
             "private_backend_platform",

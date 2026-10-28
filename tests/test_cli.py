@@ -46,7 +46,7 @@ def test_root_help_advertises_api_checkpoint_validation(capsys) -> None:
         main(["--help"])
     assert stopped.value.code == 0
     output = capsys.readouterr().out
-    assert "checkpoint" in output and "room" in output
+    assert "checkpoint" in output and "room" in output and "diagnostics" in output
 
 
 def test_checkpoint_help_preserves_arguments_and_exposes_explicit_api_consent(capsys) -> None:
@@ -58,7 +58,14 @@ def test_checkpoint_help_preserves_arguments_and_exposes_explicit_api_consent(ca
     output = capsys.readouterr().out
     assert all(
         flag in output
-        for flag in ("--isolated", "--connection-file", "--room-file", "--run", "--policy")
+        for flag in (
+            "--isolated",
+            "--connection-file",
+            "--room-file",
+            "--run",
+            "--policy",
+            "--diagnostics",
+        )
     )
 
 
@@ -99,3 +106,29 @@ def test_room_create_cli_rejects_http_before_reserving_a_file(tmp_path, capsys) 
     )
     assert not path.exists()
     assert "HTTPS origin" in capsys.readouterr().err
+
+
+def test_diagnostics_help_is_read_only_and_preserves_arguments(capsys) -> None:
+    arguments = ["diagnostics", "--help"]
+    with pytest.raises(SystemExit) as stopped:
+        main(arguments)
+    assert stopped.value.code == 0
+    assert arguments == ["diagnostics", "--help"]
+    output = capsys.readouterr().out
+    assert all(
+        flag in output
+        for flag in ("--connection-file", "--room-file", "--duration-s", "--cadence-hz", "--output")
+    )
+    assert "--run" not in output and "--isolated" not in output and "--allow-loopback" not in output
+
+
+def test_diagnostics_cli_requires_explicit_scope_and_keeps_errors_private(capsys) -> None:
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    assert main(["diagnostics", "--unknown", token]) == 1
+    captured = capsys.readouterr()
+    assert token not in captured.out + captured.err
+    events = [json.loads(line) for line in captured.out.splitlines()]
+    assert events[0]["code"] == "invalid_arguments"
+    assert events[-1]["sample_count"] == 0 and events[-1]["error_count"] == 1

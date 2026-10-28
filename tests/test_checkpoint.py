@@ -44,8 +44,16 @@ def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connecti
     assert options.duration_s <= 1800
     assert options.wall_budget_s <= 3600
     assert options.cadence_hz >= 10
+    assert options.diagnostics is False
     with pytest.raises(CheckpointError, match="arguments"):
         parse_args([])
+
+
+def test_diagnostics_flag_is_explicit_and_does_not_grant_run_consent():
+    options = parse_args(["--room-file", "private.json", "--diagnostics"])
+    assert options.diagnostics is True and options.run is False
+    with pytest.raises(CheckpointError):
+        CheckpointOptions(isolated=True, diagnostics=1)
 
 
 def test_external_scope_is_explicit_single_trial_and_does_not_change_playback_rate():

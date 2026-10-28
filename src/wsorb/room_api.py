@@ -31,7 +31,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
-from . import __version__
+from . import __version__, diagnostics
 from .local_api import (
     MAX_RESPONSE_BYTES,
     LocalApiError,
@@ -224,25 +224,46 @@ def _http_client():
     return client
 
 
-def _post_json(http, request: Request, *, timeout_s: float, expected_status: int) -> dict[str, Any]:
+def _post_json(
+    http,
+    request: Request,
+    *,
+    timeout_s: float,
+    expected_status: int,
+    diagnostic_trace: diagnostics.RequestTrace | None = None,
+) -> dict[str, Any]:
+    trace = diagnostics.start_request("room", "http", method="create_room", parent=diagnostic_trace)
+    if trace is not None:
+        for name, value in diagnostics.request_headers(trace).items():
+            request.add_header(name, value)
+    http_status = None
     try:
-        with http.open(request, timeout=timeout_s) as response:
-            if response.status != expected_status:
-                raise RoomApiError(f"Unexpected room HTTP status. {_UNKNOWN_OUTCOME}")
-            body = response.read(MAX_RESPONSE_BYTES + 1)
-    except HTTPError as error:
-        error.close()
-        raise RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}") from None
-    except (OSError, URLError, HTTPException):
-        raise RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}") from None
-    if len(body) > MAX_RESPONSE_BYTES:
-        raise RoomApiError(f"Room response exceeds the 2 MiB limit. {_UNKNOWN_OUTCOME}")
-    try:
-        result = json.loads(body)
-    except ValueError:
-        raise RoomApiError(f"Room returned invalid JSON. {_UNKNOWN_OUTCOME}") from None
-    if not isinstance(result, dict):
-        raise RoomApiError(f"Room returned an invalid response. {_UNKNOWN_OUTCOME}")
+        try:
+            with http.open(request, timeout=timeout_s) as response:
+                if trace is not None:
+                    http_status = response.status
+                if response.status != expected_status:
+                    raise RoomApiError(f"Unexpected room HTTP status. {_UNKNOWN_OUTCOME}")
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+        except HTTPError as error:
+            if trace is not None:
+                http_status = error.code
+            error.close()
+            raise RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}") from None
+        except (OSError, URLError, HTTPException):
+            raise RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}") from None
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise RoomApiError(f"Room response exceeds the 2 MiB limit. {_UNKNOWN_OUTCOME}")
+        try:
+            result = json.loads(body)
+        except ValueError:
+            raise RoomApiError(f"Room returned invalid JSON. {_UNKNOWN_OUTCOME}") from None
+        if not isinstance(result, dict):
+            raise RoomApiError(f"Room returned an invalid response. {_UNKNOWN_OUTCOME}")
+    except BaseException as error:
+        diagnostics.finish_request(trace, error=error, http_status=http_status)
+        raise
+    diagnostics.finish_request(trace, response=result, http_status=http_status)
     return result
 
 
@@ -373,6 +394,7 @@ class RoomSimulation(LocalSimulation):
         timeout = _timeout(self.timeout_s if timeout_s is None else timeout_s)
         with self._channels.control:
             envelope = _rpc_envelope(call, timeout)
+            trace = diagnostics.start_request("room", "rpc", call, request_id=envelope["id"])
             request = Request(
                 f"{self.url}/api/rooms/{self.room_id}/commands",
                 data=json.dumps(envelope, allow_nan=False).encode(),
@@ -383,8 +405,20 @@ class RoomSimulation(LocalSimulation):
                 },
                 method="POST",
             )
-            result = _post_json(self._http, request, timeout_s=timeout, expected_status=200)
-            return self._result(result, envelope["id"])
+            try:
+                result = _post_json(
+                    self._http,
+                    request,
+                    timeout_s=timeout,
+                    expected_status=200,
+                    diagnostic_trace=trace,
+                )
+                value = self._result(result, envelope["id"])
+            except BaseException as error:
+                diagnostics.finish_request(trace, error=error)
+                raise
+            diagnostics.finish_request(trace, value=value)
+            return value
 
     def command(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Send one allowed native operation. An ACK is not applied-state proof."""

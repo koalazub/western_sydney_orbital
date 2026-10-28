@@ -110,6 +110,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "room", help="create a hosted room and a new private connection file", add_help=False
     )
+    subparsers.add_parser(
+        "diagnostics", help="read-only live status and public snapshot JSONL", add_help=False
+    )
 
     notebook = subparsers.add_parser("notebook", help="work with the shared mission notebook")
     notebook_sub = notebook.add_subparsers(dest="notebook_command", required=True)
@@ -359,6 +362,10 @@ def main(argv: list[str] | None = None) -> int:
         from wsorb.room_api import main as room_main
 
         return room_main(arguments[1:])
+    if arguments and arguments[0] == "diagnostics":
+        from wsorb.diagnostics import main as diagnostics_main
+
+        return diagnostics_main(arguments[1:])
     parser = _build_parser()
     args = parser.parse_args(arguments)
     args.invocation = shlex.join(["uv", "run", "--locked", "wsorb", *arguments])
