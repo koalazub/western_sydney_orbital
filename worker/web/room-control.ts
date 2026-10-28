@@ -363,6 +363,9 @@ export function connectRoom(
       const result: Result = engineReady
         ? runCall(api, build, message.command as Record<string, unknown>, execution, diagnostics, { id: message.id, page_id: pageId })
         : { ok: false, error: "Browser engine is not ready; no command was invoked." };
+      // Observation availability is not permission to start a flight. Report
+      // the real command gate separately while preserving native renderer data.
+      if (readOnly && result.ok) result.value.control_ready = ready();
       anyCommandInvoked ||= execution.commandInvoked;
       seen.set(message.id, Date.now() + MAX_DEADLINE_MS);
       try {

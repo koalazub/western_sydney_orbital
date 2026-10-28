@@ -26,6 +26,7 @@ export function bridgeRequestOptions(token, page, path, body, build, signal, tra
     headers: {
       Authorization: `Bearer ${token}`,
       "X-WSORB-Page": page,
+      ...(typeof document === "undefined" ? {} : { "X-WSORB-Page-Visible": document.hidden ? "0" : "1" }),
       ...(path === "poll" ? { "X-WSORB-Build": build.sha256 } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       ...(diagnosticsEnabled(trace?.diagnostics) ? { "X-WSORB-Diagnostics": "1" } : {}),

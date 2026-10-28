@@ -203,6 +203,10 @@ Keep the link and connection file private. A room cannot replace an already conn
 
 Add `--wait-for-owner-s 3600 --progress` when Python should wait for the external game to connect. Waiting is read-only, stays within the invocation's total wall budget, and does not grant `--run` consent. Browser readiness requires advancing real renderer counters; native-headless readiness uses its actual scheduler status. An existing controller is not replaced. Only read-only owner/network unavailability is retried, with bounded wait-error logs; authentication and protocol failures end the wait. Flight commands are never retried. Read-only hosted observations remain available when the initialized page is hidden, but commands still require a visible game.
 
+For a demo that must remain available until you return, use `--await-owner` instead of a finite owner wait. This explicit external-connection mode waits read-only without a startup expiry. The configured flight budget begins only after actual readiness, then Python runs or inspects once and exits. It does not repeat failed flight commands, restart a completed run or grant `--run` consent by itself.
+
+New local backends return the actual browser page ID with snapshot receipts. The checkpoint client pins that verified ID before claiming control; a changed or missing target is rejected before dispatch, and the client never silently rebinds. Legacy or native-headless backends without a browser receipt remain explicitly unpinned.
+
 An instrumented, already-loaded hosted game also accepts a private room link through a fragment change without restarting its WASM or physics. It still asks for permission, and refuses to replace an active or pending room connection. The local game shows which tab owns its Python API connection; separate tabs and hosted rooms are separate flights, not mirrored views. A new game URL can opt into a close lander view with `?follow=lander`; this requests only a debug-camera change after real renderer readiness.
 
 A local game started with a separate connection file does not redirect its Notebook button to the default flight's editor. Its help page identifies the explicit API connection instead, so opening the notebook cannot silently control a different game.
@@ -222,6 +226,8 @@ Add `--diagnostics` to an explicit checkpoint invocation for correlated transpor
 An instrumented browser exposes `globalThis.__wsorbDiagnostics.enable(true)` and `enable(false)`. A new game can also opt in with `?diagnostics=1`. Do not navigate or reload an active flight just to enable logs. Browser events are bounded, and disabling clears native collection; per-request native collection otherwise expires after two seconds. Visual-transform samples are main-world Bevy measurements, not proof of GPU pixels.
 
 All logging passes through dedicated helpers. Tokens, capability URLs, raw error text, camera pixels, radar rows and hidden debris state are excluded. No collector command resets, reloads, claims control or retries actuation.
+
+With the local server's `WSORB_DIAGNOSTICS=1` flag, allowlisted startup asset deliveries are logged before a browser claims the API. Fixed asset labels and HTTP statuses distinguish a page that never requested the game from an asset-load failure; they do not claim renderer readiness.
 
 ### Run from the notebook
 
