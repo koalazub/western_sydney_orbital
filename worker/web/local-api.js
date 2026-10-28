@@ -8,10 +8,19 @@ const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavail
 // Only these native rejections establish that an invoked command was unapplied.
 const UNAPPLIED_COMMAND_CODES = new Set(["stale_context", "command_expired"]);
 let connected = false;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const diagnostic = (event, input) => {
+  try { globalThis.__wsorbDiagnostics?.record(event, input); }
+  catch { /* Optional diagnostics cannot affect flight or delivery. */ }
+};
+const diagnosticsEnabled = forced => {
+  try { return forced === true || globalThis.__wsorbDiagnostics?.enabled === true; }
+  catch { return forced === true; }
+};
 
 // Keep the actual transport policy inspectable without a substitute browser or
 // engine. The private fetch call below uses these exact Request options.
-export function bridgeRequestOptions(token, page, path, body, build, signal) {
+export function bridgeRequestOptions(token, page, path, body, build, signal, trace) {
   return {
     method: body === undefined ? "GET" : "POST",
     headers: {
@@ -19,6 +28,9 @@ export function bridgeRequestOptions(token, page, path, body, build, signal) {
       "X-WSORB-Page": page,
       ...(path === "poll" ? { "X-WSORB-Build": build.sha256 } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(diagnosticsEnabled(trace?.diagnostics) ? { "X-WSORB-Diagnostics": "1" } : {}),
+      ...(trace?.diagnostics === true && typeof trace.trace_id === "string" && UUID.test(trace.trace_id)
+        ? { "X-WSORB-Request-ID": trace.trace_id } : {}),
     },
     body,
     cache: "no-store",
@@ -32,12 +44,34 @@ export function bridgeRequestOptions(token, page, path, body, build, signal) {
   };
 }
 
+// The production snapshot path, also usable with the real native headless
+// adapter. URL logging opt-in never changes the legacy seven-field payload.
+export function bridgeSnapshot(api, manifest, page, diagnostics = false, helper = globalThis.__wsorbDiagnostics) {
+  const value = {
+    observation: JSON.parse(api.observation()),
+    telemetry: JSON.parse(api.telemetry_status()),
+    navigation: JSON.parse(api.navigation_status()),
+    runtime: JSON.parse(api.runtime_status()),
+    renderer: JSON.parse(api.renderer_status()),
+    engine_build: manifest,
+    cameras: JSON.parse(api.ship_camera_status()),
+  };
+  if (diagnostics === true) {
+    let details = { page_id: page, diagnostics_helper_available: false };
+    try { details = helper?.snapshot(api, page) ?? details; }
+    catch { /* Keep the actual snapshot even if an optional hook fails. */ }
+    value.diagnostics = details;
+  }
+  return value;
+}
+
 export function connect(token) {
   if (connected) return;
   connected = true;
-  const status = { status: "waiting_for_engine", error: null };
-  globalThis.__wsorbLocalApi = status;
   const page = crypto.randomUUID();
+  const status = { status: "waiting_for_engine", error: null, page_id: page };
+  globalThis.__wsorbLocalApi = status;
+  diagnostic("local.attach", { page_id: page, status: "waiting_for_engine" });
   let stopped = false;
   const activeRequests = new Set();
   let capturing = false;
@@ -51,6 +85,7 @@ export function connect(token) {
   };
   const errorCode = error => ERROR_CODES.has(error?.code) ? error.code : undefined;
   const report = (state, error = null) => {
+    if (status.status !== state) diagnostic("local.status", { page_id: page, status: state });
     status.status = state;
     status.error = error;
   };
@@ -61,13 +96,20 @@ export function connect(token) {
     report("disconnected", "This page left the local lab. Reload the simulation to reconnect.");
   }, { once: true });
 
-  async function request(path, body) {
+  async function request(path, body, trace) {
     const controller = new AbortController();
     activeRequests.add(controller);
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(`/__local/${path}`,
-        bridgeRequestOptions(token, page, path, body, manifest, controller.signal));
+        bridgeRequestOptions(token, page, path, body, manifest, controller.signal, trace));
+      if (response.status === 409) diagnostic("local.lease_conflict", () => ({
+        page_id: page, http_status: 409, id: trace?.id, trace_id: trace?.trace_id, diagnostics: trace?.diagnostics === true,
+        request_id: response.headers.get("X-WSORB-Request-ID"),
+      }));
+      else if (!response.ok) diagnostic("local.request_failed", () => ({
+        page_id: page, http_status: response.status, id: trace?.id, trace_id: trace?.trace_id, diagnostics: trace?.diagnostics === true,
+      }));
       const reader = response.body.getReader();
       const chunks = [];
       let size = 0;
@@ -125,10 +167,18 @@ export function connect(token) {
       throw new Error("The loaded engine module is uninitialized or no longer ready. Restart the local lab and reload the simulation.");
     }
     api = module;
+    diagnostic("local.ready", () => ({ page_id: page, status: "ready",
+      observation: JSON.parse(api.observation()), renderer: JSON.parse(api.renderer_status()),
+      camera: typeof api.camera_status === "function" ? JSON.parse(api.camera_status()) : undefined,
+    }));
   }
 
   async function invoke(job) {
     let commandInvoked = false;
+    const log = (event, fields = {}) => diagnostic(event, () => ({
+      page_id: page, id: job.id, trace_id: job.trace_id, diagnostics: job.diagnostics === true,
+      method: job.method, ...fields,
+    }));
     const failure = (error, code) => ({
       envelope: { id: job.id, ok: false, error: message(error).slice(0, 2048), ...(ERROR_CODES.has(code) ? { code } : {}) },
       commandInvoked,
@@ -137,25 +187,29 @@ export function connect(token) {
       return failure("Local call expired before engine invocation; no command was invoked");
     }
     if (globalThis.__wsorbStartup?.stage !== "ready" || !api) return failure("The browser engine is no longer ready");
+    try { globalThis.__wsorbDiagnostics?.setNativeCollection(api, job.diagnostics === true); }
+    catch { /* Collection is optional and never authorizes a command. */ }
     try {
       let value;
       if (job.method === "snapshot") {
-        value = {
-          observation: JSON.parse(api.observation()),
-          telemetry: JSON.parse(api.telemetry_status()),
-          navigation: JSON.parse(api.navigation_status()),
-          runtime: JSON.parse(api.runtime_status()),
-          renderer: JSON.parse(api.renderer_status()),
-          engine_build: manifest,
-          cameras: JSON.parse(api.ship_camera_status()),
-        };
+        value = bridgeSnapshot(api, manifest, page, job.diagnostics === true);
+        diagnostic("engine.sample", () => ({ page_id: page, id: job.id, trace_id: job.trace_id,
+          diagnostics: job.diagnostics === true, observation: value.observation, runtime: value.runtime,
+          renderer: value.renderer, ...globalThis.__wsorbDiagnostics?.snapshot(api, page),
+        }));
       } else if (job.method === "raycast") {
         const result = JSON.parse(api.lookahead_raycast(JSON.stringify(job.query)));
-        if (result.ok !== true) return failure(result.error || result.message || "Look-ahead ray was rejected", result.code);
+        if (result.ok !== true) {
+          log("local.native_rejection", { code: result.code, command_invoked: false });
+          return failure(result.error || result.message || "Look-ahead ray was rejected", result.code);
+        }
         value = result.report;
       } else if (job.method === "pan_tilt") {
         const result = JSON.parse(api.pan_tilt_camera(job.camera, job.yaw_deg, job.pitch_deg));
-        if (result.ok !== true) return failure(result.error || result.message || "Camera aim was rejected", result.code);
+        if (result.ok !== true) {
+          log("local.native_rejection", { code: result.code, command_invoked: false });
+          return failure(result.error || result.message || "Camera aim was rejected", result.code);
+        }
         value = { ok: true };
       } else if (job.method === "capture") {
         let timer;
@@ -182,15 +236,20 @@ export function connect(token) {
         const json = JSON.stringify(job.preview);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before preview publication");
         const result = JSON.parse(api.set_navigation_preview(json));
-        if (result.ok !== true) return failure(result.error || result.message || "Python preview was rejected", result.code);
+        if (result.ok !== true) {
+          log("local.native_rejection", { code: result.code, command_invoked: false });
+          return failure(result.error || result.message || "Python preview was rejected", result.code);
+        }
         value = { ok: true };
       } else if (job.method === "command" && COMMANDS.has(job.command?.op)) {
         const json = JSON.stringify(job.command);
         if (Date.now() >= job.deadline_ms) return failure("Local call expired before engine invocation; no command was invoked");
         commandInvoked = true;
+        log("local.invoked", { op: job.command.op, source_time_s: job.command.source_time_s, lease_sim_s: job.command.lease_sim_s });
         const result = JSON.parse(api.control(json));
         if (result.ok === false && (typeof result.error === "string" || typeof result.message === "string")) {
           if (UNAPPLIED_COMMAND_CODES.has(result.code)) commandInvoked = false;
+          log("local.native_rejection", { code: result.code, command_invoked: commandInvoked });
           return failure(result, result.code);
         }
         if (result.ok !== true) throw new Error("Engine did not return a valid command acknowledgement");
@@ -198,10 +257,12 @@ export function connect(token) {
         // never a claim that the next Bevy frame has applied their effects.
         value = { ok: true };
       } else return failure("Unsupported local browser job");
+      log("local.ack", { ok: true, command_invoked: commandInvoked });
       return { envelope: { id: job.id, ok: true, value }, commandInvoked };
     } catch (error) {
       const code = errorCode(error);
       if (commandInvoked && UNAPPLIED_COMMAND_CODES.has(code)) commandInvoked = false;
+      if (commandInvoked) log("local.indeterminate", { command_invoked: true, no_retry: true });
       return failure(commandInvoked
         ? `Engine command failed: ${message(error).slice(0, 1600)}. Outcome is indeterminate. Inspect live state before further flight control.`
         : `Browser engine request failed: ${message(error).slice(0, 1800)}`, code);
@@ -217,9 +278,19 @@ export function connect(token) {
     }
     try {
       if (stopped) return;
-      const acknowledgement = await request("result", body);
+      diagnostic("local.result_sent", () => ({ page_id: page, id: job.id, trace_id: job.trace_id,
+        diagnostics: job.diagnostics === true, ok: result.envelope.ok, command_invoked: result.commandInvoked,
+      }));
+      const acknowledgement = await request("result", body, job);
       if (acknowledgement.ok !== true) throw new Error("Invalid bridge acknowledgement");
+      diagnostic("local.result_ack", () => ({ page_id: page, id: job.id, trace_id: job.trace_id,
+        diagnostics: job.diagnostics === true, ok: true, command_invoked: result.commandInvoked,
+      }));
     } catch {
+      diagnostic(result.commandInvoked ? "local.indeterminate" : "local.no_retry", () => ({
+        page_id: page, id: job.id, trace_id: job.trace_id, diagnostics: job.diagnostics === true,
+        command_invoked: result.commandInvoked, no_retry: true,
+      }));
       if (result.commandInvoked) {
         // An uncertain actuation result must never be resent automatically.
         stopped = true;
@@ -250,6 +321,10 @@ export function connect(token) {
           if (stopped) return;
           report("connected");
           if (job) {
+            diagnostic("local.received", () => ({ page_id: page, id: job.id, trace_id: job.trace_id,
+              diagnostics: job.diagnostics === true, method: job.method, deadline_ms: job.deadline_ms,
+              source_time_s: job.command?.source_time_s, lease_sim_s: job.command?.lease_sim_s,
+            }));
             if (job.method === "capture") {
               if (capturing) {
                 // The server can expire a capture before this page finishes its
@@ -257,7 +332,7 @@ export function connect(token) {
                 // block polling and flight control behind the old one.
                 await request("result", JSON.stringify({
                   id: job.id, ok: false, error: "A camera readback is still finishing. Wait before capturing again.",
-                }));
+                }), job);
               } else {
                 capturing = true;
                 // Keep polling to renew the page lease and deliver flight commands

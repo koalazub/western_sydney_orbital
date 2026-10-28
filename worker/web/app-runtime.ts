@@ -5,6 +5,8 @@ import planetaryAssets from "./assets/asset-manifest.json";
 import { createEngineCanvas, graphicsPreflight } from "./graphics.ts";
 import { diagnoseStartupFailure, showStartupFailure } from "./startup-errors.ts";
 import { connectRoom, type RoomEngine } from "./room-control.ts";
+import { installDiagnostics } from "./diagnostics.ts";
+const diagnostics = installDiagnostics();
 type Engine = RoomEngine & {
   default: (options: unknown) => Promise<unknown>;
   start_simulation: (selector: string) => void;
@@ -97,6 +99,7 @@ const browserGlobals = globalThis as typeof globalThis & {
     error: string | null;
   };
   __wsorbGPU?: GPUPreflight;
+  __wsorbLocalApi?: { page_id?: string; status?: string };
   __wsorbFullscreenFailure?: {
     activation: boolean | undefined;
     name: string;
@@ -137,6 +140,23 @@ const movementHeld = new Set<string>();
 const BINDINGS_STORAGE = "wsorb.ship-bindings.v1";
 let bindingRevision: number | undefined;
 let bindingsCapturing = false;
+let diagnosticsTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleDiagnostics() {
+  clearTimeout(diagnosticsTimer);
+  if (!diagnostics.enabled || failed) return;
+  diagnosticsTimer = setTimeout(() => {
+    if (diagnostics.enabled && ready && !failed && engine) {
+      diagnostics.observeNative(engine, () => ({
+        local_page_id: browserGlobals.__wsorbLocalApi?.page_id,
+        hidden: document.hidden, visibility: document.visibilityState, focused: document.hasFocus(),
+        startup_stage: "ready",
+      }));
+    }
+    scheduleDiagnostics();
+  }, 1000);
+}
+diagnostics.onEnabledChange(scheduleDiagnostics);
 
 function readRoomConnection(): { origin: string; id: string; key: string } | null {
   const fragment = new URLSearchParams(location.hash.slice(1));
@@ -374,6 +394,8 @@ function fail(cause: unknown) {
   if (failed) return;
   ready = false;
   failed = true;
+  clearTimeout(diagnosticsTimer);
+  diagnostics.record("engine.failed", { startup_stage: "failed" });
   // A panic callback can arrive while Rust is unwinding or already trapped.
   // Never call back into that instance to assemble an error report or input reset.
   engine = undefined;
@@ -832,6 +854,11 @@ async function start() {
     await waitForRenderer();
     if (failed) return;
     ready = true;
+    // Bind only the module the app already initialized and started. Diagnostics
+    // never call default(), start_simulation(), commands or camera acquisition.
+    diagnostics.bindEngine(loaded, () => ready && !failed && engine === loaded);
+    diagnostics.record("engine.ready", { startup_stage: "ready" });
+    scheduleDiagnostics();
     lastHudStatus = JSON.parse(engine.hud_status());
     restoreBindings();
     statusText.textContent = "3D ready";

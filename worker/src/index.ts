@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
+import { emitDiagnostic } from "../shared/diagnostics.ts";
 
 const MAX_BODY = 64 * 1024;
 const MAX_UPDATE = 256 * 1024;
@@ -85,13 +86,24 @@ export class Room extends DurableObject {
     const row = this.row()!;
     return json({ document: bytesToBase64(new Uint8Array(row.document)), state: row.state ? JSON.parse(row.state) : null, notebookUrl: row.notebook_url });
   }
-  async command(key: string, id: string, command: Record<string, unknown>): Promise<Response> {
+  async command(key: string, id: string, command: Record<string, unknown>, diagnostics = false): Promise<Response> {
     if (!(await this.authorized(key))) return json({ error: "Unauthorized" }, 401);
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !command || typeof command !== "object" || Array.isArray(command)) return json({ error: "Invalid command" }, 400);
     const serialized = JSON.stringify(command);
     if (new TextEncoder().encode(serialized).byteLength > MAX_BODY) return json({ error: "Command too large" }, 413);
+    const detail = command.command as Record<string, unknown> | undefined;
+    const fence = detail?.controller_fence as Record<string, unknown> | undefined;
+    const started = diagnostics ? Date.now() : undefined;
+    emitDiagnostic(diagnostics, "room_relay", "call_received", {
+      trace_id: id, method: command.method, op: detail?.op,
+      source_time_s: detail?.source_time_s, lease_sim_s: detail?.lease_sim_s,
+      epoch: fence?.epoch, term: fence?.term,
+    });
     const row = this.row()!;
-    if (!row.host_id || !this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN && (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id)) return json({ error: "No connected room owner" }, 503);
+    if (!row.host_id || !this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN && (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id)) {
+      emitDiagnostic(diagnostics, "room_relay", "call_rejected", { trace_id: id, reason: "no_owner", http_status: 503 });
+      return json({ error: "No connected room owner" }, 503);
+    }
     this.expirePending();
     if (this.commandWaiters.size >= 64 || this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM pending").one().count >= 64) return json({ error: "Too many pending commands" }, 429);
     if (this.ctx.storage.sql.exec("SELECT id FROM pending WHERE id = ?", id).toArray().length) return json({ error: "Command ID already pending" }, 409);
@@ -111,7 +123,8 @@ export class Room extends DurableObject {
         finish({ error: "Room owner timed out", id });
       }, 30_000);
       this.commandWaiters.set(id, finish);
-      this.sendTo(row.host_id!, { type: "execute", id, command, requester });
+      emitDiagnostic(diagnostics, "room_relay", "call_dispatched", { trace_id: id, page_id: row.host_id, method: command.method, op: detail?.op });
+      this.sendTo(row.host_id!, { type: "execute", id, command, requester, ...(diagnostics ? { diagnostics: true } : {}) });
       this.ctx.storage.setAlarm(Date.now() + 30_000).catch(() => finish({ error: "Unable to schedule command timeout", id }));
     });
     const value = await result;
@@ -119,7 +132,14 @@ export class Room extends DurableObject {
     // are usable only inside the authenticated result envelope, not an HTTP
     // gateway error. Transport timeouts without a result remain HTTP 504.
     const reply = value as { type?: string; error?: string };
-    return json(value, reply.type === "result" ? 200 : reply.error ? 504 : 200);
+    const status = reply.type === "result" ? 200 : reply.error ? 504 : 200;
+    const resultValue = value as { ok?: unknown; code?: unknown };
+    emitDiagnostic(diagnostics, "room_relay", status === 504 ? "call_timeout" : "call_finished", {
+      trace_id: id, page_id: row.host_id, method: command.method, op: detail?.op,
+      ok: resultValue.ok === true, http_status: status, code: resultValue.code,
+      elapsed_ms: started === undefined ? undefined : Date.now() - started,
+    });
+    return json(value, status);
   }
   async fetch(request: Request): Promise<Response> {
     const key = request.headers.get("X-Room-Key") ?? "";
@@ -151,8 +171,11 @@ export class Room extends DurableObject {
       msg = parsed as Record<string, unknown>;
     } catch { ws.close(1003, "Invalid message"); return; }
     if (msg.type !== "document" && msg.type !== "state" && msg.type !== "result" && messageSize > MAX_BODY) { ws.close(1009, "Message too large"); return; }
-    const clientId = (ws.deserializeAttachment() as { clientId?: string } | null)?.clientId;
+    const attachment = ws.deserializeAttachment() as { clientId?: string; diagnostics?: boolean } | null;
+    const clientId = attachment?.clientId;
     if (!clientId) return;
+    const diagnostics = typeof msg.diagnostics === "boolean" ? msg.diagnostics : attachment?.diagnostics === true;
+    if (typeof msg.diagnostics === "boolean") ws.serializeAttachment({ clientId, diagnostics });
     const row = this.row();
     if (!row) return;
     if (msg.type === "document" && typeof msg.update === "string") {
@@ -171,13 +194,14 @@ export class Room extends DurableObject {
       this.ctx.storage.sql.exec("UPDATE room SET document = ?, updated_at = ?", combined, Date.now());
       this.broadcast(JSON.stringify(msg));
     } else if (msg.type === "release-host" && clientId === row.host_id) {
-      this.releaseHost(clientId, "Simulation host released control");
+      this.releaseHost(clientId, "Simulation host released control", diagnostics);
     } else if (msg.type === "claim-host") {
       const activeHost = row.host_id && this.ctx.getWebSockets().some((socket) =>
         socket.readyState === WebSocket.OPEN &&
         (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id
       );
       const hostId = activeHost ? row.host_id : clientId;
+      emitDiagnostic(diagnostics, "room_relay", hostId === clientId ? "host_claimed" : "host_conflict", { page_id: clientId, owner_page_id: hostId });
       if (hostId === clientId) this.ctx.storage.sql.exec("UPDATE room SET host_id = ?, updated_at = ?", hostId, Date.now());
       this.broadcast(JSON.stringify({ type: "host", hostId }));
     } else if (msg.type === "state" && clientId === row.host_id && msg.state !== undefined) {
@@ -195,7 +219,8 @@ export class Room extends DurableObject {
       if (this.ctx.storage.sql.exec("SELECT id FROM pending WHERE id = ?", msg.id).toArray().length) { ws.send(JSON.stringify({ type: "error", error: "Command ID already pending" })); return; }
       this.ctx.storage.sql.exec("INSERT INTO pending (id, requester, created_at) VALUES (?, ?, ?)", msg.id, clientId, Date.now());
       this.ctx.storage.setAlarm(Date.now() + 30_000).catch(() => undefined);
-      this.sendTo(row.host_id, { type: "execute", id: msg.id, command: msg.command, requester: clientId });
+      emitDiagnostic(diagnostics, "room_relay", "call_dispatched", { trace_id: msg.id, page_id: row.host_id });
+      this.sendTo(row.host_id, { type: "execute", id: msg.id, command: msg.command, requester: clientId, ...(diagnostics ? { diagnostics: true } : {}) });
     } else if (msg.type === "result" && typeof msg.id === "string" && clientId === row.host_id) {
       this.expirePending();
       const pending = this.ctx.storage.sql.exec<{ requester: string; created_at: number }>("SELECT requester, created_at FROM pending WHERE id = ?", msg.id).toArray()[0];
@@ -239,9 +264,10 @@ export class Room extends DurableObject {
       else if (!pending.requester.startsWith("http:")) this.sendTo(pending.requester, value);
     }
   }
-  private releaseHost(clientId: string, reason: string): void {
+  private releaseHost(clientId: string, reason: string, diagnostics = false): void {
     const row = this.row();
     if (row?.host_id === clientId) {
+      emitDiagnostic(diagnostics, "room_relay", "host_released", { page_id: clientId, reason: "host_released" });
       this.ctx.storage.sql.exec("UPDATE room SET host_id = NULL WHERE host_id = ?", clientId);
       this.broadcast(JSON.stringify({ type: "host", hostId: null }));
       const pending = this.ctx.storage.sql.exec<{ id: string; requester: string }>("SELECT id, requester FROM pending").toArray();
@@ -255,8 +281,8 @@ export class Room extends DurableObject {
     }
   }
   async webSocketClose(ws: WebSocket): Promise<void> {
-    const clientId = (ws.deserializeAttachment() as { clientId?: string } | null)?.clientId;
-    if (clientId) this.releaseHost(clientId, "Room owner disconnected");
+    const attachment = ws.deserializeAttachment() as { clientId?: string; diagnostics?: boolean } | null;
+    if (attachment?.clientId) this.releaseHost(attachment.clientId, "Room owner disconnected", attachment.diagnostics === true);
   }
   async alarm(): Promise<void> {
     const row = this.row();
@@ -325,7 +351,7 @@ export default {
       const payload = body as { id?: unknown; command?: unknown };
       if (!payload.command || typeof payload.command !== "object" || Array.isArray(payload.command)) return json({ error: "command must be an object" }, 400);
       const id = typeof payload.id === "string" ? payload.id : crypto.randomUUID();
-      return env.ROOMS.getByName(commandMatch[1]).command(key, id, payload.command as Record<string, unknown>);
+      return env.ROOMS.getByName(commandMatch[1]).command(key, id, payload.command as Record<string, unknown>, request.headers.get("X-WSORB-Diagnostics") === "1");
     }
     if (url.pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
     const response = await env.ASSETS.fetch(request);

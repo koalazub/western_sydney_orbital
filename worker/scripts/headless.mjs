@@ -5,6 +5,8 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
+import { bridgeSnapshot } from "../web/local-api.js";
+import { createDiagnostics } from "../web/diagnostics.ts";
 
 const TICK_MS = 20;
 const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
@@ -69,6 +71,7 @@ export async function createHeadless({ publicRoot, rootRealPath, engineBuild }) 
   let timer;
   let closed = false;
   let tickError = null;
+  let diagnosticReporter;
 
   function fail(error) {
     tickError ??= new Error(message(error));
@@ -117,7 +120,7 @@ export async function createHeadless({ publicRoot, rootRealPath, engineBuild }) 
         headless_error: tickError ? message(tickError) : null,
       };
     },
-    async invoke(call, deadline) {
+    async invoke(call, deadline, diagnostics = false) {
       let commandInvoked = false;
       const failure = (error, code) => ({
         ok: false, error: message(error).slice(0, 2048), ...(ERROR_CODES.has(code) ? { code } : {}),
@@ -127,15 +130,9 @@ export async function createHeadless({ publicRoot, rootRealPath, engineBuild }) 
         tick();
         let value;
         if (call.method === "snapshot") {
-          value = {
-            observation: JSON.parse(api.observation()),
-            telemetry: JSON.parse(api.telemetry_status()),
-            navigation: JSON.parse(api.navigation_status()),
-            runtime: JSON.parse(api.runtime_status()),
-            renderer: JSON.parse(api.renderer_status()),
-            engine_build: engineBuild,
-            cameras: JSON.parse(api.ship_camera_status()),
-          };
+          if (diagnostics === true) diagnosticReporter ??= createDiagnostics();
+          diagnosticReporter?.setNativeCollection(api, diagnostics === true);
+          value = bridgeSnapshot(api, engineBuild, undefined, diagnostics === true, diagnosticReporter);
         } else if (call.method === "command") {
           if (Date.now() >= deadline) return failure("Local call expired before native engine invocation; no command was invoked");
           commandInvoked = true;
@@ -184,6 +181,7 @@ export async function createHeadless({ publicRoot, rootRealPath, engineBuild }) 
       }
     },
     close() {
+      diagnosticReporter?.enable(false);
       closed = true;
       clearTimeout(timer);
     },

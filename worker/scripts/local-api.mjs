@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { resolveNotebook } from "./notebook-launch.mjs";
+import { emitDiagnostic, validTraceId } from "../shared/diagnostics.ts";
 
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
@@ -361,7 +362,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
   const pending = new Map();
   const nativePending = new Map();
 
-  function validateResult(result, call, browser = false) {
+  function validateResult(result, call, browser = false, diagnostics = false) {
     const id = browser ? ["id"] : [];
     shape(result, result.ok === true ? [...id, "ok", "value"] : [...id, "ok", "error"], result.ok === true ? [] : ["code"]);
     if (result.ok !== true && result.ok !== false) invalid("Result ok must be a boolean");
@@ -384,7 +385,8 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       shape(result.value, ["ok"]);
       if (result.value.ok !== true) invalid("Commands return an acknowledgement only");
     } else {
-      shape(result.value, ["observation", "telemetry", "navigation", "runtime", "renderer", "engine_build", "cameras"]);
+      shape(result.value, ["observation", "telemetry", "navigation", "runtime", "renderer", "engine_build", "cameras"], diagnostics ? ["diagnostics"] : []);
+      if (result.value.diagnostics !== undefined && !record(result.value.diagnostics)) invalid("Diagnostics must be a JSON object");
       if (![result.value.observation, result.value.telemetry, result.value.navigation, result.value.runtime, result.value.renderer].every(record)) {
         invalid("Snapshot reports must be JSON objects");
       }
@@ -412,6 +414,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
+      ...(request.wsorbTraceId ? { "X-WSORB-Request-ID": request.wsorbTraceId } : {}),
       ...(!request.complete ? { Connection: "close" } : {}),
     });
     response.end(request.method === "HEAD" ? undefined : body);
@@ -431,6 +434,12 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       pageTimer = setTimeout(expire, Math.max(1, page.expires - Date.now()));
     }
     job.response.off("close", job.disconnected);
+    emitDiagnostic(job.diagnostics, "local_relay", status === 504 ? "call_timeout" : "call_finished", {
+      trace_id: job.trace_id, job_id: job.id, page_id: job.page, method: job.call.method, op: job.call.command?.op,
+      channel: job.channel, delivered: job.delivered, ok: envelope?.ok === true, http_status: status,
+      elapsed_ms: job.started_at === undefined ? undefined : Date.now() - job.started_at,
+      code: envelope?.code, reason: status === 504 ? "call_deadline_expired" : !envelope ? "client_disconnected" : undefined,
+    });
     if (envelope) send(job.request, job.response, status, envelope);
   }
 
@@ -442,6 +451,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
 
   function expire() {
     if (page && page.expires <= Date.now()) {
+      emitDiagnostic(process.env.WSORB_DIAGNOSTICS === "1" || [...pending.values()].some(job => job.diagnostics), "local_relay", "page_expired", { page_id: page.id });
       page = null;
       clearTimeout(pageTimer);
       for (const job of [...pending.values()]) settle(job, 503, lost(job, "Browser page lease expired"));
@@ -451,9 +461,13 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     }
   }
 
-  function claimPage(id) {
+  function claimPage(id, diagnostics = false, traceId) {
     expire();
-    if (page && page.id !== id) throw new HttpError(409, "Another browser page holds the local simulation lease");
+    if (page && page.id !== id) {
+      emitDiagnostic(diagnostics, "local_relay", "page_conflict", { trace_id: traceId, owner_page_id: page.id, requester_page_id: id, reason: "owner_conflict", http_status: 409 });
+      throw new HttpError(409, "Another browser page holds the local simulation lease");
+    }
+    if (!page) emitDiagnostic(diagnostics, "local_relay", "page_claimed", { trace_id: traceId, page_id: id });
     const expires = Math.max(Date.now() + PAGE_LEASE_MS,
       ...[...pending.values()]
         .filter(job => job.page === id && job.delivered && worldSetup(job.call))
@@ -474,7 +488,20 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     return id.toLowerCase();
   }
 
+  function diagnosticCall(channel) {
+    const job = [...pending.values()].find(job => job.channel === channel);
+    if (job) return {
+      job_id: job.id, trace_id: job.trace_id ?? null, method: job.call.method,
+      op: job.call.command?.op ?? null, delivered: job.delivered,
+      deadline_remaining_ms: Math.max(0, job.deadline - Date.now()),
+    };
+    const call = nativePending.get(channel);
+    return call ? { method: call.method, op: call.command?.op ?? null, delivered: true } : null;
+  }
+
   async function handle(request, response, pathname) {
+    let diagnostics = process.env.WSORB_DIAGNOSTICS === "1";
+    let traceId;
     try {
       if (!origin || closed) throw new HttpError(503, "Local lab is not running");
       if (request.headers.host !== new URL(origin).host) throw new HttpError(403, "Local API requires its exact loopback Host");
@@ -529,12 +556,27 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         response.setHeader("WWW-Authenticate", "Bearer");
         throw new HttpError(401, "A local lab Bearer token is required");
       }
+      diagnostics ||= request.headers["x-wsorb-diagnostics"] === "1";
+      if (diagnostics) {
+        traceId = validTraceId(request.headers["x-wsorb-request-id"]) ? request.headers["x-wsorb-request-id"] : randomUUID();
+        request.wsorbTraceId = traceId;
+      }
       expire();
       if (pathname === "/__local/status") {
         const active = [...pending.values()].map(job => job.call).concat([...nativePending.values()]);
         send(request, response, 200, { enabled: true, connected: page !== null, busy: active.length !== 0,
           busy_operation: active.some(worldSetup) ? "world_setup" : null,
           engine_build: engineBuild,
+          ...(diagnostics ? { diagnostics: {
+            enabled: true, page_id: page?.id ?? null,
+            page_lease_remaining_ms: page ? Math.max(0, page.expires - Date.now()) : null,
+            active_control_call: diagnosticCall("control"), active_capture_call: diagnosticCall("capture"),
+            active_calls: [...pending.values()].map(job => ({
+              job_id: job.id, trace_id: job.trace_id ?? null, method: job.call.method,
+              op: job.call.command?.op ?? null, channel: job.channel, delivered: job.delivered,
+              deadline_remaining_ms: Math.max(0, job.deadline - Date.now()),
+            })),
+          } } : {}),
           ...(native ? { backend: "native_headless", ...native.status() } : {}) });
       } else if (pathname === "/__local/poll") {
         if (native) throw new HttpError(409, "The native headless backend does not lease a browser page");
@@ -542,10 +584,11 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         if (request.headers["x-wsorb-build"] !== engineBuild.sha256) {
           throw new HttpError(409, "Browser engine build differs from the lab server; restart the local lab and reload the simulation");
         }
-        claimPage(id);
+        claimPage(id, diagnostics, traceId);
         const job = [...pending.values()].find(job => !job.delivered);
         if (job) {
           job.delivered = true;
+          emitDiagnostic(job.diagnostics, "local_relay", "call_dispatched", { trace_id: job.trace_id, job_id: job.id, page_id: id, method: job.call.method, op: job.call.command?.op, deadline_ms: job.deadline });
           if (worldSetup(job.call)) {
             // A real delivered, bounded world-build job may block the WASM
             // thread, preventing polls. This is a compute lease, not a heartbeat.
@@ -554,10 +597,18 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
             pageTimer = setTimeout(expire, Math.max(1, job.deadline - Date.now()));
           }
         }
-        send(request, response, 200, { job: job ? { id: job.id, ...job.call, deadline_ms: job.deadline } : null });
+        send(request, response, 200, { job: job ? {
+          id: job.id, ...job.call, deadline_ms: job.deadline,
+          ...(job.diagnostics ? { diagnostics: true, trace_id: job.trace_id } : {}),
+        } : null });
       } else if (pathname === "/__local/call") {
         const call = await readJson(request, response);
         validateCall(call);
+        emitDiagnostic(diagnostics, "local_relay", "call_received", {
+          trace_id: traceId, method: call.method, op: call.command?.op,
+          source_time_s: call.command?.source_time_s, lease_sim_s: call.command?.lease_sim_s,
+          epoch: call.command?.controller_fence?.epoch, term: call.command?.controller_fence?.term,
+        });
         expire();
         const channel = call.method === "capture" ? "capture" : "control";
         if (native) {
@@ -569,8 +620,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
           if (worldSetup(call)) request.socket.setTimeout(timeout + 5000);
           nativePending.set(channel, call);
           try {
-            const result = await native.invoke(call, Date.now() + timeout);
-            validateResult(result, call);
+            const result = await native.invoke(call, Date.now() + timeout, diagnostics);
+            validateResult(result, call, false, diagnostics);
+            emitDiagnostic(diagnostics, "local_relay", "call_finished", { trace_id: traceId, method: call.method, op: call.command?.op, ok: result.ok === true, code: result.code, http_status: 200 });
             if (result.ok === false) result.error = result.error.replaceAll(token, "[redacted]");
             send(request, response, 200, result);
           } finally {
@@ -586,7 +638,8 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         if (response.destroyed || closed) return;
         const timeout = channel === "capture" ? CAPTURE_TIMEOUT_MS
           : worldSetup(call) ? WORLD_CALL_TIMEOUT_MS : CALL_TIMEOUT_MS;
-        const job = { id: randomUUID(), call, channel, page: page.id, request, response, deadline: Date.now() + timeout, delivered: false };
+        const job = { id: randomUUID(), call, channel, page: page.id, request, response, deadline: Date.now() + timeout, delivered: false,
+          diagnostics, trace_id: traceId, started_at: diagnostics ? Date.now() : undefined };
         if (worldSetup(call)) {
           job.previousSocketTimeout = request.socket.timeout ?? 30000;
           request.socket.setTimeout(timeout + 5000);
@@ -607,14 +660,19 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         if (!page || page.id !== id || !job || job.page !== id || !job.delivered || result?.id !== job.id || job.deadline <= Date.now()) {
           throw new HttpError(409, "Stale or expired browser result");
         }
-        validateResult(result, job.call, true);
-        claimPage(id);
+        validateResult(result, job.call, true, job.diagnostics);
+        claimPage(id, diagnostics || job.diagnostics, job.trace_id);
         const envelope = result.ok ? { ok: true, value: result.value }
           : { ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) };
         settle(job, 200, envelope);
         send(request, response, 200, { ok: true });
       }
     } catch (error) {
+      emitDiagnostic(diagnostics, "local_relay", "call_rejected", {
+        trace_id: traceId, http_status: error instanceof HttpError ? error.status : 500,
+        code: error instanceof HttpError ? error.code : undefined,
+        reason: error instanceof HttpError && error.code === "local_busy" ? "in_flight" : "invalid_request",
+      });
       send(request, response, error instanceof HttpError ? error.status : 500, {
         ok: false, error: error instanceof HttpError ? error.message : "Local bridge failed",
         ...(error instanceof HttpError && error.code ? { code: error.code } : {}),

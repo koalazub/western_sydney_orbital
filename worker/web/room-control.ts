@@ -1,5 +1,6 @@
 // The room transports public reports and bounded native commands. It never owns
 // the simulation clock, renderer, camera acquisition or controller watchdog.
+import { diagnosticPageId, diagnosticsEnabled, recordDiagnostic, setNativeDiagnostics, snapshotDiagnostics } from "./diagnostics.ts";
 export type RoomEngine = {
   observation: () => string;
   telemetry_status: () => string;
@@ -8,6 +9,9 @@ export type RoomEngine = {
   renderer_status: () => string;
   ship_camera_status: () => string;
   control: (json: string) => string;
+  camera_status?: () => string;
+  set_presentation_diagnostics?: (enabled: boolean) => void;
+  presentation_diagnostics?: () => string;
 };
 type Build = { bytes: number; sha256: string };
 type NativeErrorCode = "stale_context" | "command_expired" | "sensor_unavailable" | "sensor_no_sample";
@@ -138,6 +142,8 @@ function runCall(
   build: Build,
   call: Record<string, unknown>,
   execution: Execution = { commandInvoked: false, engineFailed: false },
+  diagnostics = false,
+  trace: { id?: string; page_id?: string } = {},
 ): Result {
   try {
     if (!record(call) || call.version !== 1) invalid("Unsupported room call version");
@@ -151,12 +157,13 @@ function runCall(
       || typeof build.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(build.sha256)) invalid("Verified engine build is unavailable");
     const json = JSON.stringify(call);
     if (encoder.encode(json).byteLength > CALL_LIMIT) invalid("Room call exceeds the input limit");
+    setNativeDiagnostics(api, diagnostics);
     if (call.method === "snapshot") {
       const read = (getter: () => string) => {
         if (Date.now() >= (call.deadline_ms as number)) invalid("Room snapshot expired before its next report");
         return nativeReport(getter());
       };
-      const value = {
+      const value: Record<string, unknown> = {
         observation: read(() => api.observation()),
         telemetry: read(() => api.telemetry_status()),
         navigation: read(() => api.navigation_status()),
@@ -165,20 +172,30 @@ function runCall(
         engine_build: { bytes: build.bytes, sha256: build.sha256 },
         cameras: read(() => api.ship_camera_status()),
       };
+      // The outer transport opt-in is not part of the exact v1 call body. A URL
+      // logging flag alone must not change snapshots for older strict servers.
+      if (diagnostics === true) value.diagnostics = snapshotDiagnostics(api, trace.page_id ?? diagnosticPageId());
       if (encoder.encode(JSON.stringify(value)).byteLength > REPORT_LIMIT) throw new Error("Native report unavailable");
       return { ok: true, value };
     }
     const request = JSON.stringify(call.command);
     if (Date.now() >= (call.deadline_ms as number)) invalid("Room call expired before engine invocation");
     execution.commandInvoked = true;
+    recordDiagnostic("room.invoked", () => ({ ...trace, diagnostics, method: "command", op: (call.command as Record<string, unknown>).op,
+      source_time_s: (call.command as Record<string, unknown>).source_time_s, lease_sim_s: (call.command as Record<string, unknown>).lease_sim_s }));
     const result = nativeReport(api.control(request));
-    if (result.ok === false) return nativeRejection(result);
+    if (result.ok === false) {
+      recordDiagnostic("room.native_rejection", () => ({ ...trace, diagnostics, code: result.code, command_invoked: true }));
+      return nativeRejection(result);
+    }
     if (result.ok !== true) throw new Error("Native acknowledgement unavailable");
     // Play is queued by the real engine. This ACK does not assert it has run.
+    recordDiagnostic("room.ack", () => ({ ...trace, diagnostics, method: "command", ok: true, command_invoked: true }));
     return { ok: true, value: { ok: true } };
   } catch (error) {
     if (execution.commandInvoked) {
       execution.engineFailed = true;
+      recordDiagnostic("room.indeterminate", () => ({ ...trace, diagnostics, command_invoked: true, no_retry: true }));
       return { ok: false, error: "Native engine command failed. Outcome is indeterminate. Inspect live state before further control." };
     }
     if (error instanceof CallError) return { ok: false, error: error.message };
@@ -187,8 +204,8 @@ function runCall(
   }
 }
 
-export function executeRoomCall(api: RoomEngine, build: Build, call: Record<string, unknown>): Result {
-  return runCall(api, build, call);
+export function executeRoomCall(api: RoomEngine, build: Build, call: Record<string, unknown>, diagnostics = false): Result {
+  return runCall(api, build, call, undefined, diagnostics === true);
 }
 
 function socketUrl(connection: Connection, pageOrigin: string | undefined): URL {
@@ -219,13 +236,18 @@ export function connectRoom(
   // shipped page always uses its own location, never an origin from the link.
   pageOrigin: string | undefined = typeof location === "undefined" ? undefined : location.origin,
 ): { disconnect: () => void } {
+  let pageId = diagnosticPageId();
   const notify = (status: string, error?: string) => {
     try { report(status, error); } catch { /* Status rendering cannot interrupt socket cleanup. */ }
+    // Keep the bounded event budget for actual owner grants and calls rather
+    // than repeating connecting/claiming/connected beside their protocol event.
+    if (!["connecting", "claiming", "connected"].includes(status)) recordDiagnostic("room.status", () => ({ page_id: pageId, status }));
   };
   let socket: WebSocket;
   try {
     const actualOrigin = typeof location === "undefined" ? pageOrigin : location.origin;
     socket = new WebSocket(socketUrl(connection, actualOrigin), ["wsorb", `auth.${connection.key}`]);
+    recordDiagnostic("room.connect", { page_id: pageId });
   } catch {
     notify("error", "Room connection could not open. Use a same-origin room on HTTPS or local loopback.");
     return { disconnect() {} };
@@ -245,12 +267,13 @@ export function connectRoom(
     const release = ownsHost;
     ownsHost = false;
     if (release && socket.readyState === WebSocket.OPEN) {
-      try { socket.send(JSON.stringify({ type: "release-host" })); } catch { /* Close still releases the room host. */ }
+      try { socket.send(JSON.stringify({ type: "release-host", diagnostics: diagnosticsEnabled() })); } catch { /* Close still releases the room host. */ }
     }
     try { socket.close(code, "Room control stopped"); } catch { /* The socket may already be gone. */ }
     // Never release native control, pause, reset or otherwise change the flight.
     // The native watchdog, not this socket, expires abandoned actuation.
     notify(status, error);
+    recordDiagnostic("room.no_retry", () => ({ page_id: pageId, status, no_retry: true, owner: release }));
   };
   const pagehide = () => stop("disconnected", "This page left the room. Reconnection requires explicit consent.");
   const send = (value: Record<string, unknown>) => {
@@ -280,22 +303,28 @@ export function connectRoom(
         return;
       }
       clientId = message.clientId;
+      pageId = clientId;
+      recordDiagnostic("room.welcome", () => ({ page_id: pageId, client_id: clientId, host_id: message.hostId }));
       if (message.hostId !== null && message.hostId !== clientId) {
+        recordDiagnostic("room.conflict", () => ({ page_id: pageId, client_id: clientId, host_id: message.hostId, owner: false, no_retry: true }));
         stop("conflict", "Another browser already owns this room. Its host was not replaced.", 4008);
         return;
       }
       claiming = true;
-      try { send({ type: "claim-host" }); }
+      try { send({ type: "claim-host", diagnostics: diagnosticsEnabled() }); }
       catch { stop("error", "Room host claim could not be sent."); return; }
+      recordDiagnostic("room.claim", () => ({ page_id: pageId, client_id: clientId }));
       notify("claiming");
     } else if (message.type === "host") {
       if (!clientId || !claiming) {
         stop("error", "Room host grant arrived before this browser claimed it.", 4008);
       } else if (message.hostId !== clientId) {
         ownsHost = false;
+        recordDiagnostic("room.conflict", () => ({ page_id: pageId, client_id: clientId, host_id: message.hostId, owner: false, no_retry: true }));
         stop("conflict", "This browser does not own the room. No takeover was attempted.", 4008);
       } else {
         ownsHost = true;
+        recordDiagnostic("room.owner", () => ({ page_id: pageId, client_id: clientId, host_id: message.hostId, owner: true }));
         notify("connected");
       }
     } else if (message.type === "execute") {
@@ -308,6 +337,7 @@ export function connectRoom(
         return;
       }
       if (seen.has(message.id)) {
+        recordDiagnostic("room.duplicate", () => ({ page_id: pageId, id: message.id, diagnostics: message.diagnostics === true, duplicate: true, no_retry: true }));
         stop("error", "Duplicate room call ID. The repeated call was not invoked.", 4008);
         return;
       }
@@ -322,15 +352,25 @@ export function connectRoom(
         }
       }
       seen.set(message.id, Date.now() + MAX_DEADLINE_MS);
+      const diagnostics = message.diagnostics === true;
+      recordDiagnostic("room.received", () => ({ page_id: pageId, id: message.id, diagnostics,
+        method: (message.command as Record<string, unknown>)?.method }));
       const execution: Execution = { commandInvoked: false, engineFailed: false };
       const engineReady = ready();
       const result: Result = engineReady
-        ? runCall(api, build, message.command as Record<string, unknown>, execution)
+        ? runCall(api, build, message.command as Record<string, unknown>, execution, diagnostics, { id: message.id, page_id: pageId })
         : { ok: false, error: "Browser engine is not ready; no command was invoked." };
       anyCommandInvoked ||= execution.commandInvoked;
       seen.set(message.id, Date.now() + MAX_DEADLINE_MS);
-      try { send({ type: "result", id: message.id, ...result }); }
+      try {
+        send({ type: "result", id: message.id, ...result });
+        recordDiagnostic("room.result_sent", () => ({ page_id: pageId, id: message.id, diagnostics, ok: result.ok,
+          command_invoked: execution.commandInvoked, engine_failed: execution.engineFailed }));
+      }
       catch {
+        recordDiagnostic(execution.commandInvoked ? "room.indeterminate" : "room.no_retry", () => ({
+          page_id: pageId, id: message.id, diagnostics, command_invoked: execution.commandInvoked, no_retry: true,
+        }));
         stop(execution.commandInvoked ? "indeterminate" : "error", execution.commandInvoked
           ? "Command result could not be sent. Outcome is indeterminate. Inspect live state before further control."
           : "Room result could not be sent; no command was invoked for this call.");
