@@ -18,9 +18,11 @@ from wsorb.room_api import (
     DEFAULT_ORIGIN,
     MAX_ADMISSION_MS,
     MAX_TIMEOUT_MS,
+    USER_AGENT,
     RoomApiError,
     RoomSimulation,
     _descriptor,
+    _http_client,
     _origin,
     _reserve_descriptor,
     _room_call,
@@ -67,6 +69,14 @@ def test_descriptor_is_private_explicit_and_does_not_connect_on_load(tmp_path):
     assert not (tmp_path / "wsorb-room.json").exists()
     with pytest.raises(TypeError):
         RoomSimulation.from_file()
+
+
+def test_creation_and_rpc_http_client_identifies_the_application_not_a_browser():
+    value = _credentials()
+    client = RoomSimulation(value["url"], value["room_id"], value["token"])
+    assert USER_AGENT.startswith("wsorb-controller/")
+    assert _http_client().addheaders == client._http.addheaders == [("User-Agent", USER_AGENT)]
+    assert value["token"] not in str(client._http.addheaders)
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o660, 0o700, 0o400, 0o000])

@@ -31,6 +31,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
+from . import __version__
 from .local_api import (
     MAX_RESPONSE_BYTES,
     LocalApiError,
@@ -43,6 +44,7 @@ from .local_api import (
 )
 
 DEFAULT_ORIGIN = "https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev"
+USER_AGENT = f"wsorb-controller/{__version__}"
 MAX_DESCRIPTOR_BYTES = 8192
 MAX_TIMEOUT_MS = 30_000
 MAX_ADMISSION_MS = 10_000
@@ -215,7 +217,11 @@ def _reserve_descriptor(path: Path) -> Iterator[tuple[TextIO, os.stat_result]]:
 
 def _http_client():
     # Reuse handlers, but never proxy a bearer capability or follow a redirect.
-    return build_opener(ProxyHandler({}), _NoRedirects())
+    client = build_opener(ProxyHandler({}), _NoRedirects())
+    # Cloudflare-managed workers.dev rejects the default Python-urllib signature.
+    # Identify this application honestly, never pretend to be a web browser.
+    client.addheaders = [("User-Agent", USER_AGENT)]
+    return client
 
 
 def _post_json(http, request: Request, *, timeout_s: float, expected_status: int) -> dict[str, Any]:
