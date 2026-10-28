@@ -184,6 +184,23 @@ This script uses authenticated HTTP calls and the same portable numeric controll
 
 The final JSON reports actual native arrival, range, speed, damage, fuel, score and source/configuration diagnostics. A run succeeds only on native mission success with the unchanged stock arrival/damage limits. L1 command effort is labelled as a proxy, not fuel. No report files are written automatically. To inspect an existing local flight instead, supply an explicit `--connection-file`; it is never implicitly reset, tuned or used for comparison.
 
+### Watch Python fly the hosted game
+
+Python runs privately on your machine. The Cloudflare room relays authenticated calls to the real WASM engine in your browser; it does not run a Python kernel or publish the controller's source.
+
+```sh
+devenv shell uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
+```
+
+Open the private browser link printed by this command in a new tab, then choose **Allow Python connection**. This starts a separate game; leave existing flights open. Keep the new game visible in a separate window. Inspect first, then explicitly start the same portable checkpoint policy:
+
+```sh
+devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json
+devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json --run --progress
+```
+
+Keep the link and connection file private. A room cannot replace an already connected owner. Room calls read fresh public observations, not saved room state or hidden debris truth. Flight control uses the native ownership fence and original-source expiring commands. A disconnect never retries thrust, resets the game or extends a decision's validity. Manual ship input or pausing ends the run. The hosted bridge deliberately excludes reset, tuning, raw latched thrust and private local-lab endpoints. Network latency may exhaust a lease and end an attempt; this connection is not STP runtime validation.
+
 ### Run from the notebook
 
 In the notebook:

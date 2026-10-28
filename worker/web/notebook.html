@@ -31,6 +31,12 @@
       <p>Keep the game visible in a separate window. In the notebook, use <strong>Connect</strong> to show Python guidance, then <strong>Run controller</strong> when you want it to fly. Live tuning does not reset the current flight.</p>
       <p>If the editor is still unavailable, check its output with <code>devenv processes logs lab</code>. Keep its login token private.</p>
       <p>You can return to your existing game window without closing or resetting its simulation.</p>
+      <h2>Fly the hosted game with Python</h2>
+      <p>The hosted game can connect to a private Python process on your machine through an authenticated room. Create a room from your repository directory:</p>
+      <pre><code>devenv shell uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json</code></pre>
+      <p>Open the private link it prints in a new tab and choose <strong>Allow Python connection</strong>. This starts a separate game; leave existing flights open. Keep the new game visible in a separate window, then run:</p>
+      <pre><code>devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json --run --progress</code></pre>
+      <p>This flies the portable checkpoint policy, not the notebook's default route policy. No flight is reset or tuned. Keep the link and connection file private. Your Python source is not uploaded. Manual ship input or pausing ends the run; a network delay can expire a command and end the attempt.</p>
     </main>
   </body>
 </html>

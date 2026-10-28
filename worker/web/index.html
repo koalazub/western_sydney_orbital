@@ -39,6 +39,19 @@
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
+    <section id="python-room" class="python-room" aria-label="Python connection" hidden>
+      <p id="python-room-status" role="status"></p>
+      <button id="disconnect-python" type="button" aria-keyshortcuts="Shift+Escape" hidden>Disconnect Python</button>
+    </section>
+    <dialog id="python-permission" aria-labelledby="python-permission-title" aria-describedby="python-permission-detail">
+      <h2 id="python-permission-title">Connect your Python controller?</h2>
+      <p id="python-permission-detail">This private room link lets Python read this game's public sensors, claim control and fly the lander with expiring commands. Your Python code stays on your machine. Python can control this flight only after you allow the connection and start the script.</p>
+      <p>Keep this game visible. Manual ship input or pausing ends the controller's run. Connecting does not reset or tune this flight.</p>
+      <form method="dialog">
+        <button value="cancel" type="submit" autofocus>Keep manual control</button>
+        <button value="allow" type="submit">Allow Python connection</button>
+      </form>
+    </dialog>
   </main>
   <script type="module" src="/app.js"></script>
 </body>

@@ -4,7 +4,8 @@ import { engineManifest, loadVerifiedEngine, type EngineLoadTimings } from "./en
 import planetaryAssets from "./assets/asset-manifest.json";
 import { createEngineCanvas, graphicsPreflight } from "./graphics.ts";
 import { diagnoseStartupFailure, showStartupFailure } from "./startup-errors.ts";
-type Engine = {
+import { connectRoom, type RoomEngine } from "./room-control.ts";
+type Engine = RoomEngine & {
   default: (options: unknown) => Promise<unknown>;
   start_simulation: (selector: string) => void;
   renderer_status: () => string;
@@ -62,6 +63,7 @@ type ScaleGesture = Event & { scale: number };
 type GPUPreflight = Awaited<ReturnType<typeof graphicsPreflight>>;
 
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const roomConnection = readRoomConnection();
 const canvas = createEngineCanvas();
 const viewport = byId<WebKitElement>("simulation-viewport");
 const boot = byId<HTMLElement>("boot-screen");
@@ -135,6 +137,83 @@ const movementHeld = new Set<string>();
 const BINDINGS_STORAGE = "wsorb.ship-bindings.v1";
 let bindingRevision: number | undefined;
 let bindingsCapturing = false;
+
+function readRoomConnection(): { origin: string; id: string; key: string } | null {
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  if (!fragment.has("room") && !fragment.has("key")) return null;
+  // The capability belongs only to this page's memory, not browser history,
+  // HTTP requests, diagnostics, local storage or notebook navigation.
+  history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+  const id = fragment.get("room") ?? "";
+  const key = fragment.get("key") ?? "";
+  if (location.protocol !== "https:" || fragment.getAll("room").length !== 1 || fragment.getAll("key").length !== 1
+    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)
+    || !/^[A-Za-z0-9_-]{43}$/.test(key)) return { origin: location.origin, id: "", key: "" };
+  return { origin: location.origin, id, key };
+}
+
+function offerPythonConnection() {
+  if (!roomConnection || !engine || !engineBuild) return;
+  const panel = byId("python-room");
+  const text = byId("python-room-status");
+  const disconnect = byId<HTMLButtonElement>("disconnect-python");
+  const permission = byId<HTMLDialogElement>("python-permission");
+  panel.hidden = false;
+  if (!roomConnection.id || !roomConnection.key) {
+    text.textContent = "This Python room link is invalid. Open the private HTTPS link printed by wsorb room create.";
+    return;
+  }
+  text.textContent = "Python is not connected. Choose whether to allow this private room.";
+  permission.addEventListener("close", () => {
+    canvas.focus({ preventScroll: true });
+    if (permission.returnValue !== "allow") {
+      text.textContent = "Python connection declined. The game stays under manual control.";
+      return;
+    }
+    const loaded = engine;
+    const build = engineBuild;
+    if (!loaded || !build || failed) {
+      text.textContent = "The game is no longer ready. No Python connection was opened.";
+      return;
+    }
+    try {
+      const session = connectRoom(roomConnection, loaded, build, (status, error) => {
+        const messages: Record<string, string> = {
+          connecting: "Connecting to your private Python room.",
+          claiming: "Requesting this room's browser ownership. An existing owner will not be replaced.",
+          connected: "Python room connected. Start wsorb checkpoint with your private room file to fly. Shift+Esc disconnects.",
+          conflict: "Another browser owns this room. It was not replaced.",
+          error: "Python room stopped. No call is retried.",
+          indeterminate: "Python room stopped. A command's outcome is unknown. Inspect the actual flight before reconnecting.",
+          disconnected: "Python room disconnected. No commands are retried. Native thrust expires on its original simulation-time lease.",
+        };
+        text.textContent = messages[status] ?? "Python room stopped. Inspect the game before reconnecting.";
+        if (error) text.textContent += ` ${error}`;
+        disconnect.hidden = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
+      }, () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true);
+      const disconnectRoom = () => {
+        session.disconnect();
+        disconnect.hidden = true;
+        canvas.focus({ preventScroll: true });
+      };
+      disconnect.addEventListener("click", disconnectRoom, { once: true });
+      // Tab belongs to the native HUD while the canvas has focus. Keep the
+      // platform disconnect available without trapping keyboard-only users.
+      window.addEventListener("keydown", event => {
+        if (disconnect.hidden || event.repeat || event.code !== "Escape" || !event.shiftKey
+          || event.ctrlKey || event.metaKey || event.altKey) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        disconnectRoom();
+      }, { capture: true });
+      addEventListener("pagehide", () => session.disconnect(), { once: true });
+    } catch {
+      text.textContent = "The private Python room could not connect. No flight command was sent.";
+      disconnect.hidden = true;
+    }
+  }, { once: true });
+  permission.showModal();
+}
 
 function syncBindings(persist = true) {
   if (!engine) return;
@@ -761,6 +840,7 @@ async function start() {
     // Loading may finish after the user has moved to another tab or HTML control.
     if (document.hasFocus() && !document.hidden && pageBackgroundFocused()) canvas.focus({ preventScroll: true });
     inputState();
+    offerPythonConnection();
   } catch (error) {
     fail(error);
   }
