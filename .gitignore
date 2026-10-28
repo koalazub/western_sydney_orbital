@@ -7,6 +7,17 @@ dist/
 build/
 .uv-cache/
 
+# Local IDE settings and editor state
+.idea/
+*.iml
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
 # Test and lint caches
 .pytest_cache/
 .ruff_cache/
