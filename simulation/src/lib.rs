@@ -5,6 +5,7 @@ mod app;
 pub mod astrophysics;
 mod camera;
 mod controls;
+mod diagnostics;
 pub mod domain;
 mod headless;
 mod hud;
@@ -92,6 +93,18 @@ pub fn observation() -> String {
 #[wasm_bindgen]
 pub fn renderer_status() -> String {
     app::status()
+}
+
+/// Opt-in, read-only main-world transform diagnostics. Disabling drops the cache.
+#[wasm_bindgen]
+pub fn set_presentation_diagnostics(enabled: bool) {
+    diagnostics::set_enabled(enabled);
+}
+
+/// Cached ECS observations, not GPU pixels or proof of a presented frame.
+#[wasm_bindgen]
+pub fn presentation_diagnostics() -> String {
+    diagnostics::status()
 }
 
 #[wasm_bindgen]

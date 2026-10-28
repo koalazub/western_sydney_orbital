@@ -649,6 +649,7 @@ pub fn start(canvas_selector: &str) -> Result<(), JsValue> {
             crate::session::advance_world.in_set(EngineSet::Runtime),
         )
         .add_systems(Update, crate::scene::sync_scene.in_set(EngineSet::Scene));
+    crate::diagnostics::install(&mut app);
     crate::camera::install(&mut app);
     crate::sensors::install(&mut app);
     crate::navigation::install(&mut app);

@@ -6,7 +6,7 @@ mod presentation;
 mod systems;
 mod textures;
 
-pub(crate) use model::PlanetarySurface;
+pub(crate) use model::{AssetVisual, PlanetarySurface};
 
 pub(crate) use presentation::{
     IlluminationMode, VisualAction, VisualSettings, request_visual_action, visual_settings,
