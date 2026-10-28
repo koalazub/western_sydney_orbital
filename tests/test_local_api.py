@@ -439,7 +439,7 @@ def test_error_parsing_only_classifies_explicit_predispatch_contention_as_busy()
 
 
 @contextmanager
-def _running_local_server(tmp_path, *, headless=False):
+def _running_local_server(tmp_path, *, headless=False, diagnostic_output=None, diagnostics=False):
     node = shutil.which("node")
     if node is None or not (ROOT / "worker/public/index.html").is_file():
         pytest.skip("The real local transport check needs Node and assets from just build")
@@ -454,6 +454,7 @@ def _running_local_server(tmp_path, *, headless=False):
             "WSORB_HEADLESS": "1" if headless else "0",
             "WSORB_LOCAL_CONNECTION": str(connection),
             "WSORB_LAB_TOKEN_FILE": str(tmp_path / "marimo.token"),
+            "WSORB_DIAGNOSTICS": "1" if diagnostics else "0",
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -482,6 +483,8 @@ def _running_local_server(tmp_path, *, headless=False):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        if diagnostic_output is not None:
+            diagnostic_output.append(process.stdout.read())
         process.stdout.close()
         process.stderr.close()
     assert not connection.exists(), "Shutdown should remove its own connection descriptor"
