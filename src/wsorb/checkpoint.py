@@ -1,9 +1,10 @@
-"""Opt-in checkpoint attempts through the authenticated local simulation API.
+"""Opt-in checkpoint attempts through authenticated local or hosted public APIs.
 
 ``python -m wsorb.checkpoint --isolated`` inspects one fresh, paused real WASM
 world. Add ``--run`` to claim control and fly. ``--policy compare --run`` uses
 two separate owned servers, never a reset. An explicit ``--connection-file``
-selects one existing flight; it is never configured, reset or tuned here.
+selects one existing local flight. ``--room-file`` selects a hosted room's live
+public RPC instead. Existing flights are never configured, reset or tuned here.
 
 The numeric controller is the same STPCheckpointController used by the licensed
 example. This transport is not spaceteams, SDK emulation or physics-parity
@@ -40,6 +41,7 @@ from .local_api import (
     controller_fence,
     validate_experiment_settings,
 )
+from .room_api import RoomSimulation
 
 if TYPE_CHECKING:
     from .control_contract import ControlSample
@@ -51,6 +53,8 @@ MAX_OUTPUT_BYTES = 64 * 1024
 _KNOWN_UNAPPLIED = (LocalBusyError, StaleContextError, CommandExpiredError)
 _COHORT_FIELDS = ("trial_revision", "tuning_revision", "manual_interventions", "seed")
 _OWNED_CLIENTS: weakref.WeakSet[LocalSimulation] = weakref.WeakSet()
+_LOCAL_SOURCE = "local_public_snapshot"
+_ROOM_SOURCE = "hosted_room_public_snapshot"
 _WORLD_FIELDS = (
     "flight_preset",
     "launch_site_direction",
@@ -79,6 +83,7 @@ class CheckpointOptions:
 
     isolated: bool = False
     connection_file: Path | None = None
+    room_file: Path | None = None
     run: bool = False
     policy: str = "baseline"
     duration_s: float = 1800.0
@@ -93,13 +98,18 @@ class CheckpointOptions:
                 raise CheckpointError(
                     "invalid_options", "Consent and scope flags must be booleans."
                 )
-        if self.connection_file is not None:
-            if not isinstance(self.connection_file, (str, Path)) or not str(self.connection_file):
-                raise CheckpointError("invalid_options", "An explicit connection file is required.")
-            object.__setattr__(self, "connection_file", Path(self.connection_file))
-        if self.isolated == (self.connection_file is not None):
+        for name in ("connection_file", "room_file"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, (str, Path)) or not str(value):
+                    raise CheckpointError(
+                        "invalid_options", "An explicit private file is required."
+                    )
+                object.__setattr__(self, name, Path(value))
+        if sum((self.isolated, self.connection_file is not None, self.room_file is not None)) != 1:
             raise CheckpointError(
-                "invalid_options", "Select --isolated or one explicit --connection-file, not both."
+                "invalid_options",
+                "Select exactly one of --isolated, --connection-file or --room-file.",
             )
         if self.policy not in ("baseline", "body-axis", "compare"):
             raise CheckpointError("invalid_options", "Unknown checkpoint policy.")
@@ -142,6 +152,7 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
     scope.add_argument(
         "--connection-file", type=Path, help="inspect or fly one existing local trial"
     )
+    scope.add_argument("--room-file", type=Path, help="inspect or fly one connected hosted room")
     parser.add_argument("--run", action="store_true", help="explicitly claim control and fly")
     parser.add_argument(
         "--policy", choices=("baseline", "body-axis", "compare"), default="baseline"
@@ -296,7 +307,9 @@ def native_success(snapshot: Mapping[str, Any]) -> bool:
     )
 
 
-def sample_from_snapshot(snapshot: Mapping[str, Any]) -> ControlSample:
+def sample_from_snapshot(
+    snapshot: Mapping[str, Any], *, source_kind: str = _LOCAL_SOURCE
+) -> ControlSample:
     """Copy genuine public navigation, preserving its native active/frame provenance.
 
     No missing navigation is filled from other reports. Only mass and inertia
@@ -305,6 +318,8 @@ def sample_from_snapshot(snapshot: Mapping[str, Any]) -> ControlSample:
     """
     from .control_contract import ControlSample, checked_sample, radar_rows, scalar
 
+    if source_kind not in (_LOCAL_SOURCE, _ROOM_SOURCE):
+        raise CheckpointError("source_contract", "Unsupported public API source label.")
     observation = _observation(snapshot)
     if (
         observation.get("rotation_convention") != "active_xyzw"
@@ -352,7 +367,7 @@ def sample_from_snapshot(snapshot: Mapping[str, Any]) -> ControlSample:
             fuel_used_kg=observation["mission"]["fuel_used_kg"],
             damage_j=observation["mission"]["damage"],
             frame=observation["frame"],
-            source_kind="local_public_snapshot",
+            source_kind=source_kind,
         )
         return checked_sample(sample)
     except (KeyError, TypeError, ValueError, OverflowError, np.linalg.LinAlgError) as error:
@@ -476,12 +491,41 @@ def isolated_simulation(*, deadline: float | None = None) -> Iterator[LocalSimul
                         process.wait(timeout=5)
 
 
+def _source_kind(client: LocalSimulation) -> str:
+    return _ROOM_SOURCE if isinstance(client, RoomSimulation) else _LOCAL_SOURCE
+
+
+def _engine_build_matches_expected(snapshot: Mapping[str, Any]) -> bool:
+    """Match the owner RPC's build receipt to this checkout's expected manifest."""
+    try:
+        expected = json.loads((ROOT / "worker/public/sim/manifest.json").read_text())
+        return (
+            isinstance(expected, dict)
+            and isinstance(expected.get("sha256"), str)
+            and len(expected["sha256"]) == 64
+            and all(char in "0123456789abcdef" for char in expected["sha256"])
+            and type(expected.get("bytes")) is int
+            and expected["bytes"] > 0
+            and snapshot.get("engine_build") == expected
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _validation_scope(client: LocalSimulation, *, owned: bool = False) -> str:
+    if owned:
+        return "fresh_owned_stock_trial"
+    if isinstance(client, RoomSimulation):
+        return "existing_hosted_room_trial_not_pristine_replay"
+    return "existing_external_local_trial_not_pristine_replay"
+
+
 def inspect_trial(client: LocalSimulation, *, policy: str = "baseline") -> dict[str, Any]:
     """Read-only inspection. Never claim, command, Play, configure, reset or tune."""
     snapshot = client.snapshot()
     eligible = True
     try:
-        sample_from_snapshot(snapshot)
+        sample_from_snapshot(snapshot, source_kind=_source_kind(client))
     except CheckpointError:
         eligible = False
     return {
@@ -489,6 +533,9 @@ def inspect_trial(client: LocalSimulation, *, policy: str = "baseline") -> dict[
         "state": "read_only",
         "policy": policy,
         "actuation_permitted": False,
+        "source_kind": _source_kind(client),
+        "validation_scope": _validation_scope(client),
+        "engine_build_matches_expected": _engine_build_matches_expected(snapshot),
         "native_input_eligible": eligible,
         "stock_world": _stock_world(snapshot),
         "measurement": native_measurement(snapshot),
@@ -658,6 +705,12 @@ def run_trial(
     deadline = min(deadline or math.inf, origin_wall + options.wall_budget_s)
     initial = client.snapshot()
     world = world_metadata(initial)
+    if isinstance(client, RoomSimulation) and not _engine_build_matches_expected(initial):
+        raise CheckpointError(
+            "engine_build_mismatch",
+            "Hosted engine receipt does not match this checkout's expected build manifest; "
+            "no control was claimed.",
+        )
     if expected_world is not None and world != expected_world:
         raise CheckpointError("comparison_mismatch", "Fresh trial metadata/build does not match.")
     if not _stock_world(initial):
@@ -685,7 +738,7 @@ def run_trial(
         "state": "starting",
         "policy": policy,
         "policy_config": asdict(config),
-        "source_kind": "local_public_snapshot",
+        "source_kind": _source_kind(client),
         "frame": observation.get("frame"),
         "rotation_convention": "active_xyzw",
         "radar_clock_offset_basis": "native radar_clock=simulation_elapsed_seconds contract",
@@ -693,11 +746,7 @@ def run_trial(
         "initial_world": world,
         "stock_world": True,
         "fresh_owned_trial": owned,
-        "validation_scope": (
-            "fresh_owned_stock_trial"
-            if owned
-            else "existing_external_local_trial_not_pristine_replay"
-        ),
+        "validation_scope": _validation_scope(client, owned=owned),
         "lease_sim_s": LEASE_SIM_S,
         "cadence_hz": options.cadence_hz,
         "duration_limit_s": options.duration_s,
@@ -761,7 +810,7 @@ def run_trial(
                 expect_running, awaiting_play = True, False
             if not owned and current["runtime"].get("rate") != 1:
                 raise CheckpointError("external_rate", "External playback rate changed; yielding.")
-            sample = sample_from_snapshot(current)
+            sample = sample_from_snapshot(current, source_kind=_source_kind(client))
             compute_started = time.monotonic()
             accel, angular = controller.command(
                 sample, observation["radar"], now_elapsed_time_s=now
@@ -890,7 +939,7 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
     if os.name != "posix":
         raise CheckpointError(
             "private_backend_platform",
-            "Run the private API backend and this command inside WSL2 on its Linux filesystem. "
+            "Run this command and any private local backend inside WSL2 on its Linux filesystem. "
             "Windows file modes are not verified NTFS ACL protection. "
             "The prebuilt browser game and platform probe do not require this private backend.",
         )
@@ -901,8 +950,13 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
         "mode": "run" if options.run else "read_only",
         "policy": options.policy,
         "isolated": options.isolated,
+        "transport": "hosted_room_public_API" if options.room_file else "local_private_API",
         "official_server_execution": "not_performed_here",
-        "execution_kind": "authenticated_local_API_validation_not_SDK_emulation_or_physics_parity",
+        "execution_kind": (
+            "authenticated_hosted_room_public_API_not_SDK_emulation_or_physics_parity"
+            if options.room_file
+            else "authenticated_local_API_validation_not_SDK_emulation_or_physics_parity"
+        ),
         "automatic_report_files": False,
         "trials": [],
     }
@@ -931,7 +985,11 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
                     )
             else:
                 # No implicit default descriptor or environment-selected endpoint.
-                client = LocalSimulation.from_file(options.connection_file, timeout_s=2.0)
+                client = (
+                    RoomSimulation.from_file(options.room_file, timeout_s=2.0)
+                    if options.room_file is not None
+                    else LocalSimulation.from_file(options.connection_file, timeout_s=2.0)
+                )
                 trial = (
                     run_trial(client, options, policy=policy, deadline=deadline)
                     if options.run

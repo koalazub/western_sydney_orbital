@@ -31,6 +31,7 @@ from wsorb.checkpoint import (
     world_metadata,
 )
 from wsorb.local_api import LocalSimulation
+from wsorb.room_api import RoomSimulation
 
 
 def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connection():
@@ -38,6 +39,7 @@ def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connecti
     assert options.run is False
     assert options.policy == "baseline"
     assert options.connection_file is None
+    assert options.room_file is None
     assert options.playback_rate == 1
     assert options.duration_s <= 1800
     assert options.wall_budget_s <= 3600
@@ -58,6 +60,67 @@ def test_external_scope_is_explicit_single_trial_and_does_not_change_playback_ra
     ):
         with pytest.raises(CheckpointError):
             parse_args(argv)
+
+
+def test_hosted_room_scope_is_explicit_read_only_and_cannot_change_rate_or_compare():
+    options = parse_args(["--room-file", "private-room.json"])
+    assert str(options.room_file) == "private-room.json"
+    assert options.connection_file is None
+    assert not options.isolated and not options.run
+    assert options.playback_rate == 1
+    assert parse_args(["--room-file", "private-room.json", "--run"]).run is True
+    for extra in (
+        ["--connection-file", "private-local.json"],
+        ["--isolated"],
+        ["--run", "--policy", "compare"],
+        ["--run", "--playback-rate", "5"],
+        ["--allow-loopback"],
+    ):
+        with pytest.raises(CheckpointError):
+            parse_args(["--room-file", "private-room.json", *extra])
+    for conflicting in (
+        {"isolated": True, "room_file": "room.json"},
+        {"connection_file": "local.json", "room_file": "room.json"},
+    ):
+        with pytest.raises(CheckpointError, match="exactly one"):
+            CheckpointOptions(**conflicting)
+
+
+def test_hosted_reusable_actuation_also_requires_explicit_consent_without_http():
+    import uuid
+
+    client = RoomSimulation("https://127.0.0.1:1", str(uuid.uuid4()), secrets.token_urlsafe(32))
+    with pytest.raises(CheckpointError, match="--run"):
+        run_trial(client, CheckpointOptions(room_file="room.json"), policy="baseline")
+
+
+def test_hosted_checkpoint_never_loads_an_http_test_descriptor_or_echoes_its_credential(
+    tmp_path, capsys
+):
+    import uuid
+
+    path = tmp_path / "room.json"
+    token = secrets.token_urlsafe(32)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "url": "http://127.0.0.1:1",
+                "room_id": str(uuid.uuid4()),
+                "token": token,
+            }
+        )
+    )
+    path.chmod(0o600)
+    assert main(["--room-file", str(path)]) == 1
+    captured = capsys.readouterr()
+    assert token not in captured.out + captured.err
+    result = json.loads(captured.out)
+    assert result["mode"] == "read_only"
+    assert result["transport"] == "hosted_room_public_API"
+    assert "hosted_room_public_API" in result["execution_kind"]
+    assert result["official_server_execution"] == "not_performed_here"
+    assert result["trials"][0]["error"]["code"] == "setup_failed"
 
 
 def test_comparison_requires_separate_owned_worlds_and_explicit_actuation_consent():
@@ -141,6 +204,30 @@ def test_original_granted_epoch_term_and_world_are_required_by_pure_consent_guar
     metadata["observation"]["manual_interventions"] = 1
     with pytest.raises(CheckpointError):
         _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+
+
+def test_expected_engine_build_is_part_of_the_original_world_guard():
+    from wsorb.checkpoint import _engine_build_matches_expected
+
+    fence = {"epoch": 7, "term": 9, "run_id": "consented_run", "controller_id": "writer"}
+    metadata = {
+        "observation": {
+            "time_s": 4.0,
+            "trial_revision": 1,
+            "tuning_revision": 2,
+            "manual_interventions": 0,
+            "seed": 100,
+            "control_authority": {**fence, "status": "active"},
+        },
+        "runtime": {"running": True},
+        "engine_build": {"sha256": "a" * 64, "bytes": 1},
+    }
+    original = world_metadata(metadata)
+    metadata["engine_build"] = {"sha256": "b" * 64, "bytes": 1}
+    with pytest.raises(CheckpointError, match="Original flight/cohort"):
+        _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+    assert not _engine_build_matches_expected({})
+    assert not _engine_build_matches_expected(metadata)
 
 
 def test_native_decision_lease_is_bounded_by_original_policy_validity():
