@@ -97,7 +97,12 @@ _ERROR_TYPES = _enum(
     "HTTPException",
 )
 _KNOWN_UNAPPLIED = _enum(
-    "local_busy", "stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"
+    "local_busy",
+    "stale_context",
+    "command_expired",
+    "sensor_unavailable",
+    "sensor_no_sample",
+    "owner_unavailable",
 )
 _CAMERA_MODES = _enum(
     "orbit",

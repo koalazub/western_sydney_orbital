@@ -155,7 +155,9 @@ def room_owner(actual_room):
 
 
 def test_room_requires_real_auth_origin_and_connected_owner(actual_room):
-    origin, _, room, _ = actual_room
+    from wsorb.room_api import RoomApiError, RoomSimulation
+
+    origin, _, room, path = actual_room
     route = f"/api/rooms/{room['id']}"
     assert request(origin, route + "/state")[0] == 401
     assert request(origin, route + "/state", token="x" * 43)[0] == 401
@@ -173,6 +175,11 @@ def test_room_requires_real_auth_origin_and_connected_owner(actual_room):
         body={"id": "no_owner", "command": {"method": "snapshot"}},
     )
     assert status == 503 and "No connected room owner" in result["error"]
+    client = RoomSimulation.from_file(path, allow_loopback=True)
+    with pytest.raises(RoomApiError) as unavailable:
+        client.snapshot()
+    assert unavailable.value.code == "owner_unavailable"
+    assert room["key"] not in str(unavailable.value)
 
 
 def test_real_public_rpc_preserves_fences_expiry_and_native_watchdog(room_owner):
