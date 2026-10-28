@@ -5,6 +5,7 @@ const MAX_BODY = 64 * 1024;
 const MAX_UPDATE = 256 * 1024;
 const MAX_SNAPSHOT = 512 * 1024;
 const MAX_CONNECTIONS = 32;
+const NATIVE_REJECTION_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 const ROOM_TTL = 7 * 24 * 60 * 60 * 1000;
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers });
@@ -88,9 +89,9 @@ export class Room extends DurableObject {
     if (!(await this.authorized(key))) return json({ error: "Unauthorized" }, 401);
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !command || typeof command !== "object" || Array.isArray(command)) return json({ error: "Invalid command" }, 400);
     const serialized = JSON.stringify(command);
-    if (serialized.length > MAX_BODY) return json({ error: "Command too large" }, 413);
+    if (new TextEncoder().encode(serialized).byteLength > MAX_BODY) return json({ error: "Command too large" }, 413);
     const row = this.row()!;
-    if (!row.host_id || !this.ctx.getWebSockets().some((socket) => (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id)) return json({ error: "No connected room owner" }, 503);
+    if (!row.host_id || !this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN && (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id)) return json({ error: "No connected room owner" }, 503);
     this.expirePending();
     if (this.commandWaiters.size >= 64 || this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM pending").one().count >= 64) return json({ error: "Too many pending commands" }, 429);
     if (this.ctx.storage.sql.exec("SELECT id FROM pending WHERE id = ?", id).toArray().length) return json({ error: "Command ID already pending" }, 409);
@@ -114,7 +115,11 @@ export class Room extends DurableObject {
       this.ctx.storage.setAlarm(Date.now() + 30_000).catch(() => finish({ error: "Unable to schedule command timeout", id }));
     });
     const value = await result;
-    return json(value, (value as { error?: string }).error ? 504 : 200);
+    // A completed owner RPC can contain a native rejection. Its code and ID
+    // are usable only inside the authenticated result envelope, not an HTTP
+    // gateway error. Transport timeouts without a result remain HTTP 504.
+    const reply = value as { type?: string; error?: string };
+    return json(value, reply.type === "result" ? 200 : reply.error ? 504 : 200);
   }
   async fetch(request: Request): Promise<Response> {
     const key = request.headers.get("X-Room-Key") ?? "";
@@ -183,7 +188,7 @@ export class Room extends DurableObject {
     } else if (msg.type === "notebook" && validNotebookUrl(msg.url)) {
       this.ctx.storage.sql.exec("UPDATE room SET notebook_url = ?, updated_at = ?", msg.url, Date.now());
       this.broadcast(JSON.stringify({ type: "notebook", url: msg.url }));
-    } else if (msg.type === "command" && typeof msg.id === "string" && msg.id.length <= 100 && row.host_id) {
+    } else if (msg.type === "command" && typeof msg.id === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(msg.id) && msg.command && typeof msg.command === "object" && !Array.isArray(msg.command) && row.host_id) {
       this.expirePending();
       const pendingCount = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM pending").one().count;
       if (pendingCount >= 64) { ws.send(JSON.stringify({ type: "error", error: "Too many pending commands" })); return; }
@@ -196,7 +201,16 @@ export class Room extends DurableObject {
       const pending = this.ctx.storage.sql.exec<{ requester: string; created_at: number }>("SELECT requester, created_at FROM pending WHERE id = ?", msg.id).toArray()[0];
       if (!pending) return;
       this.ctx.storage.sql.exec("DELETE FROM pending WHERE id = ?", msg.id);
-      const result = { type: "result", id: msg.id, ok: msg.ok === true, state: msg.state, error: typeof msg.error === "string" ? msg.error.slice(0, 500) : undefined };
+      // A live public API reply is not the room's saved state. Forward its value
+      // only to its requester; never persist or broadcast each sensor receipt.
+      const oversized = msg.value !== undefined && new TextEncoder().encode(JSON.stringify(msg.value)).byteLength > MAX_SNAPSHOT;
+      const result = {
+        type: "result", id: msg.id, ok: msg.ok === true && !oversized,
+        value: oversized ? undefined : msg.value,
+        state: msg.state,
+        error: oversized ? "Room result exceeds the response limit" : typeof msg.error === "string" ? msg.error.slice(0, 500) : undefined,
+        code: typeof msg.code === "string" && NATIVE_REJECTION_CODES.has(msg.code) ? msg.code : undefined,
+      };
       const waiter = this.commandWaiters.get(msg.id);
       if (waiter) waiter(result);
       else this.sendTo(pending.requester, result);
@@ -263,6 +277,10 @@ export default {
     if ((url.pathname === "/health" || url.pathname === "/api/health") && request.method === "GET") {
       return json({ service: "western-sydney-orbital", status: "ready", simulation: "bevy-wasm-browser" });
     }
+    // External Python uses bearer authentication without a browser Origin.
+    // Browser callers, including WebSockets, must stay on this exact origin.
+    const origin = request.headers.get("Origin");
+    if (url.pathname.startsWith("/api/") && origin !== null && origin !== url.origin) return json({ error: "Same-origin request required" }, 403);
     const roomMatch = /^\/api\/rooms\/([a-f0-9-]+)\/(state|ws)$/.exec(url.pathname);
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       if (!request.headers.get("Origin") || request.headers.get("Origin") !== url.origin) return json({ error: "Same-origin request required" }, 403);
