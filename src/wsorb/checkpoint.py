@@ -5,6 +5,8 @@ world. Add ``--run`` to claim control and fly. ``--policy compare --run`` uses
 two separate owned servers, never a reset. An explicit ``--connection-file``
 selects one existing local flight. ``--room-file`` selects a hosted room's live
 public RPC instead. Existing flights are never configured, reset or tuned here.
+``--await-owner`` keeps only readiness reads alive until an engine is ready, then
+inspects or runs once within the configured flight budgets. It never grants Run.
 
 The numeric controller is the same STPCheckpointController used by the licensed
 example. This transport is not spaceteams, SDK emulation or physics-parity
@@ -37,6 +39,7 @@ from .local_api import (
     CommandExpiredError,
     LocalApiError,
     LocalBusyError,
+    LocalPageMismatchError,
     LocalSimulation,
     StaleContextError,
     control_context,
@@ -95,9 +98,10 @@ class CheckpointOptions:
     progress: bool = False
     diagnostics: bool = False
     wait_for_owner_s: float = 0.0
+    await_owner: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("isolated", "run", "progress", "diagnostics"):
+        for name in ("isolated", "run", "progress", "diagnostics", "await_owner"):
             if type(getattr(self, name)) is not bool:
                 raise CheckpointError(
                     "invalid_options", "Consent and scope flags must be booleans."
@@ -142,6 +146,12 @@ class CheckpointOptions:
                 "invalid_options", "Owner waiting requires an external scope and 0..3600 seconds."
             )
         object.__setattr__(self, "wait_for_owner_s", float(wait))
+        if self.await_owner and (self.isolated or wait > 0):
+            raise CheckpointError(
+                "invalid_options",
+                "--await-owner requires an explicit external descriptor and excludes "
+                "finite waiting.",
+            )
 
 
 class _Parser(argparse.ArgumentParser):
@@ -171,7 +181,10 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
         "--duration-s", type=float, default=1800, help="simulation budget, at most 1800"
     )
     parser.add_argument(
-        "--wall-budget-s", type=float, default=3600, help="total wall budget, max 3600"
+        "--wall-budget-s",
+        type=float,
+        default=3600,
+        help="wall budget, max 3600; starts after readiness only with --await-owner",
     )
     parser.add_argument(
         "--cadence-hz", type=float, default=10, help="wall-clock decisions, 10..50 Hz"
@@ -188,6 +201,12 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
         type=float,
         default=0,
         help="read-only wait for an external engine, within the total wall budget; at most 3600 s",
+    )
+    parser.add_argument(
+        "--await-owner",
+        action="store_true",
+        help="persistent read-only external readiness wait, then one bounded inspect/run; "
+        "requires a descriptor, excludes finite waiting, and does not grant --run consent",
     )
     return CheckpointOptions(**vars(parser.parse_args(argv)))
 
@@ -235,6 +254,12 @@ def _error(error: BaseException, phase: str) -> dict[str, str]:
         return {"code": error.code, "message": str(error)}
     if isinstance(error, KeyboardInterrupt):
         return {"code": "interrupted", "message": "Interrupted; no actuation was retried."}
+    if isinstance(error, LocalPageMismatchError):
+        return {
+            "code": "page_mismatch",
+            "message": "The bound local page changed or disappeared. This request was not "
+            "dispatched; no retry or page rebinding was attempted.",
+        }
     return {
         "code": f"{phase}_failed",
         "message": f"{phase} failed. Exception text omitted; no unknown actuation was retried.",
@@ -473,7 +498,9 @@ def isolated_simulation(*, deadline: float | None = None) -> Iterator[LocalSimul
                 stderr=log,
             )
             try:
-                startup_deadline = min(deadline or math.inf, time.monotonic() + 30.0)
+                startup_deadline = min(
+                    math.inf if deadline is None else deadline, time.monotonic() + 30.0
+                )
                 while not connection.is_file():
                     if process.poll() is not None:
                         raise CheckpointError(
@@ -512,6 +539,11 @@ def isolated_simulation(*, deadline: float | None = None) -> Iterator[LocalSimul
 
 def _source_kind(client: LocalSimulation) -> str:
     return _ROOM_SOURCE if isinstance(client, RoomSimulation) else _LOCAL_SOURCE
+
+
+def _bind_observed_page(client: LocalSimulation) -> None:
+    if not isinstance(client, RoomSimulation):
+        client.bind_to_observed_page(require=False)
 
 
 def _engine_build_matches_expected(snapshot: Mapping[str, Any]) -> bool:
@@ -691,6 +723,8 @@ def _release(
         return "acknowledged", client.snapshot()
     except _KNOWN_UNAPPLIED:
         return "rejected_unapplied_no_fallback", None
+    except LocalPageMismatchError:
+        return "page_mismatch_undelivered_no_fallback", None
     except Exception:
         return "unconfirmed_native_watchdog_no_fallback", None
 
@@ -721,8 +755,14 @@ def run_trial(
 
     controller = STPCheckpointController(config)
     origin_wall = time.monotonic()
-    deadline = min(deadline or math.inf, origin_wall + options.wall_budget_s)
-    initial = client.snapshot()
+    deadline = min(math.inf if deadline is None else deadline, origin_wall + options.wall_budget_s)
+    with client.control_transaction():
+        initial = client.snapshot()
+        _bind_observed_page(client)
+    if _readiness_flag(initial, "control_ready") is False:
+        raise CheckpointError(
+            "control_not_ready", "The engine reports control is not ready; no control was claimed."
+        )
     world = world_metadata(initial)
     if isinstance(client, RoomSimulation) and not _engine_build_matches_expected(initial):
         raise CheckpointError(
@@ -930,6 +970,13 @@ def run_trial(
     except (Exception, KeyboardInterrupt) as error:
         result["state"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "error"
         result["error"] = _error(error, phase)
+        if isinstance(error, LocalPageMismatchError) and phase in (
+            "claim",
+            "command",
+            "play",
+            "rate",
+        ):
+            result["actuation_outcome"] = "page_mismatch_undelivered_no_retry"
     finally:
         if fence is not None:
             release_state, after = _release(client, world, fence)
@@ -959,11 +1006,64 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
         return _run_checkpoint(options)
 
 
-def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadline: float) -> None:
-    """Wait using reads only. Never claim, Play, adopt a fence or retry actuation."""
+def _checkpoint_deadline(
+    options: CheckpointOptions, *, now: float, owner_ready: bool = False
+) -> float | None:
+    """Only explicit persistent standby defers the bounded invocation clock."""
+    return None if options.await_owner and not owner_ready else now + options.wall_budget_s
+
+
+def _owner_wait_deadline(
+    options: CheckpointOptions, *, now: float, deadline: float | None
+) -> float | None:
+    if options.await_owner:
+        return None
+    return min(math.inf if deadline is None else deadline, now + options.wait_for_owner_s)
+
+
+def _wait_remaining(end: float | None, *, now: float) -> float:
+    return math.inf if end is None else max(0.0, end - now)
+
+
+def _owner_read_retryable(error: LocalApiError) -> bool:
+    return getattr(error, "code", None) in ("owner_unavailable", "transport_unavailable")
+
+
+def _readiness_flag(report: Mapping[str, Any], name: str) -> bool | None:
+    """Missing legacy readiness is unknown, not a fabricated True or False."""
+    if name not in report:
+        return None
+    value = report[name]
+    if type(value) is not bool:
+        raise CheckpointError("owner_read_protocol", "Engine readiness flags must be booleans.")
+    return value
+
+
+def _owner_status_gate(status: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return native readiness and permission to read, never synthesize browser readiness."""
+    if status.get("backend") == "native_headless":
+        native_ready = (
+            status.get("physics_ready") is True and status.get("physics_status_cached") is False
+        )
+        return native_ready, native_ready and status.get("busy") is False
+    return False, (
+        status.get("busy") is False
+        and status.get("connected") is True
+        and _readiness_flag(status, "page_visible") is not False
+    )
+
+
+def wait_for_owner(
+    client: LocalSimulation, options: CheckpointOptions, *, deadline: float | None = None
+) -> None:
+    """Wait using reads only, indefinitely only with explicit --await-owner.
+
+    A real ready snapshot ends standby. The caller then takes a fresh receipt
+    for one bounded inspect/run. Never claim, Play, adopt a fence or retry actuation.
+    """
     from .diagnostics import Diagnostics, _error_fields
 
-    end = min(deadline, time.monotonic() + options.wait_for_owner_s)
+    end = _owner_wait_deadline(options, now=time.monotonic(), deadline=deadline)
     original_timeout = client.timeout_s
     read_timeout = (
         max(original_timeout, 8.0) if isinstance(client, RoomSimulation) else original_timeout
@@ -972,8 +1072,9 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
     previous_error = None
     previous_frame = None
     next_progress = 0.0
+    next_error = 0.0
     try:
-        while time.monotonic() < end:
+        while _wait_remaining(end, now=time.monotonic()) > 0:
             now = time.monotonic()
             if options.progress and now >= next_progress:
                 print(
@@ -982,23 +1083,22 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
                     flush=True,
                 )
                 next_progress = now + 30
-            client.timeout_s = min(read_timeout, max(0.001, end - now))
+            client.timeout_s = min(read_timeout, max(0.001, _wait_remaining(end, now=now)))
             try:
                 native_ready = False
                 may_read = True
                 if not isinstance(client, RoomSimulation):
                     status = client.status()
-                    native_ready = (
-                        status.get("backend") == "native_headless"
-                        and status.get("physics_ready") is True
-                        and status.get("physics_status_cached") is False
+                    native_ready, may_read = _owner_status_gate(status)
+                    if not may_read:
+                        previous_frame = None
+                if may_read and _wait_remaining(end, now=time.monotonic()) > 0:
+                    client.timeout_s = min(
+                        read_timeout, max(0.001, _wait_remaining(end, now=time.monotonic()))
                     )
-                    may_read = status.get("busy") is False and (
-                        native_ready or status.get("connected") is True
-                    )
-                if may_read and time.monotonic() < end:
-                    client.timeout_s = min(read_timeout, max(0.001, end - time.monotonic()))
-                    snapshot = client.snapshot()
+                    with client.control_transaction():
+                        snapshot = client.snapshot()
+                        _bind_observed_page(client)
                     authority = _observation(snapshot).get("control_authority", {})
                     if options.run and authority.get("status") in ("active", "expired"):
                         raise CheckpointError(
@@ -1006,9 +1106,11 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
                         )
                     renderer = snapshot.get("renderer", {})
                     frames = renderer.get("rendered_frames")
-                    if native_ready:
+                    if _readiness_flag(snapshot, "control_ready") is False:
+                        previous_frame = None
+                    elif native_ready:
                         return
-                    if renderer.get("ready") is True and type(frames) is int:
+                    elif renderer.get("ready") is True and type(frames) is int:
                         if previous_frame is not None and frames > previous_frame:
                             return
                         previous_frame = frames
@@ -1017,7 +1119,7 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
             except LocalApiError as error:
                 fields = _error_fields(error)
                 if wait_log is not None and (
-                    fields["code"] != "owner_unavailable" or previous_error != fields["code"]
+                    previous_error != fields["code"] or time.monotonic() >= next_error
                 ):
                     status = getattr(error, "http_status", None)
                     wait_log.emit(
@@ -1027,12 +1129,13 @@ def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadl
                         **fields,
                         **({"http_status": status} if type(status) is int else {}),
                     )
+                    next_error = time.monotonic() + 30.0
                 previous_error = fields["code"]
-                if fields["code"] not in ("owner_unavailable", "transport_unavailable"):
+                if not _owner_read_retryable(error):
                     raise CheckpointError(
                         "owner_wait_failed", "Engine readiness read failed; no command was sent."
                     ) from error
-            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+            time.sleep(min(0.5, _wait_remaining(end, now=time.monotonic())))
         raise CheckpointError(
             "owner_wait_timeout", "No ready engine was observed before the owner wait ended."
         )
@@ -1065,12 +1168,12 @@ def _run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
         "automatic_report_files": False,
         "trials": [],
     }
-    deadline = time.monotonic() + options.wall_budget_s
+    deadline = _checkpoint_deadline(options, now=time.monotonic())
     policies = ("baseline", "body-axis") if options.policy == "compare" else (options.policy,)
     expected_world = None
     for policy in policies:
         try:
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise CheckpointError(
                     "wall_budget_limit", "The total invocation wall budget ended."
                 )
@@ -1095,13 +1198,17 @@ def _run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
                     if options.room_file is not None
                     else LocalSimulation.from_file(options.connection_file, timeout_s=2.0)
                 )
-                if options.wait_for_owner_s > 0:
+                if options.await_owner or options.wait_for_owner_s > 0:
                     from .diagnostics import diagnostics_context
 
                     # Waiting must not consume the bounded flight trace before
                     # a user has opened the game. Progress remains explicit.
                     with diagnostics_context(enabled=False):
                         wait_for_owner(client, options, deadline=deadline)
+                    if options.await_owner:
+                        deadline = _checkpoint_deadline(
+                            options, now=time.monotonic(), owner_ready=True
+                        )
                 trial = (
                     run_trial(client, options, policy=policy, deadline=deadline)
                     if options.run

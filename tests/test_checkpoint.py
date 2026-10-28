@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import math
 import os
@@ -14,10 +16,16 @@ import pytest
 from wsorb.checkpoint import (
     CheckpointError,
     CheckpointOptions,
+    _checkpoint_deadline,
     _guard,
+    _owner_read_retryable,
+    _owner_status_gate,
+    _owner_wait_deadline,
+    _readiness_flag,
     _record_command,
     _summary,
     _usage,
+    _wait_remaining,
     decision_lease,
     main,
     native_measurement,
@@ -30,8 +38,15 @@ from wsorb.checkpoint import (
     sample_from_snapshot,
     world_metadata,
 )
-from wsorb.local_api import LocalSimulation
-from wsorb.room_api import RoomSimulation
+from wsorb.local_api import (
+    CommandExpiredError,
+    LocalApiError,
+    LocalBusyError,
+    LocalPageMismatchError,
+    LocalSimulation,
+    StaleContextError,
+)
+from wsorb.room_api import RoomApiError, RoomSimulation
 
 
 def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connection():
@@ -45,6 +60,7 @@ def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connecti
     assert options.wall_budget_s <= 3600
     assert options.cadence_hz >= 10
     assert options.wait_for_owner_s == 0
+    assert options.await_owner is False
     assert options.diagnostics is False
     with pytest.raises(CheckpointError, match="arguments"):
         parse_args([])
@@ -61,6 +77,162 @@ def test_owner_wait_is_explicit_bounded_external_and_does_not_grant_run_consent(
     ):
         with pytest.raises(CheckpointError):
             parse_args(arguments)
+
+
+@pytest.mark.parametrize("scope", ["--connection-file", "--room-file"])
+def test_persistent_owner_standby_is_explicit_external_and_does_not_grant_run(scope):
+    options = parse_args([scope, "private.json", "--await-owner"])
+    assert options.await_owner is True
+    assert options.run is False
+    assert options.wait_for_owner_s == 0
+    assert options.duration_s == 1800 and options.wall_budget_s == 3600
+    assert parse_args([scope, "private.json", "--await-owner", "--run"]).run is True
+    assert parse_args([scope, "private.json", "--await-owner", "--wait-for-owner-s", "0"])
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--await-owner"],
+        ["--isolated", "--await-owner"],
+        ["--room-file", "private.json", "--await-owner", "--wait-for-owner-s", "1"],
+        ["--connection-file", "private.json", "--await-owner", "--policy", "compare", "--run"],
+    ],
+)
+def test_persistent_standby_cannot_be_implicit_isolated_compared_or_finitely_rearmed(arguments):
+    with pytest.raises(CheckpointError):
+        parse_args(arguments)
+
+
+@pytest.mark.parametrize("value", [1, "yes", np.bool_(True), None])
+def test_persistent_standby_options_require_an_actual_boolean(value):
+    with pytest.raises(CheckpointError, match="booleans"):
+        CheckpointOptions(connection_file="private.json", await_owner=value)
+
+
+def test_only_persistent_readiness_defers_the_flight_budget_and_finite_defaults_stay_bounded():
+    # Pure budget calculations. No clock, engine, graphics or transport is replaced.
+    default = CheckpointOptions(connection_file="private.json", wall_budget_s=10)
+    assert _checkpoint_deadline(default, now=100) == 110
+    assert _owner_wait_deadline(default, now=100, deadline=110) == 100
+    assert _wait_remaining(100, now=100) == 0
+
+    finite = CheckpointOptions(room_file="private.json", wait_for_owner_s=30, wall_budget_s=10)
+    assert _checkpoint_deadline(finite, now=100) == 110
+    end = _owner_wait_deadline(finite, now=100, deadline=110)
+    assert end == 110
+    assert _wait_remaining(end, now=109.5) == 0.5
+    assert _wait_remaining(end, now=110) == _wait_remaining(end, now=1000) == 0
+    assert _owner_wait_deadline(finite, now=100, deadline=None) == 130
+
+    persistent = CheckpointOptions(
+        room_file="private.json", await_owner=True, duration_s=1, wall_budget_s=10
+    )
+    assert _checkpoint_deadline(persistent, now=100) is None
+    end = _owner_wait_deadline(persistent, now=100, deadline=110)
+    assert end is None and math.isinf(_wait_remaining(end, now=1_000_000))
+    flight_end = _checkpoint_deadline(persistent, now=1_000_000, owner_ready=True)
+    assert flight_end == 1_000_010
+    assert _wait_remaining(flight_end, now=1_000_010) == 0
+    assert persistent.duration_s == 1 and persistent.wall_budget_s == 10
+
+
+def test_standby_only_retries_explicit_read_unavailability_not_auth_protocol_or_page_failures():
+    for code in ("owner_unavailable", "transport_unavailable"):
+        error = RoomApiError("Read unavailable")
+        error.code = code
+        assert _owner_read_retryable(error)
+    for error in (
+        LocalApiError("Invalid JSON"),
+        RoomApiError("HTTP authorization failed"),
+        LocalPageMismatchError("Page changed"),
+        LocalBusyError("Handled separately as pre-dispatch read contention"),
+        StaleContextError("Native context changed"),
+        CommandExpiredError("Native lease expired"),
+    ):
+        assert not _owner_read_retryable(error)
+
+
+def test_status_read_gate_blocks_explicit_hidden_pages_without_fabricating_browser_readiness():
+    # Pure protocol policy. These flags do not stand in for actual readiness evidence.
+    status = {"backend": "browser", "connected": True, "busy": False}
+    assert _owner_status_gate(status) == (False, True)  # Legacy permission to read only.
+    assert _owner_status_gate({**status, "page_visible": False}) == (False, False)
+    assert _owner_status_gate({**status, "page_visible": True}) == (False, True)
+    assert _owner_status_gate({**status, "busy": True}) == (False, False)
+    assert _owner_status_gate({**status, "connected": False}) == (False, False)
+    native = {"backend": "native_headless", "busy": False, "connected": True}
+    assert _owner_status_gate(native) == (False, False)  # No browser fallback for native.
+    assert _owner_status_gate({**native, "physics_ready": True}) == (False, False)
+    assert _owner_status_gate({**native, "physics_ready": True, "physics_status_cached": True}) == (
+        False,
+        False,
+    )
+
+
+@pytest.mark.parametrize("name", ["page_visible", "control_ready"])
+def test_optional_readiness_is_boolean_or_absent_never_coerced_or_filled(name):
+    assert _readiness_flag({}, name) is None
+    assert _readiness_flag({name: False}, name) is False
+    assert _readiness_flag({name: True}, name) is True
+    for value in (None, 0, 1, "false", np.bool_(False)):
+        with pytest.raises(CheckpointError, match="booleans"):
+            _readiness_flag({name: value}, name)
+
+
+def test_readiness_wait_has_no_actuation_or_whole_flight_retry_and_keeps_traces_separate():
+    from wsorb.checkpoint import _bind_observed_page, _run_checkpoint, wait_for_owner
+
+    tree = ast.parse(inspect.getsource(wait_for_owner))
+    client_methods = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "client"
+    }
+    assert client_methods == {"status", "snapshot", "control_transaction"}
+    helper = inspect.getsource(_bind_observed_page)
+    assert "RoomSimulation" in helper and "require=False" in helper
+    source = inspect.getsource(_run_checkpoint)
+    # The only invocation loop is over policies. External comparison is forbidden,
+    # so readiness is followed by one flight or inspection, not a retry loop.
+    invocation = ast.parse(source)
+    loops = [node for node in ast.walk(invocation) if isinstance(node, (ast.For, ast.While))]
+    assert len(loops) == 1 and isinstance(loops[0], ast.For)
+    assert isinstance(loops[0].iter, ast.Name) and loops[0].iter.id == "policies"
+    assert "diagnostics_context(enabled=False)" in source
+    assert source.index("wait_for_owner(client") < source.index("owner_ready=True")
+
+
+def test_explicit_hosted_control_unready_resets_frame_progress_before_any_ready_return():
+    from wsorb.checkpoint import wait_for_owner
+
+    tree = ast.parse(inspect.getsource(wait_for_owner))
+    gate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "_readiness_flag(snapshot, 'control_ready') is False"
+    )
+    assert len(gate.body) == 1 and ast.unparse(gate.body[0]) == "previous_frame = None"
+    assert not any(isinstance(node, ast.Return) for node in ast.walk(gate.body[0]))
+    # Ready returns live only in the else branch, after this explicit gate.
+    assert any(isinstance(node, ast.Return) for node in ast.walk(gate.orelse[0]))
+
+
+def test_run_binds_the_initial_snapshot_before_any_claim_without_widening_native_retries():
+    from wsorb.checkpoint import _KNOWN_UNAPPLIED
+
+    source = inspect.getsource(run_trial)
+    assert source.index("initial = client.snapshot()") < source.index("_bind_observed_page(client)")
+    assert source.index("_bind_observed_page(client)") < source.index("client.claim_control(")
+    assert source.index('_readiness_flag(initial, "control_ready")') < source.index(
+        "client.claim_control("
+    )
+    assert (LocalBusyError, StaleContextError, CommandExpiredError) == _KNOWN_UNAPPLIED
+    assert not issubclass(LocalPageMismatchError, _KNOWN_UNAPPLIED)
 
 
 def test_diagnostics_flag_is_explicit_and_does_not_grant_run_consent():
@@ -379,11 +551,19 @@ def test_missing_navigation_cannot_become_a_fabricated_control_sample():
     reason="Opt in after the shared policy handoff to run one real owned Node/WASM server.",
 )
 def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
-    from wsorb.checkpoint import inspect_trial, isolated_simulation, policy_config
+    from wsorb.checkpoint import inspect_trial, isolated_simulation, policy_config, wait_for_owner
 
     options = CheckpointOptions(isolated=True, run=True, duration_s=1.0, wall_budget_s=30.0)
     with isolated_simulation() as client:
         before = client.snapshot()
+        # Existing owned native fixture, not a fabricated browser-ready receipt.
+        # A stale invocation deadline cannot expire explicit persistent standby.
+        wait_for_owner(
+            client,
+            CheckpointOptions(connection_file="owned-fixture.json", await_owner=True),
+            deadline=0,
+        )
+        assert client.last_observed_page_id is client.bound_page_id is None
         inspected = inspect_trial(client)
         after = client.snapshot()
         assert inspected["state"] == "read_only"
@@ -400,6 +580,18 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
         assert sample.frame == after["observation"]["frame"]
         assert sample.elapsed_time_s == after["observation"]["navigation_sample_time_s"]
         assert sample.position_world_m.tolist() == after["observation"]["shuttle"]["position"]
+        expired = run_trial(client, options, policy="baseline", owned=True, deadline=0)
+        assert expired["state"] == "wall_budget_limit"
+        assert expired["decision_count"] == 0
+        assert expired["release_state"] == "not_claimed"
+        assert expired["actuation_outcome"] == "not_attempted"
+        after_expired = client.snapshot()
+        assert after_expired["runtime"]["running"] is False
+        assert after_expired["observation"]["time_s"] == 0
+        assert (
+            after_expired["observation"]["control_authority"]
+            == before["observation"]["control_authority"]
+        )
         baseline, axis = policy_config("baseline"), policy_config("body-axis")
         assert baseline.radar_clock_offset_s == axis.radar_clock_offset_s == 0
         result = run_trial(client, options, policy="baseline", owned=True)
