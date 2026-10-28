@@ -292,6 +292,7 @@ const inside = (root, path) => {
 };
 
 export async function createLocalApi({ worker, publicRoot, rootRealPath, headless = false }) {
+  const assetDiagnostics = process.env.WSORB_DIAGNOSTICS === "1";
   const token = randomBytes(32).toString("base64url");
   const authorization = Buffer.from(`Bearer ${token}`);
   const requestedPath = resolve(process.env.WSORB_LOCAL_CONNECTION || resolve(worker, "..", ".devenv/wsorb-local.json"));
@@ -449,7 +450,10 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       elapsed_ms: job.started_at === undefined ? undefined : Date.now() - job.started_at,
       code: envelope?.code, reason: status === 504 ? "call_deadline_expired" : !envelope ? "client_disconnected" : undefined,
     });
-    if (envelope) send(job.request, job.response, status, envelope);
+    if (envelope && !job.response.destroyed && !job.response.writableEnded) {
+      job.response.setHeader("X-WSORB-Page", job.page);
+      send(job.request, job.response, status, envelope);
+    }
   }
 
   function lost(job, reason) {
@@ -470,7 +474,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     }
   }
 
-  function claimPage(id, diagnostics = false, traceId) {
+  function claimPage(id, diagnostics = false, traceId, visible) {
     expire();
     if (page && page.id !== id) {
       emitDiagnostic(diagnostics, "local_relay", "page_conflict", { trace_id: traceId, owner_page_id: page.id, requester_page_id: id, reason: "owner_conflict", http_status: 409 });
@@ -481,7 +485,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       ...[...pending.values()]
         .filter(job => job.page === id && job.delivered && worldSetup(job.call))
         .map(job => job.deadline));
-    page = { id, expires };
+    page = { id, expires, visible };
     clearTimeout(pageTimer);
     pageTimer = setTimeout(expire, Math.max(1, expires - Date.now()));
   }
@@ -495,6 +499,23 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     const id = request.headers["x-wsorb-page"];
     if (typeof id !== "string" || !UUID.test(id)) invalid("X-WSORB-Page must be a UUID");
     return id.toLowerCase();
+  }
+
+  function targetPageId(request) {
+    const id = request.headers["x-wsorb-target-page"];
+    if (id === undefined) return;
+    if (typeof id !== "string" || !UUID.test(id) || id !== id.toLowerCase()) {
+      invalid("X-WSORB-Target-Page must be a canonical UUID");
+    }
+    return id;
+  }
+
+  function pageVisibility(request) {
+    const visible = request.headers["x-wsorb-page-visible"];
+    if (visible === undefined) return;
+    if (visible === "1") return true;
+    if (visible === "0") return false;
+    invalid("X-WSORB-Page-Visible must be 1 or 0");
   }
 
   function diagnosticCall(channel) {
@@ -564,6 +585,10 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         if (site !== "same-origin" && !authorized) throw new HttpError(403, "Local modules require a same-origin browser request");
         const source = pathname === "/__local/client.js" ? clientSource
           : native ? "export {};\n" : `import { connect } from "/__local/client.js";\nconnect(${JSON.stringify(token)});\n`;
+        if (assetDiagnostics) response.once("finish", () => emitDiagnostic(true, "local_relay", "asset_finished", {
+          asset: pathname === "/__local/client.js" ? "local_client" : "local_bootstrap",
+          http_method: request.method, http_status: response.statusCode, bytes: Buffer.byteLength(source),
+        }));
         send(request, response, 200, source, "text/javascript; charset=utf-8");
         return;
       }
@@ -577,9 +602,12 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         request.wsorbTraceId = traceId;
       }
       expire();
+      const visible = pathname === "/__local/poll" || pathname === "/__local/result"
+        ? pageVisibility(request) : undefined;
       if (pathname === "/__local/status") {
         const active = [...pending.values()].map(job => job.call).concat([...nativePending.values()]);
         send(request, response, 200, { enabled: true, connected: page !== null, busy: active.length !== 0,
+          page_id: page?.id ?? null, page_binding_supported: !native, page_visible: page?.visible,
           busy_operation: active.some(worldSetup) ? "world_setup" : null,
           engine_build: engineBuild,
           ...(diagnostics ? { diagnostics: {
@@ -599,8 +627,8 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         if (request.headers["x-wsorb-build"] !== engineBuild.sha256) {
           throw new HttpError(409, "Browser engine build differs from the lab server; restart the local lab and reload the simulation");
         }
-        claimPage(id, diagnostics, traceId);
-        const job = [...pending.values()].find(job => !job.delivered);
+        claimPage(id, diagnostics, traceId, visible);
+        const job = [...pending.values()].find(job => job.page === id && !job.delivered);
         if (job) {
           job.delivered = true;
           emitDiagnostic(job.diagnostics, "local_relay", "call_dispatched", { trace_id: job.trace_id, job_id: job.id, page_id: id, method: job.call.method, op: job.call.command?.op, deadline_ms: job.deadline });
@@ -617,6 +645,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
           ...(job.diagnostics ? { diagnostics: true, trace_id: job.trace_id } : {}),
         } : null });
       } else if (pathname === "/__local/call") {
+        const targetPage = targetPageId(request);
         const call = await readJson(request, response);
         validateCall(call);
         emitDiagnostic(diagnostics, "local_relay", "call_received", {
@@ -625,6 +654,9 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
           epoch: call.command?.controller_fence?.epoch, term: call.command?.controller_fence?.term,
         });
         expire();
+        if (targetPage !== undefined && (native || !page || page.id !== targetPage)) {
+          throw new HttpError(409, "The target browser page is not connected to this local simulation", "page_mismatch");
+        }
         const channel = call.method === "capture" ? "capture" : "control";
         if (native) {
           if (nativePending.has(channel)) throw new HttpError(409, `A local ${channel} call is already in flight`, "local_busy");
@@ -676,7 +708,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
           throw new HttpError(409, "Stale or expired browser result");
         }
         validateResult(result, job.call, true, job.diagnostics);
-        claimPage(id, diagnostics || job.diagnostics, job.trace_id);
+        claimPage(id, diagnostics || job.diagnostics, job.trace_id, visible);
         const envelope = result.ok ? { ok: true, value: result.value }
           : { ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) };
         settle(job, 200, envelope);

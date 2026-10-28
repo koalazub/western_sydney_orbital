@@ -60,6 +60,7 @@ _OPS = _enum(
 )
 _CODES = _enum(
     "local_busy",
+    "page_mismatch",
     "stale_context",
     "command_expired",
     "sensor_unavailable",
@@ -80,6 +81,7 @@ _ERROR_TYPES = _enum(
     "Exception",
     "LocalApiError",
     "LocalBusyError",
+    "LocalPageMismatchError",
     "StaleContextError",
     "CommandExpiredError",
     "SensorUnavailableError",
@@ -98,6 +100,7 @@ _ERROR_TYPES = _enum(
 )
 _KNOWN_UNAPPLIED = _enum(
     "local_busy",
+    "page_mismatch",
     "stale_context",
     "command_expired",
     "sensor_unavailable",
@@ -223,6 +226,9 @@ _STATUS = {
     "connected": "bool",
     "busy": "bool",
     "backend": _enum("native_headless", "browser"),
+    "page_id": "uuid",
+    "page_binding_supported": "bool",
+    "page_visible": "bool",
     "physics_ready": "bool",
     "physics_status_cached": "bool",
     "diagnostics": {
@@ -243,6 +249,7 @@ _SNAPSHOT = {
     "navigation_sample_time_s": "number",
     "running": "bool",
     "rate": "number",
+    "control_ready": "bool",
     "range_m": "number",
     "relative_speed_mps": "number",
     "mission_status": _enum("running", "success", "failed", "failure"),
@@ -500,6 +507,7 @@ def public_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     fields = {
         **_select(observation, {"time_s": "number", "navigation_sample_time_s": "number"}),
         **_select(runtime, {"running": "bool", "rate": "number"}),
+        **_select(value, {"control_ready": "bool"}),
         "range_m": mission.get("target_distance_m"),
         "relative_speed_mps": mission.get("relative_speed_mps"),
         "mission_status": mission.get("status"),
@@ -633,6 +641,10 @@ def finish_request(
                 if result.get("ok") is not True or not isinstance(result.get("value"), dict):
                     code = result.get("code")
                     code = code if type(code) is str and code in _CODES else "unknown_outcome"
+                    # page_mismatch is a typed HTTP 409 transport rejection only,
+                    # never a code accepted from a successful/native RPC body.
+                    if code == "page_mismatch":
+                        code = "unknown_outcome"
                     fields.update(
                         code=code,
                         result_kind="unavailable",

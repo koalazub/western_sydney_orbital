@@ -3,10 +3,17 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { emitDiagnostic } from "../shared/diagnostics.ts";
 
 const worker = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const publicRoot = resolve(worker, "public");
 const port = Number(process.env.PORT ?? 8787);
+const assetDiagnostics = process.env.WSORB_DIAGNOSTICS === "1";
+const startupAssets = new Map([
+  ["/", "index"], ["/app.js", "app"], ["/styles.css", "styles"],
+  ["/sim/manifest.json", "engine_manifest"], ["/sim/wsorb_bevy.js", "engine_glue"],
+  ["/sim/wsorb_bevy_bg.wasm", "engine_wasm"],
+]);
 if (process.env.WSORB_HEADLESS === "1" && process.env.WSORB_LAB !== "1") {
   throw new Error("WSORB_HEADLESS=1 requires the private WSORB_LAB=1 local server.");
 }
@@ -43,12 +50,15 @@ if (!process.exitCode) {
     ".woff2": "font/woff2",
   };
   const server = createServer(async (request, response) => {
+    let asset;
+    let assetBytes = 0;
     const headers = {
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
     };
     const finish = (status, body = "") => {
+      if (asset) assetBytes = Buffer.byteLength(body);
       response.writeHead(status, headers);
       response.end(request.method === "HEAD" ? undefined : body);
     };
@@ -82,6 +92,13 @@ if (!process.exitCode) {
 
     try {
       const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+      if (assetDiagnostics && (asset = startupAssets.get(pathname))) {
+        // HTTP completion describes delivery only, not engine or renderer readiness.
+        response.once("finish", () => emitDiagnostic(true, "local_relay", "asset_finished", {
+          asset, http_method: request.method, http_status: response.statusCode,
+          bytes: request.method === "HEAD" || response.statusCode === 304 ? 0 : assetBytes,
+        }));
+      }
       const segments = pathname === "/" ? [] : pathname.slice(1).split("/");
       if (pathname.includes("\\") || segments.some(part => !part || part === "." || part === ".." || part.startsWith("."))) {
         finish(404, "Not found");
@@ -110,6 +127,7 @@ if (!process.exitCode) {
         const body = !lab.indexScript ? html : /<\/body>/i.test(html)
           ? html.replace(/<\/body>/i, `${lab.indexScript}\n</body>`)
           : `${html}\n${lab.indexScript}\n`;
+        if (asset) assetBytes = Buffer.byteLength(body);
         response.writeHead(200, {
           ...headers,
           "Content-Type": contentTypes[".html"],
@@ -141,6 +159,7 @@ if (!process.exitCode) {
         "Content-Type": contentTypes[extname(actualPath).toLowerCase()] ?? "application/octet-stream",
         "Content-Length": info.size,
       });
+      if (asset) assetBytes = info.size;
       if (request.method === "HEAD") response.end();
       else createReadStream(actualPath).pipe(response);
     } catch {

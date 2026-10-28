@@ -447,6 +447,10 @@ class RoomSimulation(LocalSimulation):
     # Some local helpers take a snapshot before writing. Block the helpers
     # themselves, not just their eventual command, so they perform no HTTP.
     _request = _unsupported
+    bind_to_observed_page = _unsupported
+    # Hosted owner RPCs do not implement the local page-header protocol.
+    last_observed_page_id = None
+    bound_page_id = None
     status = _unsupported
     GetNearestDebrisLocations = _unsupported
     SetCommand = _unsupported
