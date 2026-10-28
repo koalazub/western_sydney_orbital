@@ -1,8 +1,9 @@
 import numpy as np
+
 from . import config as cfg
-from .trajectory import straight_line, predict_conflicts, propagate
-from .accel_controller import VelocityHold, BurnSequencer
+from .accel_controller import BurnSequencer, VelocityHold
 from .avoidance import plan_avoidance
+from .trajectory import predict_conflicts, propagate, straight_line
 
 
 def _unit(x):
@@ -17,8 +18,9 @@ def _grid(dist, speed):
 
 class Guidance:
     """CRUISE: fly the straight line, recheck every CHECK_PERIOD_S.
-    AVOID: run the sidestep burns, re-check the predicted path every REPLAN_PERIOD_S and re-plan if it stops being clear.
-    The shuttle's path is always predicted from its actual state, including the velocity-hold burn and any sidestep burns.
+    AVOID: run the sidestep burns, re-check the predicted path every REPLAN_PERIOD_S
+    and re-plan if it stops being clear. The shuttle's path is always predicted from
+    its actual state, including the velocity-hold burn and any sidestep burns.
     """
 
     def __init__(self):
@@ -69,39 +71,54 @@ class Guidance:
         else:
             vhat = _unit(target - p)
         v_des = self.v_des if self.vhold.active else None
-        nominal = propagate(p, v, ts, v_des=v_des, along=vhat, t_now=t)[0]    # no sidestep, along-track hold only
+        nominal = propagate(p, v, ts, v_des=v_des, along=vhat, t_now=t)[
+            0
+        ]  # no sidestep, along-track hold only
         plan = plan_avoidance(t, p, v, vhat, nominal, snap, conf, ts)
         if plan is None:
             return False
         if self.mode == "AVOID":
             if not force and plan.clearance <= float(conf.gap.min()) + cfg.REPLAN_MIN_GAIN_M:
-                return False                              # the new plan isn't clearly better: keep flying the current one
+                return False  # the new plan isn't clearly better: keep flying the current one
             self.n_replans += 1
         else:
             self.n_replans = 0
         self.mode, self.vhat0, self.plan = "AVOID", vhat, plan
         self.avoid_end = plan.t_end
         self.seq.set(plan.burns)
-        self.note = (f"avoiding {plan.threat_ids[:3]}" + ("" if plan.feasible else " (best effort)")
-                     + (f" [replan {self.n_replans}]" if self.n_replans else ""))
+        self.note = (
+            f"avoiding {plan.threat_ids[:3]}"
+            + ("" if plan.feasible else " (best effort)")
+            + (f" [replan {self.n_replans}]" if self.n_replans else "")
+        )
         return True
 
     def update(self, t, shuttle, snap, target):
         p, v = shuttle.pos, shuttle.vel
         dist = float(np.linalg.norm(target - p))
 
-        if self.next_check is None:                       # first call: the initial burn
+        if self.next_check is None:  # first call: the initial burn
             self._set_velocity_target(p, target)
             self.next_check = t + cfg.CHECK_PERIOD_S
             self.note = "initial burn"
 
-        # Predict the shuttle's path from its ACTUAL state (velocity-hold burn + any sidestep burns), then test it
+        # Predict from its ACTUAL state (velocity-hold burn + any sidestep burns), then test it.
         avoiding = self.mode == "AVOID"
-        speed_hint = max(float(np.linalg.norm(v)), float(np.linalg.norm(self.v_des)) if self.vhold.active else 0.0)
+        speed_hint = max(
+            float(np.linalg.norm(v)),
+            float(np.linalg.norm(self.v_des)) if self.vhold.active else 0.0,
+        )
         ts = _grid(dist, speed_hint)
         v_des = self.v_des if self.vhold.active else None
-        path = propagate(p, v, ts, v_des=v_des, along=self.vhat0 if avoiding else None,
-                         burns=self.seq.burns if avoiding else (), t_now=t)[0]
+        path = propagate(
+            p,
+            v,
+            ts,
+            v_des=v_des,
+            along=self.vhat0 if avoiding else None,
+            burns=self.seq.burns if avoiding else (),
+            t_now=t,
+        )[0]
         conf = predict_conflicts(path, snap, ts)
         line = straight_line(p, self.v_des if self.vhold.active else v, target)
 
@@ -110,7 +127,7 @@ class Guidance:
             if conf.threat.any() and (done or t >= self.next_replan):
                 self._plan(t, p, v, snap, ts, conf, target, force=done)
                 self.next_replan = t + cfg.REPLAN_PERIOD_S
-            elif done and not conf.threat.any():          # burns finished and the path is clear
+            elif done and not conf.threat.any():  # burns finished and the path is clear
                 self.mode, self.plan = "CRUISE", None
                 self.seq.clear()
                 self.next_check = t + cfg.SETTLE_S
@@ -125,7 +142,7 @@ class Guidance:
         accel = np.zeros(3)
         if self.mode == "AVOID":
             accel = accel + self.seq.accel_at(t)
-            if self.vhold.active:                         # keep any initial speed-up going, along the path only
+            if self.vhold.active:  # keep any initial speed-up going, along the path only
                 ah = self.vhold.step(v)
                 accel = accel + float(ah @ self.vhat0) * self.vhat0
         else:
@@ -133,9 +150,22 @@ class Guidance:
 
         speed = float(np.linalg.norm(v))
         to_t = target - p
-        cosang = float(np.clip((v @ to_t) / max(speed * max(dist, 1e-9), 1e-9), -1, 1)) if speed > 0.1 else 1.0
-        tel = dict(mode=self.mode, note=self.note, conf=conf, line=line, plan=self.plan, dist=dist,
-                   v_des=self.v_des, vhold=self.vhold.active, replans=self.n_replans,
-                   heading_err=float(np.degrees(np.arccos(cosang))),
-                   next_check_in=max(0.0, self.next_check - t))
+        cosang = (
+            float(np.clip((v @ to_t) / max(speed * max(dist, 1e-9), 1e-9), -1, 1))
+            if speed > 0.1
+            else 1.0
+        )
+        tel = dict(
+            mode=self.mode,
+            note=self.note,
+            conf=conf,
+            line=line,
+            plan=self.plan,
+            dist=dist,
+            v_des=self.v_des,
+            vhold=self.vhold.active,
+            replans=self.n_replans,
+            heading_err=float(np.degrees(np.arccos(cosang))),
+            next_check_in=max(0.0, self.next_check - t),
+        )
         return accel, tel

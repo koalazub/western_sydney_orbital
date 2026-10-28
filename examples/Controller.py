@@ -1,18 +1,28 @@
+# The licensed runtime must connect before the later numeric/controller imports.
+# ruff: noqa: E402
 #############################################################################################
 # DON'T CHANGE ANY OF THE BELOW. NECESSARY FOR CORRECTLY JOINING THE COMPETITION SIMULATION #
 #############################################################################################
 
-import os, sys, time, datetime, traceback
+import datetime
+import os
+import sys
+import time
+import traceback
+
 import spaceteams as st
+
+
 def custom_exception_handler(exctype, value, tb):
     error_message = "".join(traceback.format_exception(exctype, value, tb))
     st.logger_fatal(error_message)
+
+
 sys.excepthook = custom_exception_handler
 st.connect_to_sim(sys.argv)
 
 import numpy as np
 import numpy.typing as npt
-
 
 this = st.GetThisSystem()
 
@@ -34,9 +44,10 @@ bottomCameraFrame = bottomCamera.GetBodyFixedFrame()
 
 
 def GetNearestDebrisLocations(N: int) -> list[npt.NDArray]:
-    allDebrisInfo: list[npt.NDArray] = shuttle.GetParamArray(st.VarType.doubleM3x3, 
-                                                            ["Radar", "SortedDebrisData"])
-    nearest = allDebrisInfo[:min(N, len(allDebrisInfo))]
+    allDebrisInfo: list[npt.NDArray] = shuttle.GetParamArray(
+        st.VarType.doubleM3x3, ["Radar", "SortedDebrisData"]
+    )
+    nearest = allDebrisInfo[: min(N, len(allDebrisInfo))]
     return nearest
 
 
@@ -47,7 +58,9 @@ def PanTiltCamera(camera: st.Entity, yaw_deg: float, pitch_deg: float) -> None:
     elif camera == bottomCamera:
         yaw_deg = np.clip(yaw_deg, -89.0, 89.0)
         pitch_deg = np.clip(pitch_deg, 0.0, 50.0)
-    camera.setRotation_DCM(st.math.Euler321_to_DCM([np.deg2rad(yaw_deg), np.deg2rad(pitch_deg), 0.0]), shuttleFrame)
+    camera.setRotation_DCM(
+        st.math.Euler321_to_DCM([np.deg2rad(yaw_deg), np.deg2rad(pitch_deg), 0.0]), shuttleFrame
+    )
 
 
 def SetCommand(accelCommand: npt.NDArray, angAccelCommand: npt.NDArray) -> None:
@@ -67,17 +80,20 @@ def SetCommand(accelCommand: npt.NDArray, angAccelCommand: npt.NDArray) -> None:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mvp import config as cfg
-from mvp.context import init as mvp_init, phobos_to_body
-from mvp.state_estimator import ShuttleState, DebrisTracks
-from mvp.guidance import Guidance
-from mvp.display import Hud
 from mvp.attitude import Reorienter
+from mvp.context import init as mvp_init
+from mvp.context import phobos_to_body
+from mvp.display import Hud
+from mvp.guidance import Guidance
+from mvp.state_estimator import DebrisTracks, ShuttleState
 
 mvp_init(phobosFrame=phobosFrame, shuttleFrame=shuttleFrame)
 
 LOOP_FREQ = this.GetParam(st.VarType.double, "LoopFreqHz")
 
-t0_sim: st.timestamp = st.SimGlobals.GetSimEntity().GetParam(st.VarType.timestamp, ["Time", "StartDateTAI"])
+t0_sim: st.timestamp = st.SimGlobals.GetSimEntity().GetParam(
+    st.VarType.timestamp, ["Time", "StartDateTAI"]
+)
 t0: datetime.datetime = t0_sim.as_datetime()
 
 shuttle_state = ShuttleState()
@@ -90,7 +106,6 @@ last_damage = 0.0
 iteration = 0
 exit_flag: bool = False
 while not exit_flag:
-
     time.sleep(1.0 / LOOP_FREQ)
 
     t = (st.SimGlobals.SimClock.GetTimeNow().as_datetime() - t0).total_seconds()
@@ -113,9 +128,14 @@ while not exit_flag:
         dd = np.linalg.norm(snap.pos - shuttle_state.pos, axis=1)
         j = int(np.argmin(dd))
         st.OnScreenLogMessage(
-            f"HIT t={t:.1f}s dmg {last_damage:.2f}->{damage:.2f} | nearest #{snap.ids[j]} {dd[j]:.1f} m, "
-            f"n={snap.n[j]}, sig_v={snap.sig_v[j]:.2f}, rel speed {np.linalg.norm(snap.vel[j] - shuttle_state.vel):.1f} m/s "
-            f"| mode {tel['mode']}", "HitLog", st.Severity.Info)
+            f"HIT t={t:.1f}s dmg {last_damage:.2f}->{damage:.2f} | "
+            f"nearest #{snap.ids[j]} {dd[j]:.1f} m, "
+            f"n={snap.n[j]}, sig_v={snap.sig_v[j]:.2f}, "
+            f"rel speed {np.linalg.norm(snap.vel[j] - shuttle_state.vel):.1f} m/s "
+            f"| mode {tel['mode']}",
+            "HitLog",
+            st.Severity.Info,
+        )
     last_damage = damage
 
     # --- Commands (the shuttle expects body-frame axes) ---
@@ -125,7 +145,7 @@ while not exit_flag:
         angvel_body = phobos_to_body(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame))
         ang_cmd = reorienter.command(d_body, angvel_body)
     SetCommand(phobos_to_body(accel_phobos), ang_cmd)
-    
+
     # --- Display ---
     if iteration % cfg.HUD_EVERY_N == 0:
         hud.draw(shuttle_state, snap, tel, target_pos, tracks.scans)

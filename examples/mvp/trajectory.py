@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 import numpy as np
+
 from . import config as cfg
 
 
@@ -14,17 +16,17 @@ def lateral_basis(f):
 
 
 def safe_radius(diam, sig_p, sig_v, t):
-    """Centre-to-centre distance that counts as a collision, including tracking uncertainty at time t."""
-    margin = np.minimum(cfg.K_SIGMA * np.sqrt(sig_p ** 2 + (sig_v * t) ** 2), cfg.MARGIN_CAP_M)
+    """Collision centre-to-centre distance, including tracking uncertainty at time t."""
+    margin = np.minimum(cfg.K_SIGMA * np.sqrt(sig_p**2 + (sig_v * t) ** 2), cfg.MARGIN_CAP_M)
     return cfg.SHUTTLE_RADIUS_M + cfg.SAFETY_M + 0.55 * diam + margin
 
 
 @dataclass
 class StraightLine:
     speed: float
-    eta: float               # seconds to closest approach to the target (inf if not heading toward it)
-    miss: float              # distance from the target at that closest approach
-    heading_err_deg: float   # angle between the velocity and the direction to the target
+    eta: float  # seconds to closest approach to the target (inf if not heading toward it)
+    miss: float  # distance from the target at that closest approach
+    heading_err_deg: float  # angle between the velocity and the direction to the target
 
 
 def straight_line(p, v, target) -> StraightLine:
@@ -36,13 +38,16 @@ def straight_line(p, v, target) -> StraightLine:
     t_c = float(to_t @ v) / (speed * speed)
     miss = float(np.linalg.norm(p + v * max(t_c, 0.0) - target))
     cosang = float(np.clip((v @ to_t) / (speed * max(dist, 1e-9)), -1.0, 1.0))
-    return StraightLine(speed, t_c if t_c > 0 else float("inf"), miss, float(np.degrees(np.arccos(cosang))))
+    return StraightLine(
+        speed, t_c if t_c > 0 else float("inf"), miss, float(np.degrees(np.arccos(cosang)))
+    )
 
 
 def propagate(p0, v0, ts, v_des=None, along=None, burns=(), t_now=0.0):
-    """Shuttle path on the time grid ts (ts[0] = now), under the velocity-hold law plus any timed burns.
+    """Shuttle path on ts (ts[0] = now), under velocity hold plus any timed burns.
 
-    v_des: velocity target of the hold (None = coast). along: if given, the hold only acts along this unit vector.
+    v_des: velocity target of the hold (None = coast).
+    along: if given, the hold only acts along this unit vector.
     """
     K = len(ts)
     p = np.empty((K, 3))
@@ -71,12 +76,12 @@ def propagate(p0, v0, ts, v_des=None, along=None, burns=(), t_now=0.0):
 
 @dataclass
 class Conflicts:
-    t_star: np.ndarray   # time of worst approach for each track
-    d_star: np.ndarray   # centre-to-centre distance at that time
-    safe: np.ndarray     # distance below which that counts as a collision
-    threat: np.ndarray   # bool
-    gap: np.ndarray      # worst (distance - safe radius) over the horizon; negative = collision
-    dmin: np.ndarray     # closest centre distance to the path over the horizon
+    t_star: np.ndarray  # time of worst approach for each track
+    d_star: np.ndarray  # centre-to-centre distance at that time
+    safe: np.ndarray  # distance below which that counts as a collision
+    threat: np.ndarray  # bool
+    gap: np.ndarray  # worst (distance - safe radius) over the horizon; negative = collision
+    dmin: np.ndarray  # closest centre distance to the path over the horizon
 
 
 def predict_conflicts(path, snap, ts) -> Conflicts:
@@ -85,13 +90,15 @@ def predict_conflicts(path, snap, ts) -> Conflicts:
     if N == 0:
         z = np.zeros(0)
         return Conflicts(z, z, z, np.zeros(0, bool), z, z)
-    pd = snap.pos[:, None, :] + snap.vel[:, None, :] * ts[None, :, None]            # (N,K,3)
-    d = np.linalg.norm(pd - path[None, :, :], axis=2)                                # (N,K)
+    pd = snap.pos[:, None, :] + snap.vel[:, None, :] * ts[None, :, None]  # (N,K,3)
+    d = np.linalg.norm(pd - path[None, :, :], axis=2)  # (N,K)
     safe = safe_radius(snap.diam[:, None], snap.sig_p[:, None], snap.sig_v[:, None], ts[None, :])
     gap = d - safe
     r = np.arange(N)
     k = np.argmin(gap, axis=1)
     t_hit = ts[k]
-    settled = (snap.n >= cfg.MIN_UPDATES_FOR_THREAT) & ((snap.sig_v <= cfg.THREAT_MAX_SIGV) | (t_hit < cfg.IMMINENT_S))
+    settled = (snap.n >= cfg.MIN_UPDATES_FOR_THREAT) & (
+        (snap.sig_v <= cfg.THREAT_MAX_SIGV) | (t_hit < cfg.IMMINENT_S)
+    )
     threat = (gap[r, k] < 0.0) & settled & (t_hit <= cfg.THREAT_LEAD_S)
     return Conflicts(t_hit, d[r, k], safe[r, k], threat, gap[r, k], d.min(axis=1))
