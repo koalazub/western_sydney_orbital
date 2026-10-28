@@ -44,9 +44,23 @@ def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connecti
     assert options.duration_s <= 1800
     assert options.wall_budget_s <= 3600
     assert options.cadence_hz >= 10
+    assert options.wait_for_owner_s == 0
     assert options.diagnostics is False
     with pytest.raises(CheckpointError, match="arguments"):
         parse_args([])
+
+
+def test_owner_wait_is_explicit_bounded_external_and_does_not_grant_run_consent():
+    options = parse_args(["--room-file", "private.json", "--wait-for-owner-s", "3600"])
+    assert options.wait_for_owner_s == 3600 and options.run is False
+    for arguments in (
+        ["--isolated", "--wait-for-owner-s", "1"],
+        ["--room-file", "private.json", "--wait-for-owner-s", "-1"],
+        ["--room-file", "private.json", "--wait-for-owner-s", "3601"],
+        ["--room-file", "private.json", "--wait-for-owner-s", "nan"],
+    ):
+        with pytest.raises(CheckpointError):
+            parse_args(arguments)
 
 
 def test_diagnostics_flag_is_explicit_and_does_not_grant_run_consent():

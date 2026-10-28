@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import secrets
+import time
 import uuid
 from urllib.error import HTTPError
 
@@ -15,6 +16,7 @@ from test_room_integration import actual_room as actual_room
 from test_room_integration import room_owner as room_owner
 from test_room_integration import room_worker as room_worker
 from wsorb import diagnostics as d
+from wsorb.checkpoint import CheckpointError, CheckpointOptions, wait_for_owner
 from wsorb.room_api import RoomSimulation
 
 
@@ -144,3 +146,46 @@ def test_room_snapshot_diagnostics_are_opt_in_and_do_not_start_a_flight(room_own
     request_ids = {record["request_id"] for record in records if "request_id" in record}
     assert len(request_ids) == 1
     assert all(record.get("method") == "snapshot" for record in records if "method" in record)
+
+
+def test_owner_wait_reads_real_headless_readiness_without_starting_or_claiming(tmp_path):
+    with _running_local_server(tmp_path, headless=True) as client:
+        options = CheckpointOptions(connection_file="explicit.json", run=True, wait_for_owner_s=3)
+        timeout = client.timeout_s
+        wait_for_owner(client, options, deadline=time.monotonic() + 3)
+        snapshot = client.snapshot()
+        assert client.timeout_s == timeout
+        assert snapshot["runtime"]["running"] is False
+        assert snapshot["observation"]["time_s"] == 0
+        assert snapshot["observation"]["control_authority"]["status"] == "idle"
+        assert snapshot["renderer"]["ready"] is False
+
+
+def test_owner_wait_timeout_does_not_dispatch_a_command_to_an_absent_browser(tmp_path):
+    with _running_local_server(tmp_path) as client:
+        options = CheckpointOptions(
+            connection_file="explicit.json", run=True, wait_for_owner_s=0.05
+        )
+        with pytest.raises(CheckpointError) as expired:
+            wait_for_owner(client, options, deadline=time.monotonic() + 1)
+        assert expired.value.code == "owner_wait_timeout"
+        assert client.status()["connected"] is client.status()["busy"] is False
+
+
+def test_owner_wait_does_not_replace_an_actual_native_controller(tmp_path):
+    with _running_local_server(tmp_path, headless=True) as client:
+        initial = client.snapshot()
+        grant = client.claim_control("existing_run", "existing_controller", initial, lease_sim_s=1)
+        authority = grant["observation"]["control_authority"]
+        try:
+            options = CheckpointOptions(
+                connection_file="explicit.json", run=True, wait_for_owner_s=3
+            )
+            with pytest.raises(CheckpointError) as occupied:
+                wait_for_owner(client, options, deadline=time.monotonic() + 3)
+            assert occupied.value.code == "owner_in_use"
+            actual = client.snapshot()
+            assert actual["observation"]["control_authority"] == authority
+            assert actual["runtime"]["running"] is False
+        finally:
+            client.release_control("existing_run", authority["epoch"], client.snapshot())

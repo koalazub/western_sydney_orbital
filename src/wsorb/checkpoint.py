@@ -35,6 +35,7 @@ import numpy as np
 from . import diagnostics
 from .local_api import (
     CommandExpiredError,
+    LocalApiError,
     LocalBusyError,
     LocalSimulation,
     StaleContextError,
@@ -93,6 +94,7 @@ class CheckpointOptions:
     playback_rate: int | None = None
     progress: bool = False
     diagnostics: bool = False
+    wait_for_owner_s: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("isolated", "run", "progress", "diagnostics"):
@@ -134,6 +136,12 @@ class CheckpointOptions:
                 "invalid_options", "Playback rate 5 is allowed only on an owned isolated server."
             )
         object.__setattr__(self, "playback_rate", rate)
+        wait = _number(self.wait_for_owner_s)
+        if wait is None or not 0 <= wait <= 3600 or (self.isolated and wait > 0):
+            raise CheckpointError(
+                "invalid_options", "Owner waiting requires an external scope and 0..3600 seconds."
+            )
+        object.__setattr__(self, "wait_for_owner_s", float(wait))
 
 
 class _Parser(argparse.ArgumentParser):
@@ -174,6 +182,12 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
     parser.add_argument("--progress", action="store_true", help="bounded progress JSON on stderr")
     parser.add_argument(
         "--diagnostics", action="store_true", help="opt in to bounded, allowlisted JSONL on stderr"
+    )
+    parser.add_argument(
+        "--wait-for-owner-s",
+        type=float,
+        default=0,
+        help="read-only wait for an external engine, within the total wall budget; at most 3600 s",
     )
     return CheckpointOptions(**vars(parser.parse_args(argv)))
 
@@ -945,6 +959,67 @@ def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
         return _run_checkpoint(options)
 
 
+def wait_for_owner(client: LocalSimulation, options: CheckpointOptions, *, deadline: float) -> None:
+    """Wait using reads only. Never claim, Play, adopt a fence or retry actuation."""
+    end = min(deadline, time.monotonic() + options.wait_for_owner_s)
+    original_timeout = client.timeout_s
+    previous_frame = None
+    next_progress = 0.0
+    try:
+        while time.monotonic() < end:
+            now = time.monotonic()
+            if options.progress and now >= next_progress:
+                print(
+                    json.dumps({"state": "waiting_for_owner", "actuation_permitted": False}),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                next_progress = now + 30
+            client.timeout_s = min(original_timeout, max(0.001, end - now))
+            try:
+                native_ready = False
+                may_read = True
+                if not isinstance(client, RoomSimulation):
+                    status = client.status()
+                    native_ready = (
+                        status.get("backend") == "native_headless"
+                        and status.get("physics_ready") is True
+                        and status.get("physics_status_cached") is False
+                    )
+                    may_read = status.get("busy") is False and (
+                        native_ready or status.get("connected") is True
+                    )
+                if may_read and time.monotonic() < end:
+                    client.timeout_s = min(original_timeout, max(0.001, end - time.monotonic()))
+                    snapshot = client.snapshot()
+                    authority = _observation(snapshot).get("control_authority", {})
+                    if options.run and authority.get("status") in ("active", "expired"):
+                        raise CheckpointError(
+                            "owner_in_use", "An existing controller owns this flight; no takeover."
+                        )
+                    renderer = snapshot.get("renderer", {})
+                    frames = renderer.get("rendered_frames")
+                    if native_ready:
+                        return
+                    if renderer.get("ready") is True and type(frames) is int:
+                        if previous_frame is not None and frames > previous_frame:
+                            return
+                        previous_frame = frames
+            except LocalBusyError:
+                pass  # Actual pre-dispatch read contention, not a flight retry.
+            except LocalApiError as error:
+                if getattr(error, "code", None) != "owner_unavailable":
+                    raise CheckpointError(
+                        "owner_wait_failed", "Engine readiness read failed; no command was sent."
+                    ) from error
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+        raise CheckpointError(
+            "owner_wait_timeout", "No ready engine was observed before the owner wait ended."
+        )
+    finally:
+        client.timeout_s = original_timeout
+
+
 def _run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
     if os.name != "posix":
         raise CheckpointError(
@@ -1000,6 +1075,13 @@ def _run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:
                     if options.room_file is not None
                     else LocalSimulation.from_file(options.connection_file, timeout_s=2.0)
                 )
+                if options.wait_for_owner_s > 0:
+                    from .diagnostics import diagnostics_context
+
+                    # Waiting must not consume the bounded flight trace before
+                    # a user has opened the game. Progress remains explicit.
+                    with diagnostics_context(enabled=False):
+                        wait_for_owner(client, options, deadline=deadline)
                 trial = (
                     run_trial(client, options, policy=policy, deadline=deadline)
                     if options.run
