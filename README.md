@@ -46,6 +46,25 @@ Use `devenv up -d lab simulation` to run them in the background, and `devenv pro
 
 For a game-only session, use `PORT=0 just local` after `just setup` and open the address printed in the terminal. `PORT=0 just --no-deps local` serves an existing build without rebuilding it. Choose this path or the managed game-and-lab setup above, rather than starting both accidentally.
 
+### Windows game engine
+
+The game is WebAssembly with WebGPU, not a native Windows executable. For a prebuilt game, use a supported Windows 11 machine, Node 26.12.1 or later in the 26.x series, and current Chrome or Edge with working hardware-accelerated WebGPU. Copy the complete matching `worker/public` assets from `just build`; a source checkout alone does not contain the generated engine.
+
+From PowerShell at the repository root:
+
+```powershell
+node .\worker\scripts\platform-probe.mjs
+if ($LASTEXITCODE -ne 0) { throw "CPU/WASM probe failed" }
+$env:WSORB_LAB = "0"
+$env:WSORB_HEADLESS = "0"
+$env:PORT = "0"
+node .\worker\scripts\local.mjs
+```
+
+Open the exact loopback URL printed by the server. The probe verifies actual WASM integrity and physics on the machine running it; it does not certify WebGPU, rendered frames or camera RGB readback. Those checks still need to run on the Windows GPU and driver. No Windows runtime or GPU pass is claimed from macOS tests.
+
+For building or using the private Python lab and control APIs, run the backend inside WSL2 with the repository and secrets on its Linux filesystem under the WSL home. Do not assume `/mnt/c` or Windows `chmod` provides the POSIX private-file protection these services require. Verify Windows-to-WSL localhost forwarding for both game and notebook ports. Native Windows private-lab ACL support is not implemented; the game-only command above does not enable private control.
+
 ## Get your bearings
 
 The initial Overview shows Phobos and Mars at their actual modelled sizes and separation. Press **F** for a close view of the lander. Use **Views** to change the camera, lighting, stars or guide visibility.
@@ -147,6 +166,26 @@ WSORB_LAB=1 WSORB_HEADLESS=1 just local
 
 This starts an explicit, separate native-headless flight through the existing private loopback API. It runs the actual physics, sensor delivery, playback and telemetry schedules. Renderer status stays unstarted and camera capture reports no sample; no browser or replacement image is involved. The notebook connects using the private connection file as usual. **Pause physics** works without a game window. Starting this mode does not attach to or reset a flight already open in a browser.
 
+### Run a checkpoint attempt through the APIs
+
+Inspect a fresh isolated world without issuing flight commands:
+
+```sh
+devenv shell uv run --locked wsorb checkpoint --isolated
+```
+
+Explicitly run matched baseline and body-axis attempts in separate stock worlds:
+
+```sh
+devenv shell uv run --locked wsorb checkpoint --isolated --run --policy compare --playback-rate 5 --cadence-hz 50
+```
+
+This script uses authenticated HTTP calls and the same portable numeric controller as the colleague-facing STP script. It does not click the interface, reset an open flight, call a fixed-step test driver or emulate `spaceteams`. The two portable profiles differ only in body-axis preference; they are separate from the notebook's native-contract resilient A* controller. Default inspection is read-only, and default playback is 1×. Accelerated runs can expire their leases when computation or transport is too slow; expiry is a failed attempt, not permission to extend or retime the decision.
+
+The final JSON reports actual native arrival, range, speed, damage, fuel, score and source/configuration diagnostics. A run succeeds only on native mission success with the unchanged stock arrival/damage limits. L1 command effort is labelled as a proxy, not fuel. No report files are written automatically. To inspect an existing local flight instead, supply an explicit `--connection-file`; it is never implicitly reset, tuned or used for comparison.
+
+### Run from the notebook
+
 In the notebook:
 
 1. Open **Flight** and select **Connect / Refresh**. This watches the existing flight and publishes Python guidance. It does not reset, pause, resume or command thrust.
@@ -241,9 +280,25 @@ Our practice world uses simplified gravity, terrain, contact, fuel and damage mo
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 
-Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](src/wsorb/stp_api.py) and [controller example](examples/stp_controller.py) are separate from the local connection. The example now has a reviewed, bounded target/radar/spin-damping baseline in [stp_policy.py](src/wsorb/stp_policy.py), disabled unless explicitly configured. Select exactly one of `WSORB_STP_POLICY_FILE` or `WSORB_STP_POLICY_JSON`; enabling schema `wsorb.stp_policy`, version 1 requires an independently established `radar_clock_offset_s`. SDK bootstrap arguments stay unchanged. No offset is guessed from a reading.
+Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](src/wsorb/stp_api.py) and [controller example](examples/stp_controller.py) use the authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate validation transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not exported as STP capabilities.
 
-This baseline has no terrain/arrival geometry, vision, independent navigation sensors or native watchdog parity. Its default wall-time budget is 30 seconds, bounded to 300; Python cleanup cannot guarantee zero thrust after process death or a blocked SDK call. Authentic licensed-runtime execution is still required. Missing SDK access raises an error rather than supplying substitute results.
+### Send the controller to a colleague
+
+Send `examples/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
+
+Keep the server's existing ControllerSystem launch arguments unchanged. Start with no policy configuration, or this disabled configuration selected by `WSORB_STP_POLICY_JSON`:
+
+```json
+{"schema":"wsorb.stp_policy","schema_version":1,"enabled":false}
+```
+
+That runs a read-only SDK probe. It reports actual versions, resolved handles, frames and source clocks without writing even zero commands. Unknown SDK/server versions remain unknown. The colleague should return that output before enabling flight control.
+
+For an enabled checkpoint attempt, select `policy: "checkpoint_velocity"` in the reviewed configuration. Set an independently established `radar_clock_offset_s`, verify `checkpoint_radius_m` against the server's Scoring `KeepOutRadius_m`, and ensure this is the only jet-command writer. Select `body_axis_preference` explicitly for the candidate policy. Do not infer the radar offset from one reading or pass our policy options as SDK bootstrap arguments. The legacy PD/radar policy remains available for comparison.
+
+The portable controller uses named reference frames, original measurement times and bounded P velocity control. It does not add unreviewed integral/derivative gains or initial attitude changes from the meeting discussion. Anonymous radar tracks carry covariance and tentative/confirmed/coasting states, but their IDs are hypotheses and their uncertainty models are not calibrated probabilities. Tracking cannot remove raw obstacle envelopes or certify clearance. Body-command L1 is an allocation proxy, not measured fuel or proof of the minutes' diagonal-fuel claim; the local centre-of-mass actuator charges resultant L2 force.
+
+SDK state/radar reads and the two command writes are sequential. The script rechecks the actual clock after computation, but STP has no native decision lease here. Cleanup attempts real zeros only after explicit enabled control; it cannot guarantee a stop after process death, blocked calls or failed writes. A configured-radius observation is not an official scoring result or a physics freeze. Authentic licensed-server execution is still required. Missing SDK access fails clearly rather than returning substitute results.
 
 For technical details, use the [API and measurement reference](notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
 

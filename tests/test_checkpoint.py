@@ -1,0 +1,308 @@
+"""Pure consent/parser checks and an opt-in real owned-process/API trial. No mocks."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import secrets
+from dataclasses import asdict
+
+import numpy as np
+import pytest
+
+from wsorb.checkpoint import (
+    CheckpointError,
+    CheckpointOptions,
+    _guard,
+    _record_command,
+    _summary,
+    _usage,
+    decision_lease,
+    main,
+    native_measurement,
+    native_success,
+    parse_args,
+    policy_config,
+    policy_decision_eligible,
+    run_checkpoint,
+    run_trial,
+    sample_from_snapshot,
+    world_metadata,
+)
+from wsorb.local_api import LocalSimulation
+
+
+def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connection():
+    options = parse_args(["--isolated"])
+    assert options.run is False
+    assert options.policy == "baseline"
+    assert options.connection_file is None
+    assert options.playback_rate == 1
+    assert options.duration_s <= 1800
+    assert options.wall_budget_s <= 3600
+    assert options.cadence_hz >= 10
+    with pytest.raises(CheckpointError, match="arguments"):
+        parse_args([])
+
+
+def test_external_scope_is_explicit_single_trial_and_does_not_change_playback_rate():
+    options = parse_args(["--connection-file", "private.json"])
+    assert str(options.connection_file) == "private.json"
+    assert options.playback_rate == 1
+    assert not options.run
+    for argv in (
+        ["--connection-file", "private.json", "--run", "--policy", "compare"],
+        ["--connection-file", "private.json", "--run", "--playback-rate", "5"],
+        ["--connection-file", "private.json", "--isolated"],
+    ):
+        with pytest.raises(CheckpointError):
+            parse_args(argv)
+
+
+def test_comparison_requires_separate_owned_worlds_and_explicit_actuation_consent():
+    with pytest.raises(CheckpointError, match="--isolated and --run"):
+        parse_args(["--isolated", "--policy", "compare"])
+    options = parse_args(["--isolated", "--policy", "compare", "--run"])
+    assert options.policy == "compare" and options.isolated and options.run
+
+
+@pytest.mark.parametrize("name", ["duration-s", "wall-budget-s", "cadence-hz"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "0"])
+def test_limits_must_be_real_bounded_values_before_any_connection(name, value):
+    with pytest.raises(CheckpointError):
+        parse_args(["--isolated", f"--{name}", value])
+
+
+@pytest.mark.parametrize(
+    "name,value", [("duration-s", "1800.01"), ("wall-budget-s", "3600.01"), ("cadence-hz", "9.9")]
+)
+def test_native_lease_cadence_and_time_budgets_cannot_be_weakened(name, value):
+    with pytest.raises(CheckpointError):
+        parse_args(["--isolated", f"--{name}", value])
+
+
+def test_reusable_actuation_function_rejects_read_only_options_without_network_io():
+    # A real client object, not a fake. The consent guard precedes all calls/imports.
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    options = CheckpointOptions(connection_file="unused.json")
+    with pytest.raises(CheckpointError, match="--run"):
+        run_trial(client, options, policy="baseline")
+    with pytest.raises(CheckpointError, match="Validated"):
+        run_checkpoint({"run": True})
+
+
+@pytest.mark.parametrize("value", [True, 2**2048, math.nan, math.inf])
+def test_reusable_options_validate_numbers_without_overflow_or_boolean_consent(value):
+    with pytest.raises(CheckpointError):
+        CheckpointOptions(isolated=True, duration_s=value)
+
+
+@pytest.mark.parametrize("value", [1, "yes", np.bool_(True), None])
+def test_reusable_options_require_actual_boolean_consent(value):
+    with pytest.raises(CheckpointError):
+        CheckpointOptions(isolated=True, run=value)
+
+
+def test_explicit_isolated_options_cannot_relabel_an_external_client_as_owned():
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    with pytest.raises(CheckpointError, match="isolated"):
+        run_trial(client, CheckpointOptions(isolated=True, run=True), policy="baseline", owned=True)
+
+
+def test_original_granted_epoch_term_and_world_are_required_by_pure_consent_guard():
+    # Control-plane metadata only. This is not a client or a simulated flight.
+    fence = {"epoch": 7, "term": 9, "run_id": "consented_run", "controller_id": "writer"}
+    metadata = {
+        "observation": {
+            "time_s": 4.0,
+            "trial_revision": 1,
+            "tuning_revision": 2,
+            "manual_interventions": 0,
+            "seed": 100,
+            "control_authority": {**fence, "status": "active"},
+        },
+        "runtime": {"running": True},
+    }
+    original = world_metadata(metadata)
+    _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+    metadata["observation"]["control_authority"]["epoch"] = 8
+    with pytest.raises(CheckpointError, match="Original flight/cohort"):
+        _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+    metadata["observation"]["control_authority"]["epoch"] = 7
+    metadata["observation"]["control_authority"]["term"] = 10
+    with pytest.raises(CheckpointError):
+        _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+    metadata["observation"]["control_authority"]["term"] = 9
+    metadata["runtime"]["running"] = False
+    with pytest.raises(CheckpointError, match="pause"):
+        _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+    metadata["runtime"]["running"] = True
+    metadata["observation"]["manual_interventions"] = 1
+    with pytest.raises(CheckpointError):
+        _guard(metadata, original, fence, last_time_s=4.0, expect_running=True)
+
+
+def test_native_decision_lease_is_bounded_by_original_policy_validity():
+    assert decision_lease({"decision_valid_until_elapsed_s": 12.0}, 10.0) == 0.75
+    assert decision_lease({"decision_valid_until_elapsed_s": 10.25}, 10.0) == 0.25
+    for until in (None, True, math.nan, math.inf, 10.01, 9.9):
+        with pytest.raises(CheckpointError):
+            decision_lease({"decision_valid_until_elapsed_s": until}, 10.0)
+    with pytest.raises(CheckpointError):
+        decision_lease({"decision_valid_until_elapsed_s": 1.0}, -1.0)
+
+
+def test_command_axis_usage_labels_l1_proxy_separately_from_actual_l2_fuel():
+    usage = _usage()
+    _record_command(usage, np.array([0.3, 0.4, 0.0]), np.zeros(3))
+    _record_command(usage, np.array([0.0, 0.0, 0.5]), np.zeros(3))
+    assert usage["multi_axis_translation_samples"] == 1
+    assert usage["single_axis_translation_samples"] == 1
+    assert usage["active_body_axis_samples_xyz"] == [1, 1, 1]
+    assert usage["sum_sampled_l1_accel_mps2"] == pytest.approx(1.2)
+    assert usage["sum_sampled_l2_accel_mps2"] == pytest.approx(1.0)
+    assert "not native fuel" in usage["l1_label"]
+    assert "L2" in usage["actual_fuel_model"]
+
+
+def test_comparison_configs_use_the_shared_policy_and_differ_only_in_axis_preference():
+    baseline = asdict(policy_config("baseline"))
+    axis = asdict(policy_config("body-axis"))
+    assert baseline["body_axis_preference"] is False
+    assert axis["body_axis_preference"] is True
+    assert baseline["radar_clock_offset_s"] == axis["radar_clock_offset_s"] == 0.0
+    assert baseline["policy"] == axis["policy"] == "checkpoint_velocity"
+    assert baseline["max_speed_mps"] == axis["max_speed_mps"] == 8.0
+    assert baseline["max_radar_age_s"] == axis["max_radar_age_s"] == 2.5
+    assert baseline["tracking_diagnostics"] is axis["tracking_diagnostics"] is True
+    baseline.pop("body_axis_preference")
+    axis.pop("body_axis_preference")
+    assert baseline == axis
+
+
+def test_eligibility_requires_the_actual_reported_selected_and_accepted_command():
+    # Pure report-contract validation. No client, SDK or engine response is substituted.
+    report = {
+        "failure_reasons": [],
+        "decision_valid_until_elapsed_s": 5.0,
+        "source_freshness": {"now_elapsed_time_s": 4.0},
+        "command": {
+            "kind": "coast",
+            "written_to_any_api": False,
+            "accel_body_mps2": [0, 0, 0],
+            "angular_accel_body_rad_s2": [0, 0, 0],
+        },
+        "candidate_choice": {
+            "selected_kind": "coast",
+            "selected_axis_index": None,
+            "candidates": [
+                {
+                    "kind": "coast",
+                    "axis_index": None,
+                    "accepted": True,
+                    "eligible_for_maneuver_policy": True,
+                    "accel_body_mps2": [0, 0, 0],
+                }
+            ],
+        },
+    }
+    zero = np.zeros(3)
+    assert policy_decision_eligible(report, zero, zero, 4.0)
+    assert not policy_decision_eligible(report, np.array([0.1, 0, 0]), zero, 4.0)
+    assert not policy_decision_eligible(report, zero, zero, 5.1)
+    report["candidate_choice"]["candidates"][0]["accepted"] = False
+    assert not policy_decision_eligible(report, zero, zero, 4.0)
+    report["candidate_choice"]["candidates"][0]["accepted"] = True
+    report["failure_reasons"] = ["Invalid coast"]
+    assert not policy_decision_eligible(report, zero, zero, 4.0)
+
+
+def test_parser_failures_do_not_echo_argv_or_credentials(capsys):
+    token = secrets.token_urlsafe(32)
+    assert main(["--isolated", "--unknown", token]) != 0
+    captured = capsys.readouterr()
+    assert token not in captured.out + captured.err
+    result = json.loads(captured.out)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "invalid_arguments"
+
+
+def test_report_summary_is_bounded_and_json_finite():
+    value = {"numbers": [float("nan"), float("inf"), 3.0], "rows": list(range(10000))}
+    output = _summary(value)
+    assert output["numbers"] == [None, None, 3.0]
+    assert output["rows"][-1] == {"omitted_items": 9992}
+    assert len(json.dumps(output, allow_nan=False)) < 500
+
+
+def test_native_success_is_not_a_distance_or_score_substitute():
+    # Pure interpretation of a numeric mission document, not a simulated response.
+    observation = {
+        "time_s": 200.0,
+        "geometry": {"arrival_radius_m": 50.0},
+        "mission": {"status": "running", "target_distance_m": 1.0, "damage": 0.0, "score": 1.0},
+    }
+    assert not native_success({"observation": observation})
+    observation["mission"]["status"] = "success"
+    assert native_success({"observation": observation})
+    observation["mission"]["target_distance_m"] = 50.001
+    assert not native_success({"observation": observation})
+    observation["mission"]["target_distance_m"] = 50.0
+    observation["mission"]["damage"] = 209200.001
+    assert not native_success({"observation": observation})
+    observation["mission"]["damage"] = 209200.0
+    assert native_success({"observation": observation})
+    observation["geometry"]["arrival_radius_m"] = 500.0
+    assert not native_success({"observation": observation})
+    values = native_measurement({"observation": observation})
+    assert values["fuel_used_kg"] is None
+    assert values["relative_speed_mps"] is None
+
+
+def test_missing_navigation_cannot_become_a_fabricated_control_sample():
+    with pytest.raises(CheckpointError):
+        sample_from_snapshot({"observation": {"shuttle": None, "applied_physics": None}})
+
+
+@pytest.mark.skipif(
+    os.environ.get("WSORB_CHECKPOINT_INTEGRATION") != "1",
+    reason="Opt in after the shared policy handoff to run one real owned Node/WASM server.",
+)
+def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
+    from wsorb.checkpoint import inspect_trial, isolated_simulation, policy_config
+
+    options = CheckpointOptions(isolated=True, run=True, duration_s=1.0, wall_budget_s=30.0)
+    with isolated_simulation() as client:
+        before = client.snapshot()
+        inspected = inspect_trial(client)
+        after = client.snapshot()
+        assert inspected["state"] == "read_only"
+        assert inspected["actuation_permitted"] is False
+        assert inspected["stock_world"] is True
+        assert after["runtime"]["running"] is False
+        assert after["observation"]["time_s"] == before["observation"]["time_s"] == 0
+        assert (
+            after["observation"]["control_authority"] == before["observation"]["control_authority"]
+        )
+        sample = sample_from_snapshot(after)
+        assert sample.source_kind == "local_public_snapshot"
+        assert sample.rotation_convention == "active_xyzw"
+        assert sample.frame == after["observation"]["frame"]
+        assert sample.elapsed_time_s == after["observation"]["navigation_sample_time_s"]
+        assert sample.position_world_m.tolist() == after["observation"]["shuttle"]["position"]
+        baseline, axis = policy_config("baseline"), policy_config("body-axis")
+        assert baseline.radar_clock_offset_s == axis.radar_clock_offset_s == 0
+        result = run_trial(client, options, policy="baseline", owned=True)
+        assert "error" not in result, result.get("error")
+        assert result["final"]["time_s"] >= 1
+        assert result["world_metadata_unchanged"] is True
+        assert result["release_state"] == "acknowledged"
+        usage = result["command_usage"]
+        assert usage["acknowledged_command_samples"] > 0
+        assert usage["max_linear_norm_mps2"] <= 0.5
+        assert usage["max_angular_norm_rad_s2"] <= 0.05
+        assert math.isfinite(result["final"]["range_m"])
+        final = client.snapshot()
+        assert final["observation"]["control_authority"]["status"] != "active"
+        assert final["observation"]["applied_physics"]["requested"]["accel_body_mps2"] == [0, 0, 0]

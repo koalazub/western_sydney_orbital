@@ -102,6 +102,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override WSORB_LAB_PORT (default: 2718); use the same port for the game server",
     )
 
+    subparsers.add_parser(
+        "checkpoint",
+        help="validate the portable checkpoint controller through real local APIs",
+        add_help=False,
+    )
+
     notebook = subparsers.add_parser("notebook", help="work with the shared mission notebook")
     notebook_sub = notebook.add_subparsers(dest="notebook_command", required=True)
     nb_add = notebook_sub.add_parser("add", help="add an entry")
@@ -341,11 +347,14 @@ def _cmd_notebook(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "checkpoint":
+        from wsorb.checkpoint import main as checkpoint_main
+
+        return checkpoint_main(arguments[1:])
     parser = _build_parser()
-    args = parser.parse_args(argv)
-    args.invocation = shlex.join(
-        ["uv", "run", "--locked", "wsorb", *(sys.argv[1:] if argv is None else argv)]
-    )
+    args = parser.parse_args(arguments)
+    args.invocation = shlex.join(["uv", "run", "--locked", "wsorb", *arguments])
     try:
         if args.command == "scenario":
             return _cmd_scenario(args)
