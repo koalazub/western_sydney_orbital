@@ -253,7 +253,7 @@ class ControllerStatusSourceContracts(unittest.TestCase):
         self.assertEqual(public.count("error.includes("), 1)
 
     def test_event_key_tracks_only_lifecycle_identity_revision_and_terminal_outcome(self):
-        key = section("const run = authority === null", "\nNOT_PRESENT")
+        key = section('const run = view.state === "ended"', "\nNOT_PRESENT")
         for identity in ("epoch", "term", "run_id", "controller_id"):
             self.assertIn(f"authority.{identity}", key)
         self.assertIn("unsigned(revision) ? revision", key)
