@@ -292,6 +292,8 @@ def world_metadata(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 def native_measurement(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Read mission measurements, never calculate a substitute final range/score."""
+    from .scoring import native_score_breakdown
+
     observation = _observation(snapshot)
     mission = observation.get("mission")
     mission = mission if isinstance(mission, Mapping) else {}
@@ -306,6 +308,9 @@ def native_measurement(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "fuel_used_kg": _number(mission.get("fuel_used_kg")),
         "score": _number(mission.get("score")),
         "score_label": mission.get("score_label"),
+        "score_breakdown": native_score_breakdown(
+            mission.get("score_breakdown"), score=_number(mission.get("score"))
+        ),
     }
 
 
@@ -1071,6 +1076,24 @@ def run_profile_comparison(profiles: Sequence[str], options: CheckpointOptions) 
     matched = expected_world is not None and all(
         trial.get("initial_world") == expected_world for trial in trials
     )
+    scored_trials = [
+        trial
+        for trial in trials
+        if matched
+        and trial.get("state") == "native_terminal"
+        and "error" not in trial
+        and trial.get("world_metadata_unchanged") is True
+        and trial.get("release_state") == "acknowledged"
+        and _number(trial.get("final", {}).get("score")) is not None
+    ]
+    ranking = [
+        {
+            "policy": trial["policy"],
+            "score": trial["final"]["score"],
+            "native_success": trial["native_success"],
+        }
+        for trial in sorted(scored_trials, key=lambda trial: trial["final"]["score"], reverse=True)
+    ]
     return {
         "schema": "wsorb.controller_comparison",
         "schema_version": 1,
@@ -1085,6 +1108,9 @@ def run_profile_comparison(profiles: Sequence[str], options: CheckpointOptions) 
         "execution_kind": "asynchronous_fenced_leased_API",
         "matching_initial_worlds": matched,
         "native_arrivals": sum(trial.get("native_success") is True for trial in trials),
+        "ranking": ranking,
+        "ranking_basis": "native_terminal_score_higher_is_better_on_matching_worlds",
+        "unranked_profiles": [trial["policy"] for trial in trials if trial not in scored_trials],
         "arrival_is_not_docking": True,
         "trials": trials,
     }

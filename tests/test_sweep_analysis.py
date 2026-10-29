@@ -71,6 +71,20 @@ def test_missing_readings_stay_missing_and_do_not_become_zero():
     ):
         assert result[key] is None
     assert result["max_damage_j_estimate"] == 0
+    assert result["final_score"] is None
+    assert result["score_collision_penalty_points"] is None
+
+
+def test_recorded_score_is_retained_without_reconstructing_missing_historical_terms():
+    trial = run("success")
+    trial["samples"][-1]["observation"]["mission"]["score"] = -1234.5
+    before = deepcopy(trial)
+    result = analyze_run(trial)
+    assert result["final_score"] == -1234.5
+    assert result["score_formula"] is None
+    assert result["score_progress_points"] is None
+    assert result["score_fuel_penalty_points"] is None
+    assert trial == before
 
 
 def test_initial_damage_has_no_invented_lower_bound_or_contact_cause():

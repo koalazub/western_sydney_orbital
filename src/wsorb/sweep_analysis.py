@@ -127,6 +127,10 @@ def analyze_run(run: Mapping[str, Any]) -> dict[str, Any]:
     policy_times = [_number(sample.get("policy_wall_s")) for sample in samples]
     step_s = _number(run.get("step_s"))
     mission = _mapping(last.get("mission"))
+    from .scoring import native_score_breakdown
+
+    recorded_score = _number(mission.get("score"))
+    terms = native_score_breakdown(mission.get("score_breakdown"), score=recorded_score) or {}
     return {
         "algorithm": run["algorithm"],
         "seed": run["seed"],
@@ -136,6 +140,12 @@ def analyze_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "sample_count": len(samples),
         "elapsed_sim_s": elapsed,
         "final_phase": mission.get("phase"),
+        "final_score": recorded_score,
+        "score_formula": terms.get("formula"),
+        "score_progress_points": terms.get("progress_points"),
+        "score_collision_penalty_points": terms.get("collision_penalty_points"),
+        "score_fuel_penalty_points": terms.get("fuel_penalty_points"),
+        "score_offset_points": terms.get("offset_points"),
         "final_target_range_m": _target_metric(last, "target_distance_m"),
         "final_relative_speed_mps": _target_metric(last, "relative_speed_mps"),
         "closest_sampled_target_range_m": _minimum(
@@ -273,6 +283,11 @@ def write_report(directory: str | Path, *, trial: str | None = None) -> Path:
         "first_damage_by_s",
         "final_target_range_m",
         "final_relative_speed_mps",
+        "final_score",
+        "score_progress_points",
+        "score_collision_penalty_points",
+        "score_fuel_penalty_points",
+        "score_offset_points",
     )
     for row in runs:
         for key in numeric:
@@ -304,6 +319,32 @@ def write_report(directory: str | Path, *, trial: str | None = None) -> Path:
             )
         )
     if runs:
+        scored = [row for row in runs if row.get("final_score") is not None]
+        if scored:
+            charts.append(
+                alt.Chart(alt.Data(values=scored))
+                .mark_point(size=65)
+                .encode(
+                    x=alt.X("debris_count:Q", title="Debris count"),
+                    y=alt.Y(
+                        "final_score:Q", title="Recorded native score estimate, higher is better"
+                    ),
+                    color="algorithm:N",
+                    tooltip=[
+                        "algorithm:N",
+                        "seed:Q",
+                        "outcome:N",
+                        "final_score:Q",
+                        "score_progress_points:Q",
+                        "score_collision_penalty_points:Q",
+                        "score_fuel_penalty_points:Q",
+                        "score_offset_points:Q",
+                    ],
+                )
+                .properties(
+                    title="STP-formula score using local fuel and damage estimates", height=220
+                )
+            )
         points = alt.Chart(alt.Data(values=runs)).encode(
             x=alt.X("debris_count:Q", title="Debris count"),
             shape="algorithm:N",
@@ -448,6 +489,10 @@ def write_report(directory: str | Path, *, trial: str | None = None) -> Path:
         "<p>Success means entering the local engine's arrival radius. It does not impose "
         "an arrival-speed limit or establish a safe rendezvous. Inspect relative speed separately. "
         "These are practice-model results, not licensed competition validation.</p>"
+        "<p>The native score applies the published STP success/failure formula to local "
+        "fuel and collision-damage estimates. Completion time supplies the speed bonus; "
+        "arrival velocity is separate. Higher scores are better; negative scores are valid. "
+        "Missing historical scores or penalty terms are not reconstructed.</p>"
         "<p>Debris count is a density proxy only with fixed region, sizes and distribution. "
         "Seeds are paired across algorithms; changing count need not retain the same rocks. "
         "Finite physics steps and sampled observations can miss between-sample events.</p>"
