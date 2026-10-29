@@ -99,6 +99,17 @@ unit-check suite="all":
         devenv shell uv run --locked --extra lab pytest tests/test_flight_engine.py
     fi
 
+# Focused Python feedback without starting the native or browser suites.
+python-test *args:
+    devenv shell uv run --locked --extra lab pytest {{args}}
+
+python-format +paths:
+    devenv shell uv run --locked ruff format {{paths}}
+
+python-check +paths:
+    devenv shell uv run --locked --extra lab ruff check {{paths}}
+    devenv shell uv run --locked --extra lab ruff format --check {{paths}}
+
 # Compile and lint the actual engine and bundle the thin browser launcher.
 check:
     devenv tasks run wsorb:lint
@@ -266,6 +277,15 @@ login-wrangler:
 # Owner-controlled release only. Never a dependency of local/check.
 deploy:
     nix shell --impure .#game --command npm --prefix worker run deploy
+
+# Release browser fixes with an explicitly approved, already-built engine.
+# This does not compile unrelated in-progress native changes.
+deploy-web engine_sha message:
+    nix shell --impure .#game --command node --input-type=module -e 'import{readFileSync}from"node:fs";import{createHash}from"node:crypto";const m=JSON.parse(readFileSync("worker/public/sim/manifest.json"));const b=readFileSync("worker/public/sim/wsorb_bevy_bg.wasm");const sha=createHash("sha256").update(b).digest("hex");if(sha!==process.argv[1]||m.sha256!==sha||m.bytes!==b.length)throw Error("Prebuilt engine does not match the approved release");console.log(`Approved engine: ${sha}`);' {{quote(engine_sha)}}
+    just account
+    just web-build
+    just deploy-dry-run
+    nix shell --impure .#game --command npm --prefix worker run wrangler -- deploy --message {{quote(message)}}
 
 # Per-process fallback for intermittent dual-stack connection failures.
 deploy-ipv4:
