@@ -513,7 +513,11 @@ def test_actual_world_configuration_changes_mass_inertia_and_worldwide_sensor_po
     settings["debris"]["count"] = 64
     engine.command(op="configure_experiment", settings=settings, seed=100)
     after = engine.query("observation")
-    assert after["experiment_settings"] == settings
+    # Native legacy serialization omits the explicit directed-stream default.
+    serialized = deepcopy(settings)
+    serialized["debris"].pop("distribution")
+    assert after["experiment_settings"] == serialized
+    assert after["debris_distribution"] == {"kind": "directed_stream"}
     assert after["shuttle"]["mass_kg"] == pytest.approx(settings["ship"]["mass_kg"])
     np.testing.assert_allclose(
         after["shuttle"]["inertia_kg_m2"], np.asarray(before["shuttle"]["inertia_kg_m2"]) * 1.875

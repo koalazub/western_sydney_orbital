@@ -55,7 +55,8 @@ def test_lab_default_graph_stays_disconnected_and_idle(lab_defs) -> None:
     assert lab_defs["get_proposal_draft"]() is None
     assert not lab_defs["proposal_upload"].value
     assert lab_defs["flight_preset"].value == "far_side_l2"
-    assert lab_defs["debris_mode"].value == "directed_stream"
+    assert lab_defs["debris_mode"].value == "transit_stream"
+    assert lab_defs["trajectory_adjustment"].value == "off"
     assert lab_defs["placement_controls"].value == {"x": None, "y": None, "z": None}
     assert lab_defs["place_lander"]._component_args["disabled"] is True
     assert all(
