@@ -1,0 +1,236 @@
+{
+  "schema": "wsorb.scoring_reference",
+  "schema_version": 1,
+  "reference_version": "2026-10-29.1",
+  "reviewed_on": "2026-10-29",
+  "scope": "published_per_run_algebra_not_runtime_or_leaderboard_certification",
+  "formula_id": "stu4_sim_scoring_c1e3fc8_v1",
+  "local_receipt_formula_id": "practice_normalized_time_damage_fuel_v1",
+  "sources": {
+    "rules": {
+      "url": "https://github.com/SimDynamX/SpaceTeamsPRO/discussions/218",
+      "revision": null,
+      "mutable": true,
+      "authority_quote": "If there is conflicting info about the competition somewhere else, this page is the authoritative source."
+    },
+    "scoring_wiki": {
+      "url": "https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring",
+      "pinned_url": "https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5",
+      "wiki_commit_sha1": "4ddae12f7d577b09c27dbfc9cab886ef98e693c5",
+      "revision_date": "2026-10-19"
+    },
+    "simulation": {
+      "repository_url": "https://github.com/SimDynamX/STU4-Sim",
+      "pinned_commit": "c1e3fc8f9ee3b189bba64d8bd87818a8003639cc",
+      "observed_main_commit": "3d7c342cd28817345bcd237279c44c95f9a990d1",
+      "observed_main_commit_date": "2026-10-26",
+      "content_hash_kind": "git_blob_sha1",
+      "files": [
+        {
+          "path": "Systems/Scoring.py",
+          "pinned_url": "https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py",
+          "raw_url": "https://raw.githubusercontent.com/SimDynamX/STU4-Sim/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py",
+          "git_blob_sha1": "388558e7fac38a1b7bfb73fd37c0a303f58fa0fb",
+          "bytes": 6862,
+          "identical_blob_at_observed_main": true
+        },
+        {
+          "path": "Systems/JetSelectionActuator.py",
+          "pinned_url": "https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/JetSelectionActuator.py",
+          "raw_url": "https://raw.githubusercontent.com/SimDynamX/STU4-Sim/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/JetSelectionActuator.py",
+          "git_blob_sha1": "2d7f0f1ddad2e6c275e32af387196381dac9e6f5",
+          "bytes": 11815,
+          "identical_blob_at_observed_main": true
+        },
+        {
+          "path": "Sims/COMPETITION_SIM.simconf",
+          "pinned_url": "https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Sims/COMPETITION_SIM.simconf",
+          "raw_url": "https://raw.githubusercontent.com/SimDynamX/STU4-Sim/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Sims/COMPETITION_SIM.simconf",
+          "git_blob_sha1": "4a228831ea71c21e9aad304914abbf95d11bf5ed",
+          "bytes": 822061,
+          "identical_blob_at_observed_main": true
+        }
+      ]
+    },
+    "clarifications": [
+      {
+        "topic": "collision_energy_arrival_and_completion_time",
+        "url": "https://github.com/SimDynamX/SpaceTeamsPRO/discussions/230#discussioncomment-19180829",
+        "author": "AlexSein98",
+        "author_role": "collaborator",
+        "published_on": "2026-10-25",
+        "mutable": true
+      },
+      {
+        "topic": "asynchronous_fuel_variation_and_two_run_validation",
+        "url": "https://github.com/SimDynamX/SpaceTeamsPRO/discussions/232#discussioncomment-19226860",
+        "author": "AlexSein98",
+        "author_role": "collaborator",
+        "published_on": "2026-10-27",
+        "mutable": true
+      },
+      {
+        "topic": "current_debris_seed_and_startup_variation",
+        "url": "https://github.com/SimDynamX/SpaceTeamsPRO/discussions/227#discussioncomment-19116956",
+        "author": "connorjak",
+        "author_role": "maintainer",
+        "published_on": "2026-10-22",
+        "mutable": true
+      }
+    ]
+  },
+  "constants": {
+    "nominal_time_s": 120.0,
+    "nominal_fuel_kg": 1.15,
+    "impact_threshold_j": 209200.0,
+    "arrival_radius_m": 50.0,
+    "score_offset": 0.5,
+    "damage_multiplier": 2.0,
+    "points_scale": 100.0,
+    "zero_time_bonus": 0.0
+  },
+  "algebra": {
+    "time_bonus": "T_nom / T if T != 0 else 0",
+    "damage_penalty": "2 * D / D_max",
+    "fuel_penalty": "max(F / F_nom - 1, 0)",
+    "success_score": "100 * (time_bonus - damage_penalty - fuel_penalty + 0.5)",
+    "failure_score": "100 * (-r / r0 - damage_penalty - fuel_penalty + 0.5)",
+    "clamped": false
+  },
+  "terminal_conditions": {
+    "priority": ["failed_damage", "success", "running"],
+    "damage_failure": "D > D_max",
+    "success": "r <= arrival_radius_m after damage check",
+    "arrival_speed_gate_mps": null,
+    "arrival_dwell_gate_s": null,
+    "hard_timeout_s": null,
+    "hard_timeout_status": "not_specified_in_reviewed_sources",
+    "running_score": null
+  },
+  "counter_semantics": {
+    "fuel": {
+      "parameter_path": ["Stats", "FuelUsed"],
+      "scorer_unit_label": "kg",
+      "increment_per_iteration": "sum_i(norm(abs(onTimes[i]) * A[i, 0:3]) / (80 * 9.8))",
+      "activity_vector_linear_components": "jet_force_divided_by_vehicle_mass",
+      "timestep_multiplier_applied": false,
+      "force_conversion_mass_multiplier_applied": false,
+      "configured_loop_hz": 60.0,
+      "specific_impulse_s": 80.0,
+      "standard_gravity_mps2": 9.8,
+      "local_si_fuel_equivalence_certified": false
+    },
+    "damage": {
+      "parameter_path": ["Stats", "Damage"],
+      "scorer_unit_label": "J",
+      "official_description": "collision energy extracted from STP physics engine hit outputs",
+      "full_accumulator_source_in_reviewed_repositories": false,
+      "local_damage_equivalence_certified": false
+    },
+    "time": {
+      "origin": "scoring_system_initialization",
+      "assessment_sample": "preceding_iteration_elapsed_accumulator",
+      "configured_loop_hz": 10.0,
+      "scoring_loop_stops_physics_on_terminal": false,
+      "local_clock_equivalence_certified": false
+    }
+  },
+  "ranking": {
+    "official_final_submission": {
+      "source": "rules",
+      "run_count": 2,
+      "aggregate": "arithmetic_mean_of_run_scores",
+      "consecutive": true,
+      "same_solution_code": true,
+      "continuous_video": true,
+      "top_claims_validated_by_organizers": true,
+      "discard_scope": "software_startup_issues_between_runs_while_recording_continues",
+      "worked_example": {"run_scores": [150.0, 50.0], "mean_score": 100.0}
+    },
+    "wiki_category_order": ["arrival", "non_arrival"],
+    "category_order_enforced_by_numeric_formula": false,
+    "mixed_outcome_category_aggregation": null,
+    "tie_break": null,
+    "school_aggregation": null,
+    "prescribed_seed_list": null,
+    "unfinished_run_score": null,
+    "null_meaning": "not specified in reviewed sources, not an official policy choice"
+  },
+  "known_conflicts": [
+    {
+      "id": "fuel_penalty",
+      "wiki": "F / F_nom, nominal score 50 and worked-example score 75",
+      "published_code": "max(F / F_nom - 1, 0), nominal score 150 and same-example score 165",
+      "resolved_by_rules": false
+    },
+    {
+      "id": "damage_boundary",
+      "wiki": "reaching maximum damage ends the run",
+      "published_code": "D > D_max fails; equality permits arrival success",
+      "resolved_by_rules": false
+    },
+    {
+      "id": "arrival_category",
+      "wiki": "every arrival is in a higher category than every non-arrival",
+      "published_code": "uncapped fuel penalty permits overlapping score ranges; no leaderboard implementation",
+      "resolved_by_rules": false
+    },
+    {
+      "id": "completion_clock",
+      "wiki": "arrival stops the clock and ends the run; official answer describes simulation-start timing",
+      "published_code": "scorer-initialization origin, preceding elapsed accumulator, scoring loop continues",
+      "resolved_by_rules": false
+    }
+  ],
+  "local_comparison": {
+    "official_leaderboard": false,
+    "summaries": ["median_native_score", "mean_native_score", "success_count"],
+    "cohort": "matched declared seeds, settings, engine build, controller versions and budgets",
+    "missing_terminal_score": "unavailable_not_zero",
+    "outcome_policy": "declare included terminal outcomes and scored sample count; retain software and unfinished outcomes in attempt counts",
+    "extra_efficiency_metrics_are_score_inputs": false
+  },
+  "examples_kind": "worked_algebra_not_observed_runs",
+  "worked_examples": [
+    {
+      "id": "nominal_success",
+      "inputs": {"elapsed_time_s": 120.0, "damage_j": 0.0, "fuel_counter": 1.15, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 100.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": 150.0}
+    },
+    {
+      "id": "wiki_example_under_code",
+      "inputs": {"elapsed_time_s": 96.0, "damage_j": 10460.0, "fuel_counter": 1.035, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 125.0, "collision_penalty_points": 10.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": 165.0}
+    },
+    {
+      "id": "negative_success",
+      "inputs": {"elapsed_time_s": 120.0, "damage_j": 0.0, "fuel_counter": 9.2, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 100.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 700.0, "offset_points": 50.0, "total": -550.0}
+    },
+    {
+      "id": "damage_at_threshold",
+      "inputs": {"elapsed_time_s": 120.0, "damage_j": 209200.0, "fuel_counter": 1.15, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 100.0, "collision_penalty_points": 200.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": -50.0}
+    },
+    {
+      "id": "damage_failure",
+      "inputs": {"elapsed_time_s": 120.0, "damage_j": 313800.0, "fuel_counter": 1.15, "distance_m": 5000.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "failed_damage", "progress_basis": "remaining_distance_ratio", "progress_points": -50.0, "collision_penalty_points": 300.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": -300.0}
+    },
+    {
+      "id": "damage_preempts_arrival",
+      "inputs": {"elapsed_time_s": 60.0, "damage_j": 313800.0, "fuel_counter": 1.15, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "failed_damage", "progress_basis": "remaining_distance_ratio", "progress_points": -0.5, "collision_penalty_points": 300.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": -250.5}
+    },
+    {
+      "id": "zero_time_success",
+      "inputs": {"elapsed_time_s": 0.0, "damage_j": 0.0, "fuel_counter": 1.15, "distance_m": 50.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 0.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": 50.0}
+    },
+    {
+      "id": "running_unscored",
+      "inputs": {"elapsed_time_s": 120.0, "damage_j": 0.0, "fuel_counter": 1.15, "distance_m": 5000.0, "initial_distance_m": 10000.0},
+      "expected": {"status": "running", "progress_basis": null, "progress_points": null, "collision_penalty_points": null, "fuel_penalty_points": null, "offset_points": null, "total": null}
+    }
+  ]
+}
