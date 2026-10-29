@@ -4,6 +4,7 @@ export const CONTROLLER_HEARTBEAT_MS = 15_000;
 export const MAX_CONTROLLER_RESULTS = 32;
 export const CONTROLLER_BODY_LIMIT = 64 * 1024;
 export const CONTROLLER_EXECUTION_KIND = "asynchronous_fenced_leased_API";
+export const CONTROLLER_SCORE_FORMULA = "practice_normalized_time_damage_fuel_v1";
 
 export const CONTROLLER_RESULT_STATES = [
   "duration_limit", "wall_budget_limit", "native_terminal", "stopped", "interrupted", "error",
@@ -55,6 +56,19 @@ export interface ControllerJob {
   stop_requested: boolean;
 }
 
+export interface ControllerScoreBreakdown {
+  formula: typeof CONTROLLER_SCORE_FORMULA;
+  progress_basis: "time_ratio" | "remaining_distance_ratio";
+  progress_points: number;
+  collision_penalty_points: number;
+  fuel_penalty_points: number;
+  offset_points: number;
+  total: number;
+  nominal_time_s: number;
+  nominal_fuel_kg: number;
+  impact_threshold_j: number;
+}
+
 interface ControllerMeasurement {
   time_s: number | null;
   range_m: number | null;
@@ -62,6 +76,9 @@ interface ControllerMeasurement {
   damage_j: number | null;
   fuel_used_kg: number | null;
   status: typeof CONTROLLER_MEASUREMENT_STATUSES[number];
+  // Old persisted rows and older clients have neither score field.
+  score?: number | null;
+  score_breakdown?: ControllerScoreBreakdown | null;
 }
 
 export interface ControllerResult {
@@ -127,6 +144,37 @@ function measurementNumber(value: unknown): number | null {
   if (value === null || (typeof value === "number" && Number.isFinite(value))) return value;
   return invalid("Controller measurements must be finite numbers or null");
 }
+function scoreBreakdown(value: unknown, score: number | null): ControllerScoreBreakdown | null {
+  if (value === null) return null;
+  const numbers = [
+    "progress_points", "collision_penalty_points", "fuel_penalty_points", "offset_points", "total",
+    "nominal_time_s", "nominal_fuel_kg", "impact_threshold_j",
+  ] as const;
+  const fields = shape(value, ["formula", "progress_basis", ...numbers]);
+  if (fields.formula !== CONTROLLER_SCORE_FORMULA) invalid("Invalid controller score formula");
+  for (const name of numbers) {
+    if (typeof fields[name] !== "number" || !Number.isFinite(fields[name])) invalid("Controller score terms must be finite numbers");
+  }
+  for (const name of ["collision_penalty_points", "fuel_penalty_points"] as const) {
+    if ((fields[name] as number) < 0) invalid("Controller score penalties must be non-negative");
+  }
+  for (const name of ["nominal_time_s", "nominal_fuel_kg", "impact_threshold_j"] as const) {
+    if ((fields[name] as number) <= 0) invalid("Controller score normalization values must be positive");
+  }
+  if (score === null || fields.total !== score) invalid("Controller score total must match the native score");
+  return {
+    formula: CONTROLLER_SCORE_FORMULA,
+    progress_basis: choice(fields.progress_basis, ["time_ratio", "remaining_distance_ratio"], "score progress basis"),
+    progress_points: fields.progress_points as number,
+    collision_penalty_points: fields.collision_penalty_points as number,
+    fuel_penalty_points: fields.fuel_penalty_points as number,
+    offset_points: fields.offset_points as number,
+    total: fields.total as number,
+    nominal_time_s: fields.nominal_time_s as number,
+    nominal_fuel_kg: fields.nominal_fuel_kg as number,
+    impact_threshold_j: fields.impact_threshold_j as number,
+  };
+}
 function context(value: unknown): ControllerContext {
   const fields = shape(value, ["trial_revision", "tuning_revision", "manual_interventions", "seed", "running"]);
   for (const name of ["trial_revision", "tuning_revision", "manual_interventions", "seed"]) {
@@ -150,7 +198,9 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
   for (const name of ["id", "profile_id", "seed", "duration_s"] as const) {
     if (Object.hasOwn(summary, name) && summary[name] !== job[name]) invalid("Controller result identity differs from its job");
   }
-  const measurement = shape(summary.measurement, ["time_s", "range_m", "relative_speed_mps", "damage_j", "fuel_used_kg", "status"]);
+  const measurement = shape(summary.measurement, ["time_s", "range_m", "relative_speed_mps", "damage_j", "fuel_used_kg", "status"], ["score", "score_breakdown"]);
+  const score = Object.hasOwn(measurement, "score") ? measurementNumber(measurement.score) : null;
+  const breakdown = scoreBreakdown(Object.hasOwn(measurement, "score_breakdown") ? measurement.score_breakdown : null, score);
   if (summary.execution_kind !== CONTROLLER_EXECUTION_KIND) invalid("Invalid controller execution kind");
   if (summary.engine_sha256 !== null && (typeof summary.engine_sha256 !== "string" || !SHA256.test(summary.engine_sha256))) {
     invalid("Controller engine_sha256 must be a lowercase SHA-256 or null");
@@ -167,6 +217,7 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
       relative_speed_mps: measurementNumber(measurement.relative_speed_mps), damage_j: measurementNumber(measurement.damage_j),
       fuel_used_kg: measurementNumber(measurement.fuel_used_kg),
       status: choice(measurement.status, CONTROLLER_MEASUREMENT_STATUSES, "measurement status"),
+      score, score_breakdown: breakdown,
     },
     release_state: choice(summary.release_state, CONTROLLER_RELEASE_STATES, "release state"),
     world_metadata_unchanged: boolean(summary.world_metadata_unchanged, "world_metadata_unchanged"),
@@ -196,7 +247,13 @@ export function controllerJobsView(state: ControllerJobsState, now: number) {
       ...state.active.job, expected_context: { ...state.active.job.expected_context },
       status: isStalled ? "stalled" : state.active.job.status,
     } : null,
-    results: state.results,
+    results: state.results.map(result => ({
+      ...result,
+      measurement: {
+        ...result.measurement,
+        ...(result.measurement.score_breakdown ? { score_breakdown: { ...result.measurement.score_breakdown } } : {}),
+      },
+    })),
   };
 }
 
@@ -239,7 +296,7 @@ export function controllerJobsAction(state: ControllerJobsState, input: unknown,
       const summary: ControllerResult = {
         id: job.id, profile_id: job.profile_id, seed: job.seed, duration_s: job.duration_s,
         state: "interrupted", native_success: false,
-        measurement: { time_s: null, range_m: null, relative_speed_mps: null, damage_j: null, fuel_used_kg: null, status: "unknown" },
+        measurement: { time_s: null, range_m: null, relative_speed_mps: null, damage_j: null, fuel_used_kg: null, status: "unknown", score: null, score_breakdown: null },
         release_state: state.active.worker_id === null ? "not_claimed" : "unconfirmed_native_watchdog_no_fallback",
         world_metadata_unchanged: false, error_code: "service_stalled", execution_kind: CONTROLLER_EXECUTION_KIND,
         engine_sha256: null, elapsed_s: Math.max(0, (env.now - job.created_at) / 1000),

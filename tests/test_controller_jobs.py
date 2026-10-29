@@ -121,6 +121,8 @@ def _unexecuted_summary(snapshot, *, state="stopped", error_code=None):
             "damage_j": mission["damage"],
             "fuel_used_kg": mission["fuel_used_kg"],
             "status": mission["status"],
+            "score": mission["score"],
+            "score_breakdown": mission.get("score_breakdown"),
         },
         "release_state": "not_claimed",
         "world_metadata_unchanged": True,
@@ -305,10 +307,33 @@ def test_single_writer_queue_stop_and_matching_completion(owned_backend):
     assert completed["results"] == [
         {**summary, **{key: job[key] for key in ("id", "profile_id", "seed", "duration_s")}}
     ]
+    assert completed["results"][0]["measurement"]["score"] is None
+    assert completed["results"][0]["measurement"]["score_breakdown"] is None
     assert _complete(owned_backend, worker, job["id"], summary)[0] == 409
     assert _poll(owned_backend, worker)[:2] == (200, {"job": None, "stop_requested": False})
     if state_route:
         assert _request(owned_backend, route=state_route)[1] == saved_room
+    _unchanged(client, before)
+
+
+def test_older_clients_can_complete_without_score_fields_and_do_not_invent_zero(owned_backend):
+    client, _ = owned_backend
+    before = client.snapshot()
+    worker = str(uuid.uuid4())
+    assert _poll(owned_backend, worker)[0] == 200
+    status, view, _ = _request(owned_backend, _submit(before))
+    assert status == 200
+    job_id = view["active"]["id"]
+    assert _request(owned_backend, {"action": "stop", "job_id": job_id})[0] == 200
+    assert _poll(owned_backend, worker)[1]["stop_requested"] is True
+    summary = _unexecuted_summary(before)
+    del summary["measurement"]["score"]
+    del summary["measurement"]["score_breakdown"]
+    status, completed, _ = _complete(owned_backend, worker, job_id, summary)
+    assert status == 200
+    measurement = completed["results"][-1]["measurement"]
+    assert measurement == {**summary["measurement"], "score": None, "score_breakdown": None}
+    assert "score" not in summary["measurement"]
     _unchanged(client, before)
 
 
@@ -382,9 +407,53 @@ def test_result_summary_rejects_raw_text_unknown_fields_and_nonfinite_numbers(ow
             ("relative_speed_mps", "1"),
             ("damage_j", {}),
             ("status", canary),
-            ("score", 0),
+            ("score", True),
+            ("score", "0"),
+            ("score", float("nan")),
+            ("score", float("inf")),
+            ("score", -float("inf")),
+            ("score_label", canary),
+            ("score_breakdown", canary),
         )
     )
+    # Rejected schema data only. None of these inputs claims a native score.
+    terms = {
+        "formula": "practice_normalized_time_damage_fuel_v1",
+        "progress_basis": "time_ratio",
+        "progress_points": -12.5,
+        "collision_penalty_points": 5,
+        "fuel_penalty_points": 26000.25,
+        "offset_points": -100,
+        "total": -26000.125,
+        "nominal_time_s": 1800,
+        "nominal_fuel_kg": 100,
+        "impact_threshold_j": 1,
+    }
+    invalid_terms = [
+        {**terms, "formula": canary},
+        {**terms, "progress_basis": canary},
+        {**terms, "url": canary},
+        {**terms, "score_label": canary},
+        {**terms, "collision_penalty_points": -1},
+        {**terms, "fuel_penalty_points": -1},
+        {**terms, "total": -26000},
+    ]
+    for name in terms:
+        invalid_terms.append({key: value for key, value in terms.items() if key != name})
+        if name not in {"formula", "progress_basis"}:
+            invalid_terms.extend(
+                {**terms, name: value} for value in (True, None, "1", float("nan"), float("inf"))
+            )
+    for name in ("nominal_time_s", "nominal_fuel_kg", "impact_threshold_j"):
+        invalid_terms.extend({**terms, name: value} for value in (0, -1))
+    invalid.extend(
+        {
+            **valid,
+            "measurement": {**valid["measurement"], "score": -26000.125, "score_breakdown": value},
+        }
+        for value in invalid_terms
+    )
+    invalid.append({**valid, "measurement": {**valid["measurement"], "score_breakdown": terms}})
     original = _get(owned_backend)
     for summary in invalid:
         status, value, _ = _complete(owned_backend, worker, job["id"], summary)
@@ -451,6 +520,8 @@ def test_lost_service_heartbeat_never_reassigns_or_replays_an_active_job(
         assert status == 200 and abandoned["active"] is None
         assert abandoned["results"][-1]["error_code"] == "service_stalled"
         assert abandoned["results"][-1]["measurement"]["range_m"] is None
+        assert abandoned["results"][-1]["measurement"]["score"] is None
+        assert abandoned["results"][-1]["measurement"]["score_breakdown"] is None
         assert abandoned["results"][-1]["native_success"] is False
         _unchanged(backend[0], before)
         summary = _unexecuted_summary(before, state="error", error_code="service_stalled")

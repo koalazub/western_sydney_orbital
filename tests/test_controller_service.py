@@ -69,6 +69,23 @@ def _job_metadata(**changes):
     }
 
 
+def _score_terms(**changes):
+    """Pure schema data, not a claimed native observation or SDK result."""
+    return {
+        "formula": "practice_normalized_time_damage_fuel_v1",
+        "progress_basis": "time_ratio",
+        "progress_points": -12.5,
+        "collision_penalty_points": 5.0,
+        "fuel_penalty_points": 26000.25,
+        "offset_points": -100.0,
+        "total": -26000.125,
+        "nominal_time_s": 1800.0,
+        "nominal_fuel_kg": 100.0,
+        "impact_threshold_j": 1.0,
+        **changes,
+    }
+
+
 def test_jobs_are_exact_bounded_metadata_not_arbitrary_python_or_commands():
     metadata = _job_metadata()
     job = parse_job(metadata)
@@ -234,10 +251,14 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
         "damage_j",
         "fuel_used_kg",
         "status",
+        "score",
+        "score_breakdown",
     }
     assert summary["measurement"]["time_s"] == 2
     assert summary["measurement"]["range_m"] is None
     assert summary["measurement"]["status"] == "unknown"
+    assert summary["measurement"]["score"] is None
+    assert summary["measurement"]["score_breakdown"] is None
     assert summary["error_code"] == "controller_failed"
     assert summary["release_state"] == "unconfirmed_native_watchdog_no_fallback"
     assert summary["execution_kind"] == EXECUTION_KIND
@@ -256,6 +277,155 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
     ):
         with pytest.raises(ControllerServiceError):
             validate_summary({**summary, **changes})
+
+
+@pytest.mark.parametrize("score", [-26000.125, 0, 35.5])
+@pytest.mark.parametrize("basis", ["time_ratio", "remaining_distance_ratio"])
+def test_score_and_native_terms_are_forwarded_signed_without_formula_recalculation(score, basis):
+    terms = _score_terms(total=score, progress_basis=basis)
+    trial = {"state": "native_terminal", "final": {"score": score, "score_breakdown": terms}}
+    summary = completion_summary(trial)
+    assert summary["measurement"]["score"] == score
+    assert summary["measurement"]["score_breakdown"] == terms
+    normalized = validate_summary(summary)
+    terms["fuel_penalty_points"] = 1
+    assert summary["measurement"]["score_breakdown"]["fuel_penalty_points"] == 26000.25
+    summary["measurement"]["score_breakdown"]["offset_points"] = 0
+    assert normalized["measurement"]["score_breakdown"]["offset_points"] == -100
+
+
+def test_score_from_a_replacement_world_is_not_attributed_to_the_original_profile():
+    summary = completion_summary(
+        {
+            "state": "error",
+            "world_metadata_unchanged": False,
+            "final": {"score": -26000.125, "score_breakdown": _score_terms()},
+        }
+    )
+    assert summary["measurement"]["score"] is None
+    assert summary["measurement"]["score_breakdown"] is None
+
+
+def test_legacy_completion_measurements_stay_unscored_and_partial_score_fields_normalize():
+    summary = completion_summary({"state": "duration_limit"})
+    legacy = {
+        **summary,
+        "measurement": {
+            key: value
+            for key, value in summary["measurement"].items()
+            if key not in {"score", "score_breakdown"}
+        },
+    }
+    normalized = validate_summary(legacy)
+    assert normalized["measurement"]["score"] is None
+    assert normalized["measurement"]["score_breakdown"] is None
+    assert "score" not in legacy["measurement"]
+    score_only = validate_summary(
+        {**legacy, "measurement": {**legacy["measurement"], "score": -26000.125}}
+    )
+    assert score_only["measurement"]["score"] == -26000.125
+    assert score_only["measurement"]["score_breakdown"] is None
+    assert (
+        validate_summary(
+            {**legacy, "measurement": {**legacy["measurement"], "score_breakdown": None}}
+        )
+        == normalized
+    )
+
+
+def test_score_schema_rejects_nonfinite_terms_wrong_signs_labels_and_inconsistent_totals():
+    summary = completion_summary({"state": "native_terminal"})
+    measurement = {**summary["measurement"], "score": -26000.125, "score_breakdown": _score_terms()}
+    canary = "https://private-result-canary.invalid/secret"
+    invalid_measurements = [
+        {**measurement, "score": value}
+        for value in (True, "0", math.nan, math.inf, -math.inf, 2**2048, None, -26000)
+    ]
+    invalid_measurements.extend(
+        {**measurement, "score_breakdown": value} for value in ([], canary, True)
+    )
+    invalid_measurements.append({**measurement, "score_label": canary})
+    invalid_terms = [
+        _score_terms(formula=canary),
+        _score_terms(progress_basis=canary),
+        _score_terms(score_label=canary),
+        _score_terms(url=canary),
+        _score_terms(collision_penalty_points=-1),
+        _score_terms(fuel_penalty_points=-1),
+    ]
+    for name in _score_terms():
+        invalid_terms.append({key: value for key, value in _score_terms().items() if key != name})
+        if name not in {"formula", "progress_basis"}:
+            invalid_terms.extend(
+                _score_terms(**{name: value})
+                for value in (True, math.nan, math.inf, -math.inf, "1", 2**2048, None)
+            )
+    for name in ("nominal_time_s", "nominal_fuel_kg", "impact_threshold_j"):
+        invalid_terms.extend(_score_terms(**{name: value}) for value in (0, -1))
+    invalid_measurements.extend(
+        {**measurement, "score_breakdown": terms} for terms in invalid_terms
+    )
+    for invalid in invalid_measurements:
+        with pytest.raises(ControllerServiceError):
+            validate_summary({**summary, "measurement": invalid})
+    for invalid_score in (True, math.nan, math.inf, canary):
+        assert (
+            completion_summary({"state": "error", "final": {"score": invalid_score}})[
+                "measurement"
+            ]["score"]
+            is None
+        )
+    sanitized = completion_summary(
+        {
+            "state": "native_terminal",
+            "final": {
+                **measurement,
+                "score_breakdown": _score_terms(url=canary),
+                "score_label": canary,
+            },
+        }
+    )
+    assert sanitized["measurement"]["score"] == -26000.125
+    assert sanitized["measurement"]["score_breakdown"] is None
+    assert canary not in json.dumps(sanitized, allow_nan=False)
+
+
+def test_queue_view_accepts_legacy_and_scored_history_without_rewriting_either():
+    from wsorb.controllers import catalog
+
+    summary = completion_summary(
+        {
+            "state": "native_terminal",
+            "final": {"score": -26000.125, "score_breakdown": _score_terms()},
+        }
+    )
+    scored = {
+        **summary,
+        "id": str(uuid.uuid4()),
+        "profile_id": "coast",
+        "seed": 100,
+        "duration_s": 1800,
+    }
+    legacy = {
+        **scored,
+        "id": str(uuid.uuid4()),
+        "measurement": {
+            key: value
+            for key, value in scored["measurement"].items()
+            if key not in {"score", "score_breakdown"}
+        },
+    }
+    view = {
+        "catalog": catalog(),
+        "service": {"online": False, "busy": False},
+        "active": None,
+        "results": [legacy, scored],
+    }
+    serialized = json.dumps(view, allow_nan=False)
+    assert _queue_view(view) == view
+    assert json.dumps(view, allow_nan=False) == serialized
+    assert "score" not in legacy["measurement"]
+    assert scored["measurement"]["score"] == -26000.125
 
 
 def test_queue_requests_use_only_existing_bearer_origin_and_independent_no_proxy_clients():
@@ -370,6 +540,8 @@ def test_abandoned_stalled_job_history_accepts_unknown_measurements_without_inve
             "relative_speed_mps",
             "damage_j",
             "fuel_used_kg",
+            "score",
+            "score_breakdown",
         )
     )
     assert record["native_success"] is record["world_metadata_unchanged"] is False
@@ -558,8 +730,11 @@ def test_real_owned_service_waits_for_consent_then_runs_or_yields_once(
         result = view["results"][0]
         assert result["id"] == job_id and result["profile_id"] == "coast"
         assert result["execution_kind"] == EXECUTION_KIND
+        assert result["measurement"]["score"] is None
+        assert result["measurement"]["score_breakdown"] is None
         assert source._token not in json.dumps(result, allow_nan=False)
         actual = source.snapshot()
+        assert actual["observation"]["mission"]["score"] is None
         if finish == "context_mismatch":
             assert result["state"] == "error" and result["error_code"] == "context_mismatch"
             assert result["release_state"] == "not_claimed"

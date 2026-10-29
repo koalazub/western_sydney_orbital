@@ -42,6 +42,7 @@ from .local_api import (
     control_context,
 )
 from .room_api import RoomSimulation, _http_client
+from .scoring import native_score_breakdown
 
 _PROFILE_NAMES = {
     "harry": "basic_pd_radar",
@@ -307,12 +308,23 @@ def validate_summary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _SUMMARY_FIELDS:
         raise ControllerServiceError("invalid_queue_response", message)
     measurement = value["measurement"]
-    if not isinstance(measurement, dict) or set(measurement) != {*_MEASUREMENTS, "status"}:
+    required = {*_MEASUREMENTS, "status"}
+    if (
+        not isinstance(measurement, dict)
+        or not required.issubset(measurement)
+        or set(measurement) - required - {"score", "score_breakdown"}
+    ):
         raise ControllerServiceError("invalid_queue_response", message)
     for name in _MEASUREMENTS:
         number = _number(measurement[name])
         if measurement[name] is not None and (number is None or number < 0):
             raise ControllerServiceError("invalid_queue_response", message)
+    score = _number(measurement.get("score"))
+    if measurement.get("score") is not None and score is None:
+        raise ControllerServiceError("invalid_queue_response", message)
+    breakdown = native_score_breakdown(measurement.get("score_breakdown"), score=score)
+    if measurement.get("score_breakdown") is not None and breakdown is None:
+        raise ControllerServiceError("invalid_queue_response", message)
     status = measurement["status"]
     error_code, state, release = value["error_code"], value["state"], value["release_state"]
     elapsed = _number(value["elapsed_s"])
@@ -334,7 +346,10 @@ def validate_summary(value: Any) -> dict[str, Any]:
         or elapsed < 0
     ):
         raise ControllerServiceError("invalid_queue_response", message)
-    return {**value, "measurement": dict(measurement)}
+    return {
+        **value,
+        "measurement": {**measurement, "score": score, "score_breakdown": breakdown},
+    }
 
 
 def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
@@ -349,6 +364,14 @@ def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
     measurement["status"] = (
         status if isinstance(status, str) and status in _MISSION_STATES else "unknown"
     )
+    measurement["score"] = _number(final.get("score"))
+    measurement["score_breakdown"] = native_score_breakdown(
+        final.get("score_breakdown"), score=measurement["score"]
+    )
+    if trial.get("world_metadata_unchanged") is False:
+        # A later receipt may belong to a manual takeover or replacement world.
+        # Never attribute that flight's score to the original profile job.
+        measurement["score"] = measurement["score_breakdown"] = None
     error = trial.get("error")
     code = error.get("code") if isinstance(error, Mapping) else None
     if code is not None:
