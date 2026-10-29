@@ -48,13 +48,15 @@ pub struct DebrisExperimentSettings {
         skip_serializing_if = "DebrisDistribution::is_directed_stream"
     )]
     pub distribution: DebrisDistribution,
+    #[serde(default, skip_serializing_if = "DebrisTrajectoryAdjustment::is_off")]
+    pub trajectory_adjustment: DebrisTrajectoryAdjustment,
     pub radius_min_m: f64,
     pub radius_max_m: f64,
-    /// Directed-stream reference only; inactive for impact ejecta.
+    /// Common stream speed; inactive for impact ejecta.
     pub speed_mps: f64,
     /// Maximum stream deviation at birth; inactive for impact ejecta.
     pub speed_spread_mps: f64,
-    /// Radial clearance from the terrain, in addition to each body's radius.
+    /// Radial terrain clearance for shell distributions; inactive for transit.
     pub shell_inner_m: f64,
     pub shell_outer_m: f64,
     pub stream_axis: StreamAxis,
@@ -79,6 +81,8 @@ pub enum DebrisDistribution {
     #[default]
     #[serde(deserialize_with = "deserialize_empty_distribution")]
     DirectedStream,
+    #[serde(deserialize_with = "deserialize_empty_distribution")]
+    TransitStream,
     ImpactEjecta {
         settings: ImpactEjectaSettings,
     },
@@ -89,10 +93,42 @@ impl DebrisDistribution {
         matches!(self, Self::DirectedStream)
     }
 
+    pub const fn is_stream(&self) -> bool {
+        matches!(self, Self::DirectedStream | Self::TransitStream)
+    }
+
     pub fn impact_default() -> Self {
         Self::ImpactEjecta {
             settings: crate::scenario::settings().impact_ejecta_defaults,
         }
+    }
+}
+
+/// Opt-in local adaptation of the pinned source's disabled trajectory adjustment.
+/// This is a new-flight setting, not a live flow calibration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", try_from = "String")]
+pub enum DebrisTrajectoryAdjustment {
+    #[default]
+    Off,
+    TowardLander,
+}
+
+impl TryFrom<String> for DebrisTrajectoryAdjustment {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "off" => Ok(Self::Off),
+            "toward_lander" => Ok(Self::TowardLander),
+            _ => Err("trajectory_adjustment must be off or toward_lander".into()),
+        }
+    }
+}
+
+impl DebrisTrajectoryAdjustment {
+    pub const fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
     }
 }
 
@@ -131,9 +167,9 @@ fn deserialize_empty_distribution<'de, D: serde::Deserializer<'de>>(
 ) -> Result<(), D::Error> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct DirectedStream {}
+    struct EmptyPayload {}
 
-    DirectedStream::deserialize(deserializer).map(|_| ())
+    EmptyPayload::deserialize(deserializer).map(|_| ())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,7 +210,7 @@ impl ExperimentSettings {
             return Err("debris.count must be a whole number from 0 to 100000".into());
         }
         match debris.distribution {
-            DebrisDistribution::DirectedStream => {}
+            DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {}
             DebrisDistribution::ImpactEjecta { settings } => settings.validate()?,
         }
         if !finite_between(debris.radius_min_m, 0.05, 100.0)
@@ -306,7 +342,8 @@ mod tests {
         let value = serde_json::json!({
             "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
             "debris": {
-                "count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4,
+                "count": 500, "distribution": {"kind": "transit_stream"},
+                "radius_min_m": 0.4, "radius_max_m": 40.4,
                 "speed_mps": 20.0, "speed_spread_mps": 4.0,
                 "shell_inner_m": 60.0, "shell_outer_m": 700.0,
                 "stream_axis": "x", "stream_sign": 1
@@ -341,6 +378,10 @@ mod tests {
     #[test]
     fn older_explicit_shell_archives_keep_their_original_parameters() {
         let mut archived = serde_json::to_value(ExperimentSettings::default()).unwrap();
+        archived["debris"]
+            .as_object_mut()
+            .unwrap()
+            .remove("distribution");
         archived["debris"]["speed_spread_mps"] = serde_json::json!(5.0);
         archived["debris"]["shell_inner_m"] = serde_json::json!(200.0);
         archived["debris"]["shell_outer_m"] = serde_json::json!(3000.0);
@@ -420,7 +461,8 @@ mod tests {
 
     #[test]
     fn explicit_stream_distribution_is_accepted_but_omitted_on_write() {
-        let settings = ExperimentSettings::default();
+        let mut settings = ExperimentSettings::default();
+        settings.debris.distribution = DebrisDistribution::DirectedStream;
         let mut value = serde_json::to_value(settings).unwrap();
         value["debris"]["distribution"] = serde_json::json!({"kind": "directed_stream"});
         let explicit = serde_json::from_value::<ExperimentSettings>(value).unwrap();
@@ -436,6 +478,8 @@ mod tests {
     fn unknown_distribution_fields_and_malformed_impact_settings_are_rejected() {
         for distribution in [
             serde_json::json!({"kind": "directed_stream", "orbit_speed_mps": 7.0}),
+            serde_json::json!({"kind": "transit_stream", "settings": {}}),
+            serde_json::json!({"kind": "transit_stream", "target_lander": true}),
             serde_json::json!({"kind": "fracture_solver"}),
             serde_json::json!({"kind": "impact_ejecta"}),
             serde_json::json!({"kind": "impact_ejecta", "settings": {}, "policy": "orbit"}),
@@ -449,6 +493,79 @@ mod tests {
             serde_json::to_value(DebrisDistribution::impact_default()).unwrap();
         value["debris"]["distribution"]["settings"]["orbit_speed_mps"] = serde_json::json!(7.0);
         assert!(serde_json::from_value::<ExperimentSettings>(value).is_err());
+    }
+
+    #[test]
+    fn transit_and_adjustment_are_strict_explicit_new_flight_choices() {
+        assert_eq!(
+            DebrisDistribution::default(),
+            DebrisDistribution::DirectedStream
+        );
+        assert!(DebrisDistribution::DirectedStream.is_stream());
+        assert!(DebrisDistribution::TransitStream.is_stream());
+        assert!(!DebrisDistribution::impact_default().is_stream());
+        let defaults = ExperimentSettings::default();
+        assert_eq!(
+            defaults.debris.distribution,
+            DebrisDistribution::TransitStream
+        );
+        assert_eq!(
+            defaults.debris.trajectory_adjustment,
+            DebrisTrajectoryAdjustment::Off
+        );
+        assert!(
+            serde_json::to_value(defaults).unwrap()["debris"]
+                .get("trajectory_adjustment")
+                .is_none()
+        );
+        for mode in [
+            DebrisTrajectoryAdjustment::Off,
+            DebrisTrajectoryAdjustment::TowardLander,
+        ] {
+            let mut config = defaults;
+            config.debris.trajectory_adjustment = mode;
+            let value = serde_json::to_value(config).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ExperimentSettings>(value.clone()).unwrap(),
+                config
+            );
+            if !mode.is_off() {
+                assert_eq!(
+                    value["debris"]["trajectory_adjustment"],
+                    serde_json::json!("toward_lander")
+                );
+            }
+        }
+        let mut explicit_off = serde_json::to_value(defaults).unwrap();
+        explicit_off["debris"]["trajectory_adjustment"] = serde_json::json!("off");
+        assert_eq!(
+            serde_json::from_value::<ExperimentSettings>(explicit_off).unwrap(),
+            defaults
+        );
+        for adjustment in [
+            serde_json::json!({"off": null}),
+            serde_json::json!({"toward_lander": null}),
+            serde_json::json!({"mode": "off", "gain": 1.0}),
+            serde_json::json!({"mode": "toward_lander", "rate_hz": 60}),
+            serde_json::json!({"mode": "orbit"}),
+            serde_json::json!("orbit"),
+            serde_json::Value::Null,
+        ] {
+            let mut value = serde_json::to_value(defaults).unwrap();
+            value["debris"]["trajectory_adjustment"] = adjustment;
+            assert!(serde_json::from_value::<ExperimentSettings>(value).is_err());
+        }
+        let mut old = serde_json::to_value(defaults).unwrap();
+        old["debris"]
+            .as_object_mut()
+            .unwrap()
+            .remove("distribution");
+        let old: ExperimentSettings = serde_json::from_value(old).unwrap();
+        assert_eq!(old.debris.distribution, DebrisDistribution::DirectedStream);
+        assert!(old.debris.trajectory_adjustment.is_off());
+        let mut live = serde_json::to_value(DebrisFlowTuning::from(defaults.debris)).unwrap();
+        live["trajectory_adjustment"] = serde_json::json!("toward_lander");
+        assert!(serde_json::from_value::<DebrisFlowTuning>(live).is_err());
     }
 
     #[test]

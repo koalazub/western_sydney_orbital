@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::ImpactEjectaSettings;
+use crate::model::{DebrisTrajectoryAdjustment, ImpactEjectaSettings};
 
 fn impact_config(count: usize) -> ExperimentSettings {
     let mut experiment = ExperimentSettings::default();
@@ -287,6 +287,9 @@ fn ten_thousand_then_one_hundred_thousand_real_bodies_construct_and_take_one_ord
         config.debris.count = count;
         config.debris.radius_min_m = 0.05;
         config.debris.radius_max_m = 0.08;
+        if count == crate::model::MAX_DEBRIS_COUNT {
+            config.debris.trajectory_adjustment = DebrisTrajectoryAdjustment::TowardLander;
+        }
         let mut sim = Simulation::with_experiment(100, config).unwrap();
         assert_eq!(sim.state.assets.len(), count + 3);
         assert_eq!(sim.bodies.len(), count + 4);
@@ -320,6 +323,11 @@ fn ten_thousand_then_one_hundred_thousand_real_bodies_construct_and_take_one_ord
         let last_rotation = *body(&sim, last).rotation();
         let last_handle = sim.handles[&last];
         sim.advance(settings().integration.fixed_step_s);
+        if count == crate::model::MAX_DEBRIS_COUNT {
+            let cursor = sim.state.debris_trajectory_adjustment_state.unwrap();
+            assert_eq!(cursor.iteration, 3);
+            assert!(cursor.applied_count <= 3);
+        }
         assert_eq!(sim.handles[&last], last_handle);
         assert_ne!(body(&sim, first).translation(), first_position);
         assert_ne!(*body(&sim, last).rotation(), last_rotation);

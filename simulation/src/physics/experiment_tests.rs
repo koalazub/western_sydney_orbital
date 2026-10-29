@@ -32,7 +32,8 @@ fn assert_matrix_close(actual: [[f64; 3]; 3], expected: [[f64; 3]; 3]) {
 
 #[test]
 fn seeded_population_covers_every_side_with_real_mixed_radii_and_clearance() {
-    let config = ExperimentSettings::default();
+    let mut config = ExperimentSettings::default();
+    config.debris.distribution = DebrisDistribution::DirectedStream;
     for seed in [0, 1, 100, u32::MAX as u64] {
         let sim = Simulation::with_experiment(seed, config).unwrap();
         let repeated = Simulation::with_experiment(seed, config).unwrap();
@@ -124,6 +125,7 @@ fn every_axis_and_sign_has_a_bounded_coherent_birth_velocity() {
     for axis in [StreamAxis::X, StreamAxis::Y, StreamAxis::Z] {
         for sign in [-1, 1] {
             let mut config = ExperimentSettings::default();
+            config.debris.distribution = DebrisDistribution::DirectedStream;
             config.debris.count = 37;
             config.debris.stream_axis = axis;
             config.debris.stream_sign = sign;
@@ -297,6 +299,7 @@ fn place_contact_body(sim: &mut Simulation, id: EntityId, position: Vector, velo
 
 fn contact_experiment(count: usize) -> Simulation {
     let mut config = ExperimentSettings::default();
+    config.debris.distribution = DebrisDistribution::DirectedStream;
     config.debris.count = count;
     config.debris.radius_min_m = 2.0;
     config.debris.radius_max_m = 2.0;

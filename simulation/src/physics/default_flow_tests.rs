@@ -17,8 +17,10 @@ fn actual_phobos_debris_contact(sim: &Simulation) -> Option<EntityId> {
 }
 
 #[test]
-fn fresh_versioned_default_hits_real_phobos_without_injected_motion_or_contact_results() {
-    let mut sim = Simulation::new_default();
+fn archived_directed_default_hits_real_phobos_without_injected_motion_or_contact_results() {
+    let mut experiment = ExperimentSettings::default();
+    experiment.debris.distribution = DebrisDistribution::DirectedStream;
+    let mut sim = Simulation::with_experiment(settings().default_seed, experiment).unwrap();
     let config = sim.state.experiment_settings.unwrap();
     assert_eq!(config.debris.count, 500);
     assert_eq!(config.debris.stream_axis, StreamAxis::X);

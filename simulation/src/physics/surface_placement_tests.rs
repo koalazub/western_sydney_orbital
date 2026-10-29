@@ -500,6 +500,7 @@ fn custom_reset_restore_and_later_moves_keep_canonical_birth_ids_radii_rng_and_i
 #[test]
 fn reset_rejects_a_new_seed_rock_at_the_custom_site_before_replacing_the_active_world() {
     let mut config = experiment(1);
+    config.debris.distribution = DebrisDistribution::DirectedStream;
     config.debris.radius_min_m = 0.2;
     config.debris.radius_max_m = 0.2;
     config.debris.shell_inner_m = 0.0;
@@ -630,6 +631,7 @@ fn unrelated_warmstarts(sim: &Simulation) -> Vec<(f64, f64, Vector, f64)> {
 #[test]
 fn relocating_pad_invalidates_only_old_pad_and_lander_contacts_not_other_warmstarts() {
     let mut config = experiment(2);
+    config.debris.distribution = DebrisDistribution::DirectedStream;
     config.debris.radius_min_m = 2.0;
     config.debris.radius_max_m = 2.0;
     let mut sim = Simulation::with_experiment(10, config).unwrap();

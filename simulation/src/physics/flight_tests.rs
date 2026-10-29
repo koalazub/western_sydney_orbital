@@ -271,6 +271,7 @@ fn placement_rejects_actual_world_shapes_bounds_missing_sources_and_counter_over
 #[test]
 fn placement_invalidates_lander_contacts_but_preserves_unrelated_real_warmstarts() {
     let mut config = small_experiment(2);
+    config.debris.distribution = DebrisDistribution::DirectedStream;
     config.debris.radius_min_m = 2.0;
     config.debris.radius_max_m = 2.0;
     let mut sim = Simulation::with_experiment(10, config).unwrap();

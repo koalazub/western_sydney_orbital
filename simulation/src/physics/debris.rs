@@ -100,7 +100,9 @@ pub(super) fn initial_velocity(
     position: [f64; 3],
 ) -> [f64; 3] {
     match cfg.distribution {
-        DebrisDistribution::DirectedStream => debris_birth_velocity(rng, cfg),
+        DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
+            debris_birth_velocity(rng, cfg)
+        }
         DebrisDistribution::ImpactEjecta { settings: impact } => {
             let center = unit_direction(impact.source_direction);
             // Prefer the declared rotating frame's +Y orbit normal. The fallback

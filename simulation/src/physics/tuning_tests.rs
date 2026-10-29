@@ -3,6 +3,7 @@ use crate::model::StreamAxis;
 
 fn experiment(count: usize) -> ExperimentSettings {
     let mut experiment = ExperimentSettings::default();
+    experiment.debris.distribution = DebrisDistribution::DirectedStream;
     experiment.debris.count = count;
     experiment.debris.radius_min_m = 2.0;
     experiment.debris.radius_max_m = 2.0;

@@ -29,8 +29,11 @@ mod placement;
 mod resilience;
 mod spatial_index;
 mod surface_placement;
+mod trajectory_adjustment;
+mod transit;
 use live_tuning::{apply_actuator_forces, inertia_matrix, reconcile_ship_wrench};
 use spatial_index::SpawnIndex;
+use transit::TransitVolume;
 
 fn body() -> PrimaryBody {
     PrimaryBody {
@@ -358,18 +361,19 @@ impl Simulation {
             "launch_site_direction": self.state.launch_site_direction,
             "launchpad": launchpad,
             "debris_distribution": self.state.experiment_settings.map(|experiment| experiment.debris.distribution),
+            "debris_trajectory_adjustment": self.debris_trajectory_adjustment(),
             "physical_debris_limit": crate::model::MAX_DEBRIS_COUNT,
             "ship_tuning": self.ship_tuning(),
             "debris_flow": self.debris_flow(),
             "debris_flow_spread_scope": "future_births_only",
             "debris_births_enabled": self.state.experiment_settings.is_some_and(|experiment| {
-                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+                experiment.debris.distribution.is_stream()
             }),
             "debris_flow_active": self.state.experiment_settings.is_some_and(|experiment| {
-                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+                experiment.debris.distribution.is_stream()
             }),
             "debris_flow_tuning_available": self.state.experiment_settings.is_none_or(|experiment| {
-                matches!(experiment.debris.distribution, DebrisDistribution::DirectedStream)
+                experiment.debris.distribution.is_stream()
             }),
             "tuning_revision": self.tuning_revision(),
             "applied_physics": applied_physics,
@@ -658,6 +662,7 @@ impl Simulation {
             if self.state.mission.status.is_terminal() {
                 break;
             }
+            self.apply_debris_trajectory_adjustment(h);
             let mut integrated_application = None;
             for e in &self.state.assets {
                 if let Some(handle) = self.handles.get(&e.id)
@@ -816,6 +821,10 @@ impl Simulation {
         match experiment.debris.distribution {
             DebrisDistribution::ImpactEjecta { .. } => return,
             DebrisDistribution::DirectedStream => {}
+            DebrisDistribution::TransitStream => {
+                self.recycle_transit_debris(self.state.debris_flow().apply_to(experiment.debris));
+                return;
+            }
         }
         let cfg = self.state.debris_flow().apply_to(experiment.debris);
         let half_extent = flow_half_extent_m(cfg);
@@ -1116,10 +1125,17 @@ fn initial_for_flight(
         let debris =
             debris_flow_override.map_or(experiment.debris, |flow| flow.apply_to(experiment.debris));
         let mut spawn_index = spawn_index(&assets, debris.radius_max_m);
-        // Streams start around every side of Phobos and later recycle at the
-        // upstream plane. Impact mode instead selects a source patch and never
-        // recycles. Both modes use only gravity and real contacts after birth,
-        // never a per-frame velocity/orbit constraint.
+        let birth = match debris.distribution {
+            DebrisDistribution::DirectedStream | DebrisDistribution::ImpactEjecta { .. } => {
+                DebrisBirth::InitialShell
+            }
+            DebrisDistribution::TransitStream => {
+                DebrisBirth::InitialTransit(TransitVolume::for_preset(preset))
+            }
+        };
+        // DirectedStream keeps its original shell and draw order. TransitStream
+        // fills the canonical launch-to-target box. All bodies then use ordinary
+        // gravity, contacts and any explicitly enabled real adjustment impulses.
         for i in 0..experiment.debris.count {
             // A quadratic size sample keeps plenty of small rocks without
             // excluding the large end of the configured physical radius range.
@@ -1127,8 +1143,8 @@ fn initial_for_flight(
             let radius =
                 debris.radius_min_m + (debris.radius_max_m - debris.radius_min_m) * size * size;
             let position = debris_birth_position(
-                &mut rng, debris, radius, &spawn_index, None, DebrisBirth::InitialShell,
-            ).ok_or("experiment shell cannot safely place its population within the bounded birth budget")?;
+                &mut rng, debris, radius, &spawn_index, None, birth,
+            ).ok_or("experiment volume cannot safely place its population within the bounded birth budget")?;
             let velocity = debris::initial_velocity(&mut rng, debris, position);
             let id = EntityId::Debris((i + 1) as u32);
             let mut asteroid = entity(
@@ -1211,7 +1227,8 @@ fn initial_for_flight(
             damage: 0.0,
             status: MissionStatus::Running,
             score: None,
-            score_label: "STP points unavailable: incompatible local fuel and damage counters".into(),
+            score_label: "STP points unavailable: incompatible local fuel and damage counters"
+                .into(),
             score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: flight.target_region,
@@ -1221,6 +1238,7 @@ fn initial_for_flight(
         rng_state: rng,
         active_contacts: vec![],
         sensor_state: Some(crate::model::SensorState::new(seed)),
+        debris_trajectory_adjustment_state: trajectory_adjustment::initial_state(experiment),
     })
 }
 
@@ -1232,6 +1250,8 @@ const BIRTH_CLEARANCE_M: f64 = 1.0;
 enum DebrisBirth {
     InitialShell,
     UpstreamInlet,
+    InitialTransit(TransitVolume),
+    TransitInlet(TransitVolume),
 }
 
 fn flow_half_extent_m(cfg: DebrisExperimentSettings) -> f64 {
@@ -1257,14 +1277,16 @@ fn debris_birth_position(
     ignored: Option<EntityId>,
     birth: DebrisBirth,
 ) -> Option<[f64; 3]> {
-    // At most 64 terrain queries and indexed actor-neighborhood checks. An
+    // At most 64 candidates with bounded terrain and indexed actor checks. An
     // impossible arrangement is an atomic configure error, never an endless loop.
     let shape = phobos_shape();
     for _ in 0..MAX_BIRTH_ATTEMPTS {
         let position = match birth {
             DebrisBirth::InitialShell => {
                 let direction = match cfg.distribution {
-                    DebrisDistribution::DirectedStream => random_direction(rng),
+                    DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
+                        random_direction(rng)
+                    }
                     DebrisDistribution::ImpactEjecta { settings } => {
                         debris::source_direction(rng, settings)
                     }
@@ -1286,6 +1308,13 @@ fn debris_birth_position(
                         (uniform(rng) * 2.0 - 1.0) * extent
                     };
                 }
+                position
+            }
+            DebrisBirth::InitialTransit(volume) => volume.sample_volume(rng, radius),
+            DebrisBirth::TransitInlet(volume) => {
+                let Some(position) = volume.sample_inlet(rng, radius, cfg.into()) else {
+                    continue;
+                };
                 position
             }
         };
@@ -1350,10 +1379,14 @@ fn profile_base_description(
         None => settings().description.clone(),
         Some(experiment) => match (preset, experiment.debris.distribution) {
             (FlightPreset::FarSideL2, DebrisDistribution::DirectedStream) => {
-                settings().experiment_description.clone()
+                settings().directed_stream_description.clone()
             }
             (_, DebrisDistribution::DirectedStream) => format!(
                 "local_experiment_v1: {}; directional stream initial/inlet velocities, real rigid-body contacts and estimated fuel; not STP parity.",
+                settings().flight_preset(preset).label
+            ),
+            (_, DebrisDistribution::TransitStream) => format!(
+                "local_experiment_v1: {}; canonical launch-to-target transit stream, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP parity.",
                 settings().flight_preset(preset).label
             ),
             (_, DebrisDistribution::ImpactEjecta { .. }) => format!(
@@ -1445,6 +1478,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     if let Some(experiment) = s.experiment_settings {
         experiment.validate()?;
     }
+    trajectory_adjustment::validate_state(s)?;
     if let Some(ship) = s.ship_tuning_override {
         ship.validate()?;
     }
@@ -2440,6 +2474,7 @@ mod tests {
     #[test]
     fn real_mutual_collision_archives_restore_through_both_strict_command_envelopes() {
         let mut config = ExperimentSettings::default();
+        config.debris.distribution = DebrisDistribution::DirectedStream;
         config.debris.count = 2;
         config.debris.radius_min_m = 2.0;
         config.debris.radius_max_m = 2.0;

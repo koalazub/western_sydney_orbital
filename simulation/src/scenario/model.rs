@@ -7,9 +7,12 @@ pub struct Scenario {
     pub description: String,
     pub frame_description: String,
     pub experiment_description: String,
+    pub directed_stream_description: String,
     pub experiment_settings: crate::model::ExperimentSettings,
     pub flight_presets: FlightPresets,
     pub impact_ejecta_defaults: crate::model::ImpactEjectaSettings,
+    pub transit_stream: TransitStreamSettings,
+    pub debris_trajectory_adjustment: DebrisTrajectoryAdjustmentConstants,
     /// Frozen calibration reference for archived None corridor live overrides.
     pub legacy_corridor_flow_reference: crate::model::DebrisFlowTuning,
     pub gravity: Gravity,
@@ -26,6 +29,28 @@ pub struct Scenario {
     pub terrain: Terrain,
     pub limits: Limits,
     pub contacts: Contacts,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitStreamSettings {
+    pub version: u32,
+    pub transverse_half_width_m: f64,
+    pub launch_trail_m: f64,
+    pub target_lead_m: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebrisTrajectoryAdjustmentConstants {
+    pub version: u32,
+    pub source_url: String,
+    pub source_enabled_by_default: bool,
+    pub global_rate_hz: f64,
+    pub cutoff_m: f64,
+    pub typical_speed_mps: f64,
+    pub delta_v_factor: f64,
+    pub scheduling_note: String,
 }
 
 impl Scenario {

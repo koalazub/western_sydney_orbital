@@ -20,8 +20,9 @@ pub use avionics::{
 #[path = "experiment_settings.rs"]
 mod experiment_settings;
 pub use experiment_settings::{
-    DebrisDistribution, DebrisExperimentSettings, DebrisFlowTuning, ExperimentSettings,
-    ImpactEjectaSettings, MAX_DEBRIS_COUNT, ShipExperimentSettings, ShipTuning, StreamAxis,
+    DebrisDistribution, DebrisExperimentSettings, DebrisFlowTuning, DebrisTrajectoryAdjustment,
+    ExperimentSettings, ImpactEjectaSettings, MAX_DEBRIS_COUNT, ShipExperimentSettings, ShipTuning,
+    StreamAxis,
 };
 pub fn phobos_radii_m() -> [f64; 3] {
     crate::scenario::settings().gravity.phobos_radii_m
@@ -87,6 +88,27 @@ pub struct Snapshot {
     /// Additive sensor extension. Old archives keep their primary samples/RNG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensor_state: Option<SensorState>,
+    /// Required only for an explicitly enabled adjustment. Never infer past ticks
+    /// or impulses from an old archive that has no cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debris_trajectory_adjustment_state: Option<DebrisTrajectoryAdjustmentState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebrisTrajectoryAdjustmentState {
+    pub version: u32,
+    /// Completed global ticks, including selections skipped by the cutoff.
+    /// Validated within JSON's exact integer range.
+    pub iteration: u64,
+    pub applied_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DebrisTrajectoryAdjustmentSummary {
+    pub mode: DebrisTrajectoryAdjustment,
+    pub constants: crate::scenario::DebrisTrajectoryAdjustmentConstants,
+    pub applied_count: u64,
 }
 
 impl Snapshot {

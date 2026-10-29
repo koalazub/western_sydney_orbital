@@ -1,16 +1,28 @@
 {
   "description": "Phobos surface launch through a seeded asteroid corridor to a kinematic station-keeping return ship at Mars–Phobos L2. Circular point-mass CR3BP, synthetic terrain, and estimated contact and fuel models; not STP parity.",
   "default_seed": 100,
-  "experiment_description": "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.",
+  "experiment_description": "local_experiment_v1: Far-side launch to L2; canonical launch-to-target transit stream, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP parity.",
+  "directed_stream_description": "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.",
   "experiment_settings": {
     "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
-    "debris": { "count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4, "speed_mps": 20.0, "speed_spread_mps": 4.0, "shell_inner_m": 60.0, "shell_outer_m": 700.0, "stream_axis": "x", "stream_sign": 1 }
+    "debris": { "count": 500, "distribution": { "kind": "transit_stream" }, "radius_min_m": 0.4, "radius_max_m": 40.4, "speed_mps": 20.0, "speed_spread_mps": 4.0, "shell_inner_m": 60.0, "shell_outer_m": 700.0, "stream_axis": "x", "stream_sign": 1 }
   },
   "flight_presets": {
     "mars_facing_l1": { "label": "Mars-facing launch to L1", "launch_side": "mars_facing", "target_region": "L1", "target_name": "Return ship · Mars–Phobos L1" },
     "far_side_l2": { "label": "Far-side launch to L2", "launch_side": "far_side", "target_region": "L2", "target_name": "Return ship · Mars–Phobos L2" }
   },
   "impact_ejecta_defaults": { "source_direction": [-1.0, 0.0, 0.0], "kick_velocity_mps": [-1.0, 0.0, 0.0], "tangential_speed_mps": 7.0, "patch_half_angle_deg": 15.0 },
+  "transit_stream": { "version": 1, "transverse_half_width_m": 450.0, "launch_trail_m": 500.0, "target_lead_m": 500.0 },
+  "debris_trajectory_adjustment": {
+    "version": 1,
+    "source_url": "https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/SpawnDebris.py",
+    "source_enabled_by_default": false,
+    "global_rate_hz": 60.0,
+    "cutoff_m": 100.0,
+    "typical_speed_mps": 2.0,
+    "delta_v_factor": 0.01,
+    "scheduling_note": "Local deterministic simulation-clock adaptation of the asynchronous source loop. One rock per global tick, due impulses applied before each bounded physics step. Not STP runtime cadence parity."
+  },
   "legacy_corridor_flow_reference": { "speed_mps": 20.0, "speed_spread_mps": 5.0, "stream_axis": "y", "stream_sign": -1 },
   "frame_description": "Phobos-centered Mars–Phobos circular rotating frame; +X toward Mars, +Y orbit normal, +Z right-handed; SI units",
   "gravity": {

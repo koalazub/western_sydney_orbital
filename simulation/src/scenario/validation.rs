@@ -11,6 +11,7 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     s.impact_ejecta_defaults
         .validate()
         .map_err(|_| "invalid impact ejecta defaults")?;
+    validate_transit_and_adjustment(s)?;
     validate_flight_presets(s)?;
     validate_limits(s)?;
     validate_gravity(s)?;
@@ -29,6 +30,36 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_transit_and_adjustment(s: &Scenario) -> Result<(), &'static str> {
+    let transit = s.transit_stream;
+    if transit.version != 1
+        || !bounded_positive(
+            &[
+                transit.transverse_half_width_m,
+                transit.launch_trail_m,
+                transit.target_lead_m,
+            ],
+            50_000.0,
+        )
+        || transit.transverse_half_width_m <= 101.0
+    {
+        return Err("invalid transit stream route volume");
+    }
+    let adjustment = &s.debris_trajectory_adjustment;
+    if adjustment.version != 1
+        || adjustment.source_enabled_by_default
+        || !adjustment.source_url.starts_with("https://")
+        || adjustment.scheduling_note.trim().is_empty()
+        || !bounded_positive(&[adjustment.global_rate_hz], 120.0)
+        || !bounded_positive(&[adjustment.cutoff_m], 10_000.0)
+        || !bounded_positive(&[adjustment.typical_speed_mps], 200.0)
+        || !bounded_positive(&[adjustment.delta_v_factor], 0.1)
+    {
+        return Err("invalid source-derived debris trajectory adjustment constants");
+    }
+    Ok(())
+}
+
 fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
     let l = s.limits;
     if s.default_seed > u32::MAX as u64
@@ -42,6 +73,7 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
         || s.description.trim().is_empty()
         || s.frame_description.trim().is_empty()
         || s.experiment_description.trim().is_empty()
+        || s.directed_stream_description.trim().is_empty()
     {
         return Err("invalid scenario limits or metadata");
     }
@@ -453,6 +485,43 @@ mod tests {
         scenario = crate::scenario::settings().clone();
         scenario.impact_ejecta_defaults.source_direction = [0.0; 3];
         assert_eq!(validate(&scenario), Err("invalid impact ejecta defaults"));
+    }
+
+    #[test]
+    fn transit_route_and_source_adjustment_constants_are_versioned_validated_data() {
+        let reference = crate::scenario::settings();
+        assert_eq!(reference.transit_stream.version, 1);
+        assert_eq!(reference.transit_stream.transverse_half_width_m, 450.0);
+        assert_eq!(reference.transit_stream.launch_trail_m, 500.0);
+        assert_eq!(reference.transit_stream.target_lead_m, 500.0);
+        validate_transit_and_adjustment(reference).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, 100.0, 50_000.1] {
+            let mut scenario = reference.clone();
+            scenario.transit_stream.transverse_half_width_m = invalid;
+            assert!(validate_transit_and_adjustment(&scenario).is_err());
+        }
+        for field in 0..8 {
+            let mut scenario = reference.clone();
+            match field {
+                0 => scenario.debris_trajectory_adjustment.version = 0,
+                1 => scenario.debris_trajectory_adjustment.source_url.clear(),
+                2 => {
+                    scenario
+                        .debris_trajectory_adjustment
+                        .source_enabled_by_default = true
+                }
+                3 => scenario.debris_trajectory_adjustment.global_rate_hz = 121.0,
+                4 => scenario.debris_trajectory_adjustment.cutoff_m = f64::NAN,
+                5 => scenario.debris_trajectory_adjustment.typical_speed_mps = 0.0,
+                6 => scenario.debris_trajectory_adjustment.delta_v_factor = f64::INFINITY,
+                7 => scenario
+                    .debris_trajectory_adjustment
+                    .scheduling_note
+                    .clear(),
+                _ => unreachable!(),
+            }
+            assert!(validate_transit_and_adjustment(&scenario).is_err());
+        }
     }
 
     #[test]
