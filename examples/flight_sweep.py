@@ -33,9 +33,10 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
-from wsorb.flight import basic_command, coast_command
+from wsorb.controllers import PROFILE_IDS, policy_factory
 from wsorb.sweep import run_sweep
 from wsorb.sweep_analysis import write_report
 
@@ -43,20 +44,16 @@ from wsorb.sweep_analysis import write_report
 def basic_policy(settings):
     """Replace this with your controller; closures can hold per-trial memory."""
 
-    def decide(observation):
-        return basic_command(observation, **settings)
-
-    return decide
+    return policy_factory("basic_pd_radar", settings)
 
 
 def coast_policy(settings):
     """Zero thrust gives a useful control trial; it does not stop momentum."""
-    if settings:
-        raise ValueError("The coast policy takes no settings")
-    return coast_command
+    return policy_factory("coast", settings)
 
 
-POLICIES = {"basic_pd_radar": basic_policy, "coast": coast_policy}
+POLICIES = {profile: partial(policy_factory, profile) for profile in PROFILE_IDS}
+POLICIES.update(basic_pd_radar=basic_policy, coast=coast_policy)
 
 
 def main():
