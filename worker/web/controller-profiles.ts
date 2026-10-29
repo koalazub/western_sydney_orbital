@@ -4,6 +4,7 @@ import profiles from "../../src/wsorb/controllers/catalog.json";
 import scenario from "../../simulation/scenarios/phobos_escape.json";
 import { CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
 import { installFlightAnalytics } from "./flight-analytics.ts";
+import { mountDashboard } from "./dashboard-shell.ts";
 import type { RoomEngine } from "./room-control.ts";
 
 type Connection = { origin: string; id: string; key: string };
@@ -24,15 +25,12 @@ type Options = {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const number = (value: unknown, places = 2) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(places) : "n/a";
-const practiceScoreLabel = "STP-formula score estimate, not an official runtime score";
+const practiceScoreLabel = "STP's documented success formula";
 const numericScore = (result: Record<string, unknown>) => {
   if (result.world_metadata_unchanged === false) return null;
   const score = record(result.measurement) ? result.measurement.score : null;
   return typeof score === "number" && Number.isFinite(score) ? score : null;
 };
-const rankingScore = (result: Record<string, unknown>) => result.state === "native_terminal"
-  && result.world_metadata_unchanged === true && result.release_state === "acknowledged" && !result.error_code
-  ? numericScore(result) : null;
 
 function comparisonGroups(results: Array<Record<string, unknown>>) {
   const groups = new Map<string, { label: string; comparable: boolean; results: Array<Record<string, unknown>> }>();
@@ -54,14 +52,6 @@ function comparisonGroups(results: Array<Record<string, unknown>>) {
     group.results.push(result);
   }
   return groups.values();
-}
-
-function scoreOrder(left: Record<string, unknown>, right: Record<string, unknown>) {
-  const a = rankingScore(left), b = rankingScore(right);
-  if (a === b) return 0;
-  if (a === null) return 1;
-  if (b === null) return -1;
-  return a > b ? -1 : 1;
 }
 
 async function hostedRequest(connection: Connection, payload?: Record<string, unknown>) {
@@ -121,8 +111,21 @@ async function freshTrial(api: RoomEngine) {
   throw new Error("Fresh flight was not confirmed. No reset or run was retried.");
 }
 
+function confirmFreshTrial(profileLabel: string): Promise<boolean> {
+  const dialog = byId<HTMLDialogElement>("controller-fresh-confirm");
+  byId("controller-fresh-chosen").textContent = `Replace this tab's flight and run ${profileLabel}? The new test uses transit traffic with light attraction off, seed 100 and 500 debris bodies. The current flight cannot be recovered here.`;
+  // window.confirm blocks the bridge's page-lease polling. A native HTML dialog
+  // keeps that authenticated connection alive while the person decides.
+  dialog.returnValue = "cancel";
+  return new Promise(resolve => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "run"), { once: true });
+    dialog.showModal();
+  });
+}
+
 export function installControllerProfiles(options: Options) {
   const panel = byId<HTMLDialogElement>("controller-panel");
+  const dashboard = mountDashboard(panel);
   const open = byId<HTMLButtonElement>("open-controllers");
   const owner = byId<HTMLSelectElement>("controller-owner");
   const profile = byId<HTMLSelectElement>("controller-profile");
@@ -132,7 +135,6 @@ export function installControllerProfiles(options: Options) {
   const status = byId("controller-service-status");
   const error = byId("controller-error");
   const table = byId<HTMLTableElement>("controller-results-table");
-  const sort = byId<HTMLSelectElement>("controller-result-sort");
   const analytics = installFlightAnalytics();
   let view: View | undefined;
   let busy = false;
@@ -152,7 +154,7 @@ export function installControllerProfiles(options: Options) {
   };
   function description() {
     const entry = selected();
-    byId("controller-description").textContent = `${entry.description} ${entry.experimental ? "Adapted experimental profile; avoidance is not certified." : ""}`;
+    byId("controller-description").textContent = entry.description;
   }
   function selectOwner() {
     profile.replaceChildren(...profiles.filter(entry => entry.owner === owner.value).map(entry => new Option(entry.label, entry.id)));
@@ -171,7 +173,6 @@ export function installControllerProfiles(options: Options) {
       name.colSpan = 13;
       name.textContent = group.label;
       heading.append(name);
-      if (sort.value === "score" && group.comparable) group.results.sort(scoreOrder);
       for (const result of group.results) {
         const row = body.insertRow();
         const measurement = record(result.measurement) ? result.measurement : {};
@@ -183,15 +184,14 @@ export function installControllerProfiles(options: Options) {
           : result.error_code ? `${result.state ?? "error"}: ${result.error_code}`
             : measurement.status === "failed_damage" ? "Collision damage failure" : String(result.state ?? "Unknown");
         const score = numericScore(result);
-        const scoreText = score !== null && rankingScore(result) === null ? `${number(score)} (not ranked)` : number(score);
+        const scoreText = score === null ? "n/a" : `${number(score)} (legacy, not STP)`;
         const values = [label(result.profile_id), scoreText, number(result.duration_s, 0), outcome,
           number(measurement.time_s, 1), number(measurement.range_m), number(measurement.relative_speed_mps), number(measurement.damage_j), number(measurement.fuel_used_kg, 3),
           number(terms.progress_points), number(terms.collision_penalty_points), number(terms.fuel_penalty_points), number(terms.offset_points)];
         values.forEach((value, index) => {
           const cell = document.createElement(index === 0 ? "th" : "td");
           if (cell instanceof HTMLTableCellElement && index === 0) cell.scope = "row";
-          if (index === 1) { const score = document.createElement("strong"); score.textContent = value; cell.append(score); }
-          else cell.textContent = value;
+          cell.textContent = value;
           row.append(cell);
         });
       }
@@ -199,6 +199,7 @@ export function installControllerProfiles(options: Options) {
     });
     for (const body of Array.from(table.tBodies)) body.remove();
     table.append(...bodies);
+    byId("lab-room-results").hidden = results.length === 0;
   }
   function render(value: Record<string, unknown>) {
     if (!record(value.service) || typeof value.service.online !== "boolean" || !Array.isArray(value.results)) {
@@ -206,9 +207,9 @@ export function installControllerProfiles(options: Options) {
     }
     view = value as unknown as View;
     const active = view.active;
-    const message = !view.service.online ? "Python runner offline. Profiles are available; start the runner to fly."
-      : active ? `${label(active.profile_id)}: ${active.stop_requested ? "stopping" : active.status}.`
-        : "Python runner ready. Select a teammate and profile, then run a fresh test.";
+    const message = !view.service.online ? "Python runner offline. Open connection setup below to connect."
+      : active ? `Runner queue · ${label(active.profile_id)}: ${active.stop_requested ? "stopping" : active.status}.`
+        : "Python runner connected. Ready to run.";
     if (status.textContent !== message) status.textContent = message;
     run.disabled = busy || !view.service.online || !!active || !options.ready();
     stop.disabled = busy || !active || active.stop_requested;
@@ -216,7 +217,6 @@ export function installControllerProfiles(options: Options) {
     analytics.updateRoomResults(view.results);
   }
   byId("controller-score-label").textContent = practiceScoreLabel;
-  sort.addEventListener("change", () => { if (view) renderResults(view.results); });
   async function refresh() {
     try { render(await request()()); }
     catch (cause) {
@@ -249,7 +249,7 @@ export function installControllerProfiles(options: Options) {
       const send = request();
       render(await send());
       if (!view?.service.online || view.active || !options.ready()) throw new Error("Wait for a ready game and idle Python runner before starting.");
-      if (!window.confirm(`Replace this tab's flight and run ${label(profile.value)}? The new test uses seed 100 and 500 debris bodies.`)) return;
+      if (!await confirmFreshTrial(label(profile.value))) return;
       const api = options.engine();
       if (!api) throw new Error("The real engine is unavailable. No run was started.");
       const id = selected().id;
@@ -266,12 +266,23 @@ export function installControllerProfiles(options: Options) {
     if (panel.open && autoUpdate) timer = setTimeout(() => { void schedule(); }, 2000);
   }
   byId("refresh-controller-results").addEventListener("click", () => { void refresh(); });
+  addEventListener("wsorb:controller-status", () => {
+    if (panel.open && autoUpdate && !busy) void refresh();
+  });
   byId<HTMLButtonElement>("pause-controller-updates").addEventListener("click", event => {
     autoUpdate = !autoUpdate;
     (event.currentTarget as HTMLButtonElement).textContent = autoUpdate ? "Pause updates" : "Resume updates";
     if (autoUpdate) void schedule(); else clearTimeout(timer);
   });
-  const show = () => { if (!panel.open) { panel.showModal(); owner.focus(); void refresh(); void schedule(); } };
+  const show = () => {
+    if (!panel.open) {
+      dashboard.showView("compare");
+      panel.showModal();
+      panel.querySelector<HTMLButtonElement>('.lab-navigation [data-lab-view="compare"]')?.focus();
+      analytics.openPublished();
+      void refresh(); void schedule();
+    }
+  };
   open.hidden = false;
   open.addEventListener("click", show);
   byId("close-controllers").addEventListener("click", () => panel.close());

@@ -84,7 +84,7 @@ if (publishedAnalytics) {
     const bytes = await readFile(path);
     if (name === "dataset.json") {
       const data = JSON.parse(bytes.toString("utf8"));
-      if (data.schema !== "wsorb.teammate_analytics" || data.schema_version !== 1
+      if (data.schema !== "wsorb.teammate_analytics" || ![1, 2].includes(data.schema_version)
         || !Array.isArray(data.trials) || !Array.isArray(data.profiles)
         || !parser.validatePublication(data)) throw new Error("Unsupported curated analytics dataset");
     }

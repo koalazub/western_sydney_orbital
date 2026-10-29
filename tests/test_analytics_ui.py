@@ -14,6 +14,7 @@ WEB = ROOT / "worker/web"
 SOURCE = (WEB / "flight-analytics.ts").read_text()
 CONTROLLERS = (WEB / "controller-profiles.ts").read_text()
 CSS = (WEB / "styles.css").read_text()
+SHELL = (WEB / "dashboard-shell.ts").read_text()
 COLUMNS = (
     "time_s",
     "fuel_used_kg",
@@ -161,7 +162,11 @@ def test_publication_is_lazy_fixed_origin_credential_free_and_stream_bounded():
         assert forbidden not in load
     assert "const MAX_PUBLIC_BYTES = 2 * 1024 * 1024;" in SOURCE
     install = section("export function installFlightAnalytics()", "\nNOT_PRESENT")
-    assert "if (!details.open || loaded || loading) return;" in install
+    assert (
+        'if (!byId<HTMLDialogElement>("controller-panel").open || loaded || loading) return;'
+        in install
+    )
+    assert "openPublished() { void load(); }" in install
     assert 'details.addEventListener("toggle"' in install
     assert "Published analytics unavailable." in install
     assert "catch {" in install
@@ -208,6 +213,8 @@ def test_publication_validates_the_matched_cohort_instead_of_importing_jobs():
         "../../src/wsorb/controllers/catalog.json",
         "../../simulation/scenarios/flight_analytics.json",
         "../shared/controller-jobs.ts",
+        "../../src/wsorb/scoring_reference.json",
+        "./analytics-overview.ts",
     }
 
 
@@ -267,10 +274,13 @@ def test_optional_publisher_coverage_stats_have_bounded_structured_validation():
     assert "trial.engine_sha256 === null" in SOURCE
     assert "trial.analytics === null && trial.score === null" in SOURCE
     assert "comparison.definitions === null" in SOURCE
-    assert "coverage.every(seeds => seeds === coverage[0])" in SOURCE
-    assert "every(run => run.terms !== null)" in SOURCE
-    assert "if (publication.rankable) ordered.sort(" in SOURCE
-    assert "Unranked local means." in SOURCE
+    assert "rankable: false" in SOURCE
+    assert "Object.entries(SCORE_COMPATIBILITY)" in SOURCE
+    assert (
+        'value.schema_version === 2 && !Object.hasOwn(comparison, "score_compatibility")' in SOURCE
+    )
+    assert "ordered.sort(" not in SOURCE
+    assert "Unranked measured profiles." in SOURCE
 
 
 @pytest.mark.parametrize("prefix", ["published-analytics", "room-analytics"])
@@ -328,17 +338,14 @@ def test_chart_uses_actual_samples_and_keeps_null_gaps_and_full_precision():
         assert forbidden not in graph
 
 
-def test_published_pair_means_are_local_and_repetitions_are_not_averaged_into_curves(page):
+def test_measured_comparison_does_not_display_or_rank_incompatible_pair_points(page):
     scoreboard = page.ids["published-analytics-scoreboard"]
-    assert "Two-run mean, averaged across matched seeds" in content(scoreboard)
-    assert "Valid pairs / seeds" in content(scoreboard)
-    assert "local multi-seed summary, not an official multi-seed rank or tie-break" in content(
-        page.ids["published-scoreboard-note"]
-    )
+    assert "Medians over available physical outcomes" in content(scoreboard)
+    assert "No point ranking" in content(scoreboard)
+    assert "STP points are unavailable" in content(page.ids["published-scoreboard-note"])
     publication = section("function renderPublication(", "export function installFlightAnalytics()")
-    assert "left.mean_score === right.mean_score ? 0" in publication
-    assert "rounded(entry.mean_score)" in publication
-    assert "entry.scored_pairs" in publication
+    assert "sort(" not in publication
+    assert "rounded(entry.mean_score)" not in publication
     assert "rounded(entry.median_score)" not in publication
     assert "repetition ${trial.repetition}" in SOURCE
     assert "repetition: null" in SOURCE
@@ -379,12 +386,13 @@ def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(pa
     assert CONTROLLERS.count("analytics.updateRoomResults(view.results);") == 1
     assert "analytics.updateRoomResults([]);" in CONTROLLERS
     for preserved in (
-        "if (!window.confirm(`Replace this tab's flight",
+        "if (!await confirmFreshTrial(label(profile.value))) return;",
         "const expected = await freshTrial(api);",
         "const changedProfile = async () => { description(); await requestStop(); };",
         "if (!panel.open || !autoUpdate) return;",
         'byId<HTMLButtonElement>("pause-controller-updates")',
-        "owner.focus();",
+        "panel.querySelector<HTMLButtonElement>('.lab-navigation "
+        '[data-lab-view="compare"]\')?.focus();',
         "open.focus({ preventScroll: true });",
         'event.code !== "KeyC" || !event.shiftKey',
     ):
@@ -427,11 +435,89 @@ def _contrast(foreground, background):
 
 def test_declared_chart_and_legend_colors_have_measured_contrast():
     colors = re.findall(r"--analytics-series-\d: (#[a-fA-F0-9]{6});", CSS)
+    colors += re.findall(r"--team-(?:bui|tom|harry): (#[a-fA-F0-9]{6});", CSS)
     assert len(colors) == 7
     for color in colors:
         # Small endpoint labels and legend text need 4.5:1, lines need 3:1.
         assert _contrast(color, "#070b10") >= 4.5
-        assert _contrast(color, "#101923") >= 4.5
+        assert _contrast(color, "#171c24") >= 4.5
     assert _contrast("#b7c6d4", "#070b10") >= 4.5
     assert _contrast("#526374", "#070b10") >= 3
     assert _contrast("#94d9f5", "#101923") >= 3
+
+
+def test_dashboard_defaults_to_visible_graphs_and_moves_raw_tables_out_of_compare():
+    assert 'showView("compare")' in SHELL
+    assert 'id="dashboard-overview"' in SHELL
+    assert 'id="lab-view-data"' in SHELL
+    assert 'byId("lab-data-content").append(byId("flight-analytics"))' in SHELL
+    assert (
+        "table" not in SHELL.split('id="lab-view-compare"', 1)[1].split('id="lab-view-run"', 1)[0]
+    )
+    assert "STP points unavailable" in SHELL
+    assert "View scoring formula" in SHELL
+    assert 'if (!button.closest(".lab-navigation"))' in SHELL
+
+
+def test_documented_formula_sources_and_legacy_limits_are_visible_in_data_view(page):
+    assert "Raw Score = Time Score" in content(page.ids["controller-score-detail"])
+    assert "Final points = 100" in content(page.ids["controller-score-detail"])
+    assert "120/T" in content(page.ids["controller-score-detail"])
+    assert "2D/209200" in content(page.ids["controller-score-detail"])
+    assert "F/1.15" in content(page.ids["controller-score-detail"])
+    assert "not collision count" in content(page.ids["controller-score-detail"])
+    assert "Stats/FuelUsed" in content(page.ids["controller-score-detail"])
+    assert "150" in content(page.ids["controller-score-sources"])
+    assert "75" in content(page.ids["controller-score-sources"])
+    assert "Legacy SI total, not STP" in content(page.ids["controller-results-table"])
+    assert 'value="score"' not in (WEB / "index.html").read_text()
+    assert "rankingScore" not in CONTROLLERS and "scoreOrder" not in CONTROLLERS
+    assert "Raw score" in content(page.ids["controller-score-example"])
+    assert "0.25" in content(page.ids["controller-score-example"])
+    assert "Documentation example, not a recorded flight" in content(
+        page.ids["score-example-heading"]
+    )
+    assert "STP raw score: n/a" in SHELL and "Final points: n/a" in SHELL
+    assert 'link.target = "_blank"' in SOURCE
+    assert 'link.rel = "noopener noreferrer"' in SOURCE
+    assert "(opens in a new tab)" in SOURCE
+
+
+def test_failed_publication_retry_does_not_destroy_the_overview_renderer():
+    install = section("export function installFlightAnalytics()", "\nNOT_PRESENT")
+    assert 'querySelector<HTMLElement>(".overview-empty")' in install
+    assert 'byId("dashboard-overview").replaceChildren' not in install
+
+
+def test_connection_headline_requires_native_evidence_and_updates_only_on_state_events(page):
+    runtime = (WEB / "app-runtime.ts").read_text()
+    monitor = runtime.split("function monitorLocalPythonConnection()", 1)[1].split(
+        "function requestInitialFollowView()", 1
+    )[0]
+    assert "describeControllerStatus(connection, observation, runtime)" in monitor
+    assert "JSON.parse(engine.observation())" in monitor
+    assert "JSON.parse(engine.runtime_status())" in monitor
+    assert "if (receipt.eventKey === previous) return;" in monitor
+    assert "events.children.length > 5" in monitor
+    assert "This does not mean a controller has started" not in monitor
+    assert "connection.error}`" not in monitor
+    for forbidden in (".control(", "fetch(", "controllers(", "console."):
+        assert forbidden not in monitor
+    assert page.ids["local-python-status"]["attrs"]["role"] == "status"
+    assert "role" not in page.ids["local-python-evidence"]["attrs"]
+    assert page.ids["local-controller-events"]["tag"] == "ol"
+    assert "pointer-events: auto" in CSS.split(".connection-details {", 1)[1].split("}", 1)[0]
+
+
+def test_fresh_confirmation_does_not_block_the_authenticated_page_lease(page):
+    confirmation = page.ids["controller-fresh-confirm"]
+    assert confirmation["tag"] == "dialog"
+    assert confirmation["attrs"]["aria-describedby"] == "controller-fresh-chosen"
+    assert any(
+        element["tag"] == "form" and element["attrs"].get("method") == "dialog"
+        for element in page.elements
+        if confirmation in element["parents"]
+    )
+    assert "window.confirm(" not in CONTROLLERS
+    assert "dialog.showModal()" in CONTROLLERS
+    assert 'dialog.returnValue === "run"' in CONTROLLERS

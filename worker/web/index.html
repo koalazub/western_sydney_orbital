@@ -42,6 +42,8 @@
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
     <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
       <p id="local-python-status" role="status"></p>
+      <p id="local-python-evidence" class="connection-evidence"></p>
+      <details class="connection-details"><summary>Connection & observed events</summary><p id="local-python-endpoint"></p><ol id="local-controller-events"></ol></details>
     </section>
     <section id="python-room" class="python-room" aria-label="Python connection" hidden>
       <p id="python-room-status" role="status"></p>
@@ -93,21 +95,21 @@
         <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
       </details>
       <h3 id="controller-room-heading">Current connection job results</h3>
-      <p id="controller-score-label">STP-formula score estimate, not an official runtime score</p>
-      <p id="controller-score-detail">Published formula using local fuel/damage estimates. Speed bonus is completion time; arrival speed is separate. Collision damage and fuel burn reduce score. Local model, not certified STP counters. Station-region arrival is not docking.</p>
+      <p id="controller-score-label">STP's documented success formula</p>
+      <p id="controller-score-detail"><code>Raw Score = Time Score − Damage Penalty − Fuel Penalty<br>Raw Score = 120/T − 2D/209200 − F/1.15<br>Final points = 100 × [Raw Score + 0.5]</code>T is completion time in seconds. D is accumulated collision damage in joules, not collision count. F must be STP's Stats/FuelUsed counter, not this simulator's physical fuel estimate. The local runs cannot supply comparable raw scores or final points.</p>
+      <div id="controller-score-sources"><p><a href="https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5" referrerpolicy="no-referrer">Official scoring documentation</a>. A nominal successful run has raw score 0 and final points 50.</p><section aria-labelledby="score-example-heading"><h4 id="score-example-heading">Documentation example, not a recorded flight</h4><p>T = 96 s, D = 10,460 J, official fuel counter F = 1.035.</p><dl id="controller-score-example" class="lab-score-example"><div><dt>Time score</dt><dd data-score-term="time_score">1.25</dd></div><div><dt>Damage penalty</dt><dd data-score-term="damage_penalty">0.10</dd></div><div><dt>Fuel penalty</dt><dd data-score-term="fuel_penalty">0.90</dd></div><div><dt>Raw score</dt><dd data-score-term="raw_score">0.25</dd></div><div><dt>Final points</dt><dd data-score-term="points">75</dd></div></dl></section><details class="lab-disclosure"><summary>Why no point estimate?</summary><p>The published <a href="https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L37-L67" referrerpolicy="no-referrer">Scoring.py</a> instead uses max(F/1.15 − 1, 0) for fuel, giving 150 for the nominal run and 165 for the wiki example. This disagreement remains unresolved. Both formulas require the official counters. Local SI kilograms cannot be converted from the saved totals. The wiki does not fully specify failure's distance equation. New local runs have no score; historical local totals remain legacy diagnostics, not STP points.</p></details></div>
       <div class="controller-fields">
         <label for="controller-result-sort">Result order within each comparison group
           <select id="controller-result-sort" name="controller-result-sort" aria-describedby="controller-score-comparison">
-            <option value="score">Score high to low</option>
             <option value="newest">Newest first</option>
           </select>
         </label>
       </div>
-      <p id="controller-score-comparison">Compare only matching engine builds, seeds and time limits. Groups are shown newest first, with unscored tests last when sorting by score. Scroll horizontally for all measurements.</p>
-      <div class="controller-results" tabindex="0" aria-label="STP-formula score estimates, scroll horizontally for all measurements">
+      <p id="controller-score-comparison">Compare measured flights only within matching builds, seeds and time limits. No ranking uses legacy local point totals. Station-region arrival is not docking.</p>
+      <div class="controller-results" tabindex="0" aria-label="Connection measurements and legacy diagnostics, scroll horizontally">
         <table id="controller-results-table" aria-describedby="controller-score-label controller-score-detail controller-score-comparison">
-          <caption>STP-formula score estimate, higher is better. Fresh tests use 500 debris bodies. Missing scores and measurements appear as n/a, never zero.</caption>
-          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Score</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Speed / progress points</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
+          <caption>Actual connection measurements, newest first. Legacy SI totals and terms are preserved diagnostics, not STP points. n/a means unavailable, never zero.</caption>
+          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Legacy SI total, not STP</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Legacy progress term</th><th scope="col">Legacy collision term</th><th scope="col">Legacy fuel term</th><th scope="col">Legacy offset</th></tr></thead>
         </table>
       </div>
       <details id="flight-analytics" class="flight-analytics">
@@ -115,18 +117,18 @@
         <p id="analytics-read-only">These controls only filter recorded measurements. They never select a flight controller, request Stop, reset a flight or start a run. Public trial data loads only when this section opens.</p>
         <section aria-labelledby="published-analytics-heading">
           <h3 id="published-analytics-heading">Published matched-trial scoreboard</h3>
-          <p>Local matched-seed summaries, not an official leaderboard. The publication records two consecutive fresh trials per seed and profile with unchanged code. This mirrors the official two-run scoring rule, but does not establish official SDK execution or continuous-video evidence. These published trials are not hosted room jobs. Arrivals mean station-region entry, not docking.</p>
+          <p>Local matched-seed measurements, not an official leaderboard. Two consecutive fresh trials per seed and profile use unchanged code. This preserves pairing only, not official counters, licensed execution or video evidence. These published trials are not connection jobs. Arrivals mean station-region entry, not docking.</p>
           <p id="published-analytics-load-status" role="status">Open this section to check for a public matched-trial publication.</p>
           <button id="retry-published-analytics" type="button" hidden>Retry public analytics</button>
           <div id="published-analytics-content" hidden>
             <div class="controller-results" tabindex="0" role="region" aria-label="Published teammate efficiency table, scroll horizontally">
               <table id="published-analytics-scoreboard" aria-describedby="published-scoreboard-note">
-                <caption>Two-run mean, averaged across matched seeds with valid pairs. Other numeric columns are medians over available physical outcomes, including damage failures and timeouts. Software errors count in attempts, not physical medians. n/a means unavailable, never zero.</caption>
-                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Two-run mean score</th><th scope="col">Valid pairs / seeds</th><th scope="col">Arrivals / attempts</th><th scope="col">Scored / attempts</th><th scope="col">Median time, s</th><th scope="col">Median fuel used, kg</th><th scope="col">Median damage, J</th><th scope="col">Median translation burn count</th><th scope="col">Median translation burn time, s</th><th scope="col">Median angular actuation count</th><th scope="col">Median angular actuation time, s</th><th scope="col">Median physical turn count</th><th scope="col">Median physical turn time, s</th><th scope="col">Median orientation angle, rad</th></tr></thead>
+                <caption>Medians over available physical outcomes, including damage failures and timeouts. A timeout's duration is not a completion time. Software errors count in attempts, not physical medians. n/a means unavailable, never zero. No point ranking.</caption>
+                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Arrivals / attempts</th><th scope="col">Median time, s</th><th scope="col">Median fuel used, kg</th><th scope="col">Median damage, J</th><th scope="col">Median translation burn count</th><th scope="col">Median translation burn time, s</th><th scope="col">Median angular actuation count</th><th scope="col">Median angular actuation time, s</th><th scope="col">Median physical turn count</th><th scope="col">Median physical turn time, s</th><th scope="col">Median orientation angle, rad</th></tr></thead>
               </table>
             </div>
             <p id="published-analytics-ranking" role="status"></p>
-            <p id="published-scoreboard-note">The score column is the mean of valid two-run pair means across the matched seeds. Ordering is available only when valid-pair seed coverage and native formula receipts match. It is a local multi-seed summary, not an official multi-seed rank or tie-break. Missing pairs remain in the denominators. No ordering crosses builds, settings or execution modes. Burn and turn counts are diagnostics, not score inputs. <a href="#controller-score-detail">Score terms and local-model limits</a>. Exact recorded terms for each selected trial appear below.</p>
+            <p id="published-scoreboard-note">STP points are unavailable because the local physical fuel estimate differs from STP's fuel activity counter. Matching formula IDs, builds and seeds do not repair that mismatch. Historical score fields in downloads and collapsed receipts are legacy SI diagnostics only. Burn and turn counts are not score inputs. <a href="#controller-score-detail">Documented formula and counter limits</a>.</p>
             <details class="analytics-manifest">
               <summary>Recorded source mode, build, settings and limitations</summary>
               <dl id="published-analytics-manifest"></dl>
@@ -163,10 +165,10 @@
               <ol id="published-analytics-legend" class="analytics-legend" aria-label="Published graph legend"></ol>
             </figure>
             <details class="analytics-data">
-              <summary>Selected published outcomes and native score terms</summary>
+              <summary>Selected published outcomes and legacy SI diagnostics</summary>
               <div class="controller-results" tabindex="0" role="region" aria-label="Selected published trial outcomes, scroll horizontally">
-                <table id="published-analytics-outcomes"><caption>Exact recorded per-trial values. Score terms use native receipts, not a browser calculation.</caption>
-                  <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Trial ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Score</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Speed / progress points</th><th scope="col">Progress basis</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
+                <table id="published-analytics-outcomes"><caption>Exact archived values. Legacy SI totals and terms are not comparable STP points; they are never recalculated here.</caption>
+                  <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Trial ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Legacy SI total, not STP</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Legacy progress term</th><th scope="col">Legacy progress basis</th><th scope="col">Legacy collision term</th><th scope="col">Legacy fuel term</th><th scope="col">Legacy offset</th></tr></thead>
                 </table>
               </div>
             </details>
@@ -189,7 +191,7 @@
               <a href="/analytics/team-comparison.json" download referrerpolicy="no-referrer">Dataset JSON</a>
               <a href="/analytics/trials.csv" download referrerpolicy="no-referrer">All trials CSV</a>
               <a href="/analytics/summary.csv" download referrerpolicy="no-referrer">Summary CSV</a>
-              <a href="/analytics/score-components.svg" download referrerpolicy="no-referrer">Score components SVG</a>
+              <a href="/analytics/score-components.svg" download referrerpolicy="no-referrer">Legacy SI diagnostics SVG, not STP points</a>
               <a href="/analytics/fuel-burns.svg" download referrerpolicy="no-referrer">Fuel and burns SVG</a>
               <a href="/analytics/turns.svg" download referrerpolicy="no-referrer">Physical turns SVG</a>
               <a href="/analytics/efficiency.svg" download referrerpolicy="no-referrer">Efficiency SVG</a>
@@ -226,10 +228,10 @@
             <ol id="room-analytics-legend" class="analytics-legend" aria-label="Current job graph legend"></ol>
           </figure>
           <details class="analytics-data">
-            <summary>Selected current job outcomes and native score terms</summary>
+            <summary>Selected current job outcomes and legacy SI diagnostics</summary>
             <div class="controller-results" tabindex="0" role="region" aria-label="Selected current job outcomes, scroll horizontally">
-              <table id="room-analytics-outcomes"><caption>Actual connection job receipts. n/a means unavailable, never zero. No cross-group ranking.</caption>
-                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Job ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Score</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Speed / progress points</th><th scope="col">Progress basis</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
+              <table id="room-analytics-outcomes"><caption>Actual connection job receipts. Legacy SI totals are not STP points. n/a means unavailable, never zero. No point ranking.</caption>
+                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Job ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Legacy SI total, not STP</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Legacy progress term</th><th scope="col">Legacy progress basis</th><th scope="col">Legacy collision term</th><th scope="col">Legacy fuel term</th><th scope="col">Legacy offset</th></tr></thead>
               </table>
             </div>
           </details>
@@ -256,6 +258,11 @@
           <p id="analytics-sampling-note">Graphs show downsampled public numeric series, at most 192 actual samples per published trial and 48 per current job. Each published repetition remains its own line. Dots are retained observations at actual timestamps. Lines only join adjacent available samples; they do not add observations or establish event boundaries. Missing values break lines and stay n/a, never zero. Axes fit the selected data, not an invented zero baseline. Exact episode totals and longest durations come from the native counters, not the graph. Graphs do not read camera or radar payloads and are not evidence of GPU readiness.</p>
         </section>
       </details>
+    </dialog>
+    <dialog id="controller-fresh-confirm" aria-labelledby="controller-fresh-title" aria-describedby="controller-fresh-chosen">
+      <h2 id="controller-fresh-title">Replace this flight?</h2>
+      <p id="controller-fresh-chosen"></p>
+      <form method="dialog"><button value="cancel" autofocus>Keep current flight</button><button value="run" id="confirm-controller-run">Replace flight and run</button></form>
     </dialog>
   </main>
   <script type="module" src="/app.js"></script>

@@ -7,6 +7,7 @@ import { diagnoseStartupFailure, showStartupFailure } from "./startup-errors.ts"
 import { connectRoom, type RoomEngine } from "./room-control.ts";
 import { installDiagnostics } from "./diagnostics.ts";
 import { installControllerProfiles } from "./controller-profiles.ts";
+import { describeControllerStatus } from "./controller-status.ts";
 const diagnostics = installDiagnostics();
 type Engine = RoomEngine & {
   default: (options: unknown) => Promise<unknown>;
@@ -277,31 +278,46 @@ addEventListener("hashchange", () => {
 function monitorLocalPythonConnection() {
   const panel = byId("local-python-connection");
   const text = byId("local-python-status");
+  const evidence = byId("local-python-evidence");
+  const endpoint = byId("local-python-endpoint");
+  const events = byId<HTMLOListElement>("local-controller-events");
   let previous = "";
   const update = () => {
     const connection = browserGlobals.__wsorbLocalApi;
     if (!connection) return;
-    const signature = `${connection.status}\n${connection.error ?? ""}\n${connection.page_id ?? ""}\n${diagnostics.enabled}`;
-    if (signature === previous) return;
-    previous = signature;
     panel.hidden = false;
-    const otherOwner = connection.error?.includes("Another browser page holds the local simulation lease");
-    const messages: Record<string, string> = {
-      waiting_for_engine: "Local Python API is waiting for this game's renderer.",
-      connected: "Local Python API is connected to this tab. This does not mean a controller has started.",
-      disconnected: "Local Python API is disconnected from this tab.",
-      error: "Local Python API stopped. Inspect its error before sending more flight commands.",
-    };
-    const message = otherOwner
-      ? "The local Python API is attached to another tab. This tab is not receiving its calls. Switch to the connected game; do not reset either flight."
-      : messages[connection.status] ?? "Local Python API is not connected to this tab.";
-    text.textContent = `${message} ${location.origin}`;
-    if (connection.page_id && /^[0-9a-f-]{36}$/i.test(connection.page_id)) text.textContent += ` · page ${connection.page_id.slice(0, 8)}`;
-    if (connection.error && !otherOwner) text.textContent += ` ${connection.error}`;
-    if (otherOwner || connection.status === "error") announce(message);
+    let observation: Record<string, unknown> | null = null;
+    let runtime: Record<string, unknown> | null = null;
+    try {
+      if (engine && ready && !failed) {
+        observation = JSON.parse(engine.observation());
+        runtime = JSON.parse(engine.runtime_status());
+      }
+    } catch { /* Missing native proof remains unavailable, never an idle claim. */ }
+    const receipt = describeControllerStatus(connection, observation, runtime);
+    const headline = `${connection.status === "connected" ? "API connected · " : ""}${receipt.headline}`;
+    if (evidence.textContent !== receipt.evidence) evidence.textContent = receipt.evidence;
+    const runEvidence = document.getElementById("controller-native-evidence");
+    if (runEvidence && runEvidence.textContent !== receipt.evidence) runEvidence.textContent = receipt.evidence;
+    endpoint.textContent = location.origin;
+    if (connection.page_id && /^[0-9a-f-]{36}$/i.test(connection.page_id)) endpoint.textContent += ` · page ${connection.page_id.slice(0, 8)}`;
+    if (receipt.eventKey === previous) return;
+    previous = receipt.eventKey;
+    panel.dataset.controllerState = receipt.state;
+    text.textContent = headline;
+    const runHeadline = document.getElementById("controller-native-status");
+    if (runHeadline) runHeadline.textContent = receipt.headline;
+    dispatchEvent(new CustomEvent("wsorb:controller-status", { detail: { state: receipt.state } }));
+    const event = document.createElement("li");
+    const time = observation?.time_s;
+    const trial = runtime?.trial_revision;
+    event.textContent = `${typeof trial === "number" && Number.isSafeInteger(trial) && trial >= 0 ? `Trial ${trial}` : "Trial unknown"} · ${typeof time === "number" && Number.isFinite(time) ? `observed T+${time.toFixed(2)} s` : "no native timestamp"} · ${headline}`;
+    events.prepend(event);
+    while (events.children.length > 5) events.lastElementChild!.remove();
   };
   // Older already-running local backends serve a cached bridge without custom
-  // events. Reading its token-free status also makes those conflicts visible.
+  // events. Read native receipts without sending an API or flight command. The
+  // live headline changes only on lifecycle transitions; evidence is not a live region.
   update();
   const timer = setInterval(update, 250);
   addEventListener("pagehide", () => clearInterval(timer), { once: true });

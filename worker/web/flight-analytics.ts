@@ -2,10 +2,13 @@
 // module has no engine, connection, command or controller-selection capability.
 import profiles from "../../src/wsorb/controllers/catalog.json";
 import definitions from "../../simulation/scenarios/flight_analytics.json";
+import scoringReference from "../../src/wsorb/scoring_reference.json";
 import { CONTROLLER_EXECUTION_KIND, CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
+import { installAnalyticsOverview } from "./analytics-overview.ts";
 
 const DEFINITION_ID = "native_actuation_rotation_episodes_v1";
 const SOURCE_KIND = "native_physics_step_counters_with_sampled_public_series";
+const SCORE_COMPATIBILITY = scoringReference.local_comparison.score_compatibility;
 const MAX_PUBLIC_BYTES = 2 * 1024 * 1024;
 const MAX_SCHEMA_SAMPLES = 256;
 const MAX_PUBLIC_SAMPLES = 192;
@@ -167,12 +170,15 @@ function validateProfileStats(entry: Record<string, unknown>, seeds: unknown[]):
 
 export function validatePublication(value: unknown): Publication | null {
   if (!shape(value, ["schema", "schema_version", "comparison", "profiles", "trials"])
-    || value.schema !== "wsorb.teammate_analytics" || value.schema_version !== 1
+    || value.schema !== "wsorb.teammate_analytics" || ![1, 2].includes(value.schema_version as number)
     || !Array.isArray(value.profiles) || value.profiles.length < 1 || value.profiles.length > profiles.length
     || !Array.isArray(value.trials) || value.trials.length < 1 || value.trials.length > 256) return null;
   const comparison = value.comparison;
   if (!shape(comparison, ["preset", "seeds", "repetitions", "debris_count", "duration_limit_s", "controller_step_s", "physics_step_s",
-    "execution_kind", "score_formula_id", "engine_build", "definitions", "source_hashes", "ranking_method", "limitations"])
+    "execution_kind", "score_formula_id", "engine_build", "definitions", "source_hashes", "ranking_method", "limitations"], ["score_compatibility"])
+    || (value.schema_version === 2 && !Object.hasOwn(comparison, "score_compatibility"))
+    || (Object.hasOwn(comparison, "score_compatibility") && (!shape(comparison.score_compatibility, Object.keys(SCORE_COMPATIBILITY))
+      || Object.entries(SCORE_COMPATIBILITY).some(([key, expected]) => (comparison.score_compatibility as Record<string, unknown>)[key] !== expected)))
     || !["far_side_l2", "mars_facing_l1"].includes(comparison.preset as string)
     || !Array.isArray(comparison.seeds) || !comparison.seeds.length || comparison.seeds.length > 64
     || comparison.seeds.some(seed => !integer(seed, 0xffffffff)) || new Set(comparison.seeds).size !== comparison.seeds.length || comparison.repetitions !== 2
@@ -235,10 +241,9 @@ export function validatePublication(value: unknown): Publication | null {
       || selected.filter(run => run.score !== null).length !== summary.scored_runs
       || (comparison.seeds as number[]).filter(seed => selected.filter(run => run.seed === seed && run.score !== null).length === 2).length !== summary.scored_pairs;
   })) return null;
-  const coverage = summaries.map(summary => (comparison.seeds as number[]).filter(seed => runs.filter(run => run.profileId === summary.id && run.seed === seed && run.score !== null).length === 2).join(","));
-  const rankable = comparison.score_formula_id === CONTROLLER_SCORE_FORMULA && coverage[0] !== ""
-    && coverage.every(seeds => seeds === coverage[0]) && runs.filter(run => run.score !== null).every(run => run.terms !== null);
-  return { comparison, profiles: summaries, runs, rankable };
+  // Matching legacy formula IDs and seed coverage cannot repair incompatible
+  // fuel counters. Version-1 archives are read-only legacy diagnostics too.
+  return { comparison: { ...comparison, score_compatibility: { ...SCORE_COMPATIBILITY } }, profiles: summaries, runs, rankable: false };
 }
 
 async function loadPublication(): Promise<Publication> {
@@ -390,13 +395,14 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
   });
 }
 
-function installPlot(prefix: string) {
+function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void) {
   const metric = byId<HTMLSelectElement>(`${prefix}-metric`), seed = byId<HTMLSelectElement>(`${prefix}-seed`);
   const profile = byId<HTMLSelectElement>(`${prefix}-profile`), download = byId<HTMLAnchorElement>(`${prefix}-csv`);
   let runs: PlotRun[] = [], csvUrl: string | undefined;
   metric.replaceChildren(...METRICS.map((item, i) => new Option(`${item.label}, ${item.unit}`, String(i))));
   function render() {
     const selected = runs.filter(run => String(run.seed) === seed.value && (profile.value === "all" || run.profileId === profile.value));
+    onSelection?.(selected);
     const column = METRICS[Number(metric.value)] ?? METRICS[0];
     renderGraph(prefix, selected, column);
     renderOutcomes(byId<HTMLTableElement>(`${prefix}-outcomes`), selected);
@@ -447,7 +453,9 @@ function renderPublication(publication: Publication) {
     ["Seeds", (comparison.seeds as number[]).join(", ")], ["Consecutive repetitions per seed", String(comparison.repetitions)], ["Debris bodies", String(comparison.debris_count)],
     ["Time limit, s", String(comparison.duration_limit_s)], ["Controller step, s", String(comparison.controller_step_s)],
     ["Physics step, s", String(comparison.physics_step_s)], ["Engine bytes", String(build.bytes)], ["Engine SHA-256", String(build.sha256)],
-    ["Score formula", comparison.score_formula_id === null ? "Unavailable" : String(comparison.score_formula_id)], ["Local summary method", String(comparison.ranking_method)]];
+    ["STP points", "Unavailable: official fuel and damage counters not recorded"],
+    ["Documented success formula", scoringReference.documented_model.success_score],
+    ["Legacy diagnostic formula", comparison.score_formula_id === null ? "Unavailable" : String(comparison.score_formula_id)], ["Local summary method", String(comparison.ranking_method)]];
   const manifest = byId<HTMLDListElement>("published-analytics-manifest");
   manifest.replaceChildren();
   for (const [name, value] of fields) {
@@ -462,18 +470,10 @@ function renderPublication(publication: Publication) {
   const limitations = byId<HTMLUListElement>("published-analytics-limitations");
   limitations.replaceChildren(...(comparison.limitations as string[]).map(value => { const item = document.createElement("li"); item.textContent = value; return item; }));
   const body = bodyOf(byId<HTMLTableElement>("published-analytics-scoreboard"));
-  // Only this validated cohort is ordered. Equal means keep publication order;
-  // no official cross-seed rank or tie-break is invented here.
-  byId("published-analytics-ranking").textContent = publication.rankable
-    ? "Matched valid-pair seed coverage and native formula receipts verified. Local means are ordered high to low; equal means retain publication order."
-    : "Unranked local means. Valid-pair seed coverage or native formula receipts do not match. Missing scores and pairs are not assigned zero.";
-  const ordered = publication.profiles.slice();
-  if (publication.rankable) ordered.sort((left, right) => left.mean_score === right.mean_score ? 0
-    : left.mean_score === null ? 1 : right.mean_score === null ? -1 : left.mean_score > right.mean_score ? -1 : 1);
-  for (const entry of ordered) {
+  byId("published-analytics-ranking").textContent = "Unranked measured profiles. Legacy SI totals are not comparable STP points, even with matching builds and seeds.";
+  for (const entry of publication.profiles) {
     const row = body.insertRow();
-    [`${entry.owner} / ${entry.label}`, rounded(entry.mean_score), `${entry.scored_pairs}/${(comparison.seeds as number[]).length}`,
-      `${entry.successes}/${entry.attempts}`, `${entry.scored_runs}/${entry.attempts}`,
+    [`${entry.owner} / ${entry.label}`, `${entry.successes}/${entry.attempts}`,
       rounded(entry.median_time_s, 1), rounded(entry.median_fuel_used_kg, 3), rounded(entry.median_damage_j),
       rounded(entry.median_burn_count, 1), rounded(entry.median_burn_duration_s, 1),
       rounded(entry.median_angular_burn_count, 1), rounded(entry.median_angular_burn_duration_s, 1),
@@ -483,8 +483,24 @@ function renderPublication(publication: Publication) {
 }
 
 export function installFlightAnalytics() {
+  // Source links must not unload the game or its private controller connection.
+  for (const link of document.querySelectorAll<HTMLAnchorElement>("#controller-score-sources a")) {
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.append(document.createTextNode(" (opens in a new tab)"));
+  }
+  // These are published documentation values, never substituted for flight data.
+  const example = scoringReference.documented_model.worked_examples.find(entry => entry.id === "wiki_documented_example")!;
+  for (const cell of document.querySelectorAll<HTMLElement>("#controller-score-example [data-score-term]")) {
+    const value = example[cell.dataset.scoreTerm as keyof typeof example];
+    cell.textContent = typeof value === "number" ? String(value) : "n/a";
+  }
   const details = byId<HTMLDetailsElement>("flight-analytics");
-  const published = installPlot("published-analytics"), room = installPlot("room-analytics");
+  let publishedProfiles: PublishedProfile[] = [];
+  const publishedOverview = installAnalyticsOverview(byId("dashboard-overview"));
+  const roomOverview = installAnalyticsOverview(byId("dashboard-room-overview"));
+  const published = installPlot("published-analytics", selected => publishedOverview.update(selected, publishedProfiles));
+  const room = installPlot("room-analytics", selected => roomOverview.update(selected));
   const cohort = byId<HTMLSelectElement>("room-analytics-cohort");
   const status = byId("published-analytics-load-status"), retry = byId<HTMLButtonElement>("retry-published-analytics");
   let loaded = false, loading = false, runs: PlotRun[] = [], signature = "";
@@ -503,30 +519,45 @@ export function installFlightAnalytics() {
     renderRoom();
   }
   async function load() {
-    if (!details.open || loaded || loading) return;
+    if (!byId<HTMLDialogElement>("controller-panel").open || loaded || loading) return;
     loading = true; retry.hidden = true;
+    status.classList.remove("screen-reader-only");
     status.textContent = "Loading the public matched-trial publication.";
     try {
       const publication = await loadPublication();
+      publishedProfiles = publication.profiles;
+      byId("lab-cohort-label").textContent = `${publication.runs.length} measured runs`;
+      const build = publication.comparison.engine_build as { sha256: string };
+      const context = document.querySelector<HTMLElement>(".lab-toolbar__note");
+      if (context) context.textContent = `Recorded build ${build.sha256.slice(0, 8)} · ${publication.comparison.debris_count} bodies`;
       renderPublication(publication);
       published.update(publication.runs);
       byId("published-analytics-content").hidden = false;
       loaded = true;
-      status.textContent = `Published matched trials loaded: ${publication.runs.length} runs. Local summaries, not an official leaderboard or current room jobs.`;
+      status.textContent = `${publication.runs.length} measured flights loaded.`;
+      status.classList.add("screen-reader-only");
     } catch {
       // Never expose server text, URLs, exception messages or private details.
       status.textContent = "Published analytics unavailable. No valid matched-trial publication is available here. Current connection jobs remain separate below.";
       retry.hidden = false;
+      const empty = byId("dashboard-overview").querySelector<HTMLElement>(".overview-empty")!;
+      empty.classList.add("lab-empty"); empty.hidden = false;
+      const title = document.createElement("h4"); title.textContent = "Comparison unavailable";
+      const hint = document.createElement("p"); hint.textContent = "Use Retry above to reload the recorded comparison.";
+      empty.replaceChildren(title, hint);
     } finally { loading = false; }
   }
   cohort.addEventListener("change", renderRoom);
   details.addEventListener("toggle", () => { if (details.open) { updateCohorts(); void load(); } });
   retry.addEventListener("click", () => { void load(); });
   return {
+    openPublished() { void load(); },
     updateRoomResults(results: Array<Record<string, unknown>>) {
       const next = roomRuns(results), nextSignature = JSON.stringify(next);
       if (nextSignature === signature) return;
       runs = next; signature = nextSignature;
+      byId("lab-room-empty").hidden = runs.length !== 0;
+      byId("dashboard-room-overview").hidden = runs.length === 0;
       if (details.open) updateCohorts();
     },
   };
