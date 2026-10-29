@@ -180,9 +180,9 @@ For a hosted game, use `--room-file` with the private room descriptor instead. P
 
 Fresh panel tests use the same L2 setup, seed 100 and 500 real debris bodies. Compare equal time limits and the measured time, range, speed, damage and fuel. Native station-region arrival does not certify docking or a safe low-speed rendezvous. Both teammate MVP profiles are explicitly adapted to the command limits; their original SDK entrypoints and displays remain in `examples/`.
 
-The comparison includes the native score and its point breakdown. The [published STP scorer](https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L37-L67) uses `100 × [120/time − 2×damage/209200 − max(fuel/1.15 − 1, 0) + 0.5]` on success. Higher is better, including when scores are negative. Speed here means completion time, not arrival velocity. A damage failure replaces the time bonus with `−remaining_distance/initial_distance`; unfinished trials have no terminal score. The published zero-time bonus is zero.
+The [documented STP success formula](https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5) is `100 × [120/T − 2D/209200 − F/1.15 + 0.5]`. Its inputs are completion time, accumulated collision damage and STP's fuel counter. Collision count, arrival velocity, burn count and turn count are not extra point terms. A nominal success scores 50; the wiki's worked example scores 75.
 
-This is the published formula applied to local fuel and collision-damage estimates. STP's actuator accumulates a different fuel activity counter, so local kilograms and these scores are not verified competition counters or scores. The panel retains arrival speed as a separate safety measurement, and missing historical scores or terms stay unavailable.
+The published executable uses a different fuel penalty, `max(F/1.15 − 1, 0)`, giving 150 for nominal success. That discrepancy remains explicit in [the source audit](docs/scoring.md). Neither formula can substitute our physical kilograms for STP's activity counter. New local runs return no score. The dashboard graphs measured duration, estimated fuel, burns and turns without an invented combined ranking. Historical SI totals remain unchanged, labelled legacy diagnostics in the recorded data and downloads.
 
 The same profiles run without a browser through `just controllers run --isolated --profile PROFILE --run`. `just controllers list` lists their names and adaptations. `just controllers compare --isolated --run` runs each profile in a separate matching world, with native fenced leases rather than manual stepping. No existing game is reset.
 
@@ -318,33 +318,33 @@ Phobos and Mars use [credited spacecraft surface maps](worker/web/assets/ATTRIBU
 
 Local paired-seed practice runs at `far_side_l2`, 500 debris bodies, seeds 100, 101, 102, 103, 104. 2 consecutive fresh attempts per seed/profile. Horizon 600 s, controller step 0.5 s, physics step 0.05 s. Not an official leaderboard.
 
-| Profile | Successes | Scored / unscored | Valid pairs | Mean two-run score | Median time s | Median damage J | Median fuel kg | Burn episodes / active s | Angular episodes / active s | Turn episodes / active s | Rotation rad |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Bui / Alpha-beta + sidestep | 10/10 | 10 / 0 | 5/5 | -7,036.80 | 239.8 | 0 | 83.22 | 6 / 78 | 8 / 89 | 8 / 237.1 | 3.011 |
-| Tom / Kalman + velocity governor | 10/10 | 10 / 0 | 5/5 | -7,187.09 | 222.7 | 0 | 85 | 7 / 39.5 | 0 / 0 | 0 / 0 | 0 |
-| Harry / Basic PD + radar | 10/10 | 10 / 0 | 5/5 | -26,280.67 | 224.4 | 0 | 304.6 | 1 / 224.4 | 0 / 0 | 0 / 0 | 0 |
+STP points are unavailable. The local SI fuel estimate cannot replace STP's `Stats/FuelUsed` counter. No conversion or combined efficiency score is assumed. See the [documented formula and code discrepancy](docs/scoring.md).
 
-Local arithmetic mean of valid two-consecutive-run pair means across matched seeds, descending, with unchanged-code receipts and separate unscored attempts. The cross-seed mean is not an official aggregate or tie-break rule.
+![Completion fractions, sampled durations, fuel and episode counts](docs/analytics/team-comparison/efficiency.svg)
 
+| Profile | Arrivals / attempts | Median time s | Median damage J | Median fuel kg | Burn episodes / active s | Angular episodes / active s | Turn episodes / active s | Rotation rad |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Harry / Basic PD + radar | 10/10 | 224.4 | 0 | 304.6 | 1 / 224.4 | 0 / 0 | 0 / 0 | 0 |
+| Bui / Alpha-beta + sidestep | 10/10 | 239.8 | 0 | 83.22 | 6 / 78 | 8 / 89 | 8 / 237.1 | 3.011 |
+| Tom / Kalman + velocity governor | 10/10 | 222.7 | 0 | 85 | 7 / 39.5 | 0 / 0 | 0 / 0 | 0 |
+
+Unranked measured profiles. STP points are unavailable because local SI fuel and damage do not reproduce the official counters. Historical score fields are legacy diagnostics, not an official aggregate or a valid STP point comparison.
+
+Harry / Basic PD + radar: 10 success. Native analytics cover 10/10 physical results.
 Bui / Alpha-beta + sidestep: 10 success. Native analytics cover 10/10 physical results.
 Tom / Kalman + velocity governor: 10 success. Native analytics cover 10/10 physical results.
-Harry / Basic PD + radar: 10 success. Native analytics cover 10/10 physical results.
 
-The primary score is the arithmetic mean of valid two-consecutive-run pair means across the configured paired seeds. Both attempts must have a recorded native terminal score; partial pairs, timeouts and software errors are not averaged as complete pairs. Pair coverage is explicit. Other table measurements are medians over available physical results, including damage failures and partial timeout horizons. Errors are counted in attempts but excluded from physical measurement medians. Scores use recorded native terminal receipts only. Unavailable historical metrics remain unavailable, never zero. Component medians do not have to sum to the median score.
+Table measurements are medians over available physical results, including damage failures and partial timeout horizons. Errors are counted in attempts but excluded from physical measurement medians. A timeout's duration is not a completion time. Unavailable historical metrics remain unavailable, never zero. Legacy local score receipts and their two-run pair means remain unchanged in downloads, not in the comparison ranking.
 
-Official Rules & Info, discussion #218, require the average of two consecutive unchanged-code runs in a single continuous video. This headless benchmark mirrors the pairing only. It is not an official submission, continuous video or licensed SDK run. Averaging pair means across multiple seeds is a local comparison choice, not an official aggregate, tie-break rule or claim about mixed-outcome precedence. Native-score medians remain available as diagnostics in the downloads.
+Official Rules & Info, discussion #218, require the average of two consecutive unchanged-code runs in a single continuous video. This headless benchmark mirrors the pairing only. It is not an official submission, continuous video or licensed SDK run. Averaging pair means across multiple seeds is a local comparison choice, not an official aggregate, tie-break rule or claim about mixed-outcome precedence. The archived local SI totals are not comparable STP points.
 
 5 matched seeds with 2 consecutive repeats are not 10 independent seed draws. Success counts are descriptive, not proof of robustness. No confidence interval is claimed.
 
 ### Fuel, burns and turn analytics
 
-![Recorded native scores and score components by teammate](docs/analytics/team-comparison/score-components.svg)
-
 ![Cumulative recorded fuel and native propellant durations and episode counts](docs/analytics/team-comparison/fuel-burns.svg)
 
 ![Recorded physical rotation, turn durations and angular-actuator episodes](docs/analytics/team-comparison/turns.svg)
-
-![Completion fractions, sampled durations, fuel and episode counts](docs/analytics/team-comparison/efficiency.svg)
 
 Native physics steps count contiguous propellant-force episodes above 1e-6 N, angular-actuator episodes above 1e-6 Nm, and physical turns whose post-step angular speed exceeds 1e-3 rad/s. Rotation is the geodesic quaternion arc. Durations integrate actual physics-step time. Queued commands and API polls do not add episodes. These are not nozzle pulses or score terms. The direct-angular-control fuel model is unchanged. Native totals stay exact when interior public samples are dropped. Every series retains its actual initial and final observation.
 
@@ -363,7 +363,7 @@ The table covers each teammate's connected target-seeking profile. The coast and
 
 ### Interactive scoreboard and recorded data
 
-In the [hosted player](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/), open **Controller profiles → Scoreboard and flight analytics**. Published measurements load independently of the Python runner and WebGPU startup. Filter by seed, teammate and metric; inspect exact counters, score terms and numeric sample tables; download the selected series. Current-connection jobs are a separate dataset and never acquire results from this publication.
+In the local dashboard, open **Controller profiles → Compare** for the measured charts, **Run flight** for controller selection, or **Recorded data** for exact counters, formula sources and downloads. Published measurements load independently of the Python runner and WebGPU startup. Current-connection jobs are a separate dataset and never acquire results from this publication. Local dashboard changes are not a claim that the hosted player has been updated.
 
 Reproduce the experiment and publish to new directories:
 
@@ -373,6 +373,8 @@ just scoreboard runs/scratch/teammate-comparison-new docs/analytics/teammate-com
 ```
 
 Both outputs are new-only. The [publisher](src/wsorb/scoreboard.py) also provides `render_readme_section` for the generated block above. The checked-in artifact manifest records exact file hashes; full raw public-observation traces remain local in the ignored run directory.
+
+To correct an existing generated publication, `just scoreboard-refresh INPUT OUTPUT` verifies its current artifact digests before replacing generated files. It refuses changed files and leaves other files and raw evidence alone.
 
 ## Compare runs and share what you learn
 

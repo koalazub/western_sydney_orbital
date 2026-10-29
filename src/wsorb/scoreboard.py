@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from .controllers import catalog
@@ -27,7 +28,7 @@ from .flight_analytics import (
     DEFINITION_ID,
     FlightAnalyticsRecorder,
 )
-from .scoring import FORMULA, POINT_FIELDS, native_score_breakdown
+from .scoring import FORMULA, POINT_FIELDS, native_score_breakdown, score_compatibility
 
 _PHYSICAL = {"success", "failed_damage", "timeout"}
 _OUTCOMES = _PHYSICAL | {"policy_error", "engine_error", "interrupted"}
@@ -77,16 +78,15 @@ _MEASUREMENTS = ("time_s", "range_m", "relative_speed_mps", "damage_j", "fuel_us
 _LIMITATIONS = [
     "These are local practice-model results, not an official STP leaderboard or SDK validation.",
     "Success means arrival-radius entry. Arrival speed and safe docking are separate checks.",
-    "The primary local score is the arithmetic mean of complete two-consecutive-run pair "
-    "means across the configured seeds. No partial pair or software error receives a score. "
-    "Medians remain diagnostics, with no new score weights.",
+    "STP points are unavailable: physical SI fuel and local contact-energy estimates are "
+    "not the official Stats/FuelUsed and Stats/Damage counters. No fuel conversion is assumed.",
     "Official Rules 2.18 require two consecutive unchanged-code runs in one continuous video. "
     "These saved headless attempts mirror pairing only, not the video, licensed SDK or an "
     "official submission. The multi-seed mean and ordering are local choices, not official "
     "tie-break or mixed-outcome precedence rules.",
-    "A formula-matched ranking requires native formula receipts and the same valid-pair "
-    "seed coverage for every profile. Otherwise means are unranked diagnostics. Missing "
-    "pairs are reported, not assigned zero.",
+    "Historical score and pair-mean fields preserve legacy local SI diagnostics only. "
+    "Matching formula IDs and valid-pair seed coverage do not make them STP-comparable. "
+    "Profiles are not ranked by those totals. Missing pairs are not assigned zero.",
     "Repeats at the same seed are not independent seed draws. Success counts are descriptive, "
     "not proof of robustness. No confidence interval is claimed.",
     "All attempted outcomes are retained. Timeouts and software errors have no terminal score. "
@@ -104,14 +104,10 @@ _LIMITATIONS = [
     "A failed attempt may have no engine receipt. Its engine hash stays unavailable. "
     "Source hashes identify saved evidence, not a complete external dependency lock.",
 ]
-_RANKING = (
-    "Local arithmetic mean of valid two-consecutive-run pair means across matched seeds, "
-    "descending, with unchanged-code receipts and separate unscored attempts. "
-    "The cross-seed mean is not an official aggregate or tie-break rule."
-)
 _UNRANKED = (
-    "Unranked local pair means: two-run pairing, native formula evidence or matched valid-pair "
-    "seed coverage is unavailable. Medians are diagnostics, not an official aggregate."
+    "Unranked measured profiles. STP points are unavailable because local SI fuel and damage "
+    "do not reproduce the official counters. Historical score fields are legacy diagnostics, "
+    "not an official aggregate or a valid STP point comparison."
 )
 
 
@@ -533,21 +529,9 @@ def build_bundle(directory: str | Path) -> dict:
         FORMULA if scored and all(row["score_breakdown"] is not None for row in scored) else None
     )
     profiles = [_aggregate(trials, metadata[name], config) for name in sorted(config["algorithms"])]
-    coverage = [
-        {pair["seed"] for pair in row["paired_scores"] if pair["mean_score"] is not None}
-        for row in profiles
-    ]
-    rankable = (
-        formula is not None
-        and config["repetitions"] == 2
-        and bool(coverage[0])
-        and all(seeds == coverage[0] for seeds in coverage)
-    )
-    if rankable:
-        profiles.sort(key=lambda row: (-row["mean_score"], row["id"]))
     return {
         "schema": "wsorb.teammate_analytics",
-        "schema_version": 1,
+        "schema_version": 2,
         "comparison": {
             "preset": config["preset"],
             "seeds": list(config["seeds"]),
@@ -558,10 +542,11 @@ def build_bundle(directory: str | Path) -> dict:
             "physics_step_s": fixed,
             "execution_kind": _EXECUTION,
             "score_formula_id": formula,
+            "score_compatibility": score_compatibility(),
             "engine_build": builds[0],
             "definitions": definitions,
             "source_hashes": dict(sorted(source_hashes.items())),
-            "ranking_method": _RANKING if rankable else _UNRANKED,
+            "ranking_method": _UNRANKED,
             "limitations": [
                 *_LIMITATIONS,
                 f"{len(config['seeds'])} matched seeds with {config['repetitions']} "
@@ -733,8 +718,8 @@ def _graphs(bundle: dict) -> dict[str, str]:
         return {"title": title, "unit": unit, "series": series}
 
     components = [
-        bars("Local mean of two-run pair scores", "points, higher is better", "mean_score"),
-        bars("Native score median, diagnostic", "recorded points", "median_score"),
+        bars("Legacy SI pair mean, not STP", "legacy diagnostic units", "mean_score"),
+        bars("Legacy SI median, not STP", "legacy diagnostic units", "median_score"),
     ]
     for field, title in (
         ("progress_points", "Native progress median"),
@@ -745,7 +730,7 @@ def _graphs(bundle: dict) -> dict[str, str]:
         components.append(
             {
                 "title": title,
-                "unit": "recorded points",
+                "unit": "legacy diagnostic units, not STP points",
                 "values": [
                     _median(
                         row["score_breakdown"][field]
@@ -764,8 +749,9 @@ def _graphs(bundle: dict) -> dict[str, str]:
     }
     charts = {
         "score-components.svg": (
-            "Recorded native score and components",
-            "Pair means are primary. Component medians are separate diagnostics.",
+            "Historical SI diagnostics, not STP points",
+            "Invalid for STP comparison: local physical fuel is not the official fuel counter. "
+            "Preserved receipts only.",
             components,
         ),
         "fuel-burns.svg": (
@@ -903,6 +889,53 @@ def publish_scoreboard(directory: str | Path, output: str | Path) -> dict:
     return bundle
 
 
+def refresh_scoreboard(directory: str | Path, output: str | Path) -> dict:
+    """Replace only digest-verified generated artifacts. Keep raw evidence and other files."""
+    output = Path(output)
+    if output.is_symlink() or not output.is_dir():
+        raise ValueError("Refresh requires an existing generated publication directory")
+    manifest_path = output / "manifest.json"
+    if manifest_path.is_symlink():
+        raise ValueError("Publication manifest must not be a symlink")
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != "wsorb.teammate_analytics.artifacts"
+        or manifest.get("schema_version") != 1
+        or not isinstance(manifest.get("artifacts"), list)
+    ):
+        raise ValueError("Refresh requires a generated artifact manifest")
+    expected = {
+        "dataset.json",
+        "trials.csv",
+        "aggregate.csv",
+        "samples.csv",
+        "score-components.svg",
+        "fuel-burns.svg",
+        "turns.svg",
+        "efficiency.svg",
+    }
+    artifacts = manifest["artifacts"]
+    if (
+        len(artifacts) != len(expected)
+        or {row.get("path") for row in artifacts if isinstance(row, dict)} != expected
+    ):
+        raise ValueError("Refresh accepts only the known generated artifact set")
+    for row in artifacts:
+        path = output / row["path"]
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Generated artifact is missing or a symlink")
+        data = path.read_bytes()
+        if len(data) != row.get("bytes") or hashlib.sha256(data).hexdigest() != row.get("sha256"):
+            raise ValueError("Generated artifact changed; refusing to overwrite possible user work")
+    with TemporaryDirectory(prefix="wsorb-scoreboard-", dir=output.parent) as temporary:
+        staging = Path(temporary) / "publication"
+        bundle = publish_scoreboard(directory, staging)
+        for name in sorted(expected | {"manifest.json"}):
+            (staging / name).replace(output / name)
+    return bundle
+
+
 def render_readme_section(
     bundle: dict, *, asset_prefix: str = "docs/analytics/team-comparison"
 ) -> str:
@@ -925,10 +958,17 @@ def render_readme_section(
         f"{_format(comparison['controller_step_s'])} s, physics step "
         f"{_format(comparison['physics_step_s'])} s. Not an official leaderboard.",
         "",
-        "| Profile | Successes | Scored / unscored | Valid pairs | Mean two-run score | "
+        "STP points are unavailable. The local SI fuel estimate cannot replace STP's "
+        "`Stats/FuelUsed` counter. No conversion or combined efficiency score is assumed. "
+        "See the [documented formula and code discrepancy](docs/scoring.md).",
+        "",
+        "![Completion fractions, sampled durations, fuel and episode counts]"
+        f"({asset_prefix}/efficiency.svg)",
+        "",
+        "| Profile | Arrivals / attempts | "
         "Median time s | Median damage J | Median fuel kg | Burn episodes / active s | "
         "Angular episodes / active s | Turn episodes / active s | Rotation rad |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for profile in bundle["profiles"]:
         pairs = [
@@ -939,9 +979,6 @@ def render_readme_section(
         cells = [
             f"{profile['owner']} / {profile['label']}",
             f"{profile['successes']}/{profile['attempts']}",
-            f"{profile['scored_runs']} / {profile['unscored_runs']}",
-            f"{profile['scored_pairs']}/{len(comparison['seeds'])}",
-            f"{profile['mean_score']:,.2f}" if profile["mean_score"] is not None else "unavailable",
             *(
                 _format(profile[f"median_{field}"])
                 for field in ("time_s", "damage_j", "fuel_used_kg")
@@ -961,15 +998,13 @@ def render_readme_section(
     lines.extend(
         [
             "",
-            "The primary score is the arithmetic mean of valid two-consecutive-run pair "
-            "means across the configured paired seeds. Both attempts must have a recorded native "
-            "terminal score; partial pairs, timeouts and software errors are not averaged as "
-            "complete pairs. Pair coverage is explicit. Other table measurements are medians "
+            "Table measurements are medians "
             "over available physical results, including damage failures and "
             "partial timeout horizons. Errors are counted in attempts but excluded from physical "
-            "measurement medians. Scores use recorded native terminal receipts only. Unavailable "
-            "historical metrics remain unavailable, never zero. Component medians do not have to "
-            "sum to the median score.",
+            "measurement medians. A timeout's duration is not a completion time. Unavailable "
+            "historical metrics remain unavailable, never zero. Legacy local score receipts and "
+            "their two-run pair means remain unchanged in downloads, "
+            "not in the comparison ranking.",
             "",
         ]
     )
@@ -980,8 +1015,8 @@ def render_readme_section(
             "single continuous video. This headless benchmark mirrors the pairing only. It is not "
             "an official submission, continuous video or licensed SDK run. Averaging pair means "
             "across multiple seeds is a local comparison choice, not an official aggregate, "
-            "tie-break rule or claim about mixed-outcome precedence. Native-score medians remain "
-            "available as diagnostics in the downloads.",
+            "tie-break rule or claim about mixed-outcome precedence. The archived local SI "
+            "totals are not comparable STP points.",
             "",
             f"{len(comparison['seeds'])} matched seeds with {comparison['repetitions']} "
             "consecutive repeats are not "
@@ -993,13 +1028,11 @@ def render_readme_section(
     )
     lines.extend(["### Fuel, burns and turn analytics", ""])
     for name, alt in (
-        ("score-components", "Recorded native scores and score components by teammate"),
         (
             "fuel-burns",
             "Cumulative recorded fuel and native propellant durations and episode counts",
         ),
         ("turns", "Recorded physical rotation, turn durations and angular-actuator episodes"),
-        ("efficiency", "Completion fractions, sampled durations, fuel and episode counts"),
     ):
         lines.extend([f"![{alt}]({asset_prefix}/{name}.svg)", ""])
     if comparison["definitions"] is not None:
@@ -1049,9 +1082,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--input", type=Path, required=True, help="Existing private run_sweep directory"
     )
     parser.add_argument("--output", type=Path, required=True, help="New public output directory")
+    parser.add_argument(
+        "--refresh", action="store_true", help="Replace only digest-verified generated artifacts"
+    )
     args = parser.parse_args(argv)
     try:
-        publish_scoreboard(args.input, args.output)
+        (refresh_scoreboard if args.refresh else publish_scoreboard)(args.input, args.output)
     except (OSError, ValueError) as error:
         # Keep raw JSON contents and exception messages out of public artifacts.
         parser.exit(

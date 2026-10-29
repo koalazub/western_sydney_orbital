@@ -1,6 +1,6 @@
 {
   "schema": "wsorb.teammate_analytics",
-  "schema_version": 1,
+  "schema_version": 2,
   "comparison": {
     "preset": "far_side_l2",
     "seeds": [
@@ -17,6 +17,14 @@
     "physics_step_s": 0.05,
     "execution_kind": "owned_native_manual_step",
     "score_formula_id": "practice_normalized_time_damage_fuel_v1",
+    "score_compatibility": {
+      "stp_points_available": false,
+      "reason": "incompatible_local_si_counters",
+      "fuel_input": "local_si_propellant_kg",
+      "damage_input": "local_contact_energy_estimate",
+      "documented_formula_id": "stu4_wiki_scoring_4ddae12_v1",
+      "legacy_formula_id": "practice_normalized_time_damage_fuel_v1"
+    },
     "engine_build": {
       "bytes": 22664234,
       "sha256": "be3dc642085bf68a59dc35853d296adc3b410145663e608e51d964463b42fb07"
@@ -105,13 +113,13 @@
       "worker/scripts/local.mjs": "447817a90e913d525190af8ef60b47bb62ca2f9c3d1a146d4aad0c7d27134d75",
       "worker/web/local-api.js": "f82316813968179a3fe52f1a69f9ed9fb04e3ce10a8b6fd76832601d666bff3c"
     },
-    "ranking_method": "Local arithmetic mean of valid two-consecutive-run pair means across matched seeds, descending, with unchanged-code receipts and separate unscored attempts. The cross-seed mean is not an official aggregate or tie-break rule.",
+    "ranking_method": "Unranked measured profiles. STP points are unavailable because local SI fuel and damage do not reproduce the official counters. Historical score fields are legacy diagnostics, not an official aggregate or a valid STP point comparison.",
     "limitations": [
       "These are local practice-model results, not an official STP leaderboard or SDK validation.",
       "Success means arrival-radius entry. Arrival speed and safe docking are separate checks.",
-      "The primary local score is the arithmetic mean of complete two-consecutive-run pair means across the configured seeds. No partial pair or software error receives a score. Medians remain diagnostics, with no new score weights.",
+      "STP points are unavailable: physical SI fuel and local contact-energy estimates are not the official Stats/FuelUsed and Stats/Damage counters. No fuel conversion is assumed.",
       "Official Rules 2.18 require two consecutive unchanged-code runs in one continuous video. These saved headless attempts mirror pairing only, not the video, licensed SDK or an official submission. The multi-seed mean and ordering are local choices, not official tie-break or mixed-outcome precedence rules.",
-      "A formula-matched ranking requires native formula receipts and the same valid-pair seed coverage for every profile. Otherwise means are unranked diagnostics. Missing pairs are reported, not assigned zero.",
+      "Historical score and pair-mean fields preserve legacy local SI diagnostics only. Matching formula IDs and valid-pair seed coverage do not make them STP-comparable. Profiles are not ranked by those totals. Missing pairs are not assigned zero.",
       "Repeats at the same seed are not independent seed draws. Success counts are descriptive, not proof of robustness. No confidence interval is claimed.",
       "All attempted outcomes are retained. Timeouts and software errors have no terminal score. Timeout measurements are partial flight horizons, not successful completion times.",
       "Measurement medians include physical success, damage failure and timeout results only. Software-error partial measurements remain in trials but not physical medians.",
@@ -124,6 +132,110 @@
     ]
   },
   "profiles": [
+    {
+      "id": "basic_pd_radar",
+      "owner": "Harry",
+      "label": "Basic PD + radar",
+      "attempts": 10,
+      "successes": 10,
+      "scored_runs": 10,
+      "unscored_runs": 0,
+      "physical_runs": 10,
+      "analytics_runs": 10,
+      "mean_score": -26280.66534597437,
+      "scored_pairs": 5,
+      "paired_scores": [
+        {
+          "seed": 100,
+          "run_ids": [
+            "trial-00000",
+            "trial-00001"
+          ],
+          "mean_score": -26280.665345974365,
+          "outcomes": [
+            "success",
+            "success"
+          ]
+        },
+        {
+          "seed": 101,
+          "run_ids": [
+            "trial-00006",
+            "trial-00007"
+          ],
+          "mean_score": -26280.665345974365,
+          "outcomes": [
+            "success",
+            "success"
+          ]
+        },
+        {
+          "seed": 102,
+          "run_ids": [
+            "trial-00012",
+            "trial-00013"
+          ],
+          "mean_score": -26280.665345974365,
+          "outcomes": [
+            "success",
+            "success"
+          ]
+        },
+        {
+          "seed": 103,
+          "run_ids": [
+            "trial-00018",
+            "trial-00019"
+          ],
+          "mean_score": -26280.665345974365,
+          "outcomes": [
+            "success",
+            "success"
+          ]
+        },
+        {
+          "seed": 104,
+          "run_ids": [
+            "trial-00024",
+            "trial-00025"
+          ],
+          "mean_score": -26280.665345974365,
+          "outcomes": [
+            "success",
+            "success"
+          ]
+        }
+      ],
+      "outcomes": {
+        "success": 10
+      },
+      "median_score": -26280.665345974365,
+      "median_time_s": 224.35000000001676,
+      "median_range_m": 49.94530223182249,
+      "median_relative_speed_mps": 1.4106327685181874,
+      "median_damage_j": 0.0,
+      "median_fuel_used_kg": 304.5677617974036,
+      "median_burn_count": 1.0,
+      "median_angular_burn_count": 0.0,
+      "median_turn_count": 0.0,
+      "median_burn_duration_s": 224.35000000001676,
+      "median_angular_burn_duration_s": 0.0,
+      "median_turn_duration_s": 0.0,
+      "median_total_turn_angle_rad": 0.0,
+      "median_longest_burn_s": 224.35000000001676,
+      "median_longest_angular_burn_s": 0.0,
+      "median_longest_turn_s": 0.0,
+      "median_peak_angular_speed_rad_s": 0.0,
+      "median_propellant_impulse_ns": 238781.12524916802,
+      "median_angular_impulse_nms": 0.0,
+      "metric_runs": {
+        "time_s": 10,
+        "range_m": 10,
+        "relative_speed_mps": 10,
+        "damage_j": 10,
+        "fuel_used_kg": 10
+      }
+    },
     {
       "id": "bui_alpha_beta_mvp",
       "owner": "Bui",
@@ -323,110 +435,6 @@
       "median_longest_turn_s": 0.0,
       "median_peak_angular_speed_rad_s": 0.0,
       "median_propellant_impulse_ns": 66637.05198703536,
-      "median_angular_impulse_nms": 0.0,
-      "metric_runs": {
-        "time_s": 10,
-        "range_m": 10,
-        "relative_speed_mps": 10,
-        "damage_j": 10,
-        "fuel_used_kg": 10
-      }
-    },
-    {
-      "id": "basic_pd_radar",
-      "owner": "Harry",
-      "label": "Basic PD + radar",
-      "attempts": 10,
-      "successes": 10,
-      "scored_runs": 10,
-      "unscored_runs": 0,
-      "physical_runs": 10,
-      "analytics_runs": 10,
-      "mean_score": -26280.66534597437,
-      "scored_pairs": 5,
-      "paired_scores": [
-        {
-          "seed": 100,
-          "run_ids": [
-            "trial-00000",
-            "trial-00001"
-          ],
-          "mean_score": -26280.665345974365,
-          "outcomes": [
-            "success",
-            "success"
-          ]
-        },
-        {
-          "seed": 101,
-          "run_ids": [
-            "trial-00006",
-            "trial-00007"
-          ],
-          "mean_score": -26280.665345974365,
-          "outcomes": [
-            "success",
-            "success"
-          ]
-        },
-        {
-          "seed": 102,
-          "run_ids": [
-            "trial-00012",
-            "trial-00013"
-          ],
-          "mean_score": -26280.665345974365,
-          "outcomes": [
-            "success",
-            "success"
-          ]
-        },
-        {
-          "seed": 103,
-          "run_ids": [
-            "trial-00018",
-            "trial-00019"
-          ],
-          "mean_score": -26280.665345974365,
-          "outcomes": [
-            "success",
-            "success"
-          ]
-        },
-        {
-          "seed": 104,
-          "run_ids": [
-            "trial-00024",
-            "trial-00025"
-          ],
-          "mean_score": -26280.665345974365,
-          "outcomes": [
-            "success",
-            "success"
-          ]
-        }
-      ],
-      "outcomes": {
-        "success": 10
-      },
-      "median_score": -26280.665345974365,
-      "median_time_s": 224.35000000001676,
-      "median_range_m": 49.94530223182249,
-      "median_relative_speed_mps": 1.4106327685181874,
-      "median_damage_j": 0.0,
-      "median_fuel_used_kg": 304.5677617974036,
-      "median_burn_count": 1.0,
-      "median_angular_burn_count": 0.0,
-      "median_turn_count": 0.0,
-      "median_burn_duration_s": 224.35000000001676,
-      "median_angular_burn_duration_s": 0.0,
-      "median_turn_duration_s": 0.0,
-      "median_total_turn_angle_rad": 0.0,
-      "median_longest_burn_s": 224.35000000001676,
-      "median_longest_angular_burn_s": 0.0,
-      "median_longest_turn_s": 0.0,
-      "median_peak_angular_speed_rad_s": 0.0,
-      "median_propellant_impulse_ns": 238781.12524916802,
       "median_angular_impulse_nms": 0.0,
       "metric_runs": {
         "time_s": 10,

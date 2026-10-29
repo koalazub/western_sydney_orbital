@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from wsorb.scoring import FORMULA, POINT_FIELDS, REFERENCE_FIELDS, native_score_breakdown
+from wsorb.scoring import (
+    FORMULA,
+    POINT_FIELDS,
+    REFERENCE_FIELDS,
+    native_score_breakdown,
+    score_compatibility,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FIELDS = (
@@ -99,6 +105,7 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
         "sources",
         "constants",
         "algebra",
+        "documented_model",
         "terminal_conditions",
         "counter_semantics",
         "ranking",
@@ -109,7 +116,7 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
     }
     assert reference["schema"] == "wsorb.scoring_reference"
     assert type(reference["schema_version"]) is int and reference["schema_version"] == 1
-    assert reference["reference_version"] == "2026-10-29.1"
+    assert reference["reference_version"] == "2026-10-29.2"
     assert date.fromisoformat(reference["reviewed_on"]) == date(2026, 10, 29)
     assert reference["scope"] == (
         "published_per_run_algebra_not_runtime_or_leaderboard_certification"
@@ -311,9 +318,18 @@ def test_two_run_submission_mean_is_not_a_local_seed_or_school_ranking(reference
         "missing_terminal_score",
         "outcome_policy",
         "extra_efficiency_metrics_are_score_inputs",
+        "score_compatibility",
     }
     assert local["official_leaderboard"] is False
-    assert local["summaries"] == ["median_native_score", "mean_native_score", "success_count"]
+    assert local["summaries"] == [
+        "measured_flight_duration",
+        "local_si_fuel",
+        "local_damage",
+        "success_count",
+        "native_burn_and_turn_activity",
+    ]
+    assert local["score_compatibility"] == score_compatibility()
+    assert local["score_compatibility"]["stp_points_available"] is False
     assert local["missing_terminal_score"] == "unavailable_not_zero"
     assert local["extra_efficiency_metrics_are_score_inputs"] is False
     assert {entry["id"] for entry in reference["known_conflicts"]} == {
@@ -369,3 +385,40 @@ def test_worked_examples_match_explicit_fixtures_and_the_existing_receipt_contra
         **{name: reference["constants"][name] for name in REFERENCE_FIELDS},
     }
     assert native_score_breakdown(receipt, score=expected["total"]) == receipt
+
+
+def test_requested_wiki_model_is_explicit_and_not_silently_replaced_by_code(reference):
+    documented = reference["documented_model"]
+    assert documented["formula_id"] == "stu4_wiki_scoring_4ddae12_v1"
+    assert documented["source"] == "scoring_wiki"
+    assert documented["success_score"] == "100 * (120 / T - 2 * D / 209200 - F / 1.15 + 0.5)"
+    assert documented["raw_score"] == "120 / T - 2 * D / 209200 - F / 1.15"
+    assert documented["final_points"] == "100 * (raw_score + 0.5)"
+    assert documented["failure_equation"] is None
+    assert "does_not_define_the_equation" in documented["failure_equation_status"]
+    assert documented["inputs"] == {
+        "T": "official_scorer_elapsed_seconds",
+        "D": "official_Stats_Damage_counter",
+        "F": "official_Stats_FuelUsed_counter_not_local_physical_kg",
+    }
+    examples = documented["worked_examples"]
+    assert [example["points"] for example in examples] == [50.0, 75.0]
+    # Arithmetic checks of documented examples, not observations or a substitute engine.
+    for example in examples:
+        expected = 100 * (
+            120 / example["time_s"]
+            - 2 * example["damage_j"] / 209200
+            - example["fuel_counter"] / 1.15
+            + 0.5
+        )
+        assert expected == pytest.approx(example["points"])
+        assert example["raw_score"] == pytest.approx(
+            example["time_score"] - example["damage_penalty"] - example["fuel_penalty"]
+        )
+        assert example["points"] == pytest.approx(100 * (example["raw_score"] + 0.5))
+
+
+def test_compatibility_policy_is_detached_and_cannot_acquire_true_from_a_caller():
+    policy = score_compatibility()
+    policy["stp_points_available"] = True
+    assert score_compatibility()["stp_points_available"] is False

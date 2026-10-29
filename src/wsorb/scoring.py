@@ -1,13 +1,15 @@
-"""Validate detached native score receipts, without maintaining another scorer.
+"""Validate historical local score receipts, not official STP points.
 
-The engine applies the published STP score algebra to the local model's fuel
-and damage estimates. Python never fills missing terms from an archived flight.
+Legacy receipts apply published code algebra to incompatible local SI fuel.
+Keep them as diagnostics. Never fill missing terms or infer official counters.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
+from importlib.resources import files
 from typing import Any
 
 FORMULA = "practice_normalized_time_damage_fuel_v1"
@@ -19,6 +21,12 @@ POINT_FIELDS = (
     "total",
 )
 REFERENCE_FIELDS = ("nominal_time_s", "nominal_fuel_kg", "impact_threshold_j")
+
+
+def score_compatibility() -> dict[str, Any]:
+    """Detached publication policy. Equal formula IDs do not establish counter parity."""
+    reference = json.loads(files("wsorb").joinpath("scoring_reference.json").read_text())
+    return reference["local_comparison"]["score_compatibility"]
 
 
 def native_score_breakdown(value: Any, *, score: float | None) -> dict[str, Any] | None:

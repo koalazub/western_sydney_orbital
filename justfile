@@ -287,6 +287,10 @@ controllers +args:
 scoreboard input output:
     devenv shell uv run --locked wsorb scoreboard --input {{quote(input)}} --output {{quote(output)}}
 
+# Correct a curated publication only if its existing generated digests still match.
+scoreboard-refresh input output:
+    devenv shell uv run --locked wsorb scoreboard --input {{quote(input)}} --output {{quote(output)}} --refresh
+
 # Default sweep has 50 trials. Reduce seeds/counts for a quick workflow check.
 flight-sweep config="examples/flight_sweep.json" output="":
     devenv shell uv run --locked --extra lab python examples/flight_sweep.py --config {{quote(config)}} --output {{quote(output)}}

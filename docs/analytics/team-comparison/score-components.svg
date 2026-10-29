@@ -1,18 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 967" role="img" aria-labelledby="title" aria-describedby="description">
-<title id="title">Recorded native score and components</title>
-<desc id="description">Pair means are primary. Component medians are separate diagnostics. Values are available in dataset.json and the CSV downloads. Thin traces are actual paired-seed trials, not a median trajectory. Missing values are not drawn.</desc>
+<title id="title">Historical SI diagnostics, not STP points</title>
+<desc id="description">Invalid for STP comparison: local physical fuel is not the official fuel counter. Preserved receipts only. Values are available in dataset.json and the CSV downloads. Thin traces are actual paired-seed trials, not a median trajectory. Missing values are not drawn.</desc>
 <rect width="1100" height="100%" fill="white"/>
 <style>text{font-family:system-ui,sans-serif;fill:#172033;font-size:16px}.heading{font-size:24px;font-weight:650}.panel{font-size:16px;font-weight:650}</style>
-<text x="24" y="35" class="heading">Recorded native score and components</text>
-<text x="24" y="59">Pair means are primary. Component medians are separate diagnostics.</text>
+<text x="24" y="35" class="heading">Historical SI diagnostics, not STP points</text>
+<text x="24" y="59">Invalid for STP comparison: local physical fuel is not the official fuel counter. Preserved receipts only.</text>
 <rect x="25" y="76" width="13" height="13" fill="#075985"/>
-<text x="46.00" y="87.00" text-anchor="start" class="">1. Bui / Alpha-beta + sidestep</text>
+<text x="46.00" y="87.00" text-anchor="start" class="">1. Harry / Basic PD + radar</text>
 <rect x="565" y="76" width="13" height="13" fill="#9d174d"/>
-<text x="586.00" y="87.00" text-anchor="start" class="">2. Tom / Kalman + velocity governor</text>
+<text x="586.00" y="87.00" text-anchor="start" class="">2. Bui / Alpha-beta + sidestep</text>
 <rect x="25" y="99" width="13" height="13" fill="#166534"/>
-<text x="46.00" y="110.00" text-anchor="start" class="">3. Harry / Basic PD + radar</text>
-<text x="25.00" y="155.00" text-anchor="start" class="panel">Local mean of two-run pair scores</text>
-<text x="92.00" y="176.00" text-anchor="start" class="">points, higher is better</text>
+<text x="46.00" y="110.00" text-anchor="start" class="">3. Tom / Kalman + velocity governor</text>
+<text x="25.00" y="155.00" text-anchor="start" class="panel">Legacy SI pair mean, not STP</text>
+<text x="92.00" y="176.00" text-anchor="start" class="">legacy diagnostic units</text>
 <path d="M 92 339.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="343.00" text-anchor="end" class="">-2.628e+04</text>
 <path d="M 92 293.33 H 526" stroke="#d8dee7"/>
@@ -21,17 +21,17 @@
 <text x="84.00" y="251.67" text-anchor="end" class="">-8,760</text>
 <path d="M 92 202.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="206.00" text-anchor="end" class="">0</text>
-<text x="164.33" y="383.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="126.72" y="202.00" width="75.23" height="36.68" fill="#075985"><title>Bui / Alpha-beta + sidestep: -7,037 points, higher is better</title></rect>
-<text x="164.33" y="256.68" text-anchor="middle" class="">-7,037</text>
-<text x="309.00" y="383.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="271.39" y="202.00" width="75.23" height="37.47" fill="#9d174d"><title>Tom / Kalman + velocity governor: -7,187 points, higher is better</title></rect>
-<text x="309.00" y="257.47" text-anchor="middle" class="">-7,187</text>
-<text x="453.67" y="383.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="416.05" y="202.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: -2.628e+04 points, higher is better</title></rect>
-<text x="453.67" y="357.00" text-anchor="middle" class="">-2.628e+04</text>
-<text x="568.00" y="155.00" text-anchor="start" class="panel">Native score median, diagnostic</text>
-<text x="635.00" y="176.00" text-anchor="start" class="">recorded points</text>
+<text x="164.33" y="383.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="126.72" y="202.00" width="75.23" height="137.00" fill="#075985"><title>Harry / Basic PD + radar: -2.628e+04 legacy diagnostic units</title></rect>
+<text x="164.33" y="357.00" text-anchor="middle" class="">-2.628e+04</text>
+<text x="309.00" y="383.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="271.39" y="202.00" width="75.23" height="36.68" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: -7,037 legacy diagnostic units</title></rect>
+<text x="309.00" y="256.68" text-anchor="middle" class="">-7,037</text>
+<text x="453.67" y="383.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="416.05" y="202.00" width="75.23" height="37.47" fill="#166534"><title>Tom / Kalman + velocity governor: -7,187 legacy diagnostic units</title></rect>
+<text x="453.67" y="257.47" text-anchor="middle" class="">-7,187</text>
+<text x="568.00" y="155.00" text-anchor="start" class="panel">Legacy SI median, not STP</text>
+<text x="635.00" y="176.00" text-anchor="start" class="">legacy diagnostic units</text>
 <path d="M 635 339.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="343.00" text-anchor="end" class="">-2.628e+04</text>
 <path d="M 635 293.33 H 1069" stroke="#d8dee7"/>
@@ -40,17 +40,17 @@
 <text x="627.00" y="251.67" text-anchor="end" class="">-8,760</text>
 <path d="M 635 202.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="206.00" text-anchor="end" class="">0</text>
-<text x="707.33" y="383.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="669.72" y="202.00" width="75.23" height="36.68" fill="#075985"><title>Bui / Alpha-beta + sidestep: -7,037 recorded points</title></rect>
-<text x="707.33" y="256.68" text-anchor="middle" class="">-7,037</text>
-<text x="852.00" y="383.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="814.39" y="202.00" width="75.23" height="37.47" fill="#9d174d"><title>Tom / Kalman + velocity governor: -7,187 recorded points</title></rect>
-<text x="852.00" y="257.47" text-anchor="middle" class="">-7,187</text>
-<text x="996.67" y="383.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="959.05" y="202.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: -2.628e+04 recorded points</title></rect>
-<text x="996.67" y="357.00" text-anchor="middle" class="">-2.628e+04</text>
+<text x="707.33" y="383.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="669.72" y="202.00" width="75.23" height="137.00" fill="#075985"><title>Harry / Basic PD + radar: -2.628e+04 legacy diagnostic units</title></rect>
+<text x="707.33" y="357.00" text-anchor="middle" class="">-2.628e+04</text>
+<text x="852.00" y="383.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="814.39" y="202.00" width="75.23" height="36.68" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: -7,037 legacy diagnostic units</title></rect>
+<text x="852.00" y="256.68" text-anchor="middle" class="">-7,037</text>
+<text x="996.67" y="383.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="959.05" y="202.00" width="75.23" height="37.47" fill="#166534"><title>Tom / Kalman + velocity governor: -7,187 legacy diagnostic units</title></rect>
+<text x="996.67" y="257.47" text-anchor="middle" class="">-7,187</text>
 <text x="25.00" y="425.00" text-anchor="start" class="panel">Native progress median</text>
-<text x="92.00" y="446.00" text-anchor="start" class="">recorded points</text>
+<text x="92.00" y="446.00" text-anchor="start" class="">legacy diagnostic units, not STP points</text>
 <path d="M 92 609.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="613.00" text-anchor="end" class="">0</text>
 <path d="M 92 563.33 H 526" stroke="#d8dee7"/>
@@ -59,17 +59,17 @@
 <text x="84.00" y="521.67" text-anchor="end" class="">35.92</text>
 <path d="M 92 472.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="476.00" text-anchor="end" class="">53.88</text>
-<text x="164.33" y="653.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="126.72" y="481.74" width="75.23" height="127.26" fill="#075985"><title>Bui / Alpha-beta + sidestep: 50.05 recorded points</title></rect>
-<text x="164.33" y="476.74" text-anchor="middle" class="">50.05</text>
-<text x="309.00" y="653.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="271.39" y="472.00" width="75.23" height="137.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 53.88 recorded points</title></rect>
-<text x="309.00" y="467.00" text-anchor="middle" class="">53.88</text>
-<text x="453.67" y="653.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="416.05" y="473.01" width="75.23" height="135.99" fill="#166534"><title>Harry / Basic PD + radar: 53.49 recorded points</title></rect>
-<text x="453.67" y="468.01" text-anchor="middle" class="">53.49</text>
+<text x="164.33" y="653.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="126.72" y="473.01" width="75.23" height="135.99" fill="#075985"><title>Harry / Basic PD + radar: 53.49 legacy diagnostic units, not STP points</title></rect>
+<text x="164.33" y="468.01" text-anchor="middle" class="">53.49</text>
+<text x="309.00" y="653.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="271.39" y="481.74" width="75.23" height="127.26" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: 50.05 legacy diagnostic units, not STP points</title></rect>
+<text x="309.00" y="476.74" text-anchor="middle" class="">50.05</text>
+<text x="453.67" y="653.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="416.05" y="472.00" width="75.23" height="137.00" fill="#166534"><title>Tom / Kalman + velocity governor: 53.88 legacy diagnostic units, not STP points</title></rect>
+<text x="453.67" y="467.00" text-anchor="middle" class="">53.88</text>
 <text x="568.00" y="425.00" text-anchor="start" class="panel">Collision penalty median, subtracted</text>
-<text x="635.00" y="446.00" text-anchor="start" class="">recorded points</text>
+<text x="635.00" y="446.00" text-anchor="start" class="">legacy diagnostic units, not STP points</text>
 <path d="M 635 609.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="613.00" text-anchor="end" class="">0</text>
 <path d="M 635 563.33 H 1069" stroke="#d8dee7"/>
@@ -78,17 +78,17 @@
 <text x="627.00" y="521.67" text-anchor="end" class="">0.6667</text>
 <path d="M 635 472.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="476.00" text-anchor="end" class="">1</text>
-<text x="707.33" y="653.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="669.72" y="609.00" width="75.23" height="1.00" fill="#075985"><title>Bui / Alpha-beta + sidestep: 0 recorded points</title></rect>
+<text x="707.33" y="653.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="669.72" y="609.00" width="75.23" height="1.00" fill="#075985"><title>Harry / Basic PD + radar: 0 legacy diagnostic units, not STP points</title></rect>
 <text x="707.33" y="604.00" text-anchor="middle" class="">0</text>
-<text x="852.00" y="653.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="814.39" y="609.00" width="75.23" height="1.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 0 recorded points</title></rect>
+<text x="852.00" y="653.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="814.39" y="609.00" width="75.23" height="1.00" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: 0 legacy diagnostic units, not STP points</title></rect>
 <text x="852.00" y="604.00" text-anchor="middle" class="">0</text>
-<text x="996.67" y="653.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="959.05" y="609.00" width="75.23" height="1.00" fill="#166534"><title>Harry / Basic PD + radar: 0 recorded points</title></rect>
+<text x="996.67" y="653.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="959.05" y="609.00" width="75.23" height="1.00" fill="#166534"><title>Tom / Kalman + velocity governor: 0 legacy diagnostic units, not STP points</title></rect>
 <text x="996.67" y="604.00" text-anchor="middle" class="">0</text>
 <text x="25.00" y="695.00" text-anchor="start" class="panel">Fuel penalty median, subtracted</text>
-<text x="92.00" y="716.00" text-anchor="start" class="">recorded points</text>
+<text x="92.00" y="716.00" text-anchor="start" class="">legacy diagnostic units, not STP points</text>
 <path d="M 92 879.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="883.00" text-anchor="end" class="">0</text>
 <path d="M 92 833.33 H 526" stroke="#d8dee7"/>
@@ -97,17 +97,17 @@
 <text x="84.00" y="791.67" text-anchor="end" class="">1.759e+04</text>
 <path d="M 92 742.00 H 526" stroke="#d8dee7"/>
 <text x="84.00" y="746.00" text-anchor="end" class="">2.638e+04</text>
-<text x="164.33" y="923.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="126.72" y="841.94" width="75.23" height="37.06" fill="#075985"><title>Bui / Alpha-beta + sidestep: 7,137 recorded points</title></rect>
-<text x="164.33" y="836.94" text-anchor="middle" class="">7,137</text>
-<text x="309.00" y="923.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="271.39" y="841.14" width="75.23" height="37.86" fill="#9d174d"><title>Tom / Kalman + velocity governor: 7,291 recorded points</title></rect>
-<text x="309.00" y="836.14" text-anchor="middle" class="">7,291</text>
-<text x="453.67" y="923.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="416.05" y="742.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: 2.638e+04 recorded points</title></rect>
-<text x="453.67" y="737.00" text-anchor="middle" class="">2.638e+04</text>
+<text x="164.33" y="923.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="126.72" y="742.00" width="75.23" height="137.00" fill="#075985"><title>Harry / Basic PD + radar: 2.638e+04 legacy diagnostic units, not STP points</title></rect>
+<text x="164.33" y="737.00" text-anchor="middle" class="">2.638e+04</text>
+<text x="309.00" y="923.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="271.39" y="841.94" width="75.23" height="37.06" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: 7,137 legacy diagnostic units, not STP points</title></rect>
+<text x="309.00" y="836.94" text-anchor="middle" class="">7,137</text>
+<text x="453.67" y="923.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="416.05" y="841.14" width="75.23" height="37.86" fill="#166534"><title>Tom / Kalman + velocity governor: 7,291 legacy diagnostic units, not STP points</title></rect>
+<text x="453.67" y="836.14" text-anchor="middle" class="">7,291</text>
 <text x="568.00" y="695.00" text-anchor="start" class="panel">Native offset median</text>
-<text x="635.00" y="716.00" text-anchor="start" class="">recorded points</text>
+<text x="635.00" y="716.00" text-anchor="start" class="">legacy diagnostic units, not STP points</text>
 <path d="M 635 879.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="883.00" text-anchor="end" class="">0</text>
 <path d="M 635 833.33 H 1069" stroke="#d8dee7"/>
@@ -116,13 +116,13 @@
 <text x="627.00" y="791.67" text-anchor="end" class="">33.33</text>
 <path d="M 635 742.00 H 1069" stroke="#d8dee7"/>
 <text x="627.00" y="746.00" text-anchor="end" class="">50</text>
-<text x="707.33" y="923.00" text-anchor="middle" class="">1. Bui</text>
-<rect x="669.72" y="742.00" width="75.23" height="137.00" fill="#075985"><title>Bui / Alpha-beta + sidestep: 50 recorded points</title></rect>
+<text x="707.33" y="923.00" text-anchor="middle" class="">1. Harry</text>
+<rect x="669.72" y="742.00" width="75.23" height="137.00" fill="#075985"><title>Harry / Basic PD + radar: 50 legacy diagnostic units, not STP points</title></rect>
 <text x="707.33" y="737.00" text-anchor="middle" class="">50</text>
-<text x="852.00" y="923.00" text-anchor="middle" class="">2. Tom</text>
-<rect x="814.39" y="742.00" width="75.23" height="137.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 50 recorded points</title></rect>
+<text x="852.00" y="923.00" text-anchor="middle" class="">2. Bui</text>
+<rect x="814.39" y="742.00" width="75.23" height="137.00" fill="#9d174d"><title>Bui / Alpha-beta + sidestep: 50 legacy diagnostic units, not STP points</title></rect>
 <text x="852.00" y="737.00" text-anchor="middle" class="">50</text>
-<text x="996.67" y="923.00" text-anchor="middle" class="">3. Harry</text>
-<rect x="959.05" y="742.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: 50 recorded points</title></rect>
+<text x="996.67" y="923.00" text-anchor="middle" class="">3. Tom</text>
+<rect x="959.05" y="742.00" width="75.23" height="137.00" fill="#166534"><title>Tom / Kalman + velocity governor: 50 legacy diagnostic units, not STP points</title></rect>
 <text x="996.67" y="737.00" text-anchor="middle" class="">50</text>
 </svg>

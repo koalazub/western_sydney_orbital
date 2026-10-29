@@ -1,7 +1,7 @@
 {
   "schema": "wsorb.scoring_reference",
   "schema_version": 1,
-  "reference_version": "2026-10-29.1",
+  "reference_version": "2026-10-29.2",
   "reviewed_on": "2026-10-29",
   "scope": "published_per_run_algebra_not_runtime_or_leaderboard_certification",
   "formula_id": "stu4_sim_scoring_c1e3fc8_v1",
@@ -107,6 +107,24 @@
     "hard_timeout_status": "not_specified_in_reviewed_sources",
     "running_score": null
   },
+  "documented_model": {
+    "formula_id": "stu4_wiki_scoring_4ddae12_v1",
+    "source": "scoring_wiki",
+    "raw_score": "120 / T - 2 * D / 209200 - F / 1.15",
+    "final_points": "100 * (raw_score + 0.5)",
+    "success_score": "100 * (120 / T - 2 * D / 209200 - F / 1.15 + 0.5)",
+    "inputs": {
+      "T": "official_scorer_elapsed_seconds",
+      "D": "official_Stats_Damage_counter",
+      "F": "official_Stats_FuelUsed_counter_not_local_physical_kg"
+    },
+    "failure_equation": null,
+    "failure_equation_status": "wiki_says_distance_replaces_time_but_does_not_define_the_equation",
+    "worked_examples": [
+      {"id": "wiki_nominal_success", "time_s": 120.0, "damage_j": 0.0, "fuel_counter": 1.15, "time_score": 1.0, "damage_penalty": 0.0, "fuel_penalty": 1.0, "raw_score": 0.0, "points": 50.0},
+      {"id": "wiki_documented_example", "time_s": 96.0, "damage_j": 10460.0, "fuel_counter": 1.035, "time_score": 1.25, "damage_penalty": 0.1, "fuel_penalty": 0.9, "raw_score": 0.25, "points": 75.0}
+    ]
+  },
   "counter_semantics": {
     "fuel": {
       "parameter_path": ["Stats", "FuelUsed"],
@@ -184,7 +202,15 @@
   ],
   "local_comparison": {
     "official_leaderboard": false,
-    "summaries": ["median_native_score", "mean_native_score", "success_count"],
+    "summaries": ["measured_flight_duration", "local_si_fuel", "local_damage", "success_count", "native_burn_and_turn_activity"],
+    "score_compatibility": {
+      "stp_points_available": false,
+      "reason": "incompatible_local_si_counters",
+      "fuel_input": "local_si_propellant_kg",
+      "damage_input": "local_contact_energy_estimate",
+      "documented_formula_id": "stu4_wiki_scoring_4ddae12_v1",
+      "legacy_formula_id": "practice_normalized_time_damage_fuel_v1"
+    },
     "cohort": "matched declared seeds, settings, engine build, controller versions and budgets",
     "missing_terminal_score": "unavailable_not_zero",
     "outcome_policy": "declare included terminal outcomes and scored sample count; retain software and unfinished outcomes in attempt counts",

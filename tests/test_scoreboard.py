@@ -9,8 +9,14 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from wsorb.flight_analytics import COLUMNS, DEFINITION_ID, EPISODES, validate_run_analytics
-from wsorb.scoreboard import build_bundle, main, publish_scoreboard, render_readme_section
-from wsorb.scoring import FORMULA
+from wsorb.scoreboard import (
+    build_bundle,
+    main,
+    publish_scoreboard,
+    refresh_scoreboard,
+    render_readme_section,
+)
+from wsorb.scoring import FORMULA, score_compatibility
 
 SECRET = "PRIVATE_FIXTURE_TOKEN_https://private.invalid/do-not-publish"
 PROFILES = ("basic_pd_radar", "bui_alpha_beta_mvp", "tom_kalman_velocity_mvp")
@@ -237,6 +243,7 @@ def test_bundle_has_fixed_public_schema_and_retains_every_outcome(saved_sweep):
     bundle = build_bundle(saved_sweep)
     assert set(bundle) == {"schema", "schema_version", "comparison", "profiles", "trials"}
     assert bundle["schema"] == "wsorb.teammate_analytics"
+    assert bundle["schema_version"] == 2
     comparison = bundle["comparison"]
     assert set(comparison) == {
         "preset",
@@ -247,6 +254,7 @@ def test_bundle_has_fixed_public_schema_and_retains_every_outcome(saved_sweep):
         "physics_step_s",
         "execution_kind",
         "score_formula_id",
+        "score_compatibility",
         "engine_build",
         "definitions",
         "source_hashes",
@@ -257,6 +265,8 @@ def test_bundle_has_fixed_public_schema_and_retains_every_outcome(saved_sweep):
     assert comparison["engine_build"] == BUILD
     assert comparison["definitions"] == DEFINITIONS
     assert comparison["score_formula_id"] == FORMULA
+    assert comparison["score_compatibility"] == score_compatibility()
+    assert comparison["score_compatibility"]["stp_points_available"] is False
     assert len(bundle["trials"]) == 6
     assert {row["outcome"] for row in bundle["trials"]} == {
         "success",
@@ -337,7 +347,9 @@ def test_primary_mean_uses_only_complete_two_run_pairs_and_preserves_pair_outcom
     assert all(pair["mean_score"] is None for pair in tom["paired_scores"])
     assert "Unranked" in bundle["comparison"]["ranking_method"]
     section = render_readme_section(bundle)
-    assert "Harry / Basic PD + radar | 4/4 | 4 / 0 | 2/2 | 102.5" in section
+    assert "Harry / Basic PD + radar | 4/4 | 2 |" in section
+    assert "Mean two-run score" not in section
+    assert "STP points are unavailable" in section
     assert "two consecutive unchanged-code runs" in section
     assert "2 matched seeds with 2 consecutive repeats are not 4 independent" in section
     assert "not an official aggregate" in section
@@ -433,7 +445,7 @@ def test_one_valid_score_does_not_fill_a_partial_pair(paired_sweep):
     assert harry["scored_runs"] == 3 and harry["unscored_runs"] == 1
 
 
-def test_local_pair_ranking_requires_matched_valid_pair_seed_coverage(paired_sweep):
+def test_complete_matched_pair_coverage_cannot_make_si_counters_stp_comparable(paired_sweep):
     for index in (4, 5, 10, 11):
         mutate_run(paired_sweep, index, lambda run: run.update(outcome="failed_damage"))
         mutate_trace(
@@ -444,7 +456,9 @@ def test_local_pair_ranking_requires_matched_valid_pair_seed_coverage(paired_swe
             ),
         )
     bundle = build_bundle(paired_sweep)
-    assert "descending" in bundle["comparison"]["ranking_method"]
+    assert "Unranked" in bundle["comparison"]["ranking_method"]
+    assert "descending" not in bundle["comparison"]["ranking_method"]
+    assert bundle["comparison"]["score_compatibility"]["stp_points_available"] is False
     assert "not an official aggregate" in bundle["comparison"]["ranking_method"]
     assert [row["id"] for row in bundle["profiles"]] == list(PROFILES)
     assert bundle["profiles"][-1]["mean_score"] == -30
@@ -541,7 +555,10 @@ def test_svg_titles_descriptions_values_and_no_script_or_external_resources(save
         assert "<script" not in text and "href=" not in text
         assert "Harry" in text and "Bui" in text and "Tom" in text
         assert "viewBox" in root.attrib
-    assert "90 recorded points" in (output / "score-components.svg").read_text()
+    legacy = (output / "score-components.svg").read_text()
+    assert "90 legacy diagnostic units" in legacy
+    assert "not STP points" in legacy
+    assert "local physical fuel is not the official fuel counter" in legacy
     assert "1/2" in (output / "efficiency.svg").read_text()
 
 
@@ -615,7 +632,9 @@ def test_readme_renderer_includes_real_table_downloads_definitions_and_method(sa
     bundle = build_bundle(saved_sweep)
     before = deepcopy(bundle)
     section = render_readme_section(bundle)
-    assert "Bui / Alpha-beta + sidestep | 1/2 | 2 / 0 | 0/2 | unavailable" in section
+    assert "Bui / Alpha-beta + sidestep | 1/2 | 2 | 3,000 |" in section
+    assert "Mean two-run score" not in section
+    assert "score-components.svg" not in section
     assert "Burn episodes / active s" in section and "Rotation rad" in section
     assert "### Fuel, burns and turn analytics" in section
     assert "1 failed_damage" in section and "1 policy_error" in section
@@ -765,3 +784,33 @@ def test_publisher_cli_creates_only_the_new_bundle(saved_sweep, tmp_path, capsys
     with pytest.raises(SystemExit) as error:
         main(["--input", str(saved_sweep), "--output", str(output)])
     assert error.value.code == 2
+
+
+def test_explicit_refresh_replaces_only_verified_generated_files(saved_sweep, tmp_path):
+    output = tmp_path / "public"
+    publish_scoreboard(saved_sweep, output)
+    (output / "owner-notes.txt").write_text("preserve user work")
+    before = snapshot(saved_sweep)
+    assert refresh_scoreboard(saved_sweep, output) == build_bundle(saved_sweep)
+    assert (output / "owner-notes.txt").read_text() == "preserve user work"
+    assert snapshot(saved_sweep) == before
+    (output / "dataset.json").write_text("user-edited file")
+    unchanged = snapshot(output)
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        refresh_scoreboard(saved_sweep, output)
+    assert snapshot(output) == unchanged
+
+
+def test_refresh_rejects_symlinks_and_unexpected_manifest_paths(saved_sweep, tmp_path):
+    output = tmp_path / "public"
+    publish_scoreboard(saved_sweep, output)
+    link = tmp_path / "link"
+    link.symlink_to(output, target_is_directory=True)
+    with pytest.raises(ValueError, match="existing generated"):
+        refresh_scoreboard(saved_sweep, link)
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifacts"][0]["path"] = "../owner.txt"
+    write_json(manifest_path, manifest)
+    with pytest.raises(ValueError, match="known generated"):
+        refresh_scoreboard(saved_sweep, output)

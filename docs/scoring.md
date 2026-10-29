@@ -5,8 +5,43 @@ published STU4 scorer and the submission rules. It does not certify that our
 practice physics, counters or timing reproduce Space Teams PRO.
 
 For the competition, use the actual official run's score, counters, video and
-logs. For local comparisons, keep the native practice score and its receipt.
+logs. For local comparisons, keep historical practice receipts as diagnostics only.
 Do not reconstruct missing scores from a plot or an archived partial flight.
+
+## The documented formula requested for the dashboard
+
+The [scoring wiki][wiki] defines the successful-run equation as:
+
+```text
+Time Score = 120 / T
+Damage Penalty = 2 * D / 209200
+Fuel Penalty = F / 1.15
+Raw Score = Time Score - Damage Penalty - Fuel Penalty
+Final points = 100 * (Raw Score + 0.5)
+```
+
+`T` is completion time in seconds. `D` is accumulated collision damage, not
+collision count. `F` must be STP's `Stats/FuelUsed` counter. The constants come
+from the pinned competition configuration. A nominal success scores **50**.
+The wiki's worked example, `T = 96`, `D = 10460`, `F = 1.035`, has
+`1.25 - 0.10 - 0.90 = 0.25` raw score, then **75** final points. The raw score is
+dimensionless. The 0.5 offset and factor of 100 belong only to final points.
+
+The wiki says failure substitutes distance for time, but does not publish the
+distance equation or numerical category enforcement. The executable equations
+below are a separate source, not a complete definition supplied by the wiki.
+
+**The local dashboard cannot report comparable STP points.** Its physical fuel
+estimate is not STP's fuel counter. The earlier roughly -7,000 and -26,000 totals
+were invalid as STP comparisons. Swapping fuel penalties, dividing fuel by mass,
+or assuming a fixed 60 Hz actuator rate cannot repair the missing counter history.
+
+New local flights return no score. The dashboard compares measured duration,
+estimated SI fuel, damage, burns and turns without an invented combined ranking.
+Historical receipts remain unchanged in archives and explicitly labelled legacy
+diagnostics in downloads. Version-2 publications carry a closed
+`score_compatibility` record with `stp_points_available = false`; matching legacy
+formula IDs and seed coverage do not override it.
 
 ## Which source answers which question?
 
@@ -39,9 +74,11 @@ commits.
 The [machine-readable reference](../src/wsorb/scoring_reference.json) records
 these pins, constants, disagreements and worked examples. Its formula IDs are
 repository labels, not version names assigned by the competition organizers.
-Version 1 is documentation data, not executable scenario configuration. The
+Schema version 1 is documentation data, not executable scenario configuration. The
 `algebra` strings are explanatory, not expressions to evaluate. `worked_examples`
-contains inputs, outcomes and point receipts. Null ranking fields mean the
+contains inputs, outcomes and published-code point receipts. `documented_model`
+separately records the wiki formula and its 50-point and 75-point examples.
+Null ranking fields mean the
 reviewed sources do not specify a policy; null running-score fields mean no
 terminal score is available. Content updates change `reference_version`;
 incompatible shape changes also change `schema_version`.
@@ -160,16 +197,20 @@ Blueprint's hit-to-counter implementation. Our local contact-energy estimate
 is not proof of damage-counter parity. Neither a contact count nor a guessed
 kinetic-energy formula can replace the observed official counter.
 
-### What the practice score does establish
+### Historical practice scores
 
-[`simulation/src/mission.rs`](../simulation/src/mission.rs) applies the published
-algebra to local fuel and damage estimates. It uses the exact local physics
-clock and freezes the local mission at the terminal physics substep. It also
+Older versions of [`simulation/src/mission.rs`](../simulation/src/mission.rs)
+applied the published code algebra to local fuel and damage estimates. They used
+the exact local physics clock and froze the local mission at the terminal physics
+substep. They also
 guards the failure-distance denominator with the minimum step when the initial
 distance is degenerate. The upstream `DistancePenalty` divides directly by
 `r0`. None of the examples here uses a degenerate initial distance.
 
-These timing, counter and model differences prevent a certified parity claim.
+These counter differences make those totals unsuitable as STP point comparisons,
+not merely uncertified results. New local assessments retain arrival and damage
+outcomes but leave score and score breakdown unavailable. Existing archives are
+not rewritten.
 The receipt ID `practice_normalized_time_damage_fuel_v1` identifies a local
 score, not an official result. The Python
 [`native_score_breakdown`](../src/wsorb/scoring.py) function validates and copies
@@ -264,14 +305,15 @@ category rule cannot be inferred from the numeric formula alone.
 the closed version-1 reference shape, pinned-source metadata, scenario constants
 and explicit fixture values. It checks the fixtures' compatibility with the
 existing receipt validator without starting an engine, importing the SDK or
-fetching the network. Native mission tests own implementation-level formula
-checks. Changing this reference does not change production scoring.
+fetching the network. The documented examples are reference checks, not observed
+STP flights. Native mission tests verify local assessments do not invent points.
 
 ## Local teammate comparisons and efficiency metrics
 
 The README and app's matched-seed comparison is a local experiment, not an
-official team or school leaderboard. Label its median score, mean score and
-success count as local summaries. Declare the seed list, scenario/settings,
+official team or school leaderboard. Compare measured duration, fuel, damage,
+success counts and activity without ranking incompatible legacy point totals.
+Declare the seed list, scenario/settings,
 engine build, controller version and budgets, and use the same cohort for every
 profile.
 
