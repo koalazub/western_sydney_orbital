@@ -5,6 +5,12 @@ export const MAX_CONTROLLER_RESULTS = 32;
 export const CONTROLLER_BODY_LIMIT = 64 * 1024;
 export const CONTROLLER_EXECUTION_KIND = "asynchronous_fenced_leased_API";
 export const CONTROLLER_SCORE_FORMULA = "practice_normalized_time_damage_fuel_v1";
+export const CONTROLLER_ANALYTICS_DEFINITION = "native_actuation_rotation_episodes_v1";
+export const CONTROLLER_ANALYTICS_COLUMNS = [
+  "time_s", "fuel_used_kg", "burn_duration_s", "angular_burn_duration_s", "turn_duration_s",
+  "total_turn_angle_rad", "relative_speed_mps", "range_m", "damage_j",
+] as const;
+const MAX_ANALYTICS_SAMPLES = 48;
 
 export const CONTROLLER_RESULT_STATES = [
   "duration_limit", "wall_budget_limit", "native_terminal", "stopped", "interrupted", "error",
@@ -95,6 +101,17 @@ export interface ControllerResult {
   execution_kind: typeof CONTROLLER_EXECUTION_KIND;
   engine_sha256: string | null;
   elapsed_s: number;
+  analytics?: ControllerFlightAnalytics | null;
+}
+
+export interface ControllerFlightAnalytics {
+  schema_version: 1;
+  definition_id: typeof CONTROLLER_ANALYTICS_DEFINITION;
+  source_kind: "native_physics_step_counters_with_sampled_public_series";
+  totals: Record<string, number | string | boolean>;
+  columns: typeof CONTROLLER_ANALYTICS_COLUMNS;
+  samples: Array<Array<number | null>>;
+  sample_count: number;
 }
 
 export interface ControllerJobsState {
@@ -175,6 +192,58 @@ function scoreBreakdown(value: unknown, score: number | null): ControllerScoreBr
     impact_threshold_j: fields.impact_threshold_j as number,
   };
 }
+
+function flightAnalytics(value: unknown): ControllerFlightAnalytics | null {
+  if (value === null) return null;
+  const data = shape(value, ["schema_version", "definition_id", "source_kind", "totals", "columns", "samples", "sample_count"]);
+  if (data.schema_version !== 1 || data.definition_id !== CONTROLLER_ANALYTICS_DEFINITION
+    || data.source_kind !== "native_physics_step_counters_with_sampled_public_series") invalid("Unsupported flight analytics definition");
+  const numbers = [
+    "observed_sim_s", "burn_count", "burn_duration_s", "longest_burn_s", "angular_burn_count",
+    "angular_burn_duration_s", "longest_angular_burn_s", "turn_count", "turn_duration_s", "longest_turn_s",
+    "total_turn_angle_rad", "peak_angular_speed_rad_s", "propellant_impulse_ns", "angular_impulse_nms",
+    "current_burn_s", "current_angular_burn_s", "current_turn_s",
+  ] as const;
+  const flags = ["burn_active", "angular_burn_active", "turn_active"] as const;
+  const native = shape(data.totals, ["schema_version", "definition_id", ...numbers, ...flags]);
+  if (native.schema_version !== 1 || native.definition_id !== CONTROLLER_ANALYTICS_DEFINITION) invalid("Unsupported native analytics receipt");
+  const totals: Record<string, number | string | boolean> = { schema_version: 1, definition_id: CONTROLLER_ANALYTICS_DEFINITION };
+  for (const name of numbers) {
+    if (typeof native[name] !== "number" || !Number.isFinite(native[name]) || (native[name] as number) < 0) invalid("Analytics measurements must be finite and non-negative");
+    totals[name] = native[name] as number;
+  }
+  for (const name of ["burn_count", "angular_burn_count", "turn_count"] as const) {
+    if (!Number.isSafeInteger(totals[name])) invalid("Analytics counts must be safe integers");
+  }
+  for (const name of flags) totals[name] = boolean(native[name], "analytics activity");
+  for (const [duration, longest, current] of [
+    ["burn_duration_s", "longest_burn_s", "current_burn_s"],
+    ["angular_burn_duration_s", "longest_angular_burn_s", "current_angular_burn_s"],
+    ["turn_duration_s", "longest_turn_s", "current_turn_s"],
+  ]) {
+    if ((totals[duration] as number) > (totals.observed_sim_s as number) + 1e-6
+      || (totals[longest] as number) > (totals[duration] as number) + 1e-6
+      || (totals[current] as number) > (totals[longest] as number) + 1e-6) invalid("Analytics durations exceed their observed interval");
+  }
+  if (!Array.isArray(data.columns) || data.columns.length !== CONTROLLER_ANALYTICS_COLUMNS.length
+    || data.columns.some((name, index) => name !== CONTROLLER_ANALYTICS_COLUMNS[index])) invalid("Invalid analytics columns");
+  if (!Array.isArray(data.samples) || data.samples.length === 0 || data.samples.length > MAX_ANALYTICS_SAMPLES
+    || !Number.isSafeInteger(data.sample_count) || (data.sample_count as number) < data.samples.length) invalid("Invalid bounded analytics series");
+  let previous = -1;
+  const samples: Array<Array<number | null>> = [];
+  for (const row of data.samples) {
+    if (!Array.isArray(row) || row.length !== CONTROLLER_ANALYTICS_COLUMNS.length
+      || row.some(value => value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0))
+      || typeof row[0] !== "number" || row[0] <= previous || row[0] > (totals.observed_sim_s as number) + 1e-6) invalid("Invalid analytics sample interval");
+    previous = row[0];
+    samples.push([...row]);
+  }
+  return {
+    schema_version: 1, definition_id: CONTROLLER_ANALYTICS_DEFINITION,
+    source_kind: "native_physics_step_counters_with_sampled_public_series", totals,
+    columns: CONTROLLER_ANALYTICS_COLUMNS, samples, sample_count: data.sample_count as number,
+  };
+}
 function context(value: unknown): ControllerContext {
   const fields = shape(value, ["trial_revision", "tuning_revision", "manual_interventions", "seed", "running"]);
   for (const name of ["trial_revision", "tuning_revision", "manual_interventions", "seed"]) {
@@ -194,7 +263,7 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
   const summary = shape(value, [
     "state", "native_success", "measurement", "release_state", "world_metadata_unchanged", "error_code",
     "execution_kind", "engine_sha256", "elapsed_s",
-  ], ["id", "profile_id", "seed", "duration_s"]);
+  ], ["id", "profile_id", "seed", "duration_s", "analytics"]);
   for (const name of ["id", "profile_id", "seed", "duration_s"] as const) {
     if (Object.hasOwn(summary, name) && summary[name] !== job[name]) invalid("Controller result identity differs from its job");
   }
@@ -224,6 +293,7 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
     error_code: summary.error_code === null ? null : choice(summary.error_code, CONTROLLER_ERROR_CODES, "error code"),
     execution_kind: CONTROLLER_EXECUTION_KIND, engine_sha256: summary.engine_sha256 as string | null,
     elapsed_s: summary.elapsed_s,
+    analytics: flightAnalytics(Object.hasOwn(summary, "analytics") ? summary.analytics : null),
   };
 }
 
@@ -249,6 +319,7 @@ export function controllerJobsView(state: ControllerJobsState, now: number) {
     } : null,
     results: state.results.map(result => ({
       ...result,
+      ...(result.analytics ? { analytics: structuredClone(result.analytics) } : {}),
       measurement: {
         ...result.measurement,
         ...(result.measurement.score_breakdown ? { score_breakdown: { ...result.measurement.score_breakdown } } : {}),

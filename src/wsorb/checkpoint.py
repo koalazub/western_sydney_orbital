@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[2]
 LEASE_SIM_S = 0.75
-MAX_OUTPUT_BYTES = 64 * 1024
+MAX_OUTPUT_BYTES = 256 * 1024
 _KNOWN_UNAPPLIED = (LocalBusyError, StaleContextError, CommandExpiredError)
 _COHORT_FIELDS = ("trial_revision", "tuning_revision", "manual_interventions", "seed")
 _OWNED_CLIENTS: weakref.WeakSet[LocalSimulation] = weakref.WeakSet()
@@ -226,6 +226,14 @@ def _number(value: Any) -> float | None:
 
 def _summary(value: Any, depth: int = 0) -> Any:
     """Bound detached public numeric reports; never serialize clients or exceptions."""
+    if isinstance(value, Mapping) and value.get("source_kind") == (
+        "native_physics_step_counters_with_sampled_public_series"
+    ):
+        from .flight_analytics import validate_run_analytics
+
+        # This bounded, allowlisted numeric schema must retain its column and
+        # row shapes. Generic list truncation would turn a valid trace invalid.
+        return validate_run_analytics(value)
     if value is None or type(value) is bool:
         return value
     if isinstance(value, (int, float)):
@@ -804,6 +812,22 @@ def run_trial(
     origin_sim = _number(observation.get("time_s"))
     if origin_sim is None:
         raise CheckpointError("source_contract", "The actual native clock is unavailable.")
+    from .flight_analytics import FlightAnalyticsRecorder
+
+    # Never attribute an existing flight's earlier burns to this Run action.
+    analytics = FlightAnalyticsRecorder(max_samples=48) if origin_sim == 0 else None
+    analytics_failed = False
+
+    def record_analytics(value: Mapping[str, Any]) -> None:
+        nonlocal analytics_failed
+        if analytics is None or analytics_failed:
+            return
+        try:
+            analytics.observe(value)
+        except Exception:
+            # Optional measurement must not change flight control or retry it.
+            analytics_failed = True
+
     result: dict[str, Any] = {
         "ok": False,
         "state": "starting",
@@ -868,6 +892,7 @@ def run_trial(
                     last_time_s=last_time,
                     expect_running=expect_running and not terminal,
                 )
+            record_analytics(observation)
             if terminal:
                 result["state"] = "native_terminal"
                 break
@@ -1016,6 +1041,13 @@ def run_trial(
         result["final_playback_rate"] = current["runtime"].get("rate")
         result["final_world"] = world_metadata(current)
         result["world_metadata_unchanged"] = result["final_world"] == world
+        if result["world_metadata_unchanged"]:
+            record_analytics(_observation(current))
+        else:
+            analytics_failed = True
+        result["analytics"] = (
+            analytics.report if analytics is not None and not analytics_failed else None
+        )
         result["wall_elapsed_s"] = time.monotonic() - origin_wall
         result["native_success"] = result["world_metadata_unchanged"] and native_success(current)
         result["ok"] = (

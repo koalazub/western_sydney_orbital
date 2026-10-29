@@ -130,6 +130,7 @@ def _unexecuted_summary(snapshot, *, state="stopped", error_code=None):
         "execution_kind": EXECUTION_KIND,
         "engine_sha256": snapshot["engine_build"]["sha256"],
         "elapsed_s": 0,
+        "analytics": None,
     }
 
 

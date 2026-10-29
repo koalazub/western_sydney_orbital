@@ -578,6 +578,9 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
     options = CheckpointOptions(isolated=True, run=True, duration_s=1.0, wall_budget_s=30.0)
     with isolated_simulation() as client:
         before = client.snapshot()
+        native_analytics = before["observation"]["mission"]["flight_analytics"]
+        assert native_analytics["observed_sim_s"] == 0
+        assert native_analytics["burn_count"] == native_analytics["turn_count"] == 0
         # Existing owned native fixture, not a fabricated browser-ready receipt.
         # A stale invocation deadline cannot expire explicit persistent standby.
         wait_for_owner(
@@ -628,6 +631,13 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
         assert result["final"]["time_s"] >= 1
         assert result["world_metadata_unchanged"] is True
         assert result["release_state"] == "acknowledged"
+        assert result["analytics"]["totals"]["observed_sim_s"] == result["final"]["time_s"]
+        assert len(result["analytics"]["columns"]) == 9
+        assert all(len(row) == 9 for row in result["analytics"]["samples"])
+        assert len(result["analytics"]["samples"]) <= 48
+        serialized_analytics = _summary(result["analytics"])
+        assert serialized_analytics == result["analytics"]
+        assert len(serialized_analytics["columns"]) == 9
         usage = result["command_usage"]
         assert usage["acknowledged_command_samples"] > 0
         assert usage["max_linear_norm_mps2"] <= 0.5

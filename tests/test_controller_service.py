@@ -243,6 +243,7 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
         "execution_kind",
         "engine_sha256",
         "elapsed_s",
+        "analytics",
     }
     assert set(summary["measurement"]) == {
         "time_s",
@@ -259,6 +260,7 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
     assert summary["measurement"]["status"] == "unknown"
     assert summary["measurement"]["score"] is None
     assert summary["measurement"]["score_breakdown"] is None
+    assert summary["analytics"] is None
     assert summary["error_code"] == "controller_failed"
     assert summary["release_state"] == "unconfirmed_native_watchdog_no_fallback"
     assert summary["execution_kind"] == EXECUTION_KIND
@@ -274,6 +276,7 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
         {"error_code": secret},
         {"execution_kind": "SDK"},
         {"measurement": {**summary["measurement"], "status": secret}},
+        {"analytics": {"raw_payload": secret}},
     ):
         with pytest.raises(ControllerServiceError):
             validate_summary({**summary, **changes})
@@ -736,6 +739,7 @@ def test_real_owned_service_waits_for_consent_then_runs_or_yields_once(
         actual = source.snapshot()
         assert actual["observation"]["mission"]["score"] is None
         if finish == "context_mismatch":
+            assert result["analytics"] is None
             assert result["state"] == "error" and result["error_code"] == "context_mismatch"
             assert result["release_state"] == "not_claimed"
             assert actual["runtime"]["running"] is False
@@ -745,6 +749,13 @@ def test_real_owned_service_waits_for_consent_then_runs_or_yields_once(
                 == initial["observation"]["control_authority"]
             )
         else:
+            assert (
+                result["analytics"]["totals"]["observed_sim_s"] == result["measurement"]["time_s"]
+            )
+            assert result["analytics"]["totals"]["burn_count"] == 0
+            assert result["analytics"]["totals"]["angular_burn_count"] == 0
+            assert len(result["analytics"]["samples"]) <= 48
+            assert all(len(row) == 9 for row in result["analytics"]["samples"])
             assert result["state"] == ("stopped" if finish == "stop" else "duration_limit")
             assert result["release_state"] == "acknowledged"
             assert result["world_metadata_unchanged"] is True

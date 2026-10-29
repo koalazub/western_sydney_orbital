@@ -34,6 +34,7 @@ from .checkpoint import (
     world_metadata,
 )
 from .controllers import PROFILE_IDS
+from .flight_analytics import validate_run_analytics
 from .local_api import (
     LocalPageMismatchError,
     LocalSimulation,
@@ -305,7 +306,11 @@ def parse_poll(value: Any) -> PollReply:
 def validate_summary(value: Any) -> dict[str, Any]:
     """Validate the exact completion schema before any mutation is sent."""
     message = "Invalid bounded controller completion summary."
-    if not isinstance(value, dict) or set(value) != _SUMMARY_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or not _SUMMARY_FIELDS.issubset(value)
+        or set(value) - _SUMMARY_FIELDS - {"analytics"}
+    ):
         raise ControllerServiceError("invalid_queue_response", message)
     measurement = value["measurement"]
     required = {*_MEASUREMENTS, "status"}
@@ -346,9 +351,13 @@ def validate_summary(value: Any) -> dict[str, Any]:
         or elapsed < 0
     ):
         raise ControllerServiceError("invalid_queue_response", message)
+    analytics = validate_run_analytics(value.get("analytics"))
+    if value.get("analytics") is not None and (analytics is None or len(analytics["samples"]) > 48):
+        raise ControllerServiceError("invalid_queue_response", message)
     return {
         **value,
         "measurement": {**measurement, "score": score, "score_breakdown": breakdown},
+        "analytics": analytics,
     }
 
 
@@ -402,6 +411,11 @@ def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
             "execution_kind": EXECUTION_KIND,
             "engine_sha256": _sha256(build.get("sha256")),
             "elapsed_s": max(0.0, elapsed) if elapsed is not None else 0.0,
+            "analytics": (
+                validate_run_analytics(trial.get("analytics"))
+                if trial.get("world_metadata_unchanged") is True
+                else None
+            ),
         }
     )
 
@@ -462,7 +476,8 @@ def _queue_view(value: Any) -> dict[str, Any]:
     for record in results:
         if (
             not isinstance(record, dict)
-            or set(record) != record_fields
+            or not record_fields.issubset(record)
+            or set(record) - record_fields - {"analytics"}
             or record.get("profile_id") not in PROFILE_IDS
             or type(record.get("seed")) is not int
             or record["seed"] != 100
@@ -471,7 +486,10 @@ def _queue_view(value: Any) -> dict[str, Any]:
         ):
             raise ControllerServiceError("invalid_queue_response", message)
         _uuid(record.get("id"))
-        validate_summary({name: record[name] for name in _SUMMARY_FIELDS})
+        validate_summary(
+            {name: record[name] for name in _SUMMARY_FIELDS}
+            | ({"analytics": record["analytics"]} if "analytics" in record else {})
+        )
     return value
 
 
