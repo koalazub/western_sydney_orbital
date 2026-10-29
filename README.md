@@ -180,6 +180,10 @@ For a hosted game, use `--room-file` with the private room descriptor instead. P
 
 Fresh panel tests use the same L2 setup, seed 100 and 500 real debris bodies. Compare equal time limits and the measured time, range, speed, damage and fuel. Native station-region arrival does not certify docking or a safe low-speed rendezvous. Both teammate MVP profiles are explicitly adapted to the command limits; their original SDK entrypoints and displays remain in `examples/`.
 
+The comparison includes the native score and its point breakdown. The [published STP scorer](https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L37-L67) uses `100 × [120/time − 2×damage/209200 − max(fuel/1.15 − 1, 0) + 0.5]` on success. Higher is better, including when scores are negative. Speed here means completion time, not arrival velocity. A damage failure replaces the time bonus with `−remaining_distance/initial_distance`; unfinished trials have no terminal score. The published zero-time bonus is zero.
+
+This is the published formula applied to local fuel and collision-damage estimates. STP's actuator accumulates a different fuel activity counter, so local kilograms and these scores are not verified competition counters or scores. The panel retains arrival speed as a separate safety measurement, and missing historical scores or terms stay unavailable.
+
 The same profiles run without a browser through `just controllers run --isolated --profile PROFILE --run`. `just controllers list` lists their names and adaptations. `just controllers compare --isolated --run` runs each profile in a separate matching world, with native fenced leases rather than manual stepping. No existing game is reset.
 
 ### Run a checkpoint attempt through the APIs

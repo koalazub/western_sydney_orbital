@@ -92,11 +92,21 @@
         <p>Local game: start <code>just controllers serve --connection-file .devenv/wsorb-local.json --run</code> with the descriptor for this server.</p>
         <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
       </details>
-      <div class="controller-results" tabindex="0" aria-label="Station arrival results, scroll horizontally for all measurements">
-        <table>
-          <caption>Fresh tests with the same seed and debris population. Compare equal time limits. Station-region arrival is not docking.</caption>
-          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel, kg</th></tr></thead>
-          <tbody id="controller-result-rows"></tbody>
+      <p id="controller-score-label">STP-formula score estimate, not an official runtime score</p>
+      <p id="controller-score-detail">Published formula using local fuel/damage estimates. Speed bonus is completion time; arrival speed is separate. Collision damage and fuel burn reduce score. Local model, not certified STP counters. Station-region arrival is not docking.</p>
+      <div class="controller-fields">
+        <label for="controller-result-sort">Result order within each comparison group
+          <select id="controller-result-sort" name="controller-result-sort" aria-describedby="controller-score-comparison">
+            <option value="score">Score high to low</option>
+            <option value="newest">Newest first</option>
+          </select>
+        </label>
+      </div>
+      <p id="controller-score-comparison">Compare only matching engine builds, seeds and time limits. Groups are shown newest first, with unscored tests last when sorting by score. Scroll horizontally for all measurements.</p>
+      <div class="controller-results" tabindex="0" aria-label="STP-formula score estimates, scroll horizontally for all measurements">
+        <table id="controller-results-table" aria-describedby="controller-score-label controller-score-detail controller-score-comparison">
+          <caption>STP-formula score estimate, higher is better. Fresh tests use 500 debris bodies. Missing scores and measurements appear as n/a, never zero.</caption>
+          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Score</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Speed / progress points</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
         </table>
       </div>
     </dialog>

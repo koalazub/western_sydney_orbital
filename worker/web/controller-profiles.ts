@@ -2,6 +2,7 @@
 // measurements and control authority stay in the real native engine.
 import profiles from "../../src/wsorb/controllers/catalog.json";
 import scenario from "../../simulation/scenarios/phobos_escape.json";
+import { CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
 import type { RoomEngine } from "./room-control.ts";
 
 type Connection = { origin: string; id: string; key: string };
@@ -22,6 +23,45 @@ type Options = {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const number = (value: unknown, places = 2) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(places) : "n/a";
+const practiceScoreLabel = "STP-formula score estimate, not an official runtime score";
+const numericScore = (result: Record<string, unknown>) => {
+  if (result.world_metadata_unchanged === false) return null;
+  const score = record(result.measurement) ? result.measurement.score : null;
+  return typeof score === "number" && Number.isFinite(score) ? score : null;
+};
+const rankingScore = (result: Record<string, unknown>) => result.state === "native_terminal"
+  && result.world_metadata_unchanged === true && result.release_state === "acknowledged" && !result.error_code
+  ? numericScore(result) : null;
+
+function comparisonGroups(results: Array<Record<string, unknown>>) {
+  const groups = new Map<string, { label: string; comparable: boolean; results: Array<Record<string, unknown>> }>();
+  for (const [index, result] of results.slice(-32).reverse().entries()) {
+    const build = typeof result.engine_sha256 === "string" && /^[0-9a-f]{64}$/.test(result.engine_sha256) ? result.engine_sha256 : null;
+    const comparable = build !== null && result.seed === 100 && typeof result.duration_s === "number"
+      && Number.isFinite(result.duration_s) && result.duration_s > 0 && result.duration_s <= 1800;
+    // A missing build cannot establish a comparison cohort, even if a score exists.
+    const key = comparable ? `${build}:${result.seed}:${result.duration_s}` : `unknown:${index}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        label: comparable ? `Engine ${build}, seed 100, time limit ${result.duration_s} s`
+          : "Comparison unavailable: engine build, seed or time limit not recorded.",
+        comparable, results: [],
+      };
+      groups.set(key, group);
+    }
+    group.results.push(result);
+  }
+  return groups.values();
+}
+
+function scoreOrder(left: Record<string, unknown>, right: Record<string, unknown>) {
+  const a = rankingScore(left), b = rankingScore(right);
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a > b ? -1 : 1;
+}
 
 async function hostedRequest(connection: Connection, payload?: Record<string, unknown>) {
   const response = await fetch(`/api/rooms/${connection.id}/controllers`, {
@@ -89,7 +129,8 @@ export function installControllerProfiles(options: Options) {
   const stop = byId<HTMLButtonElement>("stop-controller");
   const status = byId("controller-service-status");
   const error = byId("controller-error");
-  const rows = byId("controller-result-rows");
+  const table = byId<HTMLTableElement>("controller-results-table");
+  const sort = byId<HTMLSelectElement>("controller-result-sort");
   let view: View | undefined;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -118,6 +159,44 @@ export function installControllerProfiles(options: Options) {
     if (profiles.some(entry => entry.owner === name)) owner.add(new Option(name, name));
   }
   selectOwner();
+  function renderResults(results: Array<Record<string, unknown>>) {
+    const bodies = Array.from(comparisonGroups(results), group => {
+      const body = document.createElement("tbody");
+      const heading = body.insertRow();
+      const name = document.createElement("th");
+      name.scope = "rowgroup";
+      name.colSpan = 13;
+      name.textContent = group.label;
+      heading.append(name);
+      if (sort.value === "score" && group.comparable) group.results.sort(scoreOrder);
+      for (const result of group.results) {
+        const row = body.insertRow();
+        const measurement = record(result.measurement) ? result.measurement : {};
+        const terms = record(measurement.score_breakdown) && measurement.score_breakdown.formula === CONTROLLER_SCORE_FORMULA
+          && numericScore(result) !== null && measurement.score_breakdown.total === numericScore(result)
+          ? measurement.score_breakdown : {};
+        const outcome = result.native_success === true && result.world_metadata_unchanged === true
+          ? `Station region reached${result.error_code ? `; ${result.error_code}` : ""}`
+          : result.error_code ? `${result.state ?? "error"}: ${result.error_code}`
+            : measurement.status === "failed_damage" ? "Collision damage failure" : String(result.state ?? "Unknown");
+        const score = numericScore(result);
+        const scoreText = score !== null && rankingScore(result) === null ? `${number(score)} (not ranked)` : number(score);
+        const values = [label(result.profile_id), scoreText, number(result.duration_s, 0), outcome,
+          number(measurement.time_s, 1), number(measurement.range_m), number(measurement.relative_speed_mps), number(measurement.damage_j), number(measurement.fuel_used_kg, 3),
+          number(terms.progress_points), number(terms.collision_penalty_points), number(terms.fuel_penalty_points), number(terms.offset_points)];
+        values.forEach((value, index) => {
+          const cell = document.createElement(index === 0 ? "th" : "td");
+          if (cell instanceof HTMLTableCellElement && index === 0) cell.scope = "row";
+          if (index === 1) { const score = document.createElement("strong"); score.textContent = value; cell.append(score); }
+          else cell.textContent = value;
+          row.append(cell);
+        });
+      }
+      return body;
+    });
+    for (const body of Array.from(table.tBodies)) body.remove();
+    table.append(...bodies);
+  }
   function render(value: Record<string, unknown>) {
     if (!record(value.service) || typeof value.service.online !== "boolean" || !Array.isArray(value.results)) {
       throw new Error("Controller service returned an unsupported status.");
@@ -130,18 +209,10 @@ export function installControllerProfiles(options: Options) {
     if (status.textContent !== message) status.textContent = message;
     run.disabled = busy || !view.service.online || !!active || !options.ready();
     stop.disabled = busy || !active || active.stop_requested;
-    rows.replaceChildren(...view.results.slice(-32).reverse().map(result => {
-      const row = document.createElement("tr");
-      const measurement = record(result.measurement) ? result.measurement : {};
-      const outcome = result.native_success === true && result.world_metadata_unchanged === true
-        ? `Station region reached${result.error_code ? `; ${result.error_code}` : ""}`
-        : result.error_code ? `${result.state ?? "error"}: ${result.error_code}` : String(result.state ?? "Unknown");
-      const values = [label(result.profile_id), number(result.duration_s, 0), outcome,
-        number(measurement.time_s, 1), number(measurement.range_m), number(measurement.relative_speed_mps), number(measurement.damage_j), number(measurement.fuel_used_kg, 3)];
-      for (const value of values) { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }
-      return row;
-    }));
+    renderResults(view.results);
   }
+  byId("controller-score-label").textContent = practiceScoreLabel;
+  sort.addEventListener("change", () => { if (view) renderResults(view.results); });
   async function refresh() {
     try { render(await request()()); }
     catch (cause) {
