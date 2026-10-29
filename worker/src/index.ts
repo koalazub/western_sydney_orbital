@@ -1,11 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
 import { emitDiagnostic } from "../shared/diagnostics.ts";
+import { CONTROLLER_BODY_LIMIT, ControllerJobsError, controllerJobsAction, controllerJobsView, createControllerJobsState } from "../shared/controller-jobs.ts";
+import type { ControllerJobsState } from "../shared/controller-jobs.ts";
 
 const MAX_BODY = 64 * 1024;
 const MAX_UPDATE = 256 * 1024;
 const MAX_SNAPSHOT = 512 * 1024;
 const MAX_CONNECTIONS = 32;
+const PAGE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NATIVE_REJECTION_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 const ROOM_TTL = 7 * 24 * 60 * 60 * 1000;
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
@@ -63,6 +66,7 @@ export class Room extends DurableObject {
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS room (key_hash TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, document BLOB NOT NULL, state TEXT, notebook_url TEXT, host_id TEXT)`);
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, requester TEXT NOT NULL, created_at INTEGER NOT NULL)");
+      ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS controller_jobs (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)");
     });
   }
 
@@ -86,8 +90,32 @@ export class Room extends DurableObject {
     const row = this.row()!;
     return json({ document: bytesToBase64(new Uint8Array(row.document)), state: row.state ? JSON.parse(row.state) : null, notebookUrl: row.notebook_url });
   }
-  async command(key: string, id: string, command: Record<string, unknown>, diagnostics = false): Promise<Response> {
+  async controllers(key: string, action?: unknown): Promise<Response> {
     if (!(await this.authorized(key))) return json({ error: "Unauthorized" }, 401);
+    // Authorization may await, but this load/transition/save section may not.
+    // SQLite persists jobs separately from the room document and saved state.
+    const saved = this.ctx.storage.sql.exec<{ state: string }>("SELECT state FROM controller_jobs WHERE id = 1").toArray()[0];
+    const state: ControllerJobsState = saved ? JSON.parse(saved.state) : createControllerJobsState();
+    if (action === undefined) return json(controllerJobsView(state, Date.now()));
+    const owner = this.row()!.host_id;
+    try {
+      const transition = controllerJobsAction(state, action, {
+        now: Date.now(), jobId: crypto.randomUUID(), ownerPageId: owner,
+        ownerAvailable: owner !== null && this.connectedOwner(owner),
+      });
+      this.ctx.storage.sql.exec("INSERT INTO controller_jobs (id, state) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET state = excluded.state", JSON.stringify(transition.state));
+      return json(transition.response);
+    } catch (error) {
+      if (error instanceof ControllerJobsError) return json({ error: error.message }, error.status);
+      throw error;
+    }
+  }
+  private connectedOwner(id: string): boolean {
+    return this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN && (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === id);
+  }
+  async command(key: string, id: string, command: Record<string, unknown>, diagnostics = false, targetPage?: string): Promise<Response> {
+    if (!(await this.authorized(key))) return json({ error: "Unauthorized" }, 401);
+    if (targetPage !== undefined && !PAGE_UUID.test(targetPage)) return json({ error: "X-WSORB-Target-Page must be a canonical UUID" }, 400);
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !command || typeof command !== "object" || Array.isArray(command)) return json({ error: "Invalid command" }, 400);
     const serialized = JSON.stringify(command);
     if (new TextEncoder().encode(serialized).byteLength > MAX_BODY) return json({ error: "Command too large" }, 413);
@@ -100,7 +128,8 @@ export class Room extends DurableObject {
       epoch: fence?.epoch, term: fence?.term,
     });
     const row = this.row()!;
-    if (!row.host_id || !this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN && (socket.deserializeAttachment() as { clientId?: string } | null)?.clientId === row.host_id)) {
+    if (targetPage !== undefined && targetPage !== row.host_id) return json({ error: "Target room owner changed", code: "page_mismatch" }, 409);
+    if (!row.host_id || !this.connectedOwner(row.host_id)) {
       emitDiagnostic(diagnostics, "room_relay", "call_rejected", { trace_id: id, reason: "no_owner", http_status: 503 });
       return json({ error: "No connected room owner" }, 503);
     }
@@ -139,7 +168,7 @@ export class Room extends DurableObject {
       ok: resultValue.ok === true, http_status: status, code: resultValue.code,
       elapsed_ms: started === undefined ? undefined : Date.now() - started,
     });
-    return json(value, status);
+    return Response.json(value, { status, headers: { ...headers, ...(status === 200 ? { "X-WSORB-Page": row.host_id } : {}) } });
   }
   async fetch(request: Request): Promise<Response> {
     const key = request.headers.get("X-Room-Key") ?? "";
@@ -339,9 +368,24 @@ export default {
       return json({ error: "Method not allowed" }, 405);
     }
     const commandMatch = /^\/api\/rooms\/([a-f0-9-]+)\/commands$/.exec(url.pathname);
+    const controllersMatch = /^\/api\/rooms\/([a-f0-9-]+)\/controllers$/.exec(url.pathname);
+    if (controllersMatch) {
+      const key = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+      if (!/^[A-Za-z0-9_-]{43}$/.test(key)) return json({ error: "Unauthorized" }, 401);
+      const stub = env.ROOMS.getByName(controllersMatch[1]);
+      if (request.method === "GET") return stub.controllers(key);
+      if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+      if (Number(request.headers.get("Content-Length") ?? 0) > CONTROLLER_BODY_LIMIT) return json({ error: "Request too large" }, 413);
+      let body: unknown;
+      try { body = await readBoundedJson(request, CONTROLLER_BODY_LIMIT); }
+      catch (error) { return json({ error: error instanceof RangeError ? "Request too large" : "Invalid JSON" }, error instanceof RangeError ? 413 : 400); }
+      return stub.controllers(key, body);
+    }
     if (commandMatch && request.method === "POST") {
       const key = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
       if (!/^[A-Za-z0-9_-]{43}$/.test(key)) return json({ error: "Unauthorized" }, 401);
+      const targetPage = request.headers.get("X-WSORB-Target-Page") ?? undefined;
+      if (targetPage !== undefined && !PAGE_UUID.test(targetPage)) return json({ error: "X-WSORB-Target-Page must be a canonical UUID" }, 400);
       const contentLength = Number(request.headers.get("Content-Length") ?? 0);
       if (contentLength > MAX_BODY) return json({ error: "Request too large" }, 413);
       let body: unknown;
@@ -351,7 +395,7 @@ export default {
       const payload = body as { id?: unknown; command?: unknown };
       if (!payload.command || typeof payload.command !== "object" || Array.isArray(payload.command)) return json({ error: "command must be an object" }, 400);
       const id = typeof payload.id === "string" ? payload.id : crypto.randomUUID();
-      return env.ROOMS.getByName(commandMatch[1]).command(key, id, payload.command as Record<string, unknown>, request.headers.get("X-WSORB-Diagnostics") === "1");
+      return env.ROOMS.getByName(commandMatch[1]).command(key, id, payload.command as Record<string, unknown>, request.headers.get("X-WSORB-Diagnostics") === "1", targetPage);
     }
     if (url.pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
     const response = await env.ASSETS.fetch(request);

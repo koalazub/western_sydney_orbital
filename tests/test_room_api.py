@@ -7,22 +7,34 @@ import math
 import secrets
 import socket
 import stat
+import threading
 import time
 import uuid
 from contextlib import contextmanager
 
 import pytest
 
-from wsorb.local_api import CommandExpiredError, LocalApiError, LocalSimulation, StaleContextError
+from test_room_integration import actual_room as actual_room
+from test_room_integration import room_owner as room_owner
+from test_room_integration import room_worker as room_worker
+from wsorb.local_api import (
+    CommandExpiredError,
+    LocalApiError,
+    LocalPageMismatchError,
+    LocalSimulation,
+    StaleContextError,
+)
 from wsorb.room_api import (
     DEFAULT_ORIGIN,
     MAX_ADMISSION_MS,
     MAX_TIMEOUT_MS,
     USER_AGENT,
     RoomApiError,
+    RoomPageMismatchError,
     RoomSimulation,
     _descriptor,
     _http_client,
+    _http_rejection,
     _origin,
     _reserve_descriptor,
     _room_call,
@@ -86,6 +98,64 @@ def test_hosted_client_does_not_claim_to_implement_the_local_page_header_protoco
     assert RoomSimulation.bind_to_observed_page is RoomSimulation._unsupported
     with pytest.raises(ValueError, match="Unsupported hosted room operation"):
         client.bind_to_observed_page(require=False)
+
+
+def test_controller_job_pin_requires_canonical_uuid_and_is_immutable_before_first_rpc():
+    value = _credentials()
+    client = RoomSimulation(value["url"], value["room_id"], value["token"])
+    owner = str(uuid.uuid4())
+    for invalid in (None, "not-a-uuid", owner.upper(), 42, "../page", str(uuid.UUID(int=0))):
+        with pytest.raises(RoomApiError, match="canonical UUID"):
+            client.bind_controller_page(invalid)
+    assert client.bound_page_id is None
+    assert client.bind_controller_page(owner) == owner
+    assert client.bound_page_id == owner
+    assert client.bind_controller_page(owner) == owner
+    assert client.last_observed_page_id is None
+    with pytest.raises(RoomApiError, match="cannot change"):
+        client.bind_controller_page(str(uuid.uuid4()))
+    assert client.bound_page_id == owner
+
+
+def test_room_request_header_pins_explicit_jobs_only_without_changing_native_allowlist():
+    value = _credentials()
+    client = RoomSimulation(value["url"], value["room_id"], value["token"])
+    envelope = _rpc_envelope({"method": "snapshot"}, 2)
+    assert client._rpc_request(envelope).get_header("X-wsorb-target-page") is None
+    owner = str(uuid.uuid4())
+    client.bind_controller_page(owner)
+    request = client._rpc_request(envelope)
+    assert request.get_header("X-wsorb-target-page") == owner
+    assert request.get_header("Authorization") == f"Bearer {value['token']}"
+    assert request.full_url == f"{value['url']}/api/rooms/{value['room_id']}/commands"
+    assert json.loads(request.data) == envelope
+    for op in ("reset", "configure_experiment", "pause", "stop"):
+        with pytest.raises(ValueError, match="Unsupported hosted"):
+            client.command({"op": op})
+
+
+def test_only_actual_http_409_and_exact_page_mismatch_code_prove_no_dispatch():
+    secret = secrets.token_urlsafe(32)
+    mismatch = _http_rejection(409, {"code": "page_mismatch", "error": secret})
+    assert isinstance(mismatch, RoomPageMismatchError)
+    assert isinstance(mismatch, LocalPageMismatchError)
+    assert isinstance(mismatch, RoomApiError)
+    assert not isinstance(mismatch, StaleContextError)
+    assert mismatch.code == "page_mismatch" and mismatch.http_status == 409
+    assert secret not in str(mismatch)
+    for status, body in (
+        (200, {"code": "page_mismatch", "error": secret}),
+        (403, {"code": "page_mismatch", "error": secret}),
+        (503, {"code": "page_mismatch", "error": secret}),
+        (409, {"code": "stale_context", "error": secret}),
+        (409, {"code": "page_mismatch "}),
+        (409, {"code": ["page_mismatch"]}),
+        (409, None),
+    ):
+        error = _http_rejection(status, body)
+        assert type(error) is RoomApiError
+        assert "outcome may be unknown" in str(error)
+        assert secret not in str(error)
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o660, 0o700, 0o400, 0o000])
@@ -395,6 +465,78 @@ def test_real_unavailable_http_never_becomes_a_saved_state_snapshot_or_a_retry()
         with pytest.raises(RoomApiError, match="outcome may be unknown") as rejected:
             client.snapshot()
         assert value["token"] not in str(rejected.value)
+
+
+def test_controller_pin_cannot_be_added_after_even_an_unavailable_first_rpc():
+    with _unavailable_origin("http") as origin:
+        value = _credentials(url=origin)
+        client = RoomSimulation(
+            origin, value["room_id"], value["token"], allow_loopback=True, timeout_s=0.2
+        )
+        with pytest.raises(RoomApiError):
+            client.snapshot()
+        with pytest.raises(RoomApiError, match="before the first room RPC"):
+            client.bind_controller_page(str(uuid.uuid4()))
+
+
+def test_real_owned_room_http_rejects_wrong_job_owner_before_no_owner_dispatch(actual_room):
+    _, _, _, path = actual_room
+    client = RoomSimulation.from_file(path, allow_loopback=True, timeout_s=2)
+    client.bind_controller_page(str(uuid.uuid4()))
+    with pytest.raises(RoomPageMismatchError) as mismatch:
+        client.snapshot()
+    assert mismatch.value.code == "page_mismatch" and mismatch.value.http_status == 409
+    assert not isinstance(mismatch.value, StaleContextError)
+    assert client._token not in str(mismatch.value)
+    legacy = RoomSimulation.from_file(path, allow_loopback=True, timeout_s=2)
+    with pytest.raises(RoomApiError) as unavailable:
+        legacy.snapshot()
+    assert unavailable.value.code == "owner_unavailable"
+
+
+def test_real_owned_room_job_stamp_pins_the_actual_host_before_first_snapshot(room_owner):
+    from wsorb.checkpoint import CheckpointOptions
+    from wsorb.controller_service import ControllerQueue, JobMonitor, execute_job
+    from wsorb.local_api import control_context
+
+    _, _, _, path, _ = room_owner
+    source = RoomSimulation.from_file(path, allow_loopback=True, timeout_s=2)
+    initial = source.snapshot()
+    queue, worker_id = ControllerQueue(source), str(uuid.uuid4())
+    assert queue.poll(worker_id).job is None
+    submitted = queue._send(
+        {
+            "action": "submit",
+            "profile_id": "coast",
+            "seed": 100,
+            "duration_s": 0.2,
+            "fresh": True,
+            "expected_context": control_context(initial),
+        }
+    )
+    owner = submitted["active"]["owner_page_id"]
+    assert str(uuid.UUID(owner)) == owner
+    claimed = queue.poll(worker_id)
+    assert claimed.job.owner_page_id == owner
+    pinned = RoomSimulation.from_file(path, allow_loopback=True, timeout_s=2)
+    pinned.bind_controller_page(owner)
+    actual = pinned.snapshot()
+    assert control_context(actual) == control_context(initial)
+    assert actual["observation"]["time_s"] == 0
+    assert actual["observation"]["control_authority"] == initial["observation"]["control_authority"]
+    summary = execute_job(
+        source,
+        claimed.job,
+        CheckpointOptions(room_file=path, run=True, wall_budget_s=15),
+        JobMonitor(claimed.job, threading.Event()),
+    )
+    assert summary["state"] == "duration_limit"
+    assert summary["release_state"] == "acknowledged"
+    assert summary["world_metadata_unchanged"] is True
+    assert summary["measurement"]["time_s"] >= 0.2
+    completed = queue.complete(worker_id, claimed.job.id, summary)
+    assert completed["active"] is None and len(completed["results"]) == 1
+    assert pinned.snapshot()["observation"]["control_authority"]["status"] == "revoked"
 
 
 def test_output_is_reserved_private_exclusive_and_cleanup_removes_only_its_own_file(tmp_path):

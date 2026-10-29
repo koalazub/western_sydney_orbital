@@ -35,6 +35,7 @@ from . import __version__, diagnostics
 from .local_api import (
     MAX_RESPONSE_BYTES,
     LocalApiError,
+    LocalPageMismatchError,
     LocalSimulation,
     _channels,
     _expected_context,
@@ -53,6 +54,10 @@ _UNKNOWN_OUTCOME = "Command outcome may be unknown; do not automatically retry a
 
 class RoomApiError(LocalApiError):
     """A credential-free hosted transport or descriptor failure."""
+
+
+class RoomPageMismatchError(LocalPageMismatchError, RoomApiError):
+    """The room rejected an explicit job's changed owner before dispatch."""
 
 
 def _private_platform() -> None:
@@ -224,6 +229,23 @@ def _http_client():
     return client
 
 
+def _http_rejection(status: int, failure: Any) -> RoomApiError:
+    # A native result's code is not proof of an HTTP pre-dispatch rejection.
+    if status == 409 and isinstance(failure, dict) and failure.get("code") == "page_mismatch":
+        rejected = RoomPageMismatchError(
+            "The bound room owner changed or disappeared. This request was not dispatched."
+        )
+    elif status == 503 and failure == {"error": "No connected room owner"}:
+        rejected = RoomApiError(
+            "Hosted room has no connected owner. This request was not dispatched."
+        )
+        rejected.code = "owner_unavailable"
+    else:
+        rejected = RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}")
+    rejected.http_status = status
+    return rejected
+
+
 def _post_json(
     http,
     request: Request,
@@ -254,15 +276,7 @@ def _post_json(
                 failure = json.loads(failure_body) if len(failure_body) <= 8192 else None
             except ValueError:
                 failure = None
-            if error.code == 503 and failure == {"error": "No connected room owner"}:
-                unavailable = RoomApiError(
-                    "Hosted room has no connected owner. This request was not dispatched."
-                )
-                unavailable.code = "owner_unavailable"
-                raise unavailable from None
-            rejected = RoomApiError(f"Room HTTP request failed. {_UNKNOWN_OUTCOME}")
-            rejected.http_status = error.code
-            raise rejected from None
+            raise _http_rejection(error.code, failure) from None
         except (OSError, URLError, HTTPException):
             unavailable = RoomApiError(f"Room transport unavailable. {_UNKNOWN_OUTCOME}")
             unavailable.code = "transport_unavailable"
@@ -355,6 +369,8 @@ class RoomSimulation(LocalSimulation):
         self.timeout_s = _timeout(timeout_s)
         self._channels = _channels(f"{self.url}/api/rooms/{self.room_id}")
         self._http = _http_client()
+        self._controller_page_id: str | None = None
+        self._rpc_started = False
 
     @classmethod
     def from_file(
@@ -369,6 +385,55 @@ class RoomSimulation(LocalSimulation):
             _read_descriptor(Path(path)), allow_loopback=allow_loopback
         )
         return cls(url, room_id, token, timeout_s=timeout_s, allow_loopback=allow_loopback)
+
+    @property
+    def bound_page_id(self) -> str | None:
+        """The explicit controller job's immutable host pin, otherwise None."""
+        with self._channels.control:
+            return self._controller_page_id
+
+    def bind_controller_page(self, owner_page_id: str) -> str:
+        """Bind an authenticated job's actual host UUID before the first room RPC.
+
+        This is not the local observed-page protocol. Ordinary room clients stay
+        unpinned, and no snapshot or native ownership is implied by this binding.
+        """
+        try:
+            parsed = uuid.UUID(owner_page_id) if isinstance(owner_page_id, str) else None
+            valid = (
+                parsed is not None
+                and str(parsed) == owner_page_id
+                and parsed.variant == uuid.RFC_4122
+                and parsed.version in range(1, 9)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise RoomApiError("Controller owner page must be a canonical UUID.")
+        with self._channels.control:
+            if self._controller_page_id == owner_page_id:
+                return owner_page_id
+            if self._controller_page_id is not None:
+                raise RoomApiError("A controller job cannot change its bound room owner.")
+            if self._rpc_started:
+                raise RoomApiError("Bind the controller owner before the first room RPC.")
+            self._controller_page_id = owner_page_id
+            return owner_page_id
+
+    def _rpc_request(self, envelope: Mapping[str, Any]) -> Request:
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self._controller_page_id is not None:
+            headers["X-WSORB-Target-Page"] = self._controller_page_id
+        return Request(
+            f"{self.url}/api/rooms/{self.room_id}/commands",
+            data=json.dumps(envelope, allow_nan=False).encode(),
+            headers=headers,
+            method="POST",
+        )
 
     def _result(self, result: Any, request_id: str) -> dict[str, Any]:
         message = f"Room result envelope or request ID does not match. {_UNKNOWN_OUTCOME}"
@@ -408,18 +473,10 @@ class RoomSimulation(LocalSimulation):
         call = _room_call(payload)
         timeout = _timeout(self.timeout_s if timeout_s is None else timeout_s)
         with self._channels.control:
+            self._rpc_started = True
             envelope = _rpc_envelope(call, timeout)
             trace = diagnostics.start_request("room", "rpc", call, request_id=envelope["id"])
-            request = Request(
-                f"{self.url}/api/rooms/{self.room_id}/commands",
-                data=json.dumps(envelope, allow_nan=False).encode(),
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                method="POST",
-            )
+            request = self._rpc_request(envelope)
             try:
                 result = _post_json(
                     self._http,
@@ -448,9 +505,8 @@ class RoomSimulation(LocalSimulation):
     # themselves, not just their eventual command, so they perform no HTTP.
     _request = _unsupported
     bind_to_observed_page = _unsupported
-    # Hosted owner RPCs do not implement the local page-header protocol.
+    # Hosted jobs pin their authenticated host before RPC, never from a local receipt.
     last_observed_page_id = None
-    bound_page_id = None
     status = _unsupported
     GetNearestDebrisLocations = _unsupported
     SetCommand = _unsupported

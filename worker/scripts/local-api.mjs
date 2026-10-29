@@ -5,6 +5,7 @@ import { basename, dirname, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { resolveNotebook } from "./notebook-launch.mjs";
 import { emitDiagnostic, validTraceId } from "../shared/diagnostics.ts";
+import { CONTROLLER_BODY_LIMIT, ControllerJobsError, controllerJobsAction, controllerJobsView, createControllerJobsState } from "../shared/controller-jobs.ts";
 
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
@@ -371,6 +372,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
   // hold the command channel while Python is controlling a flying vehicle.
   const pending = new Map();
   const nativePending = new Map();
+  let controllerJobs = createControllerJobsState();
 
   function validateResult(result, call, browser = false, diagnostics = false) {
     const id = browser ? ["id"] : [];
@@ -541,12 +543,13 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       if (new URL(request.url, origin).search) invalid("Local API routes do not accept query parameters");
       const moduleRoute = pathname === "/__local/bootstrap.js" || pathname === "/__local/client.js";
       const notebookRoute = pathname === "/__local/notebook";
+      const controllersRoute = pathname === "/__local/controllers";
       const allowedMethod = moduleRoute || notebookRoute || pathname === "/__local/status" || pathname === "/__local/poll" ? "GET" : "POST";
-      if (!["/__local/bootstrap.js", "/__local/client.js", "/__local/notebook", "/__local/status", "/__local/call", "/__local/poll", "/__local/result"].includes(pathname)) {
+      if (!["/__local/bootstrap.js", "/__local/client.js", "/__local/notebook", "/__local/status", "/__local/call", "/__local/poll", "/__local/result", "/__local/controllers"].includes(pathname)) {
         throw new HttpError(404, "Unknown local API route");
       }
-      if (request.method !== allowedMethod) {
-        response.setHeader("Allow", allowedMethod);
+      if (controllersRoute ? !["GET", "POST"].includes(request.method) : request.method !== allowedMethod) {
+        response.setHeader("Allow", controllersRoute ? "GET, POST" : allowedMethod);
         throw new HttpError(405, "Method not allowed");
       }
       const authorized = authenticated(request);
@@ -604,7 +607,22 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
       expire();
       const visible = pathname === "/__local/poll" || pathname === "/__local/result"
         ? pageVisibility(request) : undefined;
-      if (pathname === "/__local/status") {
+      if (controllersRoute) {
+        if (request.method === "GET") {
+          send(request, response, 200, controllerJobsView(controllerJobs, Date.now()));
+        } else {
+          const action = await readJson(request, response, CONTROLLER_BODY_LIMIT);
+          expire();
+          // Owner identity comes only from the actual bridge lease. A native
+          // headless instance deliberately has no browser identity to invent.
+          const transition = controllerJobsAction(controllerJobs, action, {
+            now: Date.now(), jobId: randomUUID(), ownerPageId: page?.id ?? null,
+            ownerAvailable: native !== null || page !== null,
+          });
+          controllerJobs = transition.state;
+          send(request, response, 200, transition.response);
+        }
+      } else if (pathname === "/__local/status") {
         const active = [...pending.values()].map(job => job.call).concat([...nativePending.values()]);
         send(request, response, 200, { enabled: true, connected: page !== null, busy: active.length !== 0,
           page_id: page?.id ?? null, page_binding_supported: !native, page_visible: page?.visible,
@@ -715,13 +733,14 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
         send(request, response, 200, { ok: true });
       }
     } catch (error) {
+      const httpError = error instanceof HttpError || error instanceof ControllerJobsError;
       emitDiagnostic(diagnostics, "local_relay", "call_rejected", {
-        trace_id: traceId, http_status: error instanceof HttpError ? error.status : 500,
+        trace_id: traceId, http_status: httpError ? error.status : 500,
         code: error instanceof HttpError ? error.code : undefined,
         reason: error instanceof HttpError && error.code === "local_busy" ? "in_flight" : "invalid_request",
       });
-      send(request, response, error instanceof HttpError ? error.status : 500, {
-        ok: false, error: error instanceof HttpError ? error.message : "Local bridge failed",
+      send(request, response, httpError ? error.status : 500, {
+        ok: false, error: httpError ? error.message : "Local bridge failed",
         ...(error instanceof HttpError && error.code ? { code: error.code } : {}),
       });
     }
