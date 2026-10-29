@@ -341,12 +341,9 @@ fn placement_cannot_revive_or_rescore_a_real_terminal_collision() {
     sim.advance(2.0);
     assert_eq!(sim.state.mission.status, MissionStatus::FailedDamage);
     let before = sim.snapshot();
-    let terms = before
-        .mission
-        .score_breakdown
-        .expect("real terminal collision is scored");
-    assert_eq!(Some(terms.total), before.mission.score);
-    assert!(terms.collision_penalty_points > 200.0);
+    assert!(before.mission.damage > settings().mission.impact_threshold_j);
+    assert!(before.mission.score.is_none());
+    assert!(before.mission.score_breakdown.is_none());
     sim.place_lander([16_000.0, 8_000.0, 9_000.0]).unwrap();
     assert_eq!(sim.state.mission.status, before.mission.status);
     assert_eq!(sim.state.mission.phase, before.mission.phase);

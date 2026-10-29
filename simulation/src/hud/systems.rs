@@ -1166,7 +1166,7 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         snapshot
             .mission
             .score
-            .map(|score| format!(" | est. score {:.0}", score))
+            .map(|score| format!(" | legacy SI total {:.0}, not STP", score))
             .unwrap_or_default()
     } else {
         String::new()

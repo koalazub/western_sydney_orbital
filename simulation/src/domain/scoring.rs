@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreFormula {
+    /// Legacy local SI diagnostic identifier, retained for archive compatibility.
     PracticeNormalizedTimeDamageFuelV1,
 }
 
@@ -13,7 +14,8 @@ pub enum ScoreProgressBasis {
     RemainingDistanceRatio,
 }
 
-/// Native score terms, evaluated with the practice model's actual counters.
+/// Archived local SI diagnostics, not STP scores or compatible source counters.
+/// Retain recorded values when reading historical receipts.
 /// Penalties are positive values to subtract; the total can be negative.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

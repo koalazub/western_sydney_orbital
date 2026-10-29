@@ -1211,7 +1211,7 @@ fn initial_for_flight(
             damage: 0.0,
             status: MissionStatus::Running,
             score: None,
-            score_label: "Custom mission estimate; not official STP score".into(),
+            score_label: "STP points unavailable: incompatible local fuel and damage counters".into(),
             score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: flight.target_region,
