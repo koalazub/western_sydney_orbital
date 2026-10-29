@@ -18,7 +18,7 @@ If circles come out mirrored or shifted, flip FLIP_U / FLIP_V below.
 import numpy as np
 from PIL import ImageDraw
 
-CAM_POS_BODY = {                      # metres, shuttle body frame (wiki)
+CAM_POS_BODY = {  # metres, shuttle body frame (wiki)
     "top": np.array([1.27, 0.0, 0.9]),
     "bottom": np.array([1.675, 0.0, -1.025]),
 }
@@ -43,10 +43,12 @@ def project(p_body, camera: str, yaw_deg: float, pitch_deg: float, fov_deg: floa
     if v_cam[0] <= 0.1:
         return None
     f = (size_px / 2) / np.tan(np.deg2rad(fov_deg) / 2)
-    u = size_px / 2 - f * v_cam[1] / v_cam[0]       # camera y points left -> subtract
-    v = size_px / 2 - f * v_cam[2] / v_cam[0]       # camera z points up   -> subtract
-    if FLIP_U: u = size_px - u
-    if FLIP_V: v = size_px - v
+    u = size_px / 2 - f * v_cam[1] / v_cam[0]  # camera y points left -> subtract
+    v = size_px / 2 - f * v_cam[2] / v_cam[0]  # camera z points up   -> subtract
+    if FLIP_U:
+        u = size_px - u
+    if FLIP_V:
+        v = size_px - v
     return u, v, f, v_cam[0]
 
 
@@ -80,5 +82,6 @@ def overlay_contacts(image, contacts, camera, yaw_deg, pitch_deg, fov_deg):
 #   marked = overlay_contacts(imageRGB, contacts, "top",
 #                             yaw_deg=30.0, pitch_deg=-10.0,   # same numbers you gave PanTiltCamera
 #                             fov_deg=cameraParams.FOV)
-#   marked.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), f"cam_{imageNumber:04d}.png"))
+#   marked.save(os.path.join(
+#       os.path.dirname(os.path.abspath(__file__)), f"cam_{imageNumber:04d}.png"))
 # ------------------------------------------------------------------------------

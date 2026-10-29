@@ -17,8 +17,8 @@ shuttle's nose points. Without it, the axes are the Phobos-fixed axes.
 Needs matplotlib:  pip install matplotlib
 """
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.patches import Circle
 
 # (title, horizontal axis index, vertical axis index, flip horizontal?, shuttle marker)
@@ -46,8 +46,7 @@ class RadarDisplay:
             self.fig.clf()
             self.axs = self.fig.subplots(1, 3)
 
-    def update(self, shuttle_loc, debris_info, target_loc=None, iteration: int = 0,
-               to_body=None):
+    def update(self, shuttle_loc, debris_info, target_loc=None, iteration: int = 0, to_body=None):
         """
         shuttle_loc : shuttle position in the Phobos frame (3-vector); only used to
                       place the target relative to the shuttle
@@ -59,9 +58,12 @@ class RadarDisplay:
         if not self.enabled or iteration % self.update_every != 0:
             return
         try:
-            self._draw(np.asarray(shuttle_loc, dtype=float), debris_info,
-                       None if target_loc is None else np.asarray(target_loc, dtype=float),
-                       to_body)
+            self._draw(
+                np.asarray(shuttle_loc, dtype=float),
+                debris_info,
+                None if target_loc is None else np.asarray(target_loc, dtype=float),
+                to_body,
+            )
         except Exception as e:  # never let plotting crash the controller
             print(f"RadarDisplay disabled: {e}")
             self.enabled = False
@@ -72,14 +74,16 @@ class RadarDisplay:
 
         centers, rates, diameters, ranges = [], [], [], []
         for item in debris_info:
-            centers.append(convert(np.array(item[0, :], dtype=float)))  # already relative to shuttle
+            centers.append(
+                convert(np.array(item[0, :], dtype=float))
+            )  # already relative to shuttle
             ranges.append(float(item[1, 0]))
             rates.append(float(item[1, 1]))
             diameters.append(float(item[1, 2]))
         t_rel = None if target_loc is None else convert(target_loc - shuttle_loc)
 
         R = self.view_range
-        for ax, (title, h, v, flip_h, marker) in zip(self.axs, VIEWS):
+        for ax, (title, h, v, flip_h, marker) in zip(self.axs, VIEWS, strict=False):
             ax.clear()
             ax.set_xlim(-R, R)
             ax.set_ylim(-R, R)
@@ -91,7 +95,7 @@ class RadarDisplay:
             ax.set_ylabel(f"{frame} {AXIS_NAMES[v]} (m)")
             ax.grid(alpha=0.3)
 
-            for c, rate, d in zip(centers, rates, diameters):
+            for c, rate, d in zip(centers, rates, diameters, strict=False):
                 colour = "tab:red" if rate < 0 else "tab:blue"
                 ax.add_patch(Circle((c[h], c[v]), d / 2.0, color=colour, alpha=0.5))
 
@@ -102,10 +106,13 @@ class RadarDisplay:
         msg = "no debris detected"
         if ranges:
             k = int(np.argmin(ranges))
-            msg = (f"{len(ranges)} contacts | closest surface {ranges[k]:.1f} m, "
-                   f"range rate {rates[k]:+.1f} m/s")
-        self.fig.suptitle(f"Shuttle-centred, {frame}-frame axes  (black = shuttle, "
-                          f"green * = target)\n" + msg)
+            msg = (
+                f"{len(ranges)} contacts | closest surface {ranges[k]:.1f} m, "
+                f"range rate {rates[k]:+.1f} m/s"
+            )
+        self.fig.suptitle(
+            f"Shuttle-centred, {frame}-frame axes  (black = shuttle, green * = target)\n" + msg
+        )
         self.fig.subplots_adjust(left=0.07, right=0.98, bottom=0.14, top=0.80, wspace=0.25)
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()

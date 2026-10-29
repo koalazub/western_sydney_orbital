@@ -14,9 +14,10 @@ axes=(0, 1) is a top-down X-Y view; (0, 2) is a side view; (1, 2) a front view.
 Needs matplotlib:  pip install matplotlib
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
 from collections import deque
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 NAMES = ["X", "Y", "Z"]
 
@@ -28,7 +29,7 @@ class LiveMap:
         self.count = 0
         self.enabled = True
         plt.ion()
-        self.fig = plt.figure(title)       # same name every time -> always the same window
+        self.fig = plt.figure(title)  # same name every time -> always the same window
         self.fig.clf()
         self.ax = self.fig.add_subplot(111)
         self.ax.set_xlabel(f"{NAMES[self.i]} (m)")
@@ -39,7 +40,7 @@ class LiveMap:
         (self.trail,) = self.ax.plot([], [], "k-", lw=0.8, alpha=0.5)
         (self.ship,) = self.ax.plot([], [], "k^", markersize=10)
         (self.goal,) = self.ax.plot([], [], "g*", markersize=14)
-        self.path = deque(maxlen=2000)     # capped, so the trail can never grow without bound
+        self.path = deque(maxlen=2000)  # capped, so the trail can never grow without bound
 
     def update(self, rocks, shuttle_pos, target_pos=None):
         if not self.enabled:
@@ -69,12 +70,12 @@ class LiveMap:
             allp = np.vstack([np.atleast_2d(p) for p in pts])
             lo, hi = allp.min(axis=0), allp.max(axis=0)
             centre = (lo + hi) / 2
-            half = max(0.6 * float((hi - lo).max()), 10.0)   # square view, 20% margin
+            half = max(0.6 * float((hi - lo).max()), 10.0)  # square view, 20% margin
             self.ax.set_xlim(centre[0] - half, centre[0] + half)
             self.ax.set_ylim(centre[1] - half, centre[1] + half)
             self.ax.set_title(f"{len(rocks)} tracked rocks")
             self.fig.canvas.draw_idle()
             self.fig.canvas.flush_events()
-        except Exception as e:             # never let plotting crash the controller
+        except Exception as e:  # never let plotting crash the controller
             print(f"LiveMap disabled: {e}")
             self.enabled = False

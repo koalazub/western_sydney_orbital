@@ -31,26 +31,34 @@ class Track:
     def __init__(self, x, P, diameter, t):
         self.id = Track._next_id
         Track._next_id += 1
-        self.x = x              # [px,py,pz,vx,vy,vz], absolute Phobos-frame
-        self.P = P              # 6x6 covariance
+        self.x = x  # [px,py,pz,vx,vy,vz], absolute Phobos-frame
+        self.P = P  # 6x6 covariance
         self.diameter = diameter
-        self.t = t              # time the state refers to
+        self.t = t  # time the state refers to
         self.last_seen = t
         self.hits = 1
 
 
 class DebrisTracker:
-    def __init__(self, pos_sigma=2.0, rr_sigma=0.02, accel_sigma=0.02,
-                 init_tangential_vel_sigma=10.0, gate_chi2=16.0,
-                 diameter_tol=0.3, drop_after_s=5.0, min_hits=3):
-        self.pos_sigma = pos_sigma            # radar position noise (wiki: 2 m)
-        self.rr_sigma = rr_sigma              # radar range-rate noise (wiki: 0.02 m/s)
-        self.accel_sigma = accel_sigma        # unmodelled debris accel, m/s^2 (tune)
+    def __init__(
+        self,
+        pos_sigma=2.0,
+        rr_sigma=0.02,
+        accel_sigma=0.02,
+        init_tangential_vel_sigma=10.0,
+        gate_chi2=16.0,
+        diameter_tol=0.3,
+        drop_after_s=5.0,
+        min_hits=3,
+    ):
+        self.pos_sigma = pos_sigma  # radar position noise (wiki: 2 m)
+        self.rr_sigma = rr_sigma  # radar range-rate noise (wiki: 0.02 m/s)
+        self.accel_sigma = accel_sigma  # unmodelled debris accel, m/s^2 (tune)
         self.v0_sigma = init_tangential_vel_sigma  # prior on unknown sideways speed (tune)
-        self.gate_chi2 = gate_chi2            # Mahalanobis^2 gate, 3 dof (16.3 ~ 99.9%)
-        self.diameter_tol = diameter_tol      # max fractional diameter mismatch
-        self.drop_after_s = drop_after_s      # delete tracks unseen this long
-        self.min_hits = min_hits              # hits before a track is "confirmed"
+        self.gate_chi2 = gate_chi2  # Mahalanobis^2 gate, 3 dof (16.3 ~ 99.9%)
+        self.diameter_tol = diameter_tol  # max fractional diameter mismatch
+        self.drop_after_s = drop_after_s  # delete tracks unseen this long
+        self.min_hits = min_hits  # hits before a track is "confirmed"
         self.tracks: list[Track] = []
         self.t_last = -np.inf
 
@@ -66,8 +74,8 @@ class DebrisTracker:
         if len(debris_info) == 0:
             return self.confirmed()
 
-        t = max(float(d[2, 0]) for d in debris_info)   # radar measurement time
-        if t <= self.t_last + 1e-9:                    # no fresh radar data yet
+        t = max(float(d[2, 0]) for d in debris_info)  # radar measurement time
+        if t <= self.t_last + 1e-9:  # no fresh radar data yet
             return self.confirmed()
         self.t_last = t
 
@@ -75,14 +83,13 @@ class DebrisTracker:
         meas = []
         for d in debris_info:
             rel = np.array(d[0, :], float)
-            meas.append({"p": sp + rel, "rel": rel,
-                         "vr": float(d[1, 1]), "diam": float(d[1, 2])})
+            meas.append({"p": sp + rel, "rel": rel, "vr": float(d[1, 1]), "diam": float(d[1, 2])})
 
         for tr in self.tracks:
             self._predict(tr, t)
 
         # --- association: greedy on Mahalanobis distance, with gates ---
-        R = self.pos_sigma ** 2 * np.eye(3)
+        R = self.pos_sigma**2 * np.eye(3)
         pairs = []
         for i, tr in enumerate(self.tracks):
             Sinv = np.linalg.inv(tr.P[:3, :3] + R)
@@ -95,10 +102,11 @@ class DebrisTracker:
                     pairs.append((d2, i, j))
         pairs.sort()
         used_t, used_m = set(), set()
-        for d2, i, j in pairs:
+        for _d2, i, j in pairs:
             if i in used_t or j in used_m:
                 continue
-            used_t.add(i); used_m.add(j)
+            used_t.add(i)
+            used_m.add(j)
             self._correct(self.tracks[i], meas[j], sp, sv, t)
 
         # --- new tracks for unmatched contacts ---
@@ -123,8 +131,14 @@ class DebrisTracker:
         """
         sp = np.asarray(shuttle_pos, float)
         n = len(self.tracks)
-        snap = {"id": np.zeros(n, int), "p_rel": np.zeros((n, 3)), "v_abs": np.zeros((n, 3)),
-                "diameter": np.zeros(n), "sigma_p": np.zeros(n), "sigma_v": np.zeros(n)}
+        snap = {
+            "id": np.zeros(n, int),
+            "p_rel": np.zeros((n, 3)),
+            "v_abs": np.zeros((n, 3)),
+            "diameter": np.zeros(n),
+            "sigma_p": np.zeros(n),
+            "sigma_v": np.zeros(n),
+        }
         for i, tr in enumerate(self.tracks):
             dt = float(np.clip(t_now - tr.t, 0.0, max_extrap_s))
             snap["id"][i] = tr.id
@@ -138,29 +152,33 @@ class DebrisTracker:
     @staticmethod
     def relative_state(track, shuttle_pos, shuttle_vel):
         """Debris position and velocity relative to the shuttle (Phobos axes)."""
-        return track.x[:3] - np.asarray(shuttle_pos, float), track.x[3:] - np.asarray(shuttle_vel, float)
+        return track.x[:3] - np.asarray(shuttle_pos, float), track.x[3:] - np.asarray(
+            shuttle_vel, float
+        )
 
     # ----------------------------------------------------------------- private
     def _new_track(self, m, sp, sv, t):
         rng = max(np.linalg.norm(m["rel"]), 1e-6)
         u = m["rel"] / rng
-        v_rad = m["vr"] + sv @ u                      # debris velocity along line of sight
-        x = np.concatenate([m["p"], v_rad * u])       # sideways velocity unknown -> 0
+        v_rad = m["vr"] + sv @ u  # debris velocity along line of sight
+        x = np.concatenate([m["p"], v_rad * u])  # sideways velocity unknown -> 0
         P = np.zeros((6, 6))
-        P[:3, :3] = self.pos_sigma ** 2 * np.eye(3)
-        P[3:, 3:] = (self.v0_sigma ** 2 * (np.eye(3) - np.outer(u, u))
-                     + self.rr_sigma ** 2 * np.outer(u, u))
+        P[:3, :3] = self.pos_sigma**2 * np.eye(3)
+        P[3:, 3:] = self.v0_sigma**2 * (np.eye(3) - np.outer(u, u)) + self.rr_sigma**2 * np.outer(
+            u, u
+        )
         return Track(x, P, m["diam"], t)
 
     def _predict(self, tr, t):
         dt = t - tr.t
         if dt <= 0:
             return
-        F = np.eye(6); F[:3, 3:] = dt * np.eye(3)
-        q = self.accel_sigma ** 2
+        F = np.eye(6)
+        F[:3, 3:] = dt * np.eye(3)
+        q = self.accel_sigma**2
         Q = np.zeros((6, 6))
-        Q[:3, :3] = q * dt ** 3 / 3 * np.eye(3)
-        Q[:3, 3:] = Q[3:, :3] = q * dt ** 2 / 2 * np.eye(3)
+        Q[:3, :3] = q * dt**3 / 3 * np.eye(3)
+        Q[:3, 3:] = Q[3:, :3] = q * dt**2 / 2 * np.eye(3)
         Q[3:, 3:] = q * dt * np.eye(3)
         tr.x = F @ tr.x
         tr.P = F @ tr.P @ F.T + Q
@@ -170,11 +188,11 @@ class DebrisTracker:
         I6 = np.eye(6)
         # 1) position update
         H = np.hstack([np.eye(3), np.zeros((3, 3))])
-        S = H @ tr.P @ H.T + self.pos_sigma ** 2 * np.eye(3)
+        S = H @ tr.P @ H.T + self.pos_sigma**2 * np.eye(3)
         K = tr.P @ H.T @ np.linalg.inv(S)
         tr.x = tr.x + K @ (m["p"] - H @ tr.x)
         A = I6 - K @ H
-        tr.P = A @ tr.P @ A.T + K @ (self.pos_sigma ** 2 * np.eye(3)) @ K.T
+        tr.P = A @ tr.P @ A.T + K @ (self.pos_sigma**2 * np.eye(3)) @ K.T
 
         # 2) range-rate update: v_debris . u = range_rate + v_shuttle . u
         rel = tr.x[:3] - sp
@@ -184,7 +202,7 @@ class DebrisTracker:
         # line-of-sight error (~pos_sigma/range rad) leaks sideways speed into this
         # measurement, so inflate its noise with the current relative-speed estimate
         v_rel = np.linalg.norm(tr.x[3:] - sv)
-        r2 = self.rr_sigma ** 2 + (self.pos_sigma / rng * v_rel) ** 2
+        r2 = self.rr_sigma**2 + (self.pos_sigma / rng * v_rel) ** 2
         Hr = np.concatenate([np.zeros(3), u]).reshape(1, 6)
         s = (Hr @ tr.P @ Hr.T).item() + r2
         k = (tr.P @ Hr.T) / s

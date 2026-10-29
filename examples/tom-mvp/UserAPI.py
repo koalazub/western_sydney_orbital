@@ -1,18 +1,28 @@
+# SDK bootstrap must connect with the original argv before importing NumPy.
+# ruff: noqa: E402
+
 #############################################################################################
 # DON'T CHANGE ANY OF THE BELOW. NECESSARY FOR CORRECTLY JOINING THE COMPETITION SIMULATION #
 #############################################################################################
 
-import os, sys, time, datetime, traceback
+import datetime
+import sys
+import time
+import traceback
+
 import spaceteams as st
+
+
 def custom_exception_handler(exctype, value, tb):
     error_message = "".join(traceback.format_exception(exctype, value, tb))
     st.logger_fatal(error_message)
+
+
 sys.excepthook = custom_exception_handler
 st.connect_to_sim(sys.argv)
 
 import numpy as np
 import numpy.typing as npt
-
 
 this = st.GetThisSystem()
 
@@ -34,9 +44,10 @@ bottomCameraFrame = bottomCamera.GetBodyFixedFrame()
 
 
 def GetNearestDebrisLocations(N: int) -> list[npt.NDArray]:
-    allDebrisInfo: list[npt.NDArray] = shuttle.GetParamArray(st.VarType.doubleM3x3, 
-                                                            ["Radar", "SortedDebrisData"])
-    nearest = allDebrisInfo[:min(N, len(allDebrisInfo))]
+    allDebrisInfo: list[npt.NDArray] = shuttle.GetParamArray(
+        st.VarType.doubleM3x3, ["Radar", "SortedDebrisData"]
+    )
+    nearest = allDebrisInfo[: min(N, len(allDebrisInfo))]
     return nearest
 
 
@@ -47,7 +58,9 @@ def PanTiltCamera(camera: st.Entity, yaw_deg: float, pitch_deg: float) -> None:
     elif camera == bottomCamera:
         yaw_deg = np.clip(yaw_deg, -89.0, 89.0)
         pitch_deg = np.clip(pitch_deg, 0.0, 50.0)
-    camera.setRotation_DCM(st.math.Euler321_to_DCM([np.deg2rad(yaw_deg), np.deg2rad(pitch_deg), 0.0]), shuttleFrame)
+    camera.setRotation_DCM(
+        st.math.Euler321_to_DCM([np.deg2rad(yaw_deg), np.deg2rad(pitch_deg), 0.0]), shuttleFrame
+    )
 
 
 def SetCommand(accelCommand: npt.NDArray, angAccelCommand: npt.NDArray) -> None:
@@ -68,7 +81,9 @@ def SetCommand(accelCommand: npt.NDArray, angAccelCommand: npt.NDArray) -> None:
 # Get initial simulation time #
 ###############################
 
-t0_sim: st.timestamp = st.SimGlobals.GetSimEntity().GetParam(st.VarType.timestamp, ["Time", "StartDateTAI"])
+t0_sim: st.timestamp = st.SimGlobals.GetSimEntity().GetParam(
+    st.VarType.timestamp, ["Time", "StartDateTAI"]
+)
 t0: datetime.datetime = t0_sim.as_datetime()
 
 ##################
@@ -78,11 +93,10 @@ t0: datetime.datetime = t0_sim.as_datetime()
 iteration = 0
 exit_flag: bool = False
 while not exit_flag:
-
     ################################
     # Wait between loop iterations #
     ################################
-    
+
     time.sleep(1.0 / this.GetParam(st.VarType.double, "LoopFreqHz"))
 
     ###################################
@@ -143,8 +157,11 @@ while not exit_flag:
         closestDebris_closestPoint = closestDebris[1, 0]
         closestDebris_rangeRate = closestDebris[1, 1]
         closestDebris_diameter = closestDebris[1, 2]
-        st.OnScreenLogMessage(f"Nearest debris: {np.linalg.norm(closestDebris_loc):.1f} m", 
-                              "UserAPIPrintout", st.Severity.Info)
+        st.OnScreenLogMessage(
+            f"Nearest debris: {np.linalg.norm(closestDebris_loc):.1f} m",
+            "UserAPIPrintout",
+            st.Severity.Info,
+        )
 
     #######################################################
     # Example for commanding a...                         #
