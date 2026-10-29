@@ -921,6 +921,7 @@ impl Simulation {
         self.state.mission.status = assessment.status;
         self.state.mission.phase = assessment.phase;
         self.state.mission.score = assessment.score;
+        self.state.mission.score_breakdown = assessment.score_breakdown;
         if assessment.phase == MissionPhase::OnPad
             && let Some(lander) = self
                 .state
@@ -1194,6 +1195,7 @@ fn initial_for_flight(
             status: MissionStatus::Running,
             score: None,
             score_label: "Custom mission estimate; not official STP score".into(),
+            score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: flight.target_region,
         },
@@ -1505,6 +1507,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         || s.mission.damage < 0.0
         || s.mission.target_region != settings().flight_preset(s.flight_preset).target_region
         || s.mission.score.is_some_and(|v| !v.is_finite())
+        || !mission::valid_archived_breakdown(&s.mission)
     {
         return Err("invalid or client-modified fixed configuration".into());
     }

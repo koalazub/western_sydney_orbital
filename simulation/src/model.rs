@@ -1,6 +1,6 @@
 pub use crate::domain::FlightPreset;
 use crate::domain::{
-    EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus,
+    EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus, ScoreBreakdown,
 };
 pub use crate::propulsion::ThrustApplication;
 pub use crate::terrain::{
@@ -357,6 +357,8 @@ pub struct MissionState {
     #[serde(default)]
     pub score_label: String,
     #[serde(default)]
+    pub score_breakdown: Option<ScoreBreakdown>,
+    #[serde(default)]
     pub phase: MissionPhase,
     pub target_region: LagrangeRegion,
 }
@@ -374,6 +376,7 @@ impl Default for MissionState {
             status: MissionStatus::Running,
             score: None,
             score_label: String::new(),
+            score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: LagrangeRegion::L2,
         }
