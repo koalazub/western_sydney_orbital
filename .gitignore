@@ -56,6 +56,8 @@ worker/worker-configuration.d.ts
 # Keep generated runs, but not scratch output.
 runs/scratch/
 runs/**/raw/
+# Keep this full sensor/source evidence local; only its curated analytics ship.
+/runs/teammate-analytics-69/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
