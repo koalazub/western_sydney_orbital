@@ -6,6 +6,7 @@ import { createEngineCanvas, graphicsPreflight } from "./graphics.ts";
 import { diagnoseStartupFailure, showStartupFailure } from "./startup-errors.ts";
 import { connectRoom, type RoomEngine } from "./room-control.ts";
 import { installDiagnostics } from "./diagnostics.ts";
+import { installControllerProfiles } from "./controller-profiles.ts";
 const diagnostics = installDiagnostics();
 type Engine = RoomEngine & {
   default: (options: unknown) => Promise<unknown>;
@@ -99,7 +100,6 @@ const browserGlobals = globalThis as typeof globalThis & {
     error: string | null;
   };
   __wsorbGPU?: GPUPreflight;
-  __wsorbLocalApi?: { page_id?: string; status?: string };
   __wsorbFullscreenFailure?: {
     activation: boolean | undefined;
     name: string;
@@ -107,7 +107,7 @@ const browserGlobals = globalThis as typeof globalThis & {
   } | null;
   __wsorbPlatformAction?: typeof platformAction;
   __wsorbEngineError?: typeof fail;
-  __wsorbLocalApi?: { status: string; error: string | null; page_id?: string };
+  __wsorbLocalApi?: { status: string; error: string | null; page_id?: string; controllers?: (payload?: Record<string, unknown>) => Promise<Record<string, unknown>> };
 };
 
 let engine: Engine | undefined;
@@ -215,7 +215,7 @@ function offerPythonConnection() {
         const messages: Record<string, string> = {
           connecting: "Connecting to your private Python room.",
           claiming: "Requesting this room's browser ownership. An existing owner will not be replaced.",
-          connected: "Python room connected. Start wsorb checkpoint with your private room file to fly. Shift+Esc disconnects.",
+          connected: "Python room connected. Open Controller profiles to select a teammate. Start the Python runner with this room's private descriptor. Shift+Esc disconnects.",
           conflict: "Another browser owns this room. It was not replaced.",
           error: "Python room stopped. No call is retried.",
           indeterminate: "Python room stopped. A command's outcome is unknown. Inspect the actual flight before reconnecting.",
@@ -956,6 +956,12 @@ async function start() {
     requestInitialFollowView();
     monitorLocalPythonConnection();
     offerPythonConnection();
+    installControllerProfiles({
+      engine: () => engine,
+      ready: () => ready && !failed && !document.hidden && engine !== undefined,
+      room: () => roomSessionActive ? roomConnection : null,
+      local: () => browserGlobals.__wsorbLocalApi,
+    });
   } catch (error) {
     fail(error);
   }

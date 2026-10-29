@@ -166,6 +166,22 @@ WSORB_LAB=1 WSORB_HEADLESS=1 just local
 
 This starts an explicit, separate native-headless flight through the existing private loopback API. It runs the actual physics, sensor delivery, playback and telemetry schedules. Renderer status stays unstarted and camera capture reports no sample; no browser or replacement image is involved. The notebook connects using the private connection file as usual. **Pause physics** works without a game window. Starting this mode does not attach to or reset a flight already open in a browser.
 
+### Choose a teammate and profile
+
+Open **Controller profiles** in the game, or press **Shift+C** while the canvas has focus. Choose **Tom**, **Harry** or **Bui**, then a profile. WSO retains the portable baseline profiles. Harry's choices are the PD and coast baselines used by his sweep workflow; Tom's stock UserAPI example is labelled separately from his target-seeking MVP.
+
+Start the private Python runner for the game you want to control:
+
+```sh
+just controllers serve --connection-file .devenv/wsorb-local.json --run
+```
+
+For a hosted game, use `--room-file` with the private room descriptor instead. Python stays on your machine. The panel shows whether that runner is actually online. Choose **Run fresh test** and confirm replacement of this tab's flight. Selecting another teammate or profile requests Stop first; it does not reset the game or run the next profile automatically.
+
+Fresh panel tests use the same L2 setup, seed 100 and 500 real debris bodies. Compare equal time limits and the measured time, range, speed, damage and fuel. Native station-region arrival does not certify docking or a safe low-speed rendezvous. Both teammate MVP profiles are explicitly adapted to the command limits; their original SDK entrypoints and displays remain in `examples/`.
+
+The same profiles run without a browser through `just controllers run --isolated --profile PROFILE --run`. `just controllers list` lists their names and adaptations. `just controllers compare --isolated --run` runs each profile in a separate matching world, with native fenced leases rather than manual stepping. No existing game is reset.
+
 ### Run a checkpoint attempt through the APIs
 
 Inspect a fresh isolated world without issuing flight commands:
@@ -296,6 +312,8 @@ Phobos and Mars use [credited spacecraft surface maps](worker/web/assets/ATTRIBU
 ## Compare runs and share what you learn
 
 Use the same launch setup, seed, world settings, ship calibration and run schedule when comparing two policies. Change one thing at a time where possible, and record deliberate differences.
+
+Harry's `flight-sweep` workflow remains available for paired seed/debris experiments and saved-trial inspection. Its headless client now uses the existing authenticated native backend, with manual steps of at most one second. Saved runs identify that execution mode separately from live leased-controller results. Historical experiment copies and receipts retain their original provenance; selecting a saved trial does not overwrite its report.
 
 Look at arrival time, arrival speed, fuel and damage together. A fast arrival with excessive speed or damage is not necessarily a better strategy. History retains measurement timestamps, leaves missing readings missing and separates resets or interventions instead of drawing a false continuous flight.
 

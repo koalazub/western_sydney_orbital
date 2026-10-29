@@ -31,4 +31,25 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #python-permission::backdrop { background: rgb(0 0 0 / .7); }
 #python-permission h2 { margin-top: 0; font-size: 1.25rem; }
 #python-permission form { display: flex; flex-wrap: wrap; gap: 12px; }
+.controller-toggle { position: absolute; inset-inline-start: 12px; inset-block-end: 12px; max-width: calc(100% - 24px); z-index: 1; }
+.controller-toggle, #controller-panel button, #controller-panel select { min-height: 40px; padding: 8px 12px; font: inherit; color: #e8edf3; background: #1c3042; border: 1px solid #9ab0c3; border-radius: 3px; }
+.controller-toggle, #controller-panel button { cursor: pointer; }
+#controller-panel :is(button, select, summary, .controller-results):focus-visible, .controller-toggle:focus-visible { outline: 2px solid #94d9f5; outline-offset: 3px; }
+#controller-panel { width: min(60rem, calc(100% - 24px)); max-height: calc(100dvh - 24px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid #526374; color: #e8edf3; background: #101923; overflow-wrap: anywhere; }
+#controller-panel::backdrop { background: rgb(0 0 0 / .7); }
+.controller-heading, .controller-actions, .controller-fields { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; }
+.controller-heading { justify-content: space-between; }
+.controller-heading h2 { margin: 0; font-size: 1.25rem; }
+.controller-fields label { display: grid; gap: 4px; flex: 1 1 12rem; min-width: 0; }
+.controller-fields select { width: 100%; }
+#controller-panel p { margin: 12px 0; }
+#controller-panel button:disabled { cursor: default; opacity: .55; }
+#controller-error { color: #ffb5aa; }
+#controller-setup { margin-block: 16px; }
+#controller-setup summary { cursor: pointer; min-height: 28px; }
+.controller-results { overflow-x: auto; margin-block-start: 20px; }
+.controller-results table { width: 100%; border-collapse: collapse; font-size: .875rem; text-align: start; }
+.controller-results caption { text-align: start; margin-block-end: 8px; color: #b7c6d4; }
+.controller-results :is(th, td) { border-bottom: 1px solid #526374; padding: 8px; font-variant-numeric: tabular-nums; }
+.controller-results td:not(:first-child) { white-space: nowrap; }
 [hidden] { display: none !important; }

@@ -138,6 +138,9 @@ export function connect(token) {
     }
   }
 
+  // The panel receives a scoped authenticated operation, never the bearer token.
+  status.controllers = payload => request("controllers", payload === undefined ? undefined : JSON.stringify(payload));
+
   async function attach() {
     const response = await fetch("/sim/manifest.json", {
       cache: "no-store", mode: "same-origin", credentials: "omit", redirect: "error", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

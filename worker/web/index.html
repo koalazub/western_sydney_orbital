@@ -10,6 +10,7 @@
 </head>
 <body>
   <main id="simulation-viewport" aria-label="Escape from Phobos simulation">
+    <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-keyshortcuts="Shift+C" hidden>Controller profiles</button>
     <canvas id="simulation-canvas" tabindex="0" aria-label="Interactive Bevy simulation" aria-describedby="camera-instructions"></canvas>
     <section id="boot-screen" class="boot-screen" aria-labelledby="boot-title">
       <h1 id="boot-title">Escape from Phobos</h1>
@@ -54,6 +55,50 @@
         <button value="cancel" type="submit" autofocus>Keep manual control</button>
         <button value="allow" type="submit">Allow Python connection</button>
       </form>
+    </dialog>
+    <dialog id="controller-panel" aria-labelledby="controller-title" aria-describedby="controller-scope">
+      <header class="controller-heading">
+        <h2 id="controller-title">Test a teammate's controller</h2>
+        <button id="close-controllers" type="button" aria-label="Close controller profiles">Close</button>
+      </header>
+      <p id="controller-scope">Python runs the selected logic. This game supplies real physics and sensors. Every fresh test uses seed 100 and 500 debris bodies at L2.</p>
+      <div class="controller-fields">
+        <label for="controller-owner">Teammate
+          <select id="controller-owner" name="controller-owner"></select>
+        </label>
+        <label for="controller-profile">Profile
+          <select id="controller-profile" name="controller-profile" aria-describedby="controller-description"></select>
+        </label>
+        <label for="controller-duration">Simulation time limit
+          <select id="controller-duration" name="controller-duration">
+            <option value="60">60 seconds</option>
+            <option value="600">600 seconds</option>
+            <option value="1800" selected>1800 seconds</option>
+          </select>
+        </label>
+      </div>
+      <p id="controller-description"></p>
+      <p id="controller-service-status" role="status"></p>
+      <p id="controller-error" role="alert"></p>
+      <p id="controller-fresh-warning">Run fresh replaces this tab's flight. Stop the current controller first. Selecting another profile requests Stop; it never resets or starts a flight by itself.</p>
+      <div class="controller-actions">
+        <button id="run-controller" type="button">Run fresh test</button>
+        <button id="stop-controller" type="button" disabled>Stop controller</button>
+        <button id="refresh-controller-results" type="button">Refresh results</button>
+        <button id="pause-controller-updates" type="button">Pause updates</button>
+      </div>
+      <details id="controller-setup">
+        <summary>Connect the Python runner</summary>
+        <p>Local game: start <code>just controllers serve --connection-file .devenv/wsorb-local.json --run</code> with the descriptor for this server.</p>
+        <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
+      </details>
+      <div class="controller-results" tabindex="0" aria-label="Station arrival results, scroll horizontally for all measurements">
+        <table>
+          <caption>Fresh tests with the same seed and debris population. Compare equal time limits. Station-region arrival is not docking.</caption>
+          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel, kg</th></tr></thead>
+          <tbody id="controller-result-rows"></tbody>
+        </table>
+      </div>
     </dialog>
   </main>
   <script type="module" src="/app.js"></script>
