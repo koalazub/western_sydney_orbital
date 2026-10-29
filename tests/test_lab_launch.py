@@ -427,10 +427,32 @@ def notebook_server(tmp_path_factory, real_marimo):
     if node is None or not (ROOT / "worker/public/index.html").is_file():
         pytest.skip("The real local transport check needs Node and assets from just build")
     port, token_file = real_marimo
-    connection = tmp_path_factory.mktemp("notebook-server").resolve() / "connection.json"
+    workspace = tmp_path_factory.mktemp("notebook-server").resolve()
+    # Exercise default-descriptor redirects in an owned filesystem, not by
+    # overwriting the developer's real default connection. Explicit alternate
+    # descriptors intentionally show separate-game help instead of redirecting.
+    # These are the actual production modules and assets, with no substitute
+    # server, notebook response or renderer readiness.
+    for relative in (
+        "worker/package.json",
+        "worker/scripts/local.mjs",
+        "worker/scripts/local-api.mjs",
+        "worker/scripts/notebook-launch.mjs",
+        "worker/shared/diagnostics.ts",
+        "worker/shared/controller-jobs.ts",
+        "worker/web/local-api.js",
+        "worker/web/notebook.html",
+        "worker/public/index.html",
+        "worker/public/sim/manifest.json",
+        "src/wsorb/controllers/catalog.json",
+    ):
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
+    connection = workspace / ".devenv/wsorb-local.json"
     process = subprocess.Popen(
         [node, "worker/scripts/local.mjs"],
-        cwd=ROOT,
+        cwd=workspace,
         env=_lab_environment(
             PORT="0",
             WSORB_LAB="1",
