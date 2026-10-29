@@ -1,0 +1,47 @@
+{
+  "schema": "wsorb.teammate_analytics.artifacts",
+  "schema_version": 1,
+  "provenance_revision": "8d64198855735c05045c40101d04e13101b135e61bf9b48389a62eeef70a022a",
+  "artifacts": [
+    {
+      "path": "aggregate.csv",
+      "bytes": 3884,
+      "sha256": "e95d7dfcd94327dfa1ac3865a0c15a22c7cde0426759f4a04ed4b89d07b5e4a3"
+    },
+    {
+      "path": "dataset.json",
+      "bytes": 1174237,
+      "sha256": "8d64198855735c05045c40101d04e13101b135e61bf9b48389a62eeef70a022a"
+    },
+    {
+      "path": "efficiency.svg",
+      "bytes": 8953,
+      "sha256": "f6e1381c9d550139923acb6dc00fcaa483a65734e17998f41646c2c02c6b9bb6"
+    },
+    {
+      "path": "fuel-burns.svg",
+      "bytes": 157824,
+      "sha256": "115267e694a46904598901abf86a9f07a19d5e1ef9effcef5fdc53513b8e807a"
+    },
+    {
+      "path": "samples.csv",
+      "bytes": 646549,
+      "sha256": "fd2b84894c613d0a0d4f6712c8e154bc71d725a63a8bd80a8f4bc75610e5e89f"
+    },
+    {
+      "path": "score-components.svg",
+      "bytes": 10387,
+      "sha256": "bd8e0af962b95ae92e477adaf81be5114e4d26c02c3c38f7b775589f40ae7e7f"
+    },
+    {
+      "path": "trials.csv",
+      "bytes": 13185,
+      "sha256": "ae5c461ae44e873eb9272feb3d62892627c75c835ffb79858c105fb548b1cd07"
+    },
+    {
+      "path": "turns.svg",
+      "bytes": 235322,
+      "sha256": "d3163ce5133e27b494ee38ecf291b9713583afcfd18a5535aad560cb629e8205"
+    }
+  ]
+}

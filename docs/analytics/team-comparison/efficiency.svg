@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 967" role="img" aria-labelledby="title" aria-describedby="description">
+<title id="title">Completion, duration and resource comparison</title>
+<desc id="description">No weighted efficiency score. Timeout durations are partial flight horizons. Values are available in dataset.json and the CSV downloads. Thin traces are actual paired-seed trials, not a median trajectory. Missing values are not drawn.</desc>
+<rect width="1100" height="100%" fill="white"/>
+<style>text{font-family:system-ui,sans-serif;fill:#172033;font-size:16px}.heading{font-size:24px;font-weight:650}.panel{font-size:16px;font-weight:650}</style>
+<text x="24" y="35" class="heading">Completion, duration and resource comparison</text>
+<text x="24" y="59">No weighted efficiency score. Timeout durations are partial flight horizons.</text>
+<rect x="25" y="76" width="13" height="13" fill="#075985"/>
+<text x="46.00" y="87.00" text-anchor="start" class="">1. Bui / Alpha-beta + sidestep</text>
+<rect x="565" y="76" width="13" height="13" fill="#9d174d"/>
+<text x="586.00" y="87.00" text-anchor="start" class="">2. Tom / Kalman + velocity governor</text>
+<rect x="25" y="99" width="13" height="13" fill="#166534"/>
+<text x="46.00" y="110.00" text-anchor="start" class="">3. Harry / Basic PD + radar</text>
+<text x="25.00" y="155.00" text-anchor="start" class="panel">Arrival-radius entries / all attempts</text>
+<text x="92.00" y="176.00" text-anchor="start" class="">fraction of attempts</text>
+<path d="M 92 339.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="343.00" text-anchor="end" class="">0</text>
+<path d="M 92 293.33 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="297.33" text-anchor="end" class="">0.3333</text>
+<path d="M 92 247.67 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="251.67" text-anchor="end" class="">0.6667</text>
+<path d="M 92 202.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="206.00" text-anchor="end" class="">1</text>
+<text x="164.33" y="383.00" text-anchor="middle" class="">1. Bui</text>
+<rect x="126.72" y="202.00" width="75.23" height="137.00" fill="#075985"><title>Bui / Alpha-beta + sidestep: 1 fraction of attempts</title></rect>
+<text x="164.33" y="197.00" text-anchor="middle" class="">10/10</text>
+<text x="309.00" y="383.00" text-anchor="middle" class="">2. Tom</text>
+<rect x="271.39" y="202.00" width="75.23" height="137.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 1 fraction of attempts</title></rect>
+<text x="309.00" y="197.00" text-anchor="middle" class="">10/10</text>
+<text x="453.67" y="383.00" text-anchor="middle" class="">3. Harry</text>
+<rect x="416.05" y="202.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: 1 fraction of attempts</title></rect>
+<text x="453.67" y="197.00" text-anchor="middle" class="">10/10</text>
+<text x="568.00" y="155.00" text-anchor="start" class="panel">Sampled flight duration</text>
+<text x="635.00" y="176.00" text-anchor="start" class="">physical-result median, s</text>
+<path d="M 635 339.00 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="343.00" text-anchor="end" class="">0</text>
+<path d="M 635 293.33 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="297.33" text-anchor="end" class="">79.92</text>
+<path d="M 635 247.67 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="251.67" text-anchor="end" class="">159.8</text>
+<path d="M 635 202.00 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="206.00" text-anchor="end" class="">239.8</text>
+<text x="707.33" y="383.00" text-anchor="middle" class="">1. Bui</text>
+<rect x="669.72" y="202.00" width="75.23" height="137.00" fill="#075985"><title>Bui / Alpha-beta + sidestep: 239.8 physical-result median, s</title></rect>
+<text x="707.33" y="197.00" text-anchor="middle" class="">239.8</text>
+<text x="852.00" y="383.00" text-anchor="middle" class="">2. Tom</text>
+<rect x="814.39" y="211.74" width="75.23" height="127.26" fill="#9d174d"><title>Tom / Kalman + velocity governor: 222.7 physical-result median, s</title></rect>
+<text x="852.00" y="206.74" text-anchor="middle" class="">222.7</text>
+<text x="996.67" y="383.00" text-anchor="middle" class="">3. Harry</text>
+<rect x="959.05" y="210.80" width="75.23" height="128.20" fill="#166534"><title>Harry / Basic PD + radar: 224.4 physical-result median, s</title></rect>
+<text x="996.67" y="205.80" text-anchor="middle" class="">224.4</text>
+<text x="25.00" y="425.00" text-anchor="start" class="panel">Fuel used</text>
+<text x="92.00" y="446.00" text-anchor="start" class="">physical-result median, kg</text>
+<path d="M 92 609.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="613.00" text-anchor="end" class="">0</text>
+<path d="M 92 563.33 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="567.33" text-anchor="end" class="">101.5</text>
+<path d="M 92 517.67 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="521.67" text-anchor="end" class="">203</text>
+<path d="M 92 472.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="476.00" text-anchor="end" class="">304.6</text>
+<text x="164.33" y="653.00" text-anchor="middle" class="">1. Bui</text>
+<rect x="126.72" y="571.56" width="75.23" height="37.44" fill="#075985"><title>Bui / Alpha-beta + sidestep: 83.22 physical-result median, kg</title></rect>
+<text x="164.33" y="566.56" text-anchor="middle" class="">83.22</text>
+<text x="309.00" y="653.00" text-anchor="middle" class="">2. Tom</text>
+<rect x="271.39" y="570.77" width="75.23" height="38.23" fill="#9d174d"><title>Tom / Kalman + velocity governor: 85 physical-result median, kg</title></rect>
+<text x="309.00" y="565.77" text-anchor="middle" class="">85</text>
+<text x="453.67" y="653.00" text-anchor="middle" class="">3. Harry</text>
+<rect x="416.05" y="472.00" width="75.23" height="137.00" fill="#166534"><title>Harry / Basic PD + radar: 304.6 physical-result median, kg</title></rect>
+<text x="453.67" y="467.00" text-anchor="middle" class="">304.6</text>
+<text x="568.00" y="425.00" text-anchor="start" class="panel">Propellant episodes</text>
+<text x="635.00" y="446.00" text-anchor="start" class="">physical-result median count</text>
+<path d="M 635 609.00 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="613.00" text-anchor="end" class="">0</text>
+<path d="M 635 563.33 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="567.33" text-anchor="end" class="">2.333</text>
+<path d="M 635 517.67 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="521.67" text-anchor="end" class="">4.667</text>
+<path d="M 635 472.00 H 1069" stroke="#d8dee7"/>
+<text x="627.00" y="476.00" text-anchor="end" class="">7</text>
+<text x="707.33" y="653.00" text-anchor="middle" class="">1. Bui</text>
+<rect x="669.72" y="491.57" width="75.23" height="117.43" fill="#075985"><title>Bui / Alpha-beta + sidestep: 6 physical-result median count</title></rect>
+<text x="707.33" y="486.57" text-anchor="middle" class="">6</text>
+<text x="852.00" y="653.00" text-anchor="middle" class="">2. Tom</text>
+<rect x="814.39" y="472.00" width="75.23" height="137.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 7 physical-result median count</title></rect>
+<text x="852.00" y="467.00" text-anchor="middle" class="">7</text>
+<text x="996.67" y="653.00" text-anchor="middle" class="">3. Harry</text>
+<rect x="959.05" y="589.43" width="75.23" height="19.57" fill="#166534"><title>Harry / Basic PD + radar: 1 physical-result median count</title></rect>
+<text x="996.67" y="584.43" text-anchor="middle" class="">1</text>
+<text x="25.00" y="695.00" text-anchor="start" class="panel">Physical turn episodes</text>
+<text x="92.00" y="716.00" text-anchor="start" class="">physical-result median count</text>
+<path d="M 92 879.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="883.00" text-anchor="end" class="">0</text>
+<path d="M 92 833.33 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="837.33" text-anchor="end" class="">2.667</text>
+<path d="M 92 787.67 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="791.67" text-anchor="end" class="">5.333</text>
+<path d="M 92 742.00 H 526" stroke="#d8dee7"/>
+<text x="84.00" y="746.00" text-anchor="end" class="">8</text>
+<text x="164.33" y="923.00" text-anchor="middle" class="">1. Bui</text>
+<rect x="126.72" y="742.00" width="75.23" height="137.00" fill="#075985"><title>Bui / Alpha-beta + sidestep: 8 physical-result median count</title></rect>
+<text x="164.33" y="737.00" text-anchor="middle" class="">8</text>
+<text x="309.00" y="923.00" text-anchor="middle" class="">2. Tom</text>
+<rect x="271.39" y="879.00" width="75.23" height="1.00" fill="#9d174d"><title>Tom / Kalman + velocity governor: 0 physical-result median count</title></rect>
+<text x="309.00" y="874.00" text-anchor="middle" class="">0</text>
+<text x="453.67" y="923.00" text-anchor="middle" class="">3. Harry</text>
+<rect x="416.05" y="879.00" width="75.23" height="1.00" fill="#166534"><title>Harry / Basic PD + radar: 0 physical-result median count</title></rect>
+<text x="453.67" y="874.00" text-anchor="middle" class="">0</text>
+</svg>

@@ -313,6 +313,67 @@ Viewer lighting, stars, route guides, instrument panels and exhaust effects do n
 
 Phobos and Mars use [credited spacecraft surface maps](worker/web/assets/ATTRIBUTION.md). These help us recognise the setting; they are not a claim that our terrain or camera rendering exactly matches the official simulator.
 
+<!-- BEGIN GENERATED TEAMMATE ANALYTICS -->
+## Teammate flight comparison
+
+Local paired-seed practice runs at `far_side_l2`, 500 debris bodies, seeds 100, 101, 102, 103, 104. 2 consecutive fresh attempts per seed/profile. Horizon 600 s, controller step 0.5 s, physics step 0.05 s. Not an official leaderboard.
+
+| Profile | Successes | Scored / unscored | Valid pairs | Mean two-run score | Median time s | Median damage J | Median fuel kg | Burn episodes / active s | Angular episodes / active s | Turn episodes / active s | Rotation rad |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bui / Alpha-beta + sidestep | 10/10 | 10 / 0 | 5/5 | -7,036.80 | 239.8 | 0 | 83.22 | 6 / 78 | 8 / 89 | 8 / 237.1 | 3.011 |
+| Tom / Kalman + velocity governor | 10/10 | 10 / 0 | 5/5 | -7,187.09 | 222.7 | 0 | 85 | 7 / 39.5 | 0 / 0 | 0 / 0 | 0 |
+| Harry / Basic PD + radar | 10/10 | 10 / 0 | 5/5 | -26,280.67 | 224.4 | 0 | 304.6 | 1 / 224.4 | 0 / 0 | 0 / 0 | 0 |
+
+Local arithmetic mean of valid two-consecutive-run pair means across matched seeds, descending, with unchanged-code receipts and separate unscored attempts. The cross-seed mean is not an official aggregate or tie-break rule.
+
+Bui / Alpha-beta + sidestep: 10 success. Native analytics cover 10/10 physical results.
+Tom / Kalman + velocity governor: 10 success. Native analytics cover 10/10 physical results.
+Harry / Basic PD + radar: 10 success. Native analytics cover 10/10 physical results.
+
+The primary score is the arithmetic mean of valid two-consecutive-run pair means across the configured paired seeds. Both attempts must have a recorded native terminal score; partial pairs, timeouts and software errors are not averaged as complete pairs. Pair coverage is explicit. Other table measurements are medians over available physical results, including damage failures and partial timeout horizons. Errors are counted in attempts but excluded from physical measurement medians. Scores use recorded native terminal receipts only. Unavailable historical metrics remain unavailable, never zero. Component medians do not have to sum to the median score.
+
+Official Rules & Info, discussion #218, require the average of two consecutive unchanged-code runs in a single continuous video. This headless benchmark mirrors the pairing only. It is not an official submission, continuous video or licensed SDK run. Averaging pair means across multiple seeds is a local comparison choice, not an official aggregate, tie-break rule or claim about mixed-outcome precedence. Native-score medians remain available as diagnostics in the downloads.
+
+5 matched seeds with 2 consecutive repeats are not 10 independent seed draws. Success counts are descriptive, not proof of robustness. No confidence interval is claimed.
+
+### Fuel, burns and turn analytics
+
+![Recorded native scores and score components by teammate](docs/analytics/team-comparison/score-components.svg)
+
+![Cumulative recorded fuel and native propellant durations and episode counts](docs/analytics/team-comparison/fuel-burns.svg)
+
+![Recorded physical rotation, turn durations and angular-actuator episodes](docs/analytics/team-comparison/turns.svg)
+
+![Completion fractions, sampled durations, fuel and episode counts](docs/analytics/team-comparison/efficiency.svg)
+
+Native physics steps count contiguous propellant-force episodes above 1e-6 N, angular-actuator episodes above 1e-6 Nm, and physical turns whose post-step angular speed exceeds 1e-3 rad/s. Rotation is the geodesic quaternion arc. Durations integrate actual physics-step time. Queued commands and API polls do not add episodes. These are not nozzle pulses or score terms. The direct-angular-control fuel model is unchanged. Native totals stay exact when interior public samples are dropped. Every series retains its actual initial and final observation.
+
+Success is arrival-radius entry, not an arrival-speed or safe-docking check. Fuel and damage are local estimates. See [scoring and model limits](docs/scoring.md).
+
+Engine SHA-256: `be3dc642085bf68a59dc35853d296adc3b410145663e608e51d964463b42fb07`. The dataset includes the build size, source hashes, definitions and coverage counts. Private source snapshots, raw radar, cameras and exception strings are not published.
+
+[Dataset](docs/analytics/team-comparison/dataset.json) · [Trials CSV](docs/analytics/team-comparison/trials.csv) · [Aggregate CSV](docs/analytics/team-comparison/aggregate.csv) · [Samples CSV](docs/analytics/team-comparison/samples.csv) · [Artifact digests](docs/analytics/team-comparison/manifest.json)
+<!-- END GENERATED TEAMMATE ANALYTICS -->
+
+### Interpreting this comparison
+
+The five seeds and deterministic repeats produced identical headline results in this setup. All 30 trials reached the region with zero measured damage; that does not establish collision-avoidance robustness. Bui used slightly less estimated fuel than Tom, while Tom arrived sooner. Bui also used angular actuation and continued rotating while coasting. The local direct-angular-control fuel model differs from STP jet allocation, so this is not a claim about the eventual competition winner. Harry's entry is the shared PD baseline selected by his experiment workflow, not a claim that he authored that shared controller.
+
+The table covers each teammate's connected target-seeking profile. The coast and body-Z template controls, and WSO's separate checkpoint profiles, remain selectable in the player but are not mixed into these three-profile averages.
+
+### Interactive scoreboard and recorded data
+
+In the [hosted player](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/), open **Controller profiles → Scoreboard and flight analytics**. Published measurements load independently of the Python runner and WebGPU startup. Filter by seed, teammate and metric; inspect exact counters, score terms and numeric sample tables; download the selected series. Current-connection jobs are a separate dataset and never acquire results from this publication.
+
+Reproduce the experiment and publish to new directories:
+
+```sh
+just flight-sweep examples/teammate_comparison.json runs/scratch/teammate-comparison-new
+just scoreboard runs/scratch/teammate-comparison-new docs/analytics/teammate-comparison-new
+```
+
+Both outputs are new-only. The [publisher](src/wsorb/scoreboard.py) also provides `render_readme_section` for the generated block above. The checked-in artifact manifest records exact file hashes; full raw public-observation traces remain local in the ignored run directory.
+
 ## Compare runs and share what you learn
 
 Use the same launch setup, seed, world settings, ship calibration and run schedule when comparing two policies. Change one thing at a time where possible, and record deliberate differences.
