@@ -350,9 +350,9 @@ def test_primary_mean_uses_only_complete_two_run_pairs_and_preserves_pair_outcom
     assert "Harry / Basic PD + radar | 4/4 | 2 |" in section
     assert "Mean two-run score" not in section
     assert "STP points are unavailable" in section
-    assert "two consecutive unchanged-code runs" in section
     assert "2 matched seeds with 2 consecutive repeats are not 4 independent" in section
-    assert "not an official aggregate" in section
+    assert "these profiles are unranked" in section
+    assert "docs/flight-lab.md#reading-the-comparison" in section
 
 
 def test_paired_publication_matches_ui_profile_and_retained_sample_contract(paired_sweep):
@@ -628,22 +628,27 @@ def test_chart_text_and_profile_strokes_have_measured_contrast_on_white():
     assert all(contrast_on_white(color) >= 3 for color in _COLORS)
 
 
-def test_readme_renderer_includes_real_table_downloads_definitions_and_method(saved_sweep):
+def test_readme_renderer_includes_real_table_downloads_and_method_links(saved_sweep):
     bundle = build_bundle(saved_sweep)
     before = deepcopy(bundle)
     section = render_readme_section(bundle)
-    assert "Bui / Alpha-beta + sidestep | 1/2 | 2 | 3,000 |" in section
+    assert "Bui / Alpha-beta + sidestep | 1/2 | 2 | 0.4 |" in section
     assert "Mean two-run score" not in section
     assert "score-components.svg" not in section
-    assert "Burn episodes / active s" in section and "Rotation rad" in section
-    assert "### Fuel, burns and turn analytics" in section
-    assert "1 failed_damage" in section and "1 policy_error" in section
+    assert "| Profile | Arrivals / attempts | Median duration, s | Estimated fuel, kg |" in section
+    assert section.count("![") == 1
+    assert "1 damage failure" in section and "1 policy error" in section
+    assert "1 timeout" in section
     assert "partial timeout" in section
     assert "official leaderboard" in section
-    assert "1e-6 Nm" in section and "1e-3 rad/s" in section
+    assert "Native burn and turn measurements cover 5/5 physical results" in section
+    assert "docs/flight-lab.md#reading-the-comparison" in section
     assert "docs/scoring.md" in section
     assert "docs/analytics/team-comparison/turns.svg" in section
+    assert "docs/analytics/team-comparison/fuel-burns.svg" in section
     assert "aggregate.csv" in section
+    assert "dataset.json" in section and "manifest.json" in section
+    assert BUILD["sha256"] not in section
     assert bundle == before
     custom = render_readme_section(bundle, asset_prefix="assets/measured")
     assert "assets/measured/turns.svg" in custom

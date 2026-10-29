@@ -939,7 +939,7 @@ def refresh_scoreboard(directory: str | Path, output: str | Path) -> dict:
 def render_readme_section(
     bundle: dict, *, asset_prefix: str = "docs/analytics/team-comparison"
 ) -> str:
-    """Render actual measurements and method text; never edit a README."""
+    """Render a short measured comparison with links to the full records."""
     if (
         not isinstance(asset_prefix, str)
         or not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*", asset_prefix)
@@ -948,128 +948,84 @@ def render_readme_section(
         raise ValueError("asset_prefix must be a local relative asset path")
     comparison = bundle["comparison"]
     lines = [
-        "## Teammate flight comparison",
+        "### Recorded teammate flights",
         "",
-        f"Local paired-seed practice runs at `{comparison['preset']}`, "
-        f"{comparison['debris_count']} debris bodies, seeds "
-        f"{', '.join(str(seed) for seed in comparison['seeds'])}. "
-        f"{comparison['repetitions']} consecutive fresh attempts per seed/profile. "
-        f"Horizon {_format(comparison['duration_limit_s'])} s, controller step "
-        f"{_format(comparison['controller_step_s'])} s, physics step "
-        f"{_format(comparison['physics_step_s'])} s. Not an official leaderboard.",
-        "",
-        "STP points are unavailable. The local SI fuel estimate cannot replace STP's "
-        "`Stats/FuelUsed` counter. No conversion or combined efficiency score is assumed. "
-        "See the [documented formula and code discrepancy](docs/scoring.md).",
+        f"Local practice with {comparison['debris_count']} debris bodies, "
+        f"{len(comparison['seeds'])} matched seeds and {comparison['repetitions']} fresh "
+        "attempts per seed and profile. Not an official leaderboard.",
         "",
         "![Completion fractions, sampled durations, fuel and episode counts]"
         f"({asset_prefix}/efficiency.svg)",
         "",
-        "| Profile | Arrivals / attempts | "
-        "Median time s | Median damage J | Median fuel kg | Burn episodes / active s | "
-        "Angular episodes / active s | Turn episodes / active s | Rotation rad |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Profile | Arrivals / attempts | Median duration, s | Estimated fuel, kg |",
+        "| --- | ---: | ---: | ---: |",
     ]
     for profile in bundle["profiles"]:
-        pairs = [
-            f"{_format(profile[f'median_{name}_count'])} / "
-            f"{_format(profile[f'median_{name}_duration_s'])}"
-            for name in ("burn", "angular_burn", "turn")
-        ]
         cells = [
             f"{profile['owner']} / {profile['label']}",
             f"{profile['successes']}/{profile['attempts']}",
-            *(
-                _format(profile[f"median_{field}"])
-                for field in ("time_s", "damage_j", "fuel_used_kg")
-            ),
-            *pairs,
-            _format(profile["median_total_turn_angle_rad"]),
+            _format(profile["median_time_s"]),
+            _format(profile["median_fuel_used_kg"]),
         ]
         lines.append("| " + " | ".join(cells) + " |")
-    lines.extend(["", comparison["ranking_method"], ""])
+    lines.append("")
+    outcome_names = {"failed_damage": "damage failure", "interrupted": "interrupted attempt"}
     for profile in bundle["profiles"]:
-        outcomes = ", ".join(f"{count} {name}" for name, count in profile["outcomes"].items())
-        lines.append(
-            f"{profile['owner']} / {profile['label']}: {outcomes}. "
-            f"Native analytics cover {profile['analytics_runs']}/{profile['physical_runs']} "
-            "physical results."
+        other_outcomes = ", ".join(
+            f"{count} {outcome_names.get(name, name.replace('_', ' '))}{'s' if count != 1 else ''}"
+            for name, count in profile["outcomes"].items()
+            if name != "success"
         )
+        if other_outcomes:
+            lines.extend([f"{profile['owner']} also recorded {other_outcomes}.", ""])
     lines.extend(
         [
-            "",
-            "Table measurements are medians "
-            "over available physical results, including damage failures and "
-            "partial timeout horizons. Errors are counted in attempts but excluded from physical "
-            "measurement medians. A timeout's duration is not a completion time. Unavailable "
-            "historical metrics remain unavailable, never zero. Legacy local score receipts and "
-            "their two-run pair means remain unchanged in downloads, "
-            "not in the comparison ranking.",
-            "",
-        ]
-    )
-    lines.extend(
-        [
-            "Official Rules & Info, discussion #218, require the average of two consecutive "
-            "unchanged-code runs in a "
-            "single continuous video. This headless benchmark mirrors the pairing only. It is not "
-            "an official submission, continuous video or licensed SDK run. Averaging pair means "
-            "across multiple seeds is a local comparison choice, not an official aggregate, "
-            "tie-break rule or claim about mixed-outcome precedence. The archived local SI "
-            "totals are not comparable STP points.",
+            "Duration and fuel are medians of available physical results, including failed "
+            "flights and partial timeouts. Errors count as attempts, not physical measurements. "
+            "A timeout is not an arrival time. Missing readings stay missing.",
             "",
             f"{len(comparison['seeds'])} matched seeds with {comparison['repetitions']} "
             "consecutive repeats are not "
             f"{len(comparison['seeds']) * comparison['repetitions']} independent seed draws. "
-            "Success counts are descriptive, not proof of robustness. "
-            "No confidence interval is claimed.",
+            "Arrival counts are descriptive, not proof of robustness. "
+            "Arrival means entry to the station region, not safe docking.",
+            "",
+            "STP points are unavailable because local fuel is not STP's fuel counter. "
+            "The [scoring notes](docs/scoring.md) preserve the wiki/code disagreement; "
+            "these profiles are unranked.",
             "",
         ]
     )
-    lines.extend(["### Fuel, burns and turn analytics", ""])
-    for name, alt in (
-        (
-            "fuel-burns",
-            "Cumulative recorded fuel and native propellant durations and episode counts",
-        ),
-        ("turns", "Recorded physical rotation, turn durations and angular-actuator episodes"),
-    ):
-        lines.extend([f"![{alt}]({asset_prefix}/{name}.svg)", ""])
     if comparison["definitions"] is not None:
+        analytics_runs = sum(profile["analytics_runs"] for profile in bundle["profiles"])
+        physical_runs = sum(profile["physical_runs"] for profile in bundle["profiles"])
         lines.extend(
             [
-                "Native physics steps count contiguous propellant-force episodes above 1e-6 N, "
-                "angular-actuator episodes above 1e-6 Nm, and physical turns whose post-step "
-                "angular speed exceeds 1e-3 rad/s. Rotation is the geodesic quaternion arc. "
-                "Durations integrate actual physics-step time. Queued commands and API polls "
-                "do not add episodes. These are not nozzle pulses or score terms. "
-                "The direct-angular-control fuel model is unchanged. Native totals stay exact "
-                "when interior public samples are "
-                "dropped. Every series retains its actual initial and final observation.",
+                f"Native burn and turn measurements cover {analytics_runs}/{physical_runs} "
+                "physical results. Fuel and turning measurements describe the local model, "
+                "not competition efficiency.",
                 "",
             ]
         )
     else:
         lines.extend(
             [
-                "This archive has no versioned native analytics receipt. No burn or turn history "
-                "has been reconstructed from sampled commands.",
+                "No burn or turn history has been reconstructed where native measurements "
+                "are missing.",
                 "",
             ]
         )
     lines.extend(
         [
-            "Success is arrival-radius entry, not an arrival-speed or safe-docking check. Fuel and "
-            "damage are local estimates. See [scoring and model limits](docs/scoring.md).",
+            f"[Fuel and burns]({asset_prefix}/fuel-burns.svg) · "
+            f"[Turns and rotation]({asset_prefix}/turns.svg) · "
+            "[How to read and repeat this comparison](docs/flight-lab.md#reading-the-comparison)",
             "",
-            f"Engine SHA-256: `{comparison['engine_build']['sha256']}`. "
-            "The dataset includes the build size, source hashes, definitions and coverage counts. "
-            "Private source snapshots, raw radar, cameras and exception strings are not published.",
-            "",
-            f"[Dataset]({asset_prefix}/dataset.json) · [Trials CSV]({asset_prefix}/trials.csv) · "
-            f"[Aggregate CSV]({asset_prefix}/aggregate.csv) · "
+            f"[Full dataset and build record]({asset_prefix}/dataset.json) · "
+            f"[Trials CSV]({asset_prefix}/trials.csv) · "
+            f"[Summary CSV]({asset_prefix}/aggregate.csv) · "
             f"[Samples CSV]({asset_prefix}/samples.csv) · "
-            f"[Artifact digests]({asset_prefix}/manifest.json)",
+            f"[Artifact checksums]({asset_prefix}/manifest.json)",
             "",
         ]
     )
