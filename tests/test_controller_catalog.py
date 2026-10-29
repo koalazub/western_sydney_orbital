@@ -455,7 +455,7 @@ def test_bui_projected_hold_cap_matches_prediction_and_angular_norm_is_bounded()
     np.testing.assert_allclose(actual, [0.25, 0.0, 0.0], atol=1e-15)
     np.testing.assert_allclose((predicted_velocity[1] - velocity) / 0.25, actual, atol=1e-14)
     angular = controller.reorienter.command([0.0, 1.0, 1.0], [1.0, -1.0, 1.0])
-    assert np.linalg.norm(angular) <= 0.05
+    assert np.linalg.norm(angular) <= controller.reorienter.maximum < np.nextafter(0.05, 0.0)
     assert controller.modules["config"].ACC_MAX < 0.25
 
 

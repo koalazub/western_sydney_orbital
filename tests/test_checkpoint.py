@@ -656,8 +656,9 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
 def test_each_named_profile_runs_its_own_real_stock_world_with_native_leases(profile):
     from wsorb.checkpoint import isolated_simulation
 
+    duration = 3 if profile == "bui_alpha_beta_mvp" else 1
     options = CheckpointOptions(
-        isolated=True, run=True, policy=profile, duration_s=1, wall_budget_s=30
+        isolated=True, run=True, policy=profile, duration_s=duration, wall_budget_s=30
     )
     with isolated_simulation() as client:
         result = run_trial(client, options, policy=profile, owned=True)
@@ -665,7 +666,7 @@ def test_each_named_profile_runs_its_own_real_stock_world_with_native_leases(pro
         assert result["profile"]["id"] == profile
         assert result["execution_kind"] == "asynchronous_fenced_leased_API"
         assert "error" not in result, result.get("error")
-        assert result["final"]["time_s"] >= 1
+        assert result["final"]["time_s"] >= duration
         assert result["initial_world"]["debris_count"] == 500
         assert result["initial_world"]["seed"] == 100
         assert result["release_state"] == "acknowledged"

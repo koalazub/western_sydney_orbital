@@ -87,8 +87,12 @@ def _profile():
             return adopted
 
     class NormReorienter(modules["attitude"].Reorienter):
+        # Keep the requested norm below the cap in Python, JavaScript and Rust,
+        # whose floating-point hypot implementations may round differently.
+        maximum = 0.05 * (1.0 - 8.0 * np.finfo(float).eps)
+
         def command(self, target_dir_body, angvel_body):
-            return bounded(super().command(target_dir_body, angvel_body), 0.05)
+            return bounded(super().command(target_dir_body, angvel_body), self.maximum)
 
     class ExpiringTracks(modules["state_estimator"].DebrisTracks):
         def expire(self, now):
