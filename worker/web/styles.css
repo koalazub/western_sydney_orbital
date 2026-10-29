@@ -52,4 +52,5 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .controller-results caption { text-align: start; margin-block-end: 8px; color: #b7c6d4; }
 .controller-results :is(th, td) { border-bottom: 1px solid #526374; padding: 8px; font-variant-numeric: tabular-nums; }
 .controller-results td:not(:first-child) { white-space: nowrap; }
+@media (max-width: 40rem) { .python-room { inset-block-end: 64px; } .controller-toggle { min-height: 44px; } }
 [hidden] { display: none !important; }
