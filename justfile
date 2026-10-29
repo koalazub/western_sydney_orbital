@@ -283,6 +283,10 @@ tasks:
 controllers +args:
     devenv shell uv run --locked wsorb controllers {{args}}
 
+# Publish only curated own-ship measurements from a completed matched sweep.
+scoreboard input output:
+    devenv shell uv run --locked wsorb scoreboard --input {{quote(input)}} --output {{quote(output)}}
+
 # Default sweep has 50 trials. Reduce seeds/counts for a quick workflow check.
 flight-sweep config="examples/flight_sweep.json" output="":
     devenv shell uv run --locked --extra lab python examples/flight_sweep.py --config {{quote(config)}} --output {{quote(output)}}

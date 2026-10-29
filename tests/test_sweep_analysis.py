@@ -163,6 +163,22 @@ def test_precomputed_summaries_match_raw_runs_and_accept_interruptions():
     assert summaries == before
 
 
+def test_repeated_seed_attempts_do_not_get_an_independent_draw_wilson_interval():
+    trials = [run("success", 1), run("success", 1), run("timeout", 2), run("timeout", 2)]
+    for index, trial in enumerate(trials):
+        trial["repetition"] = index % 2 + 1
+    result = summarize_runs(trials)[0]
+    assert result["runs"] == 4
+    assert result["success_rate"] == 0.5
+    assert result["success_rate_wilson95_low"] is None
+    assert result["success_rate_wilson95_high"] is None
+    assert "not independent" in result["success_rate_wilson95_unavailable_reason"]
+    unique = summarize_runs([run("success", 1), run("timeout", 2)])[0]
+    assert unique["success_rate_wilson95_low"] is not None
+    assert unique["success_rate_wilson95_unavailable_reason"] is None
+    assert analyze_run(trials[1])["repetition"] == 2
+
+
 def test_report_skips_empty_failure_trace_without_changing_trial_selection(tmp_path):
     pytest.importorskip("altair")
     from wsorb.sweep_analysis import write_report
@@ -187,6 +203,8 @@ def test_report_skips_empty_failure_trace_without_changing_trial_selection(tmp_p
     (tmp_path / "summary.json").write_text(json.dumps(summarize_runs(summaries)))
     report = write_report(tmp_path)
     assert "Paired trace: seed 2, count 500" in report.read_text()
+    assert "Repeated attempts at the same seed are not independent" in report.read_text()
+    assert "bounds are omitted" in report.read_text()
     with pytest.raises(ValueError, match="no saved observations"):
         write_report(tmp_path, trial="trial-00000")
     assert write_report(tmp_path, trial="trial-00001") == report

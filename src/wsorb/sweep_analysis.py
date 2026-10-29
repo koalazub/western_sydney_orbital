@@ -15,6 +15,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .flight_analytics import COUNTERS, NATIVE_NUMBERS, FlightAnalyticsRecorder
+
 
 def _number(value: Any) -> float | None:
     if type(value) not in (int, float):
@@ -131,9 +133,15 @@ def analyze_run(run: Mapping[str, Any]) -> dict[str, Any]:
 
     recorded_score = _number(mission.get("score"))
     terms = native_score_breakdown(mission.get("score_breakdown"), score=recorded_score) or {}
+    recorder = FlightAnalyticsRecorder()
+    for observation in observations:
+        recorder.observe(observation)
+    analytics = recorder.report
+    totals = analytics["totals"] if analytics is not None else {}
     return {
         "algorithm": run["algorithm"],
         "seed": run["seed"],
+        "repetition": run.get("repetition", 1),
         "debris_count": run["debris_count"],
         "outcome": run["outcome"],
         "error": run.get("error"),
@@ -146,6 +154,9 @@ def analyze_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "score_collision_penalty_points": terms.get("collision_penalty_points"),
         "score_fuel_penalty_points": terms.get("fuel_penalty_points"),
         "score_offset_points": terms.get("offset_points"),
+        "analytics_available": analytics is not None,
+        "analytics_definition_id": analytics["definition_id"] if analytics else None,
+        **{key: totals.get(key) for key in (*COUNTERS, *NATIVE_NUMBERS)},
         "final_target_range_m": _target_metric(last, "target_distance_m"),
         "final_relative_speed_mps": _target_metric(last, "relative_speed_mps"),
         "closest_sampled_target_range_m": _minimum(
@@ -188,8 +199,8 @@ def summarize_runs(runs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     ``success_rate`` includes every attempted run. ``physical_success_rate``
     excludes policy/engine errors and interruptions, and is null when no physical
     result exists. Accepts raw runs or previously computed ``analyze_run`` rows.
-    Wilson intervals describe variation across sampled seeds, not numerical or
-    model uncertainty. Call separately for different scenarios or step schedules.
+    Wilson intervals require unique seeds. Repeats do not add independent draws,
+    so their bounds are omitted. Call separately for different scenarios/schedules.
     """
     groups = defaultdict(list)
     for run in runs:
@@ -203,7 +214,8 @@ def summarize_runs(runs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         physical_rows = [
             row for row in rows if row["outcome"] in ("success", "failed_damage", "timeout")
         ]
-        low, high = _wilson(successes, len(rows))
+        repeated_seeds = len({row["seed"] for row in rows}) != len(rows)
+        low, high = (None, None) if repeated_seeds else _wilson(successes, len(rows))
         result.append(
             {
                 "algorithm": algorithm,
@@ -213,6 +225,11 @@ def summarize_runs(runs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "success_rate": successes / len(rows),
                 "success_rate_wilson95_low": low,
                 "success_rate_wilson95_high": high,
+                "success_rate_wilson95_unavailable_reason": (
+                    "Repeated seeds are not independent draws; no Wilson interval is reported."
+                    if repeated_seeds
+                    else None
+                ),
                 "physical_runs": physical,
                 "physical_success_rate": successes / physical if physical else None,
                 "outcomes": dict(sorted(outcomes.items())),
@@ -315,7 +332,8 @@ def write_report(directory: str | Path, *, trial: str | None = None) -> Path:
         )
         charts.append(
             (rate + interval).properties(
-                title="Success across sampled seeds (95% Wilson intervals)", height=220
+                title="Success across sampled seeds (95% Wilson intervals only for unique seeds)",
+                height=220,
             )
         )
     if runs:
@@ -504,6 +522,9 @@ def write_report(directory: str | Path, *, trial: str | None = None) -> Path:
         "<p>Chart success fractions include all attempts; physical success rates in the table "
         "exclude policy errors, engine errors and interruptions. Error outcomes need separate "
         "investigation. Wilson intervals describe sampled-seed variation, not model accuracy. "
+        "Repeated attempts at the same seed are not independent seed draws, so their Wilson "
+        "bounds are omitted. Repeated-seed success counts are descriptive, not evidence of "
+        "robustness across additional seeds. "
         "Charts require internet access to load Vega; experiment data is embedded locally.</p>"
         "<p>Physical distance, speed and fuel group medians exclude software-error runs; "
         "completion and timeout horizons still differ. Policy/module source is recorded when "

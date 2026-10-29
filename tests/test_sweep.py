@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from wsorb import flight_engine
+from wsorb import flight_engine, sweep
 from wsorb.flight import coast_command
 from wsorb.sweep import _configuration, load_trial, run_sweep
 from wsorb.sweep_analysis import write_report
@@ -53,6 +53,10 @@ def configuration():
         ("preset", "typo"),
         ("algorithms", {"missing": {}}),
         ("schema_version", 2),
+        ("repetitions", True),
+        ("repetitions", 0),
+        ("repetitions", 11),
+        ("repetitions", 2.0),
     ],
 )
 def test_invalid_design_rejected_before_creating_output(tmp_path, monkeypatch, field, value):
@@ -85,6 +89,49 @@ def test_one_second_manual_step_is_supported():
     config = configuration()
     config.update(duration_s=2.0, step_s=1.0)
     assert _configuration(config, SCENARIO, {"coast": coast_factory})["step_s"] == 1.0
+
+
+def test_repetitions_default_to_one_and_are_bounded():
+    config = configuration()
+    assert _configuration(config, SCENARIO, {"coast": coast_factory})["repetitions"] == 1
+    for repetitions in (2, 10):
+        config["repetitions"] = repetitions
+        assert (
+            _configuration(config, SCENARIO, {"coast": coast_factory})["repetitions"] == repetitions
+        )
+
+
+def test_pure_schedule_keeps_fresh_repetitions_consecutive_and_snapshots_peer_hashes(
+    tmp_path, monkeypatch
+):
+    # Orchestration only: never launch physics, produce observations or claim a physical result.
+    monkeypatch.setattr(sweep.HeadlessSimulation, "__enter__", lambda self: self)
+    attempts = []
+
+    def no_flight(engine, run, factory, trace):
+        attempts.append((run["debris_count"], run["seed"], run["algorithm"], run["repetition"]))
+        run["outcome"] = "policy_error"
+
+    monkeypatch.setattr(sweep, "_trial", no_flight)
+    config = configuration()
+    config.update(repetitions=2, algorithms={"one": {}, "two": {}})
+    output = tmp_path / "schedule-only"
+    summaries = run_sweep(config, {"one": coast_factory, "two": coast_factory}, output)
+    expected = [
+        (count, seed, algorithm, repetition)
+        for count in (0, 2)
+        for seed in (11, 22)
+        for algorithm in ("one", "two")
+        for repetition in (1, 2)
+    ]
+    assert attempts == expected
+    assert [row["repetition"] for row in summaries] == [row[-1] for row in expected]
+    assert all(row["sample_count"] == 0 for row in summaries)
+    evidence = json.loads((output / "python.json").read_text())
+    hashes = evidence["reviewed_example_hashes"]
+    assert "examples/mvp/guidance.py" in hashes
+    assert "examples/tom-mvp/avoidance.py" in hashes
+    assert all(len(value) == 64 for value in hashes.values())
 
 
 def test_settings_override_keeps_fixed_region_and_does_not_mutate_input():

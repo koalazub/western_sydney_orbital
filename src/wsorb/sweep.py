@@ -96,10 +96,15 @@ def _configuration(config: Mapping, scenario: dict, policies: Mapping) -> dict:
         "step_s",
         "settings",
         "algorithms",
+        "repetitions",
     }
     if set(config) - allowed:
         raise ValueError(f"Unknown sweep fields: {sorted(set(config) - allowed)}")
     result = deepcopy(dict(config))
+    repetitions = result.get("repetitions", 1)
+    if type(repetitions) is not int or not 1 <= repetitions <= 10:
+        raise ValueError("repetitions must be an integer between 1 and 10")
+    result["repetitions"] = repetitions
     for key, maximum in (("seeds", 0xFFFFFFFF), ("debris_counts", MAX_DEBRIS_COUNT)):
         values = result.get(key)
         if (
@@ -216,6 +221,8 @@ def run_sweep(
     ``policies`` maps names to factories accepting algorithm settings. Each
     factory returns ``policy(observation) -> (accel, angular_accel)`` or Decision.
     Use a factory/closure for stateful algorithms so memory resets every trial.
+    Optional ``repetitions`` defaults to one. Repeats get fresh contexts and stay
+    consecutive within each count/seed/algorithm, rather than adding seed draws.
     The output directory must be new. Traces flush after each sample, and errors
     are retained as experiment outcomes rather than silently dropped.
     """
@@ -235,6 +242,25 @@ def run_sweep(
             "version": platform.python_version(),
             "implementation": platform.python_implementation(),
             "uv_lock_sha256": hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
+            "reviewed_example_hashes": {
+                str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for family in ("mvp", "tom-mvp")
+                for path in sorted((root / "examples" / family).glob("*.py"))
+            },
+            "analytics_definitions": (
+                json.loads((root / "simulation/scenarios/flight_analytics.json").read_text())
+                if (root / "simulation/scenarios/flight_analytics.json").is_file()
+                else None
+            ),
+            "data_source_hashes": {
+                str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (
+                    root / "simulation/scenarios/phobos_escape.json",
+                    root / "simulation/scenarios/flight_analytics.json",
+                    root / "src/wsorb/controllers/catalog.json",
+                )
+                if path.is_file()
+            },
             "package_sources": {
                 str(path.relative_to(root)): {
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -249,54 +275,59 @@ def run_sweep(
     for count in config["debris_counts"]:
         for seed in config["seeds"]:
             for algorithm, algorithm_settings in config["algorithms"].items():
-                trial_dir = output / f"trial-{len(summaries):05d}"
-                trial_dir.mkdir()
-                settings = deepcopy(config["settings"])
-                settings["debris"]["count"] = count
-                run = {
-                    "schema_version": 1,
-                    "execution_kind": EXECUTION_KIND,
-                    "algorithm": algorithm,
-                    "algorithm_settings": algorithm_settings,
-                    "seed": seed,
-                    "debris_count": count,
-                    "preset": config["preset"],
-                    "duration_s": config["duration_s"],
-                    "step_s": config["step_s"],
-                    "settings": settings,
-                    "outcome": "engine_error",
-                    "error": None,
-                    "samples": [],
-                    "engine": None,
-                    "success_criterion": "Local engine arrival-radius entry; no arrival-speed gate",
-                }
-                with (trial_dir / "trace.jsonl").open("w") as trace:
-                    try:
-                        with HeadlessSimulation(root=root, node=node) as engine:
-                            run["engine"] = engine.metadata
-                            _trial(engine, run, policies[algorithm], trace)
-                    except KeyboardInterrupt:
-                        run["outcome"] = "interrupted"
-                        _write_json(
-                            trial_dir / "run.json", {k: v for k, v in run.items() if k != "samples"}
-                        )
-                        raise
-                    except Exception as error:
-                        run["outcome"] = "engine_error"
-                        run["error"] = f"{type(error).__name__}: {error}"
-                _write_json(
-                    trial_dir / "run.json", {k: v for k, v in run.items() if k != "samples"}
-                )
-                summary = analyze_run(run)
-                summary["trial_directory"] = trial_dir.name
-                summaries.append(summary)
-                _write_csv(output / "runs.csv", summaries)
-                # The analysis consumes observations, but grouping only needs flat summaries.
-                groups = summarize_runs(summaries)
-                _write_json(output / "summary.json", groups)
-                _write_csv(output / "summary.csv", groups)
-                if progress:
-                    progress(summary)
+                for repetition in range(1, config["repetitions"] + 1):
+                    trial_dir = output / f"trial-{len(summaries):05d}"
+                    trial_dir.mkdir()
+                    settings = deepcopy(config["settings"])
+                    settings["debris"]["count"] = count
+                    run = {
+                        "schema_version": 1,
+                        "execution_kind": EXECUTION_KIND,
+                        "algorithm": algorithm,
+                        "algorithm_settings": algorithm_settings,
+                        "repetition": repetition,
+                        "seed": seed,
+                        "debris_count": count,
+                        "preset": config["preset"],
+                        "duration_s": config["duration_s"],
+                        "step_s": config["step_s"],
+                        "settings": settings,
+                        "outcome": "engine_error",
+                        "error": None,
+                        "samples": [],
+                        "engine": None,
+                        "success_criterion": (
+                            "Local engine arrival-radius entry; no arrival-speed gate"
+                        ),
+                    }
+                    with (trial_dir / "trace.jsonl").open("w") as trace:
+                        try:
+                            with HeadlessSimulation(root=root, node=node) as engine:
+                                run["engine"] = engine.metadata
+                                _trial(engine, run, policies[algorithm], trace)
+                        except KeyboardInterrupt:
+                            run["outcome"] = "interrupted"
+                            _write_json(
+                                trial_dir / "run.json",
+                                {k: v for k, v in run.items() if k != "samples"},
+                            )
+                            raise
+                        except Exception as error:
+                            run["outcome"] = "engine_error"
+                            run["error"] = f"{type(error).__name__}: {error}"
+                    _write_json(
+                        trial_dir / "run.json", {k: v for k, v in run.items() if k != "samples"}
+                    )
+                    summary = analyze_run(run)
+                    summary["trial_directory"] = trial_dir.name
+                    summaries.append(summary)
+                    _write_csv(output / "runs.csv", summaries)
+                    # Analysis consumes observations; grouping only needs flat summaries.
+                    groups = summarize_runs(summaries)
+                    _write_json(output / "summary.json", groups)
+                    _write_csv(output / "summary.csv", groups)
+                    if progress:
+                        progress(summary)
     return summaries
 
 

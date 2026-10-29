@@ -81,6 +81,7 @@ class HeadlessSimulation:
             "module_sha256": "worker/public/sim/wsorb_bevy.js",
             "manifest_sha256": "worker/public/sim/manifest.json",
             "scenario_source_sha256": "simulation/scenarios/phobos_escape.json",
+            "analytics_definition_sha256": "simulation/scenarios/flight_analytics.json",
             "driver_sha256": "worker/scripts/headless.mjs",
             "launcher_sha256": "worker/scripts/local.mjs",
             "bridge_sha256": "worker/web/local-api.js",
@@ -116,6 +117,7 @@ class HeadlessSimulation:
                 "execution_note": "Paused run_step commands, not asynchronous leased control.",
                 "maximum_step_s": MAX_STEP_SECONDS,
                 "scenario_source": self.scenario,
+                "analytics_definition": json.loads(sources["analytics_definition_sha256"]),
                 "scenario_source_note": (
                     "Source on disk is copied and hashed; the manifest and WASM hash identify "
                     "the executed binary. Rebuild after scenario changes."

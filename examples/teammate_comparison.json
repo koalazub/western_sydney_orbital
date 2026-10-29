@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "preset": "far_side_l2",
+  "seeds": [100, 101, 102, 103, 104],
+  "repetitions": 2,
+  "debris_counts": [500],
+  "duration_s": 600.0,
+  "step_s": 0.5,
+  "settings": {},
+  "algorithms": {
+    "basic_pd_radar": {},
+    "bui_alpha_beta_mvp": {},
+    "tom_kalman_velocity_mvp": {}
+  }
+}

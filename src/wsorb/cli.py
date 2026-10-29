@@ -116,6 +116,11 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "controllers", help="list, run, compare or serve reviewed Python profiles", add_help=False
     )
+    subparsers.add_parser(
+        "scoreboard",
+        help="publish measured teammate scoreboard and analytics assets",
+        add_help=False,
+    )
 
     notebook = subparsers.add_parser("notebook", help="work with the shared mission notebook")
     notebook_sub = notebook.add_subparsers(dest="notebook_command", required=True)
@@ -357,6 +362,10 @@ def _cmd_notebook(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "scoreboard":
+        from wsorb.scoreboard import main as scoreboard_main
+
+        return scoreboard_main(arguments[1:])
     if arguments and arguments[0] == "controllers":
         from wsorb.controller_service import main as controllers_main
 
