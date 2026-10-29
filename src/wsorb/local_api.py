@@ -25,6 +25,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from email.message import Message
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -79,6 +80,12 @@ class LocalBusyError(LocalApiError):
     code = "local_busy"
 
 
+class LocalPageMismatchError(LocalApiError):
+    """HTTP rejected a changed/missing target page before dispatch, not a native error."""
+
+    code = "page_mismatch"
+
+
 class StaleContextError(LocalApiError):
     """The engine rejected a checked command before changing the current flight."""
 
@@ -105,6 +112,75 @@ class _NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward the local bearer token to a redirect target.
         return None
+
+
+def _response_page_id(headers: Message) -> str | None:
+    """Parse only the transport receipt. Body diagnostics and status IDs cannot bind."""
+    values = headers.get_all("X-WSORB-Page", [])
+    if not values:
+        return None
+    if (
+        len(values) != 1
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            values[0],
+            re.IGNORECASE,
+        )
+        is None
+    ):
+        raise LocalApiError(
+            "Local simulator returned an invalid page receipt. Command outcome may be unknown; "
+            "do not automatically retry actuation."
+        )
+    return values[0].lower()
+
+
+class _PageBinding:
+    """Receipt/request policy only. Observing a page never grants control or GPU readiness."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_observed_page_id: str | None = None
+        self._bound_page_id: str | None = None
+
+    @property
+    def last_observed_page_id(self) -> str | None:
+        with self._lock:
+            return self._last_observed_page_id
+
+    @property
+    def bound_page_id(self) -> str | None:
+        with self._lock:
+            return self._bound_page_id
+
+    def request_headers(self) -> dict[str, str]:
+        with self._lock:
+            return (
+                {} if self._bound_page_id is None else {"X-WSORB-Target-Page": self._bound_page_id}
+            )
+
+    def observe(self, headers: Message, *, successful_snapshot: bool = False) -> None:
+        page_id = _response_page_id(headers)
+        with self._lock:
+            if self._bound_page_id is not None and page_id != self._bound_page_id:
+                # A post-dispatch receipt failure does not prove non-application.
+                # Only the server's explicit HTTP 409 page_mismatch does that.
+                raise LocalApiError(
+                    "Local simulator did not confirm the bound page. Command outcome may be "
+                    "unknown; do not automatically retry actuation."
+                )
+            if successful_snapshot:
+                self._last_observed_page_id = page_id
+
+    def bind(self, *, require: bool = False) -> str | None:
+        if type(require) is not bool:
+            raise ValueError("require must be a boolean")
+        with self._lock:
+            if self._bound_page_id is None:
+                if require and self._last_observed_page_id is None:
+                    raise LocalApiError("No verified snapshot page receipt is available to bind.")
+                self._bound_page_id = self._last_observed_page_id
+            return self._bound_page_id
 
 
 class _TransportChannels:
@@ -600,6 +676,7 @@ class LocalSimulation:
             raise ValueError("timeout_s must be between 0 and 30")
         self.timeout_s = timeout_s
         self._channels = _channels(self.url)
+        self._page_binding = _PageBinding()
         # Ignore proxy environment variables for this loopback-only connection.
         self._http = build_opener(ProxyHandler({}), _NoRedirects())
 
@@ -622,6 +699,26 @@ class LocalSimulation:
             ) from error
         return cls(url, token, timeout_s=timeout_s)
 
+    @property
+    def last_observed_page_id(self) -> str | None:
+        """The last successful snapshot's verified transport UUID, or None for no receipt."""
+        return self._page_binding.last_observed_page_id
+
+    @property
+    def bound_page_id(self) -> str | None:
+        """The immutable target UUID, or None when page pinning has not occurred."""
+        return self._page_binding.bound_page_id
+
+    def bind_to_observed_page(self, *, require: bool = False) -> str | None:
+        """Pin only a successful snapshot receipt, without I/O or accepting a guessed UUID.
+
+        Returns the bound UUID, or None for legacy/no-header/native-headless servers
+        when require=False. A bound client never adopts another page. This is only
+        transport identity, not a control grant or proof that a renderer is ready.
+        """
+        with self._channels.control:
+            return self._page_binding.bind(require=require)
+
     def _request(
         self,
         route: str,
@@ -634,6 +731,8 @@ class LocalSimulation:
             "local", "http", payload, method="status" if route == "status" else None
         )
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        if route == "call":
+            headers.update(self._page_binding.request_headers())
         if trace is not None:
             headers.update(diagnostics.request_headers(trace))
         if data is not None:
@@ -647,6 +746,7 @@ class LocalSimulation:
                 ) as response:
                     if trace is not None:
                         http_status = response.status
+                    response_headers = response.headers
                     body = response.read(MAX_RESPONSE_BYTES + 1)
             except HTTPError as error:
                 if trace is not None:
@@ -657,12 +757,20 @@ class LocalSimulation:
                     failure = json.loads(detail)
                 except ValueError:
                     failure = None
-                raise self._rejection(failure, f"HTTP {error.code}") from error
+                rejected = self._rejection(failure, f"HTTP {error.code}", http_status=error.code)
+                if route == "call" and not (
+                    error.code == 409
+                    and isinstance(rejected, (LocalBusyError, LocalPageMismatchError))
+                ):
+                    self._page_binding.observe(error.headers)
+                raise rejected from error
             except (OSError, URLError) as error:
-                raise LocalApiError(
-                    f"Local simulator unavailable at {self.url}. Command outcome may be unknown; "
+                unavailable = LocalApiError(
+                    "Local simulator transport unavailable. Command outcome may be unknown; "
                     "do not automatically retry thrust. Check the game and reconnect."
-                ) from error
+                )
+                unavailable.code = "transport_unavailable"
+                raise unavailable from error
             if len(body) > MAX_RESPONSE_BYTES:
                 raise LocalApiError("Local simulator response exceeds the 2 MiB limit")
             try:
@@ -671,22 +779,43 @@ class LocalSimulation:
                 raise LocalApiError("Local simulator returned invalid JSON") from error
             if not isinstance(result, dict):
                 raise LocalApiError("Local simulator returned an invalid response")
+            if route == "call":
+                self._page_binding.observe(
+                    response_headers,
+                    successful_snapshot=(
+                        payload is not None
+                        and payload.get("method") == "snapshot"
+                        and result.get("ok") is True
+                        and isinstance(result.get("value"), dict)
+                    ),
+                )
         except BaseException as error:
             diagnostics.finish_request(trace, error=error, http_status=http_status)
             raise
         diagnostics.finish_request(trace, response=result, http_status=http_status)
         return result
 
-    def _rejection(self, failure: Any, fallback: str) -> LocalApiError:
+    def _rejection(
+        self, failure: Any, fallback: str, *, http_status: int | None = None
+    ) -> LocalApiError:
         if not isinstance(failure, Mapping):
             return LocalApiError(fallback)
+        code = failure.get("code")
+        if code == "page_mismatch":
+            if http_status == 409:
+                return LocalPageMismatchError(
+                    "The bound local page changed or disappeared. This request was not dispatched."
+                )
+            return LocalApiError(
+                "Local page rejection was not verified before dispatch. Command outcome may be "
+                "unknown; do not automatically retry actuation."
+            )
         message = failure.get("error")
         if not isinstance(message, str) or not message:
             message = failure.get("message")
         if not isinstance(message, str) or not message:
             message = fallback
         message = message.replace(self._token, "[redacted]")
-        code = failure.get("code")
         if code == "local_busy":
             return LocalBusyError(message)
         if code == "stale_context":

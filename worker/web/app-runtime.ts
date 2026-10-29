@@ -175,12 +175,20 @@ function readRoomConnection(): { origin: string; id: string; key: string } | nul
 }
 
 function offerPythonConnection() {
-  if (!roomConnection || !engine || !engineBuild) return;
-  const connection = roomConnection;
+  if (!engine || !engineBuild) return;
   const panel = byId("python-room");
   const text = byId("python-room-status");
   const disconnect = byId<HTMLButtonElement>("disconnect-python");
   const permission = byId<HTMLDialogElement>("python-permission");
+  if (!roomConnection) {
+    if (location.protocol === "https:") {
+      panel.hidden = false;
+      disconnect.hidden = true;
+      text.textContent = "This hosted game has no Python room connection. The local notebook controls a separate local flight, not this tab. Open a private room link to attach Python here.";
+    }
+    return;
+  }
+  const connection = roomConnection;
   panel.hidden = false;
   if (!connection.id || !connection.key) {
     text.textContent = "This Python room link is invalid. Open the private HTTPS link printed by wsorb room create.";
@@ -213,7 +221,7 @@ function offerPythonConnection() {
           indeterminate: "Python room stopped. A command's outcome is unknown. Inspect the actual flight before reconnecting.",
           disconnected: "Python room disconnected. No commands are retried. Native thrust expires on its original simulation-time lease.",
         };
-        text.textContent = messages[status] ?? "Python room stopped. Inspect the game before reconnecting.";
+        text.textContent = `Room ${connection.id.slice(0, 8)} · ${messages[status] ?? "Python room stopped. Inspect the game before reconnecting."}`;
         if (error) text.textContent += ` ${error}`;
         const ended = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
         disconnect.hidden = ended;
@@ -288,7 +296,7 @@ function monitorLocalPythonConnection() {
       ? "The local Python API is attached to another tab. This tab is not receiving its calls. Switch to the connected game; do not reset either flight."
       : messages[connection.status] ?? "Local Python API is not connected to this tab.";
     text.textContent = `${message} ${location.origin}`;
-    if (diagnostics.enabled && connection.page_id) text.textContent += ` · page ${connection.page_id.slice(0, 8)}`;
+    if (connection.page_id && /^[0-9a-f-]{36}$/i.test(connection.page_id)) text.textContent += ` · page ${connection.page_id.slice(0, 8)}`;
     if (connection.error && !otherOwner) text.textContent += ` ${connection.error}`;
     if (otherOwner || connection.status === "error") announce(message);
   };

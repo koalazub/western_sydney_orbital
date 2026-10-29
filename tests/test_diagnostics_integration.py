@@ -246,6 +246,7 @@ def test_real_room_can_observe_when_flight_command_permission_is_not_ready(actua
         client = RoomSimulation.from_file(path, allow_loopback=True)
         for _ in range(2):
             snapshot = client.snapshot()
+            assert snapshot["control_ready"] is False
             assert snapshot["runtime"]["running"] is False
             assert snapshot["observation"]["time_s"] == 0
             assert snapshot["observation"]["control_authority"]["status"] == "idle"

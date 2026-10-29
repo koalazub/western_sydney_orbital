@@ -439,32 +439,36 @@ def test_error_parsing_only_classifies_explicit_predispatch_contention_as_busy()
 
 
 @contextmanager
-def _running_local_server(tmp_path, *, headless=False, diagnostic_output=None, diagnostics=False):
+def _running_local_server(tmp_path, *, headless=False, diagnostic_output=None, diagnostics=None):
     node = shutil.which("node")
     if node is None or not (ROOT / "worker/public/index.html").is_file():
         pytest.skip("The real local transport check needs Node and assets from just build")
     connection = tmp_path / "connection.json"
+    env = {
+        **os.environ,
+        "PORT": "0",
+        "WSORB_LAB": "1",
+        "WSORB_HEADLESS": "1" if headless else "0",
+        "WSORB_LOCAL_CONNECTION": str(connection),
+        "WSORB_LAB_TOKEN_FILE": str(tmp_path / "marimo.token"),
+    }
+    if diagnostics is None:
+        env.pop("WSORB_DIAGNOSTICS", None)
+    else:
+        env["WSORB_DIAGNOSTICS"] = "1" if diagnostics else "0"
     process = subprocess.Popen(
         [node, "worker/scripts/local.mjs"],
         cwd=ROOT,
-        env={
-            **os.environ,
-            "PORT": "0",
-            "WSORB_LAB": "1",
-            "WSORB_HEADLESS": "1" if headless else "0",
-            "WSORB_LOCAL_CONNECTION": str(connection),
-            "WSORB_LAB_TOKEN_FILE": str(tmp_path / "marimo.token"),
-            "WSORB_DIAGNOSTICS": "1" if diagnostics else "0",
-        },
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    output = ""
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             deadline = time.monotonic() + 30
-            output = ""
             while not re.search(r"http://127\.0\.0\.1:\d+/", output):
                 assert selector.select(timeout=max(0, deadline - time.monotonic())), (
                     "Local server did not print its listening URL"
@@ -484,7 +488,7 @@ def _running_local_server(tmp_path, *, headless=False, diagnostic_output=None, d
             process.kill()
             process.wait(timeout=5)
         if diagnostic_output is not None:
-            diagnostic_output.append(process.stdout.read())
+            diagnostic_output.append(output + process.stdout.read() + process.stderr.read())
         process.stdout.close()
         process.stderr.close()
     assert not connection.exists(), "Shutdown should remove its own connection descriptor"
@@ -502,10 +506,10 @@ def headless_server(tmp_path):
         yield client
 
 
-def _http(client, route, *, headers=None, payload=None):
+def _http(client, route, *, headers=None, payload=None, method=None):
     data = None if payload is None else json.dumps(payload).encode()
     return build_opener(ProxyHandler({})).open(
-        Request(f"{client.url}{route}", data=data, headers=headers or {}), timeout=5
+        Request(f"{client.url}{route}", data=data, headers=headers or {}, method=method), timeout=5
     )
 
 
@@ -550,6 +554,9 @@ def test_headless_reports_actual_physics_without_a_browser_or_renderer(headless_
     assert status["enabled"] is True
     assert status["backend"] == "native_headless"
     assert status["connected"] is False
+    assert status["page_id"] is None
+    assert status["page_binding_supported"] is False
+    assert "page_visible" not in status
     assert status["busy"] is False
     assert status["physics"]["started"] is True
     assert status["physics"]["phase"] == "idle"
@@ -738,6 +745,9 @@ def test_real_server_requires_an_actual_ready_browser(local_server):
     status = client.status()
     assert status["enabled"] is True
     assert status["connected"] is False
+    assert status["page_id"] is None
+    assert status["page_binding_supported"] is True
+    assert "page_visible" not in status
     assert status["busy"] is False
     assert client._token not in json.dumps(status)
     for request in [client.snapshot, lambda: client.command({"op": "pause"})]:
@@ -746,6 +756,297 @@ def test_real_server_requires_an_actual_ready_browser(local_server):
     assert client.status()["busy"] is False
     with _http(client, "/") as response:
         assert "/__local/" in response.read().decode()
+
+
+@pytest.mark.parametrize("headless", [False, True], ids=["absent_browser", "native_headless"])
+def test_target_page_guard_rejects_before_browser_or_native_dispatch(tmp_path, headless):
+    """Real negative transport requests, without claiming a page or starting a flight."""
+    with _running_local_server(tmp_path, headless=headless) as client:
+        headers = {
+            "Authorization": f"Bearer {client._token}",
+            "Content-Type": "application/json",
+        }
+        target = "12345678-abcd-4abc-8def-123456789abc"
+        before = client.snapshot() if headless else None
+        scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text())
+        # These are request metadata, not a substituted native state or result.
+        context = {
+            "trial_revision": 0,
+            "tuning_revision": 0,
+            "manual_interventions": 0,
+            "seed": 100,
+            "running": False,
+        }
+        calls = [
+            {"method": "snapshot"},
+            {"method": "capture", "camera": "top"},
+            {"method": "preview", "preview": None},
+            {"method": "command", "command": {"op": "reset", "seed": 101}},
+            {
+                "method": "command",
+                "command": {
+                    "op": "configure_flight",
+                    "settings": scenario["experiment_settings"],
+                    "preset": "mars_facing_l1",
+                    "seed": 101,
+                },
+            },
+            {"method": "command", "command": {"op": "play", "rate": 1}},
+            {
+                "method": "command",
+                "command": {"op": "set_command", "accel": [0.1, 0, 0], "angular_accel": [0, 0, 0]},
+            },
+            {
+                "method": "command",
+                "command": {
+                    "op": "claim_control",
+                    "run_id": "guard_test",
+                    "controller_id": "guard_test",
+                    "expected_epoch": 0,
+                    "expected_term": 0,
+                    "source_time_s": 0,
+                    "lease_sim_s": 1,
+                    "expected_context": context,
+                },
+            },
+        ]
+        for call in calls:
+            with pytest.raises(HTTPError) as rejected:
+                _http(
+                    client,
+                    "/__local/call",
+                    headers={**headers, "X-WSORB-Target-Page": target, "X-WSORB-Page": target},
+                    payload=call,
+                )
+            with rejected.value as response:
+                assert response.code == 409
+                assert response.headers.get("X-WSORB-Page") is None
+                assert json.load(response) == {
+                    "ok": False,
+                    "error": "The target browser page is not connected to this local simulation",
+                    "code": "page_mismatch",
+                }
+            status = client.status()
+            assert status["connected"] is status["busy"] is False
+            assert status["busy_operation"] is None
+            assert status["page_id"] is None
+            assert status["page_binding_supported"] is not headless
+            assert "page_visible" not in status
+
+        if headless:
+            # Unbound legacy reads still use the real engine and never invent a page receipt.
+            with _http(
+                client, "/__local/call", headers=headers, payload={"method": "snapshot"}
+            ) as response:
+                assert response.status == 200
+                assert response.headers.get("X-WSORB-Page") is None
+                envelope = json.load(response)
+            assert envelope["ok"] is True
+            after = envelope["value"]
+            assert set(after) == {
+                "observation",
+                "telemetry",
+                "navigation",
+                "runtime",
+                "renderer",
+                "engine_build",
+                "cameras",
+            }
+            assert after["renderer"]["started"] is after["renderer"]["ready"] is False
+            assert after["runtime"]["running"] is False
+            for field in (
+                "time_s",
+                "seed",
+                "trial_revision",
+                "tuning_revision",
+                "manual_interventions",
+                "control_authority",
+                "applied_physics",
+                "experiment_settings",
+            ):
+                assert after["observation"][field] == before["observation"][field]
+        else:
+            with pytest.raises(HTTPError) as unavailable:
+                _http(client, "/__local/call", headers=headers, payload={"method": "snapshot"})
+            with unavailable.value as response:
+                assert response.code == 503
+                assert response.headers.get("X-WSORB-Page") is None
+                assert "code" not in json.load(response)
+
+
+@pytest.mark.parametrize("headless", [False, True], ids=["absent_browser", "native_headless"])
+def test_malformed_target_page_never_falls_through_to_an_unbound_call(tmp_path, headless):
+    with _running_local_server(tmp_path, headless=headless) as client:
+        headers = {
+            "Authorization": f"Bearer {client._token}",
+            "Content-Type": "application/json",
+        }
+        target = "12345678-abcd-4abc-8def-123456789abc"
+        before = client.snapshot() if headless else None
+        payload = {"method": "command", "command": {"op": "reset", "seed": 101}}
+        for malformed in ("", "not-a-uuid", target.upper(), f"{target}, {target}", "0" * 36):
+            with pytest.raises(HTTPError) as rejected:
+                _http(
+                    client,
+                    "/__local/call",
+                    headers={**headers, "X-WSORB-Target-Page": malformed},
+                    payload=payload,
+                )
+            with rejected.value as response:
+                assert response.code == 400
+                assert response.headers.get("X-WSORB-Page") is None
+                error = json.load(response)
+                assert error == {
+                    "ok": False,
+                    "error": "X-WSORB-Target-Page must be a canonical UUID",
+                }
+
+        address = urlsplit(client.url)
+        connection = HTTPConnection(address.hostname, address.port, timeout=5)
+        try:
+            body = json.dumps(payload).encode()
+            connection.putrequest("POST", "/__local/call")
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.putheader("X-WSORB-Target-Page", target)
+            connection.putheader("X-WSORB-Target-Page", target)
+            connection.putheader("Content-Length", str(len(body)))
+            connection.putheader("Connection", "close")
+            connection.endheaders(body)
+            with connection.getresponse() as response:
+                assert response.status == 400
+                assert response.headers.get("X-WSORB-Page") is None
+                assert json.load(response)["ok"] is False
+        finally:
+            connection.close()
+        status = client.status()
+        assert status["connected"] is status["busy"] is False
+        assert status["busy_operation"] is status["page_id"] is None
+        if headless:
+            after = client.snapshot()
+            for field in ("time_s", "seed", "trial_revision", "control_authority"):
+                assert after["observation"][field] == before["observation"][field]
+
+
+@pytest.mark.parametrize("headless", [False, True], ids=["absent_browser", "native_headless"])
+def test_malformed_visibility_cannot_claim_or_renew_a_browser_page(tmp_path, headless):
+    with _running_local_server(tmp_path, headless=headless) as client:
+        status = client.status()
+        headers = {
+            "Authorization": f"Bearer {client._token}",
+            "Content-Type": "application/json",
+            "X-WSORB-Page": "12345678-abcd-4abc-8def-123456789abc",
+            "X-WSORB-Build": status["engine_build"]["sha256"],
+        }
+        for malformed in ("", "true", "false", "2", "1, 0"):
+            for route, payload in (("/__local/poll", None), ("/__local/result", {})):
+                with pytest.raises(HTTPError) as rejected:
+                    _http(
+                        client,
+                        route,
+                        headers={**headers, "X-WSORB-Page-Visible": malformed},
+                        payload=payload,
+                    )
+                with rejected.value as response:
+                    assert response.code == 400
+                    assert json.load(response) == {
+                        "ok": False,
+                        "error": "X-WSORB-Page-Visible must be 1 or 0",
+                    }
+        status = client.status()
+        assert status["connected"] is status["busy"] is False
+        assert status["page_id"] is None
+        assert "page_visible" not in status
+
+
+@pytest.mark.parametrize("diagnostics", [None, True, False], ids=["default_off", "on", "off"])
+def test_startup_asset_logs_require_the_server_flag_and_only_report_delivery(tmp_path, diagnostics):
+    output = []
+    canary = secrets.token_urlsafe(32)
+    with _running_local_server(
+        tmp_path, diagnostic_output=output, diagnostics=diagnostics
+    ) as client:
+        flags = {"X-WSORB-Diagnostics": "1", "X-WSORB-Request-ID": canary}
+        expected = []
+        app_etag = None
+        for path, label, method in (
+            ("/", "index", "GET"),
+            ("/app.js", "app", "GET"),
+            ("/styles.css", "styles", "HEAD"),
+            ("/sim/manifest.json", "engine_manifest", "GET"),
+            ("/sim/wsorb_bevy.js", "engine_glue", "GET"),
+            ("/sim/wsorb_bevy_bg.wasm", "engine_wasm", "HEAD"),
+            ("/__local/bootstrap.js", "local_bootstrap", "GET"),
+            ("/__local/client.js", "local_client", "GET"),
+        ):
+            headers = dict(flags)
+            if path.startswith("/__local/"):
+                headers["Authorization"] = f"Bearer {client._token}"
+                route = path
+            else:
+                route = f"{path}?private={canary}#private={canary}"
+            with _http(client, route, headers=headers, method=method) as response:
+                assert response.status == 200
+                data = response.read()
+                if path == "/app.js":
+                    app_etag = response.headers["ETag"]
+            expected.append((label, method, 200, len(data)))
+        with pytest.raises(HTTPError) as unchanged:
+            _http(client, "/app.js", headers={**flags, "If-None-Match": app_etag})
+        with unchanged.value as response:
+            assert response.code == 304
+            assert response.read() == b""
+        expected.append(("app", "GET", 304, 0))
+
+        # Other assets, failed Host/auth checks and request flags cannot add startup records.
+        with _http(client, f"/asset-notices.txt?private={canary}", headers=flags) as response:
+            response.read()
+        for path, headers, status in (
+            ("/", {**flags, "Host": f"{canary}.invalid"}, 403),
+            ("/__local/bootstrap.js", flags, 403),
+            ("/__local/status", flags, 401),
+        ):
+            with pytest.raises(HTTPError) as denied:
+                _http(client, path, headers=headers)
+            with denied.value as response:
+                assert response.code == status
+                assert client._token not in response.read().decode()
+        status = client.status()
+        assert status["connected"] is status["busy"] is False
+        assert status["page_id"] is None
+        token = client._token
+    text = "".join(output)
+    assert canary not in text and token not in text
+    events = [
+        event
+        for line in text.splitlines()
+        if line.startswith("{")
+        and (event := json.loads(line)).get("schema") == "wsorb.diagnostics.v1"
+    ]
+    assets = [event for event in events if event["event"] == "asset_finished"]
+    if diagnostics is not True:
+        assert events == []
+        return
+    assert [
+        (event["asset"], event["http_method"], event["http_status"], event["bytes"])
+        for event in assets
+    ] == expected
+    for event in assets:
+        assert set(event) <= {
+            "schema",
+            "component",
+            "event",
+            "wall_time_ms",
+            "asset",
+            "http_method",
+            "http_status",
+            "bytes",
+            "omitted_events",
+        }
+        assert event["component"] == "local_relay"
+        assert type(event["bytes"]) is int and event["bytes"] >= 0
+    for second in {event["wall_time_ms"] // 1000 for event in events}:
+        assert sum(event["wall_time_ms"] // 1000 == second for event in events) <= 10
 
 
 def test_local_game_has_an_accessible_connection_status_region(local_server):

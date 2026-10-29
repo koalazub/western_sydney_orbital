@@ -79,6 +79,15 @@ def test_creation_and_rpc_http_client_identifies_the_application_not_a_browser()
     assert value["token"] not in str(client._http.addheaders)
 
 
+def test_hosted_client_does_not_claim_to_implement_the_local_page_header_protocol():
+    value = _credentials()
+    client = RoomSimulation(value["url"], value["room_id"], value["token"])
+    assert client.last_observed_page_id is client.bound_page_id is None
+    assert RoomSimulation.bind_to_observed_page is RoomSimulation._unsupported
+    with pytest.raises(ValueError, match="Unsupported hosted room operation"):
+        client.bind_to_observed_page(require=False)
+
+
 @pytest.mark.parametrize("mode", [0o644, 0o660, 0o700, 0o400, 0o000])
 def test_descriptor_requires_exact_private_read_write_mode(tmp_path, mode):
     path = tmp_path / "room.json"
@@ -366,6 +375,7 @@ def test_only_matching_native_known_unapplied_results_are_classified_and_never_e
         ("stale_context", StaleContextError),
         ("command_expired", CommandExpiredError),
         ("local_busy", RoomApiError),
+        ("page_mismatch", RoomApiError),
         ("unknown", RoomApiError),
     ):
         with pytest.raises(expected) as rejected:
