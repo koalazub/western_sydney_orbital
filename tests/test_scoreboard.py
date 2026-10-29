@@ -616,7 +616,8 @@ def test_readme_renderer_includes_real_table_downloads_definitions_and_method(sa
     before = deepcopy(bundle)
     section = render_readme_section(bundle)
     assert "Bui / Alpha-beta + sidestep | 1/2 | 2 / 0 | 0/2 | unavailable" in section
-    assert "Burns count / s" in section and "Rotation rad" in section
+    assert "Burn episodes / active s" in section and "Rotation rad" in section
+    assert "### Fuel, burns and turn analytics" in section
     assert "1 failed_damage" in section and "1 policy_error" in section
     assert "partial timeout" in section
     assert "official leaderboard" in section

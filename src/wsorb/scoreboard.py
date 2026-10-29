@@ -926,8 +926,8 @@ def render_readme_section(
         f"{_format(comparison['physics_step_s'])} s. Not an official leaderboard.",
         "",
         "| Profile | Successes | Scored / unscored | Valid pairs | Mean two-run score | "
-        "Time s | Damage J | Fuel kg | Burns count / s | Angular burns count / s | "
-        "Turns count / s | Rotation rad |",
+        "Median time s | Median damage J | Median fuel kg | Burn episodes / active s | "
+        "Angular episodes / active s | Turn episodes / active s | Rotation rad |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for profile in bundle["profiles"]:
@@ -941,7 +941,7 @@ def render_readme_section(
             f"{profile['successes']}/{profile['attempts']}",
             f"{profile['scored_runs']} / {profile['unscored_runs']}",
             f"{profile['scored_pairs']}/{len(comparison['seeds'])}",
-            _format(profile["mean_score"]),
+            f"{profile['mean_score']:,.2f}" if profile["mean_score"] is not None else "unavailable",
             *(
                 _format(profile[f"median_{field}"])
                 for field in ("time_s", "damage_j", "fuel_used_kg")
@@ -991,6 +991,7 @@ def render_readme_section(
             "",
         ]
     )
+    lines.extend(["### Fuel, burns and turn analytics", ""])
     for name, alt in (
         ("score-components", "Recorded native scores and score components by teammate"),
         (
