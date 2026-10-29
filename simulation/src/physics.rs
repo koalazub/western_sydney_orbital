@@ -1,5 +1,6 @@
 use crate::domain::{
-    EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus,
+    EntityId, EntityKind, EntityStatus, FlightAnalytics, FlightAnalyticsStep, LagrangeRegion,
+    MissionPhase, MissionStatus,
 };
 use crate::mission::{self, FlightMetrics};
 use crate::model::{
@@ -657,6 +658,7 @@ impl Simulation {
             if self.state.mission.status.is_terminal() {
                 break;
             }
+            let mut integrated_application = None;
             for e in &self.state.assets {
                 if let Some(handle) = self.handles.get(&e.id)
                     && let Some(rb) = self.bodies.get_mut(*handle)
@@ -674,6 +676,7 @@ impl Simulation {
                             self.state.tuning_revision,
                         );
                         let fuel_force_n = application.propellant_force_n;
+                        integrated_application = Some(application);
                         self.last_actuator_application = Some(application);
                         self.state.mission.fuel_used_kg +=
                             fuel_force_n * h / (cfg.specific_impulse_s * cfg.standard_gravity_mps2);
@@ -701,6 +704,20 @@ impl Simulation {
                 &(),
                 &(),
             );
+            let analytics_step = integrated_application.and_then(|application| {
+                let lander = self.bodies.get(*self.handles.get(&EntityId::Lander)?)?;
+                let q = lander.rotation();
+                Some(FlightAnalyticsStep {
+                    start_sim_s: self.state.time_s,
+                    duration_s: h,
+                    propellant_force_n: application.propellant_force_n,
+                    actuator_torque_world_nm: application.torque_world_nm,
+                    rotation_before_xyzw: application.rotation_body_to_world_xyzw,
+                    rotation_after_xyzw: [q.x, q.y, q.z, q.w],
+                    angular_velocity_after_rad_s: lander.angvel().to_array(),
+                })
+            });
+            crate::analytics::integrate(&mut self.state.mission.flight_analytics, analytics_step);
             let mut current = HashSet::new();
             for pair in self.narrow.contact_pairs() {
                 if pair.has_any_active_contact()
@@ -1198,6 +1215,7 @@ fn initial_for_flight(
             score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: flight.target_region,
+            flight_analytics: Some(FlightAnalytics::default()),
         },
         observations: vec![],
         rng_state: rng,
@@ -1421,6 +1439,9 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
 }
 fn validate(s: &Snapshot) -> Result<(), String> {
     resilience::validate_sensor_state(s)?;
+    if let Some(analytics) = &s.mission.flight_analytics {
+        crate::analytics::validate_snapshot(analytics, s.time_s)?;
+    }
     if let Some(experiment) = s.experiment_settings {
         experiment.validate()?;
     }
@@ -1830,6 +1851,10 @@ fn vectors_match(a: [f64; 3], b: [f64; 3]) -> bool {
         .zip(b)
         .all(|(a, b)| (a - b).abs() <= 1e-8 + b.abs() * 1e-10)
 }
+
+#[cfg(test)]
+#[path = "physics/analytics_tests.rs"]
+mod analytics_tests;
 
 #[cfg(test)]
 #[path = "physics/experiment_tests.rs"]

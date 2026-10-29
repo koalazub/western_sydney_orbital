@@ -1,6 +1,7 @@
 pub use crate::domain::FlightPreset;
 use crate::domain::{
-    EntityId, EntityKind, EntityStatus, LagrangeRegion, MissionPhase, MissionStatus, ScoreBreakdown,
+    EntityId, EntityKind, EntityStatus, FlightAnalytics, LagrangeRegion, MissionPhase,
+    MissionStatus, ScoreBreakdown,
 };
 pub use crate::propulsion::ThrustApplication;
 pub use crate::terrain::{
@@ -361,6 +362,9 @@ pub struct MissionState {
     #[serde(default)]
     pub phase: MissionPhase,
     pub target_region: LagrangeRegion,
+    /// None preserves unavailable history in archives predating native counters.
+    #[serde(default)]
+    pub flight_analytics: Option<FlightAnalytics>,
 }
 
 impl Default for MissionState {
@@ -379,6 +383,7 @@ impl Default for MissionState {
             score_breakdown: None,
             phase: MissionPhase::OnPad,
             target_region: LagrangeRegion::L2,
+            flight_analytics: None,
         }
     }
 }

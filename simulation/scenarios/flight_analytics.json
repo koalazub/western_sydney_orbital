@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "definition_id": "native_actuation_rotation_episodes_v1",
+  "burn_force_threshold_n": 1e-6,
+  "angular_torque_threshold_nm": 1e-6,
+  "turn_speed_threshold_rad_s": 1e-3
+}

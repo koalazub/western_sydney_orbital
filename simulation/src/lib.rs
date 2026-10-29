@@ -1,5 +1,6 @@
 //! WebAssembly facade. Domain state, effects, rendering and protocol parsing are
 //! implemented by their respective modules rather than by this entry point.
+mod analytics;
 mod api;
 mod app;
 pub mod astrophysics;
