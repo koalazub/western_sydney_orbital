@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def scenario():
     """Read real versioned local settings, not an invented replacement scenario."""
     document = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
-    assert document["experiment_description"].startswith("local_experiment_v1:")
+    assert document["experiment_description"].startswith("local_experiment_v")
     return document
 
 
@@ -62,19 +62,78 @@ def test_checked_in_settings_have_canonical_json_and_a_content_digest(document):
     assert parse_world_proposal(expected_bytes).to_json_bytes() == expected_bytes
     assert parse_world_proposal(expected_bytes.decode("utf-8")).digest == proposal.digest
     assert proposal.to_document()["settings"]["debris"]["distribution"] == {
-        "kind": "directed_stream"
+        "kind": "transit_stream"
     }
-    assert "distribution" not in document["settings"]["debris"]
+    assert document["settings"]["debris"]["distribution"] == {"kind": "transit_stream"}
+    assert "trajectory_adjustment" not in proposal.to_document()["settings"]["debris"]
+    assert json.loads(original) == document
 
 
-def test_key_order_whitespace_numeric_spelling_and_explicit_defaults_share_a_digest(document):
+def test_key_order_whitespace_numeric_spelling_and_explicit_off_share_a_digest(document):
     proposal = parse_world_proposal(json.dumps(document))
     alternate = {name: document[name] for name in reversed(document)}
     alternate["settings"]["ship"]["inertia_scale"] = 1
     alternate["settings"]["debris"]["speed_mps"] = 20
-    alternate["settings"]["debris"]["distribution"] = {"kind": "directed_stream"}
+    alternate["settings"]["debris"]["trajectory_adjustment"] = "off"
     reordered = json.dumps(alternate, sort_keys=True, indent=4)
     assert parse_world_proposal(reordered).digest == proposal.digest
+
+
+def test_legacy_omission_and_explicit_directed_stream_keep_the_old_canonical_shape(document):
+    """Legacy proposal serialization only, not replay or flight proof."""
+    del document["settings"]["debris"]["distribution"]
+    legacy = parse_world_proposal(json.dumps(document))
+    expected = deepcopy(document)
+    expected["settings"]["debris"]["distribution"] = {"kind": "directed_stream"}
+    assert legacy.to_json_bytes() == json.dumps(
+        expected, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    expected["settings"]["debris"]["trajectory_adjustment"] = "off"
+    assert parse_world_proposal(json.dumps(expected)).digest == legacy.digest
+    assert "distribution" not in document["settings"]["debris"]
+    assert "trajectory_adjustment" not in legacy.to_document()["settings"]["debris"]
+
+
+@pytest.mark.parametrize("kind", ["directed_stream", "transit_stream", "impact_ejecta"])
+def test_adjustment_is_explicit_in_review_and_off_keeps_the_omitted_digest(
+    document, scenario, kind
+):
+    distribution = {"kind": kind}
+    if kind == "impact_ejecta":
+        distribution["settings"] = deepcopy(scenario["impact_ejecta_defaults"])
+    debris = document["settings"]["debris"]
+    debris["distribution"] = distribution
+    omitted = parse_world_proposal(json.dumps(document))
+    debris["trajectory_adjustment"] = "off"
+    assert parse_world_proposal(json.dumps(document)).digest == omitted.digest
+    debris["trajectory_adjustment"] = "toward_lander"
+    adjusted = parse_world_proposal(json.dumps(document))
+    assert adjusted.digest != omitted.digest
+    assert adjusted.to_document()["settings"]["debris"]["trajectory_adjustment"] == "toward_lander"
+    assert adjusted.to_document()["settings"]["debris"]["distribution"] == distribution
+    draft = approve_world_proposal(adjusted, adjusted.digest)
+    assert draft["settings"]["debris"]["trajectory_adjustment"] == "toward_lander"
+    assert parse_world_proposal(adjusted.to_json_bytes()).digest == adjusted.digest
+    with pytest.raises(ValueError, match="Review the current normalized JSON"):
+        approve_world_proposal(adjusted, omitted.digest)
+
+
+def test_transit_and_legacy_streams_cannot_share_an_approval_digest(document):
+    transit = parse_world_proposal(json.dumps(document))
+    document["settings"]["debris"]["distribution"] = {"kind": "directed_stream"}
+    legacy = parse_world_proposal(json.dumps(document))
+    assert legacy.digest != transit.digest
+    with pytest.raises(ValueError, match="Review the current normalized JSON"):
+        approve_world_proposal(transit, legacy.digest)
+
+
+@pytest.mark.parametrize(
+    "adjustment", [None, True, False, 0, 1, "", "OFF", "toward-Lander", [], {}, {"kind": "off"}]
+)
+def test_adjustment_rejects_boolean_numbers_wrong_kinds_and_unknown_names(document, adjustment):
+    document["settings"]["debris"]["trajectory_adjustment"] = adjustment
+    with pytest.raises(ValueError, match="trajectory_adjustment"):
+        parse_world_proposal(json.dumps(document))
 
 
 def test_signed_vector_and_scalar_zero_have_one_canonical_encoding(impact_document):
@@ -314,9 +373,19 @@ def test_distribution_fields_are_exact_at_each_depth(impact_document):
     "distribution",
     [
         None,
+        True,
+        "transit_stream",
+        [],
         {},
+        {"kind": None},
+        {"kind": True},
+        {"kind": 1},
+        {"kind": []},
+        {"kind": {}},
         {"kind": "arbitrary"},
         {"kind": "directed_stream", "settings": {}},
+        {"kind": "transit_stream", "settings": {}},
+        {"kind": "transit_stream", "trajectory_adjustment": "toward_lander"},
         {"kind": "impact_ejecta"},
     ],
 )

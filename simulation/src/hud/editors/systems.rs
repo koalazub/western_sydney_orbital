@@ -162,6 +162,7 @@ fn prepare(
                         EditorIntent::Action(
                             EditorAction::Preset(_)
                             | EditorAction::Distribution(_)
+                            | EditorAction::TrajectoryAdjustment(_)
                             | EditorAction::ToggleAdvanced
                             | EditorAction::ResetImpact
                             | EditorAction::AskCreateWorld
@@ -300,6 +301,7 @@ fn action_available(hud: &HudState, playback: &PlaybackState, action: EditorActi
             | EditorAction::ReverseFlow
             | EditorAction::Preset(_)
             | EditorAction::Distribution(_)
+            | EditorAction::TrajectoryAdjustment(_)
             | EditorAction::ResetImpact
             | EditorAction::AskCreateWorld
             | EditorAction::CreateWorld
@@ -326,6 +328,7 @@ fn action_in_panel(hud: &HudState, action: EditorAction) -> bool {
         }
         EditorAction::Preset(_)
         | EditorAction::Distribution(_)
+        | EditorAction::TrajectoryAdjustment(_)
         | EditorAction::ToggleAdvanced
         | EditorAction::ResetImpact
         | EditorAction::AskCreateWorld
@@ -347,11 +350,15 @@ fn field_available(state: &InstrumentEditors, field: EditorField) -> bool {
         | EditorField::ImpactKick(_)
         | EditorField::ImpactTangentialSpeed
         | EditorField::ImpactPatchAngle => state.impact().is_some(),
-        EditorField::WorldCount
-        | EditorField::RadiusMin
-        | EditorField::RadiusMax
-        | EditorField::ShellInner
-        | EditorField::ShellOuter => state.world.is_some(),
+        EditorField::WorldCount | EditorField::RadiusMin | EditorField::RadiusMax => {
+            state.world.is_some()
+        }
+        EditorField::ShellInner | EditorField::ShellOuter => state.world.is_some_and(|world| {
+            !matches!(
+                world.settings.debris.distribution,
+                DebrisDistribution::TransitStream
+            )
+        }),
         EditorField::Mass | EditorField::InertiaFactor | EditorField::ThrustGain => {
             state.confirmed.is_some()
         }
@@ -564,7 +571,7 @@ fn impact_settings(
     draft: &mut WorldDraft,
 ) -> Result<&mut crate::model::ImpactEjectaSettings, String> {
     match &mut draft.settings.debris.distribution {
-        DebrisDistribution::DirectedStream => Err(
+        DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => Err(
             "Select Impact ejecta in the world draft before editing ejection parameters.".into(),
         ),
         DebrisDistribution::ImpactEjecta { settings } => Ok(settings),
@@ -653,15 +660,25 @@ fn apply_action(
         EditorAction::Distribution(choice) => {
             if let Some(world) = state.world.as_mut() {
                 world.settings.debris.distribution = match choice {
+                    DistributionChoice::Transit => DebrisDistribution::TransitStream,
                     DistributionChoice::Stream => DebrisDistribution::DirectedStream,
                     DistributionChoice::Impact => match world.settings.debris.distribution {
-                        DebrisDistribution::DirectedStream => DebrisDistribution::impact_default(),
+                        DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
+                            DebrisDistribution::impact_default()
+                        }
                         distribution @ DebrisDistribution::ImpactEjecta { .. } => distribution,
                     },
                 };
             }
             state.notice_scope(EditorScope::World, InputNotice::Staged);
             state.reload = Reload::All;
+            Ok(())
+        }
+        EditorAction::TrajectoryAdjustment(mode) => {
+            if let Some(world) = state.world.as_mut() {
+                world.settings.debris.trajectory_adjustment = mode;
+            }
+            state.notice_scope(EditorScope::World, InputNotice::Staged);
             Ok(())
         }
         EditorAction::ToggleAdvanced => {
@@ -966,6 +983,7 @@ fn update_views(
                 EditorAction::ResetImpact => state.impact().is_some(),
                 EditorAction::Preset(_)
                 | EditorAction::Distribution(_)
+                | EditorAction::TrajectoryAdjustment(_)
                 | EditorAction::ToggleAdvanced
                 | EditorAction::AskCreateWorld
                 | EditorAction::CancelCreateWorld
@@ -982,13 +1000,23 @@ fn update_views(
                 state.world.is_some_and(|world| world.preset == *preset)
             }
             EditorAction::Distribution(choice) => state.world.is_some_and(|world| match choice {
+                DistributionChoice::Transit => matches!(
+                    world.settings.debris.distribution,
+                    DebrisDistribution::TransitStream
+                ),
                 DistributionChoice::Stream => {
                     world.settings.debris.distribution.is_directed_stream()
                 }
                 DistributionChoice::Impact => {
-                    !world.settings.debris.distribution.is_directed_stream()
+                    matches!(
+                        world.settings.debris.distribution,
+                        DebrisDistribution::ImpactEjecta { .. }
+                    )
                 }
             }),
+            EditorAction::TrajectoryAdjustment(mode) => state
+                .world
+                .is_some_and(|world| world.settings.debris.trajectory_adjustment == *mode),
             EditorAction::Commit(_)
             | EditorAction::Nudge(_, _)
             | EditorAction::ReverseFlow
@@ -1103,14 +1131,19 @@ fn world_summary(state: &InstrumentEditors) -> String {
         return "World draft unavailable.".into();
     };
     format!(
-        "{}\nNew-world draft template: {}; {}; {} asteroids.\nCreate paused world replaces this run at time zero and clears thrust. {}",
+        "{}\nNew-world draft template: {}; {}; {} asteroids.\nLight attraction: {}.\nCreate paused world replaces this run at time zero and clears thrust. {}",
         crate::hud::systems::launch_site_readout(&crate::snapshot()),
         preset_label(draft.preset),
         match draft.settings.debris.distribution {
             DebrisDistribution::DirectedStream => "directed stream",
+            DebrisDistribution::TransitStream => "transit traffic along the station route",
             DebrisDistribution::ImpactEjecta { .. } => "impact ejecta",
         },
         draft.settings.debris.count,
+        match draft.settings.debris.trajectory_adjustment {
+            crate::model::DebrisTrajectoryAdjustment::Off => "off",
+            crate::model::DebrisTrajectoryAdjustment::TowardLander => "on, practice only",
+        },
         if draft.settings.debris.count >= 10_000 {
             "Heavy world; generation and playback may be slow."
         } else {

@@ -164,6 +164,7 @@ pub(super) fn group_description(group: InstrumentGroup, report: &Report) -> Stri
                 match report.debris_distribution {
                     Some(crate::model::DebrisDistribution::ImpactEjecta { .. }) => "Impact ejecta. Stream reference is inactive. Change ejection parameters in World setup, then create a new world.",
                     Some(crate::model::DebrisDistribution::DirectedStream) | None => "Stream reference is an input, not measured orbital speed. Spread affects new births.",
+                    Some(crate::model::DebrisDistribution::TransitStream) => "Directional transit traffic spans the launch-to-station route. Gravity and contacts change each body's velocity; mean stream settings are inputs, not measured motion.",
                 },
                 crate::scenario::settings().debris.density_kg_m3,
             )

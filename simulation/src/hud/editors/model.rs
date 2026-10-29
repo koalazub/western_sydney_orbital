@@ -1,6 +1,6 @@
 use crate::model::{
-    DebrisDistribution, DebrisFlowTuning, ExperimentSettings, FlightPreset, ShipTuning, Snapshot,
-    StreamAxis,
+    DebrisDistribution, DebrisFlowTuning, DebrisTrajectoryAdjustment, ExperimentSettings,
+    FlightPreset, ShipTuning, Snapshot, StreamAxis,
 };
 use bevy::prelude::*;
 use std::collections::VecDeque;
@@ -107,7 +107,7 @@ impl EditorField {
             }
             Self::RadiusMin | Self::RadiusMax => "0.05 to 100 m. Minimum must not exceed maximum.",
             Self::ShellInner | Self::ShellOuter => {
-                "0 to 50000 m above terrain, plus asteroid radius. At least 10 m thick."
+                "Shell modes only, 0 to 50000 m above terrain. Transit traffic uses the station-route box instead."
             }
             Self::Placement(_) => {
                 "Phobos-centered rotating world axes, in meters. Debug-only draft until Apply XYZ position."
@@ -192,6 +192,7 @@ pub(super) enum StepDirection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DistributionChoice {
+    Transit,
     Stream,
     Impact,
 }
@@ -204,6 +205,7 @@ pub(super) enum EditorAction {
     ReverseFlow,
     Preset(FlightPreset),
     Distribution(DistributionChoice),
+    TrajectoryAdjustment(DebrisTrajectoryAdjustment),
     ToggleAdvanced,
     ResetImpact,
     AskCreateWorld,
@@ -336,7 +338,7 @@ impl From<&Snapshot> for ConfirmedInputs {
 impl ConfirmedInputs {
     pub fn stream_active(&self) -> bool {
         self.experiment
-            .is_none_or(|settings| settings.debris.distribution.is_directed_stream())
+            .is_none_or(|settings| settings.debris.distribution.is_stream())
     }
 
     pub fn world_draft(&self) -> WorldDraft {
@@ -419,7 +421,7 @@ impl InstrumentEditors {
 
     pub fn impact(&self) -> Option<crate::model::ImpactEjectaSettings> {
         match self.world?.settings.debris.distribution {
-            DebrisDistribution::DirectedStream => None,
+            DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => None,
             DebrisDistribution::ImpactEjecta { settings } => Some(settings),
         }
     }

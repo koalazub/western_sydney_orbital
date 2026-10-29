@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from copy import deepcopy
 from http.client import HTTPConnection
 from pathlib import Path
 from urllib.error import HTTPError
@@ -37,10 +38,129 @@ from wsorb.local_api import (
     _seconds,
     _vector,
     controller_fence,
+    validate_experiment_settings,
     validate_surface_direction,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def parser_setup_settings():
+    """Versioned parameter inputs only, not an engine result or flight evidence."""
+    scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
+    return scenario["experiment_settings"]
+
+
+def test_current_scenario_selects_transit_but_legacy_omissions_stay_directed(parser_setup_settings):
+    current = validate_experiment_settings(parser_setup_settings)
+    assert current["debris"]["distribution"] == {"kind": "transit_stream"}
+    assert current["debris"]["count"] == 500
+    assert "trajectory_adjustment" not in current["debris"]
+    legacy = deepcopy(parser_setup_settings)
+    del legacy["debris"]["distribution"]
+    parsed = validate_experiment_settings(legacy)
+    assert parsed["debris"]["distribution"] == {"kind": "directed_stream"}
+    assert "trajectory_adjustment" not in parsed["debris"]
+    assert "distribution" not in legacy["debris"]
+    assert parser_setup_settings["debris"]["distribution"] == {"kind": "transit_stream"}
+
+
+@pytest.mark.parametrize("kind", ["directed_stream", "transit_stream"])
+@pytest.mark.parametrize("adjustment", ["off", "toward_lander"])
+def test_debris_modes_parse_without_mutating_inputs_or_adding_off(
+    parser_setup_settings, kind, adjustment
+):
+    debris = parser_setup_settings["debris"]
+    debris.update(distribution={"kind": kind}, trajectory_adjustment=adjustment)
+    original = deepcopy(parser_setup_settings)
+    parsed = validate_experiment_settings(parser_setup_settings)
+    assert parsed["debris"]["distribution"] == {"kind": kind}
+    if adjustment == "off":
+        assert "trajectory_adjustment" not in parsed["debris"]
+    else:
+        assert parsed["debris"]["trajectory_adjustment"] == adjustment
+    assert validate_experiment_settings(parsed) == parsed
+    assert parser_setup_settings == original
+    parsed["debris"]["distribution"]["kind"] = "impact_ejecta"
+    assert debris["distribution"] == {"kind": kind}
+
+
+@pytest.mark.parametrize(
+    "distribution",
+    [
+        None,
+        True,
+        False,
+        "transit_stream",
+        [],
+        {},
+        {"kind": None},
+        {"kind": True},
+        {"kind": 1},
+        {"kind": []},
+        {"kind": {}},
+        {"kind": "TransitStream"},
+        {"kind": "transit_stream", "settings": {}},
+        {"kind": "transit_stream", "trajectory_adjustment": "toward_lander"},
+        {"kind": "directed_stream", "settings": {}},
+    ],
+)
+def test_distribution_shape_rejects_unknown_or_untyped_data_before_io(
+    parser_setup_settings, distribution
+):
+    parser_setup_settings["debris"]["distribution"] = distribution
+    with pytest.raises(ValueError, match="Debris distribution"):
+        validate_experiment_settings(parser_setup_settings)
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    with pytest.raises(ValueError, match="Debris distribution"):
+        client.configure_experiment(parser_setup_settings)
+    with pytest.raises(ValueError, match="Debris distribution"):
+        client.configure_flight(parser_setup_settings, "far_side_l2")
+
+
+@pytest.mark.parametrize(
+    "adjustment",
+    [
+        None,
+        True,
+        False,
+        0,
+        1,
+        "",
+        "OFF",
+        "toward-Lander",
+        "toward_lander ",
+        [],
+        {},
+        {"kind": "off"},
+    ],
+)
+def test_trajectory_adjustment_is_a_closed_string_enum_before_any_request(
+    parser_setup_settings, adjustment
+):
+    parser_setup_settings["debris"]["trajectory_adjustment"] = adjustment
+    with pytest.raises(ValueError, match="trajectory_adjustment"):
+        validate_experiment_settings(parser_setup_settings)
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    with pytest.raises(ValueError, match="trajectory_adjustment"):
+        client.configure_experiment(parser_setup_settings)
+    with pytest.raises(ValueError, match="trajectory_adjustment"):
+        client.configure_flight(parser_setup_settings, "far_side_l2")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("distribution", {"kind": "transit_stream"}), ("trajectory_adjustment", "toward_lander")],
+)
+def test_new_world_debris_controls_are_not_live_flow_tuning(parser_setup_settings, name, value):
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    flow = {
+        key: parser_setup_settings["debris"][key]
+        for key in ("speed_mps", "speed_spread_mps", "stream_axis", "stream_sign")
+    }
+    with pytest.raises(ValueError, match="Flow tuning requires"):
+        client.tune_debris_flow({**flow, name: value})
 
 
 def test_connection_file_is_local_private_and_does_not_connect_on_load(tmp_path):
@@ -573,6 +693,12 @@ def test_headless_reports_actual_physics_without_a_browser_or_renderer(headless_
     assert actual["observation"]["time_s"] == 0
     assert actual["observation"]["applied_physics"]["mass_kg"] > 0
     assert actual["observation"]["experiment_settings"]["debris"]["count"] == 500
+    scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
+    assert validate_experiment_settings(
+        actual["observation"]["experiment_settings"]
+    ) == validate_experiment_settings(scenario["experiment_settings"])
+    assert actual["observation"]["debris_distribution"] == {"kind": "transit_stream"}
+    assert "trajectory_adjustment" not in actual["observation"]["experiment_settings"]["debris"]
     assert actual["telemetry"]["source_time_s"] == 0
     assert actual["telemetry"]["applied_physics"]["mass_kg"] > 0
     assert actual["cameras"]["configured"] is False
@@ -585,6 +711,50 @@ def test_headless_reports_actual_physics_without_a_browser_or_renderer(headless_
     assert len(cameras) == 2
     assert all(unit["sample_time_s"] is None and unit["sequence"] is None for unit in cameras)
     assert client._token not in json.dumps({"status": status, "snapshot": actual})
+
+
+@pytest.mark.parametrize(
+    ("kind", "adjustment"),
+    [
+        ("directed_stream", None),
+        ("transit_stream", "off"),
+        ("transit_stream", "toward_lander"),
+        ("impact_ejecta", "toward_lander"),
+    ],
+)
+def test_headless_new_world_reads_actual_debris_modes_without_starting_flight(
+    headless_server, parser_setup_settings, kind, adjustment
+):
+    """Actual built WASM setup receipts, not proof of adjustment dynamics or STP parity."""
+    client = headless_server
+    before = client.snapshot()
+    debris = parser_setup_settings["debris"]
+    debris["distribution"] = {"kind": kind}
+    if kind == "impact_ejecta":
+        scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
+        debris["distribution"]["settings"] = scenario["impact_ejecta_defaults"]
+    if adjustment is not None:
+        debris["trajectory_adjustment"] = adjustment
+    after = client.configure_flight(parser_setup_settings, "far_side_l2", seed=42)
+    observation = after["observation"]
+    assert after["runtime"]["running"] is False
+    assert observation["time_s"] == 0
+    assert observation["seed"] == 42
+    assert observation["trial_revision"] != before["observation"]["trial_revision"]
+    assert validate_experiment_settings(observation["experiment_settings"]) == (
+        validate_experiment_settings(parser_setup_settings)
+    )
+    assert observation["debris_distribution"] == debris["distribution"]
+    assert observation["experiment_settings"]["debris"]["count"] == 500
+    if adjustment == "toward_lander":
+        assert observation["experiment_settings"]["debris"]["trajectory_adjustment"] == adjustment
+    else:
+        assert "trajectory_adjustment" not in observation["experiment_settings"]["debris"]
+    requested = observation["applied_physics"]["requested"]
+    assert requested["accel_body_mps2"] == [0, 0, 0]
+    assert requested["angular_accel_body_rad_s2"] == [0, 0, 0]
+    assert after["renderer"]["started"] is False
+    assert client.snapshot()["observation"]["time_s"] == 0
 
 
 def test_headless_real_timer_advances_playback_and_pause_is_applied_natively(headless_server):

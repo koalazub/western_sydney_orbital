@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import time
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -97,12 +98,13 @@ def headless(tmp_path):
             assert readiness["physics"]["started"] and readiness["physics_ready"]
             before = sim.snapshot()
             assert not before["renderer"]["started"] and not before["renderer"]["ready"]
-            # Only this fixture's fresh engine is configured. Preserve its real
-            # default body count and sensors rather than making a toy world.
+            # Keep the original 500-body broad-stream cohort for process/lease
+            # regressions. Transit-traffic guidance is assessed separately by the
+            # real WASM flight test, not conflated with ownership failover.
             assert before["observation"]["experiment_settings"]["debris"]["count"] == 500
-            configured = sim.configure_flight(
-                before["observation"]["experiment_settings"], "far_side_l2", 100
-            )
+            settings = deepcopy(before["observation"]["experiment_settings"])
+            settings["debris"]["distribution"] = {"kind": "directed_stream"}
+            configured = sim.configure_flight(settings, "far_side_l2", 100)
             assert configured["observation"]["geometry"]["debris_count"] == 500
             yield sim, connection
         finally:
@@ -324,7 +326,7 @@ def test_watch_only_does_not_claim_or_start_a_peer(headless, primary):
     assert after["observation"]["time_s"] == before["observation"]["time_s"]
 
 
-def test_stock_controller_reaches_checkpoint_over_real_headless_transport(headless, primary):
+def test_broad_stream_controller_reaches_checkpoint_over_real_headless_transport(headless, primary):
     """Full real-controller flight at native 5x playback, not injected clock ticks."""
     sim, _ = headless
     before = sim.snapshot()

@@ -85,6 +85,7 @@ def observed_setup(observation: Mapping[str, Any]) -> dict[str, Any]:
     debris = baseline.get("debris") if isinstance(baseline, Mapping) else None
     distribution = observation.get("debris_distribution")
     if distribution is None and isinstance(debris, Mapping):
+        # Archived omissions mean directed_stream, regardless of today's scenario default.
         distribution = debris.get("distribution", {"kind": "directed_stream"})
     trial = observation.get("trial_revision")
     pad = observation.get("launchpad")

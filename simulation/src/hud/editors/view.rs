@@ -4,7 +4,7 @@ use crate::hud::{
     view::{button_row, button_text, panel_style, text},
 };
 use crate::{
-    model::{FlightPreset, StreamAxis},
+    model::{DebrisTrajectoryAdjustment, FlightPreset, StreamAxis},
     telemetry::InstrumentGroup,
 };
 use bevy::{
@@ -114,8 +114,13 @@ fn world(parent: &mut ChildSpawnerCommands) {
         button_row(),
         children![
             action(
-                "Directed stream",
-                "Select directed stream for a new world",
+                "Transit traffic",
+                "Select directional transit traffic along the station route for a new world",
+                EditorAction::Distribution(DistributionChoice::Transit)
+            ),
+            action(
+                "Broad shell stream",
+                "Select the broad shell directed stream for a new world",
                 EditorAction::Distribution(DistributionChoice::Stream)
             ),
             action(
@@ -125,6 +130,21 @@ fn world(parent: &mut ChildSpawnerCommands) {
             ),
         ],
     ));
+    parent.spawn(text(
+        "Transit traffic fills the launch-to-station route. All modes retain gravity and real contacts. Set mean speed, spread, axis and sign in Debris.",
+        CAPTION_SIZE_PX,
+        MUTED,
+    ));
+    parent.spawn(text(
+        "Light lander attraction, practice only",
+        CAPTION_SIZE_PX,
+        MUTED,
+    ));
+    parent.spawn((button_row(), children![
+        action("Off", "Disable lander-directed trajectory adjustment in the new world", EditorAction::TrajectoryAdjustment(DebrisTrajectoryAdjustment::Off)),
+        action("Light attraction", "Enable light lander-directed trajectory adjustment in the new world, practice only", EditorAction::TrajectoryAdjustment(DebrisTrajectoryAdjustment::TowardLander)),
+    ]));
+    parent.spawn(text("Source-derived occasional impulses, not a velocity lock or natural gravity. Disabled for normal flights; no attraction inside 100 m. Draft only until you confirm a new world.", CAPTION_SIZE_PX, MUTED));
     numeric(parent, EditorField::WorldCount);
     parent.spawn((
         text("", CAPTION_SIZE_PX, MUTED),

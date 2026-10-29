@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -358,3 +359,58 @@ def test_setup_distribution_trial_and_recorded_placement_remain_actual_not_draft
     assert csv_row["trial_revision"] == "5"
     assert json.loads(csv_row["debris_distribution"]) == distribution
     assert csv_row["observation_time_s"] == "7.0"
+
+
+@pytest.mark.parametrize("kind", [None, "directed_stream", "transit_stream"])
+@pytest.mark.parametrize("adjustment", [None, "off", "toward_lander"])
+def test_debris_exports_do_not_relabel_archives_or_merge_new_world_drafts(kind, adjustment):
+    """Export inputs only, not a replay, physics result or source-parity claim."""
+    debris = {"count": 500}
+    if kind is not None:
+        debris["distribution"] = {"kind": kind}
+    if adjustment is not None:
+        debris["trajectory_adjustment"] = adjustment
+    settings = {"debris": debris}
+    source_settings = deepcopy(settings)
+    row = {
+        "experiment_settings": settings,
+        "debris_distribution": {"kind": kind or "directed_stream"},
+        "telemetry_time_s": 2.0,
+        "observation_time_s": 2.25,
+    }
+    source = b"# supplied export-contract bytes, not executed flight proof\n"
+    document = experiment_document(
+        applied_config=None,
+        draft_config={
+            "settings": {
+                "debris": {
+                    "count": 1000,
+                    "distribution": {"kind": "transit_stream"},
+                    "trajectory_adjustment": "toward_lander",
+                }
+            }
+        },
+        selected_policy="coast",
+        schedule_s=(),
+        history=[row],
+        latest_snapshot={
+            "observation": {"time_s": 2.25, "experiment_settings": settings},
+            "engine_build": {"sha256": "reported-engine-hash"},
+        },
+        sources={"export-contract source bytes": source},
+    )
+    assert document["applied_world_settings"] == source_settings
+    assert document["observed_setup"]["experiment_settings"] == source_settings
+    assert document["observed_setup"]["debris_distribution"] == {"kind": kind or "directed_stream"}
+    assert document["flight_context"]["experiment_settings"] == source_settings
+    assert document["measured_history"][0]["experiment_settings"] == source_settings
+    assert document["draft_config"]["settings"]["debris"]["count"] == 1000
+    assert document["engine_build"] == {"sha256": "reported-engine-hash"}
+    assert document["python_sources"][0]["sha256"] == hashlib.sha256(source).hexdigest()
+    assert document["claims"]["stp_physics_parity"] is False
+    exported = next(csv.DictReader(io.StringIO(history_csv([row]).decode())))
+    assert json.loads(exported["experiment_settings"]) == source_settings
+    assert exported["telemetry_time_s"] == "2.0"
+    assert exported["observation_time_s"] == "2.25"
+    document["applied_world_settings"]["debris"]["count"] = 0
+    assert settings == source_settings

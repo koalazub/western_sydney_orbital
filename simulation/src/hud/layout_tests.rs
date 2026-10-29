@@ -2144,6 +2144,43 @@ fn check_native_instrument_editors(app: &mut App, camera: Entity, window: Entity
     assert!(!crate::session::is_running());
     assert_eq!(created.ship_tuning().thrust_scale, 1.0);
 
+    let traffic = action(
+        app,
+        "Select directional transit traffic along the station route for a new world",
+    );
+    let attraction = action(
+        app,
+        "Enable light lander-directed trajectory adjustment in the new world, practice only",
+    );
+    let unchanged = serde_json::to_value(created.as_ref()).unwrap();
+    activate(app, window, traffic);
+    activate(app, window, attraction);
+    assert_eq!(
+        serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+        unchanged,
+        "traffic and attraction buttons stage a draft without changing the current bodies"
+    );
+    activate(app, window, review);
+    activate(app, window, keep);
+    assert_eq!(
+        serde_json::to_value(crate::snapshot().as_ref()).unwrap(),
+        unchanged
+    );
+    activate(app, window, review);
+    activate(app, window, create);
+    let created = crate::snapshot();
+    let settings = created.experiment_settings.unwrap();
+    assert!(matches!(
+        settings.debris.distribution,
+        DebrisDistribution::TransitStream
+    ));
+    assert_eq!(
+        settings.debris.trajectory_adjustment,
+        crate::model::DebrisTrajectoryAdjustment::TowardLander
+    );
+    assert_eq!(crate::session::debris_dynamics().unwrap().physical_count, 3);
+    assert!(!crate::session::is_running());
+
     let placement = app
         .world_mut()
         .query::<(Entity, &HudAction)>()

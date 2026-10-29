@@ -252,10 +252,16 @@ def _distribution(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("Debris distribution must be a typed mapping")
     kind = value.get("kind")
-    if kind == "directed_stream" and set(value) == {"kind"}:
+    if (
+        isinstance(kind, str)
+        and kind in ("directed_stream", "transit_stream")
+        and set(value) == {"kind"}
+    ):
         return {"kind": kind}
     if kind != "impact_ejecta" or set(value) != {"kind", "settings"}:
-        raise ValueError("Debris distribution must be directed_stream or impact_ejecta")
+        raise ValueError(
+            "Debris distribution must be directed_stream, transit_stream or impact_ejecta"
+        )
     settings = value["settings"]
     fields = {
         "source_direction",
@@ -289,7 +295,11 @@ def _distribution(value: Any) -> dict[str, Any]:
 
 
 def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
-    """Parse the external local setup schema without issuing any request."""
+    """Parse setup data without I/O. Omitted distributions keep legacy directed_stream.
+
+    An omitted trajectory adjustment stays absent; explicit off normalizes to
+    absence, matching native serialization without changing archived settings.
+    """
     if not isinstance(settings, Mapping) or set(settings) != {"ship", "debris"}:
         raise ValueError("Experiment settings require exactly ship and debris")
     ship, debris = settings["ship"], settings["debris"]
@@ -309,7 +319,7 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
     if (
         not isinstance(debris, Mapping)
         or not fields.issubset(debris)
-        or set(debris) - fields - {"distribution"}
+        or set(debris) - fields - {"distribution", "trajectory_adjustment"}
     ):
         raise ValueError("Experiment debris fields do not match the versioned local schema")
     parsed_ship = {
@@ -328,7 +338,7 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Flow direction needs stream_axis x/y/z and stream_sign -1/1")
     if debris["stream_sign"] not in (-1, 1):
         raise ValueError("Flow direction needs stream_axis x/y/z and stream_sign -1/1")
-    return {
+    parsed = {
         "ship": parsed_ship,
         "debris": {
             "count": _integer(debris["count"], "debris.count", MAX_DEBRIS_COUNT),
@@ -343,6 +353,13 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
             "distribution": _distribution(debris.get("distribution", {"kind": "directed_stream"})),
         },
     }
+    if "trajectory_adjustment" in debris:
+        adjustment = debris["trajectory_adjustment"]
+        if not isinstance(adjustment, str) or adjustment not in ("off", "toward_lander"):
+            raise ValueError("trajectory_adjustment must be off or toward_lander")
+        if adjustment != "off":
+            parsed["debris"]["trajectory_adjustment"] = adjustment
+    return parsed
 
 
 def control_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:

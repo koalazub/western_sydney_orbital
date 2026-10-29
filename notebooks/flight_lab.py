@@ -329,7 +329,10 @@ def _(
     def directed_flow_available(session):
         setup = session.get("actual_setup") if session is not None else None
         distribution = setup.get("debris_distribution") if isinstance(setup, dict) else None
-        return isinstance(distribution, dict) and distribution.get("kind") == "directed_stream"
+        return isinstance(distribution, dict) and distribution.get("kind") in (
+            "directed_stream",
+            "transit_stream",
+        )
 
     def placement_seed(snapshot):
         seed = {
@@ -1458,6 +1461,7 @@ def _(
         _distribution_kind = (_context.get("debris_distribution") or {}).get("kind")
         _mode_label = {
             "directed_stream": "Directed stream",
+            "transit_stream": "Transit traffic",
             "impact_ejecta": "Impact ejecta",
         }.get(_distribution_kind, "Unavailable")
         _direction_label = {-1: "negative", 1: "positive"}.get(
@@ -1473,7 +1477,7 @@ def _(
                     f"source {_observation.get('time_s', 'unavailable')} s · "
                     f"revision {_observation.get('tuning_revision', 'unavailable')}"
                 )
-                if _distribution_kind == "directed_stream"
+                if _distribution_kind in ("directed_stream", "transit_stream")
                 else mo.md(
                     "Live stream edits are unavailable in this world. New-world drafts below."
                 ),
@@ -1855,7 +1859,9 @@ def _(
     _setup = _seed.get("setup", {}) if _seed is not None else {}
     _baseline = _setup.get("experiment_settings") or default_world_settings
     _debris = _baseline["debris"]
-    _distribution = _setup.get("debris_distribution") or {"kind": "directed_stream"}
+    _distribution = _setup.get("debris_distribution") or _debris.get(
+        "distribution", {"kind": "directed_stream"}
+    )
     _impact = _distribution.get("settings", impact_defaults)
     flight_preset = mo.ui.dropdown(
         options={
@@ -1870,10 +1876,25 @@ def _(
         full_width=True,
     )
     debris_mode = mo.ui.dropdown(
-        options={"Directed stream": "directed_stream", "Impact ejecta": "impact_ejecta"},
-        value="Impact ejecta" if _distribution["kind"] == "impact_ejecta" else "Directed stream",
+        options={
+            "Transit traffic": "transit_stream",
+            "Broad shell stream": "directed_stream",
+            "Impact ejecta": "impact_ejecta",
+        },
+        value={"transit_stream": "Transit traffic", "impact_ejecta": "Impact ejecta"}.get(
+            _distribution["kind"], "Broad shell stream"
+        ),
         allow_select_none=False,
         label="Debris mode for new world",
+        full_width=True,
+    )
+    trajectory_adjustment = mo.ui.dropdown(
+        options={"Off": "off", "Light attraction, practice only": "toward_lander"},
+        value="Light attraction, practice only"
+        if _debris.get("trajectory_adjustment") == "toward_lander"
+        else "Off",
+        allow_select_none=False,
+        label="Lander-directed trajectory adjustment for new world",
         full_width=True,
     )
     structure_controls = mo.ui.dictionary(
@@ -1894,10 +1915,18 @@ def _(
                 0.05, 100, 0.05, _debris["radius_max_m"], "Maximum debris radius, m"
             ),
             "shell_inner_m": lab_slider(
-                0, 49990, 10, _debris["shell_inner_m"], "Shell inner offset, m"
+                0,
+                49990,
+                10,
+                _debris["shell_inner_m"],
+                "Shell inner offset, m; inactive for transit",
             ),
             "shell_outer_m": lab_slider(
-                10, 50000, 10, _debris["shell_outer_m"], "Shell outer offset, m"
+                10,
+                50000,
+                10,
+                _debris["shell_outer_m"],
+                "Shell outer offset, m; inactive for transit",
             ),
         }
     )
@@ -1954,6 +1983,7 @@ def _(
     run_policy_step = mo.ui.run_button(label="Run one paused policy step", kind="warn")
     return (
         debris_mode,
+        trajectory_adjustment,
         flight_preset,
         impact_controls,
         regenerate_world,
@@ -1998,6 +2028,7 @@ def _(
     ship_controls,
     step_seconds,
     structure_controls,
+    trajectory_adjustment,
 ):
     _impact = impact_controls.value
     distribution_draft = (
@@ -2011,7 +2042,7 @@ def _(
             },
         }
         if debris_mode.value == "impact_ejecta"
-        else {"kind": "directed_stream"}
+        else {"kind": debris_mode.value}
     )
     world_settings_draft = {
         "ship": {key: ship_controls.value[key] for key in ("mass_kg", "inertia_scale")},
@@ -2019,6 +2050,11 @@ def _(
             **structure_controls.value,
             **flow_controls.value,
             "distribution": distribution_draft,
+            **(
+                {"trajectory_adjustment": trajectory_adjustment.value}
+                if trajectory_adjustment.value != "off"
+                else {}
+            ),
         },
     }
     # Edit this real Python schedule. One click executes one selected row, no loop.
@@ -2039,6 +2075,7 @@ def _(
     regenerate_world,
     stopped_sim,
     structure_controls,
+    trajectory_adjustment,
     validate_experiment_settings,
     world_seed,
 ):
@@ -2064,6 +2101,11 @@ def _(
                     **_before["debris_flow"],
                     **structure_controls.value,
                     "distribution": distribution_draft,
+                    **(
+                        {"trajectory_adjustment": trajectory_adjustment.value}
+                        if trajectory_adjustment.value != "off"
+                        else {}
+                    ),
                 },
             }
         _settings = validate_experiment_settings(_settings)
@@ -2315,6 +2357,7 @@ def _(
     step_seconds,
     stop_run,
     structure_controls,
+    trajectory_adjustment,
     upright,
     world_seed,
 ):
@@ -2443,7 +2486,7 @@ def _(
                             "Live stream model": mo.md(
                                 "Speed and direction edits preserve existing velocity deviations. "
                                 "Birth spread affects future births and must be at most half the "
-                                "speed. Live flow edits require a directed-stream world."
+                                "speed. Live flow edits require transit traffic or a broad stream."
                             ),
                             "New-world debris setup, draft only": lab_stack(
                                 [
@@ -2452,6 +2495,14 @@ def _(
                                         "with Regenerate world in Launch."
                                     ),
                                     debris_mode,
+                                    trajectory_adjustment,
+                                    mo.md(
+                                        "Transit traffic spans the station route. "
+                                        "Light attraction is off by default. Its "
+                                        "small source-derived impulses apply only "
+                                        "beyond 100 m. Both are new-world settings. "
+                                        "Gravity and contacts remain active."
+                                    ),
                                     structure_controls.vstack(),
                                     mo.accordion(
                                         {

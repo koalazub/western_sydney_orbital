@@ -140,23 +140,28 @@ def _settings_shape(settings: Any) -> dict[str, Any]:
     settings = _require_fields(settings, "settings", frozenset({"ship", "debris"}))
     _require_fields(settings["ship"], "settings.ship", frozenset({"mass_kg", "inertia_scale"}))
     debris = _require_fields(
-        settings["debris"], "settings.debris", _DEBRIS_FIELDS, frozenset({"distribution"})
+        settings["debris"],
+        "settings.debris",
+        _DEBRIS_FIELDS,
+        frozenset({"distribution", "trajectory_adjustment"}),
     )
-    # The checked-in local_experiment_v1 settings omit distribution. The native
-    # validator supplies directed_stream, which is then explicit in reviewed JSON.
+    # New scenario settings select transit_stream explicitly. Older documents
+    # without distribution still normalize to legacy directed_stream, not that default.
     if "distribution" in debris:
         path = "settings.debris.distribution"
         distribution = _require_fields(
             debris["distribution"], path, frozenset({"kind"}), frozenset({"settings"})
         )
         kind = distribution["kind"]
-        if kind == "directed_stream":
+        if isinstance(kind, str) and kind in ("directed_stream", "transit_stream"):
             _require_fields(distribution, path, frozenset({"kind"}))
         elif kind == "impact_ejecta":
             _require_fields(distribution, path, frozenset({"kind", "settings"}))
             _require_fields(distribution["settings"], f"{path}.settings", _EJECTA_FIELDS)
         else:
-            raise ValueError(f"{path}.kind must be directed_stream or impact_ejecta")
+            raise ValueError(
+                f"{path}.kind must be directed_stream, transit_stream or impact_ejecta"
+            )
     return settings
 
 
@@ -216,9 +221,10 @@ def _validate_document(document: Any) -> dict[str, Any]:
 class WorldProposal:
     """Validated, immutable review data. Documents returned to callers are fresh copies.
 
-    Canonical JSON uses the native validator's numeric types and default
-    distribution, positive floating-point zero, sorted keys, compact separators
-    and UTF-8, without a trailing newline. The digest is its lowercase SHA-256 hex.
+    Canonical JSON uses native numeric types, legacy distribution for omissions,
+    omitted off trajectory adjustment, positive floating-point zero, sorted keys,
+    compact separators and UTF-8 without a trailing newline. The digest is its
+    lowercase SHA-256 hex.
     A digest identifies content, not its author or proof of human review.
     """
 

@@ -506,6 +506,8 @@ def test_actual_upright_reset_records_the_intervention_without_teleporting_or_br
 def test_actual_world_configuration_changes_mass_inertia_and_worldwide_sensor_population(engine):
     before = engine.query("observation")
     settings = deepcopy(before["experiment_settings"])
+    # This is the worldwide shell regression, not the new bounded route volume.
+    settings["debris"]["distribution"] = {"kind": "directed_stream"}
     settings["ship"]["mass_kg"] *= 1.25
     settings["ship"]["inertia_scale"] = 1.5
     settings["debris"]["count"] = 64
@@ -1009,6 +1011,9 @@ def test_large_counts_construct_and_advance_actual_wasm_bodies_with_small_acknow
     engine, count
 ):
     settings = deepcopy(engine.baseline_settings)
+    # Capacity is measured in the broad shell. Packing 100000 default-sized
+    # colliders into the transit corridor must be rejected, not overlap bodies.
+    settings["debris"]["distribution"] = {"kind": "directed_stream"}
     settings["debris"]["count"] = count
     try:
         acknowledgement = engine.query(

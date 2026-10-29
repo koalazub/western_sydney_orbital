@@ -11,10 +11,12 @@ import secrets
 import threading
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from wsorb.checkpoint import world_metadata
 from wsorb.experiment import (
     HISTORY_LIMIT,
     MAX_CONTROLLER_RUN_S,
@@ -56,6 +58,7 @@ from wsorb.local_api import (
     validate_position,
 )
 from wsorb.standby import control_authority, controller_fence, standby_policy_data
+from wsorb.sweep import _configuration
 
 
 def test_decision_copies_body_frame_vectors_without_clamping_or_sending():
@@ -960,6 +963,118 @@ def test_ejecta_schema_is_closed_and_keeps_initial_conditions_separate_from_stre
         numeric_setup_settings["debris"]["distribution"] = bad
         with pytest.raises(ValueError):
             validate_experiment_settings(numeric_setup_settings)
+
+
+@pytest.mark.parametrize("kind", [None, "directed_stream", "transit_stream"])
+@pytest.mark.parametrize("adjustment", [None, "off", "toward_lander"])
+def test_setup_projection_and_comparison_metadata_preserve_reported_optional_settings(
+    numeric_setup_settings, numeric_history_contract, kind, adjustment
+):
+    """Metadata projection only, not measurements or execution of these settings."""
+    debris = numeric_setup_settings["debris"]
+    if kind is not None:
+        debris["distribution"] = {"kind": kind}
+    if adjustment is not None:
+        debris["trajectory_adjustment"] = adjustment
+    snapshot = numeric_history_contract
+    snapshot["observation"].update(
+        experiment_settings=deepcopy(numeric_setup_settings), trial_revision=3, tuning_revision=4
+    )
+    snapshot["runtime"] = {"running": False}
+    snapshot["engine_build"] = {"sha256": "serialization-input-not-flight-proof"}
+    for projection in (
+        observed_setup(snapshot["observation"]),
+        flight_context(snapshot),
+        measured_sample(snapshot),
+    ):
+        assert projection["experiment_settings"] == numeric_setup_settings
+        assert projection["debris_distribution"] == {"kind": kind or "directed_stream"}
+        projection["experiment_settings"]["debris"]["count"] = 0
+    assert snapshot["observation"]["experiment_settings"] == numeric_setup_settings
+    metadata = world_metadata(snapshot)
+    assert metadata["experiment_settings"] == numeric_setup_settings
+    assert metadata["engine_build"] == snapshot["engine_build"]
+    assert metadata["trial_revision"] == 3
+    assert metadata["tuning_revision"] == 4
+    assert metadata["seed"] == 12
+    assert control_context(snapshot) == {
+        "trial_revision": 3,
+        "tuning_revision": 4,
+        "manual_interventions": 0,
+        "seed": 12,
+        "running": False,
+    }
+
+
+def test_reported_distribution_does_not_rewrite_the_separate_baseline_or_invent_adjustment():
+    observation = {
+        "debris_distribution": {"kind": "transit_stream"},
+        "experiment_settings": {"debris": {"count": 500}},
+    }
+    projection = observed_setup(observation)
+    assert projection["debris_distribution"] == {"kind": "transit_stream"}
+    assert projection["experiment_settings"] == {"debris": {"count": 500}}
+    projection["debris_distribution"]["kind"] = "directed_stream"
+    assert observation["debris_distribution"] == {"kind": "transit_stream"}
+    assert observed_setup({})["debris_distribution"] is None
+
+
+def test_sweep_default_merge_keeps_saved_explicit_legacy_distribution():
+    """Configuration parsing only. No sweep, engine, replay or policy is executed."""
+    root = Path(__file__).resolve().parents[1]
+    scenario = json.loads((root / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
+    config = {
+        "schema_version": 1,
+        "seeds": [100],
+        "debris_counts": [500],
+        "preset": "far_side_l2",
+        "duration_s": 1.0,
+        "step_s": 0.1,
+        "algorithms": {"coast": {}},
+    }
+    policies = {"coast": coast_command}
+    current = _configuration(config, scenario, policies)
+    assert current["settings"]["debris"]["distribution"] == {"kind": "transit_stream"}
+    saved = deepcopy(current)
+    saved["settings"]["debris"]["distribution"] = {"kind": "directed_stream"}
+    loaded = json.loads(json.dumps(saved))
+    merged = _configuration(loaded, scenario, policies)
+    assert merged["settings"]["debris"]["distribution"] == {"kind": "directed_stream"}
+    assert "trajectory_adjustment" not in merged["settings"]["debris"]
+    assert loaded == saved
+    assert scenario["experiment_settings"]["debris"]["distribution"] == {"kind": "transit_stream"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("distribution", {"kind": "transit_stream"}), ("trajectory_adjustment", "toward_lander")],
+)
+def test_recorded_debris_setup_change_keeps_legacy_rows_and_held_source_clocks(
+    numeric_setup_settings, numeric_history_contract, field, value
+):
+    """Serialization inputs only. Recording must not create a flight or reset its clock."""
+    observation = numeric_history_contract["observation"]
+    observation.update(experiment_settings=deepcopy(numeric_setup_settings), trial_revision=1)
+    runner = ExperimentRunner()
+    runner.record_snapshot(numeric_history_contract)
+    observation["experiment_settings"]["debris"][field] = value
+    observation["trial_revision"] = 2
+    runner.record_snapshot(numeric_history_contract)
+    first, second = runner.history()
+    assert first["experiment_settings"] == numeric_setup_settings
+    assert first["debris_distribution"] == {"kind": "directed_stream"}
+    assert second["experiment_settings"]["debris"][field] == value
+    assert second["setup_changed"] is True
+    assert second["telemetry_held"] is True
+    assert second["segment"] != first["segment"]
+    assert first["telemetry_time_s"] == second["telemetry_time_s"] == 2.0
+    assert first["observation_time_s"] == second["observation_time_s"] == 2.25
+    change = runner.configuration_changes()[-1]
+    assert change["experiment_settings"] == second["experiment_settings"]
+    assert change["source_time_s"] == 2.25
+    assert change["source_seed"] == 12
+    assert runner._worker is None
+    assert runner.status()["state"] == "idle"
 
 
 def test_checked_control_context_requires_real_receipt_fields_without_synthetic_defaults():

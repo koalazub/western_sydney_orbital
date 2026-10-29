@@ -202,7 +202,7 @@ pub(super) fn measure(snapshot: &Snapshot) -> Measurement {
         .map(|settings| settings.debris.distribution);
     report.debris_flow_reference = (report
         .debris_distribution
-        .is_none_or(|distribution| distribution.is_directed_stream())
+        .is_none_or(|distribution| distribution.is_stream())
         && flow.validate().is_ok())
     .then_some(flow);
     report.physical_debris_count = Some(
