@@ -62,15 +62,15 @@ def _():
         LivePolicy,
         LocalApiError,
         LocalSimulation,
-        MAX_DEBRIS_COUNT,
         MAX_CONTROLLER_RUN_S,
+        MAX_DEBRIS_COUNT,
         Path,
         PlannerConfig,
         ResilienceConfig,
         ResilientGuidance,
         alt,
-        asdict,
         approve_world_proposal,
+        asdict,
         basic_command,
         controller_start_notice,
         experiment_document,
@@ -110,7 +110,6 @@ def _(json, lab_source_path, validate_experiment_settings):
         impact_defaults,
         position_limit_m,
         scenario_source_path,
-        workspace_scenario,
     )
 
 
@@ -141,7 +140,12 @@ def _(mo):
 
 @app.cell
 def _(
-    action_error, mo, parse_world_proposal, proposal_upload, review_proposal, set_reviewed_proposal
+    action_error,
+    mo,
+    parse_world_proposal,
+    proposal_upload,
+    review_proposal,
+    set_reviewed_proposal,
 ):
     mo.stop(not review_proposal.value)
     try:
@@ -260,7 +264,14 @@ def _(mo):
 
 
 @app.cell
-def _(FlightStateError, LocalApiError, json, mo, observed_setup, validate_position):
+def _(
+    FlightStateError,
+    LocalApiError,
+    json,
+    mo,
+    observed_setup,
+    validate_position,
+):
     def lab_slider(start, stop, step, value, label, *, disabled=False):
         return mo.ui.slider(
             start=start,
@@ -1092,9 +1103,9 @@ def _(get_session, lab_slider, mo):
     return (
         apply_sensor_fault,
         clear_sensor_faults,
+        interrupt_primary,
         pause_physics,
         primary_outage_duration,
-        interrupt_primary,
         sensor_fault_duration,
         sensor_fault_mode,
         sensor_fault_target,
@@ -1102,7 +1113,13 @@ def _(get_session, lab_slider, mo):
 
 
 @app.cell
-def _(action_error, experiment, interrupt_primary, mo, primary_outage_duration):
+def _(
+    action_error,
+    experiment,
+    interrupt_primary,
+    mo,
+    primary_outage_duration,
+):
     mo.stop(not interrupt_primary.value)
     try:
         experiment.inject_primary_outage(duration_sim_s=primary_outage_duration.value)
@@ -1235,8 +1252,8 @@ def _(
     live_policy,
     mo,
     observed_setup,
-    place_lander,
     pause_physics,
+    place_lander,
     prepare_export,
     regenerate_world,
     reset_run,
@@ -2252,16 +2269,16 @@ def _(
     controller_mode,
     debris_mode,
     debris_readback_view,
-    duration_s,
     discard_proposal,
+    duration_s,
     experiment_refresh,
     experiment_schedule_s,
     flight_diagnostics_view,
-    flow_controls,
     flight_preset,
+    flow_controls,
     gain_controls,
-    get_selected_tab,
     get_proposal_draft,
+    get_selected_tab,
     get_session,
     history_view,
     impact_controls,
@@ -2700,7 +2717,7 @@ def _(
     )
     lab_view = mo.Html(f'<div class="wsorb-lab">{lab_styles}{lab_tabs}</div>')
     mo.output.replace(lab_view)
-    return lab_tabs, lab_view
+    return
 
 
 @app.cell
@@ -2713,8 +2730,8 @@ def _(
     controller_gains,
     controller_mode,
     decide_command,
-    duration_s,
     distribution_draft,
+    duration_s,
     experiment,
     experiment_document,
     experiment_schedule_s,
@@ -2728,13 +2745,13 @@ def _(
     json_bytes,
     lab_source_path,
     mo,
-    planner_settings,
     placement_controls,
+    planner_settings,
     policy_sources,
     predict_scene,
     prepare_export,
-    schedule_slot,
     scenario_source_path,
+    schedule_slot,
     ship_controls,
     world_seed,
     world_settings_draft,

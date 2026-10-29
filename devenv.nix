@@ -67,7 +67,7 @@ in
       exec = "uv run --locked --extra lab pytest";
     };
     "wsorb:lint" = {
-      exec = "uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict notebooks";
+      exec = "uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict --ignore-scripts notebooks";
     };
   };
 
