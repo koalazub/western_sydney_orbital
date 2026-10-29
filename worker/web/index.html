@@ -58,7 +58,7 @@
     </dialog>
     <dialog id="controller-panel" aria-labelledby="controller-title" aria-describedby="controller-scope">
       <header class="controller-heading">
-        <h2 id="controller-title">Test a teammate's controller</h2>
+        <h2 id="controller-title">Controller profiles and flight metrics</h2>
         <button id="close-controllers" type="button" aria-label="Close controller profiles">Close</button>
       </header>
       <p id="controller-scope">Python runs the selected logic. This game supplies real physics and sensors. Every fresh test uses seed 100 and 500 debris bodies at L2.</p>
@@ -82,7 +82,7 @@
       <p id="controller-error" role="alert"></p>
       <p id="controller-fresh-warning">Run fresh replaces this tab's flight. Stop the current controller first. Selecting another profile requests Stop; it never resets or starts a flight by itself.</p>
       <div class="controller-actions">
-        <button id="run-controller" type="button">Run fresh test</button>
+        <button id="run-controller" type="button" disabled>Run fresh test</button>
         <button id="stop-controller" type="button" disabled>Stop controller</button>
         <button id="refresh-controller-results" type="button">Refresh results</button>
         <button id="pause-controller-updates" type="button">Pause updates</button>
@@ -92,6 +92,7 @@
         <p>Local game: start <code>just controllers serve --connection-file .devenv/wsorb-local.json --run</code> with the descriptor for this server.</p>
         <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
       </details>
+      <h3 id="controller-room-heading">Current connection job results</h3>
       <p id="controller-score-label">STP-formula score estimate, not an official runtime score</p>
       <p id="controller-score-detail">Published formula using local fuel/damage estimates. Speed bonus is completion time; arrival speed is separate. Collision damage and fuel burn reduce score. Local model, not certified STP counters. Station-region arrival is not docking.</p>
       <div class="controller-fields">
@@ -109,6 +110,152 @@
           <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Score</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Speed / progress points</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
         </table>
       </div>
+      <details id="flight-analytics" class="flight-analytics">
+        <summary>Published teammate scoreboard and measured flight metrics</summary>
+        <p id="analytics-read-only">These controls only filter recorded measurements. They never select a flight controller, request Stop, reset a flight or start a run. Public trial data loads only when this section opens.</p>
+        <section aria-labelledby="published-analytics-heading">
+          <h3 id="published-analytics-heading">Published matched-trial scoreboard</h3>
+          <p>Local matched-seed summaries, not an official leaderboard. The publication records two consecutive fresh trials per seed and profile with unchanged code. This mirrors the official two-run scoring rule, but does not establish official SDK execution or continuous-video evidence. These published trials are not hosted room jobs. Arrivals mean station-region entry, not docking.</p>
+          <p id="published-analytics-load-status" role="status">Open this section to check for a public matched-trial publication.</p>
+          <button id="retry-published-analytics" type="button" hidden>Retry public analytics</button>
+          <div id="published-analytics-content" hidden>
+            <div class="controller-results" tabindex="0" role="region" aria-label="Published teammate efficiency table, scroll horizontally">
+              <table id="published-analytics-scoreboard" aria-describedby="published-scoreboard-note">
+                <caption>Two-run mean, averaged across matched seeds with valid pairs. Other numeric columns are medians over available physical outcomes, including damage failures and timeouts. Software errors count in attempts, not physical medians. n/a means unavailable, never zero.</caption>
+                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Two-run mean score</th><th scope="col">Valid pairs / seeds</th><th scope="col">Arrivals / attempts</th><th scope="col">Scored / attempts</th><th scope="col">Median time, s</th><th scope="col">Median fuel used, kg</th><th scope="col">Median damage, J</th><th scope="col">Median translation burn count</th><th scope="col">Median translation burn time, s</th><th scope="col">Median angular actuation count</th><th scope="col">Median angular actuation time, s</th><th scope="col">Median physical turn count</th><th scope="col">Median physical turn time, s</th><th scope="col">Median orientation angle, rad</th></tr></thead>
+              </table>
+            </div>
+            <p id="published-analytics-ranking" role="status"></p>
+            <p id="published-scoreboard-note">The score column is the mean of valid two-run pair means across the matched seeds. Ordering is available only when valid-pair seed coverage and native formula receipts match. It is a local multi-seed summary, not an official multi-seed rank or tie-break. Missing pairs remain in the denominators. No ordering crosses builds, settings or execution modes. Burn and turn counts are diagnostics, not score inputs. <a href="#controller-score-detail">Score terms and local-model limits</a>. Exact recorded terms for each selected trial appear below.</p>
+            <details class="analytics-manifest">
+              <summary>Recorded source mode, build, settings and limitations</summary>
+              <dl id="published-analytics-manifest"></dl>
+              <p>Only settings recorded in this manifest are reported here. No unrecorded tuning or runtime equivalence is assumed.</p>
+              <ul id="published-analytics-limitations"></ul>
+              <h4>Versioned counter definitions</h4>
+              <pre id="published-analytics-definitions" tabindex="0" aria-label="Published native counter definition JSON"></pre>
+              <div class="controller-results" tabindex="0" role="region" aria-label="Published source hashes, scroll horizontally">
+                <table id="published-analytics-hashes"><caption>Recorded source SHA-256 hashes</caption><thead><tr><th scope="col">Source path</th><th scope="col">SHA-256</th></tr></thead></table>
+              </div>
+            </details>
+            <h4>Compare recorded trial series</h4>
+            <div class="controller-fields analytics-controls">
+              <label for="published-analytics-metric">Published metric
+                <select id="published-analytics-metric" name="published-analytics-metric" aria-describedby="analytics-sampling-note"></select>
+              </label>
+              <label for="published-analytics-seed">Published seed
+                <select id="published-analytics-seed" name="published-analytics-seed" disabled></select>
+              </label>
+              <label for="published-analytics-profile">Published teammate / profile
+                <select id="published-analytics-profile" name="published-analytics-profile" disabled></select>
+              </label>
+            </div>
+            <p id="published-analytics-status-detail">The efficiency table above always summarizes the full published cohort. These filters change only the graph and selected-trial tables.</p>
+            <p id="published-analytics-status" role="status">No published trial samples selected.</p>
+            <figure class="analytics-figure">
+              <figcaption>Published samples by actual simulation time. Scroll the graph horizontally on a narrow screen.</figcaption>
+              <div class="analytics-chart-scroll" tabindex="0" role="region" aria-label="Published metric graph, scroll horizontally">
+                <svg id="published-analytics-plot" class="analytics-plot" viewBox="0 0 760 330" role="img" aria-labelledby="published-analytics-plot-title published-analytics-plot-description">
+                  <title id="published-analytics-plot-title">Published flight measurements</title>
+                  <desc id="published-analytics-plot-description">No publication loaded. The full numeric tables below are the graph alternative.</desc>
+                </svg>
+              </div>
+              <ol id="published-analytics-legend" class="analytics-legend" aria-label="Published graph legend"></ol>
+            </figure>
+            <details class="analytics-data">
+              <summary>Selected published outcomes and native score terms</summary>
+              <div class="controller-results" tabindex="0" role="region" aria-label="Selected published trial outcomes, scroll horizontally">
+                <table id="published-analytics-outcomes"><caption>Exact recorded per-trial values. Score terms use native receipts, not a browser calculation.</caption>
+                  <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Trial ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Score</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Speed / progress points</th><th scope="col">Progress basis</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
+                </table>
+              </div>
+            </details>
+            <details class="analytics-data">
+              <summary>Selected published native episode totals and longest durations</summary>
+              <div class="controller-results" tabindex="0" role="region" aria-label="Published native totals, scroll horizontally">
+                <table id="published-analytics-totals"><caption>Exact physics-step totals. Counts and longest durations are never reconstructed from the sampled graph.</caption></table>
+              </div>
+            </details>
+            <details class="analytics-data">
+              <summary>Full numeric data for selected published series</summary>
+              <div class="controller-results" tabindex="0" role="region" aria-label="Published sample data, scroll horizontally">
+                <table id="published-analytics-samples" aria-describedby="analytics-sampling-note"><caption>All retained samples at their actual timestamps, at full reported precision. n/a is missing data.</caption>
+                  <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Trial ID</th><th scope="col">Time, s</th><th scope="col">Fuel used, kg</th><th scope="col">Translation burn time, s</th><th scope="col">Angular actuation time, s</th><th scope="col">Physical turn time, s</th><th scope="col">Orientation angle, rad</th><th scope="col">Relative speed, m/s</th><th scope="col">Range, m</th><th scope="col">Damage, J</th></tr></thead>
+                </table>
+              </div>
+              <a id="published-analytics-csv" download="published-selected-samples.csv" hidden>Download selected published samples CSV</a>
+            </details>
+            <nav class="analytics-downloads" aria-label="Download the full published cohort">
+              <a href="/analytics/team-comparison.json" download referrerpolicy="no-referrer">Dataset JSON</a>
+              <a href="/analytics/trials.csv" download referrerpolicy="no-referrer">All trials CSV</a>
+              <a href="/analytics/summary.csv" download referrerpolicy="no-referrer">Summary CSV</a>
+              <a href="/analytics/score-components.svg" download referrerpolicy="no-referrer">Score components SVG</a>
+              <a href="/analytics/fuel-burns.svg" download referrerpolicy="no-referrer">Fuel and burns SVG</a>
+              <a href="/analytics/turns.svg" download referrerpolicy="no-referrer">Physical turns SVG</a>
+              <a href="/analytics/efficiency.svg" download referrerpolicy="no-referrer">Efficiency SVG</a>
+            </nav>
+          </div>
+        </section>
+        <section aria-labelledby="room-analytics-heading">
+          <h3 id="room-analytics-heading">Current connection job analytics</h3>
+          <p>Only jobs returned by this tab's existing connection appear here. The seven reviewed profiles are supported. Legacy jobs without native analytics show n/a; the publication above never fills those gaps. Refresh and Pause updates above also control this section.</p>
+          <div class="controller-fields analytics-controls">
+            <label for="room-analytics-cohort">Current job comparison group
+              <select id="room-analytics-cohort" name="room-analytics-cohort" aria-describedby="room-analytics-cohort-detail" disabled></select>
+            </label>
+            <label for="room-analytics-metric">Current job metric
+              <select id="room-analytics-metric" name="room-analytics-metric" aria-describedby="analytics-sampling-note"></select>
+            </label>
+            <label for="room-analytics-seed">Current job seed
+              <select id="room-analytics-seed" name="room-analytics-seed" disabled></select>
+            </label>
+            <label for="room-analytics-profile">Current job teammate / profile
+              <select id="room-analytics-profile" name="room-analytics-profile" disabled></select>
+            </label>
+          </div>
+          <p id="room-analytics-cohort-detail">No completed jobs from this connection.</p>
+          <p id="room-analytics-status" role="status">No completed jobs from this connection.</p>
+          <figure class="analytics-figure">
+            <figcaption>Current job samples by actual simulation time. Scroll the graph horizontally on a narrow screen.</figcaption>
+            <div class="analytics-chart-scroll" tabindex="0" role="region" aria-label="Current job metric graph, scroll horizontally">
+              <svg id="room-analytics-plot" class="analytics-plot" viewBox="0 0 760 330" role="img" aria-labelledby="room-analytics-plot-title room-analytics-plot-description">
+                <title id="room-analytics-plot-title">Current job flight measurements</title>
+                <desc id="room-analytics-plot-description">No job analytics loaded. The full numeric tables below are the graph alternative.</desc>
+              </svg>
+            </div>
+            <ol id="room-analytics-legend" class="analytics-legend" aria-label="Current job graph legend"></ol>
+          </figure>
+          <details class="analytics-data">
+            <summary>Selected current job outcomes and native score terms</summary>
+            <div class="controller-results" tabindex="0" role="region" aria-label="Selected current job outcomes, scroll horizontally">
+              <table id="room-analytics-outcomes"><caption>Actual connection job receipts. n/a means unavailable, never zero. No cross-group ranking.</caption>
+                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Job ID</th><th scope="col">Seed</th><th scope="col">Outcome</th><th scope="col">Score</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Analytics availability</th><th scope="col">Speed / progress points</th><th scope="col">Progress basis</th><th scope="col">Collision penalty</th><th scope="col">Fuel penalty</th><th scope="col">Offset</th></tr></thead>
+              </table>
+            </div>
+          </details>
+          <details class="analytics-data">
+            <summary>Selected current job native episode totals and longest durations</summary>
+            <div class="controller-results" tabindex="0" role="region" aria-label="Current job native totals, scroll horizontally">
+              <table id="room-analytics-totals"><caption>Exact physics-step totals, including last-interval activity. Missing legacy receipts remain n/a.</caption></table>
+            </div>
+          </details>
+          <details class="analytics-data">
+            <summary>Full numeric data for selected current job series</summary>
+            <div class="controller-results" tabindex="0" role="region" aria-label="Current job sample data, scroll horizontally">
+              <table id="room-analytics-samples" aria-describedby="analytics-sampling-note"><caption>All retained samples at actual timestamps, at full reported precision. n/a is missing data.</caption>
+                <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Job ID</th><th scope="col">Time, s</th><th scope="col">Fuel used, kg</th><th scope="col">Translation burn time, s</th><th scope="col">Angular actuation time, s</th><th scope="col">Physical turn time, s</th><th scope="col">Orientation angle, rad</th><th scope="col">Relative speed, m/s</th><th scope="col">Range, m</th><th scope="col">Damage, J</th></tr></thead>
+              </table>
+            </div>
+            <a id="room-analytics-csv" download="current-job-selected-samples.csv" hidden>Download selected current job samples CSV</a>
+          </details>
+        </section>
+        <section aria-labelledby="analytics-definitions-heading">
+          <h3 id="analytics-definitions-heading">What the counters mean</h3>
+          <p>Definition <code>native_actuation_rotation_episodes_v1</code>. A translation burn is a contiguous episode of actual propellant force above 1e-6 N. Angular actuation is actual actuator torque above 1e-6 N m. A physical turn is actual angular speed above 1e-3 rad/s. Counts and durations come from native physics integration, normally every 0.05 s, not controller polls or nozzle pulses.</p>
+          <p>Total orientation angle is the accumulated pre/post-quaternion physical rotation arc, not the commanded angle or the shortest start-to-finish angle. Coasting spin or contact can produce a physical turn without angular actuation. Active flags describe the last integrated interval. Direct local angular torque is not charged to the official fuel allocation; fuel and damage here are local model estimates.</p>
+          <p id="analytics-sampling-note">Graphs show downsampled public numeric series, at most 192 actual samples per published trial and 48 per current job. Each published repetition remains its own line. Dots are retained observations at actual timestamps. Lines only join adjacent available samples; they do not add observations or establish event boundaries. Missing values break lines and stay n/a, never zero. Axes fit the selected data, not an invented zero baseline. Exact episode totals and longest durations come from the native counters, not the graph. Graphs do not read camera or radar payloads and are not evidence of GPU readiness.</p>
+        </section>
+      </details>
     </dialog>
   </main>
   <script type="module" src="/app.js"></script>

@@ -956,15 +956,17 @@ async function start() {
     requestInitialFollowView();
     monitorLocalPythonConnection();
     offerPythonConnection();
-    installControllerProfiles({
-      engine: () => engine,
-      ready: () => ready && !failed && !document.hidden && engine !== undefined,
-      room: () => roomSessionActive ? roomConnection : null,
-      local: () => browserGlobals.__wsorbLocalApi,
-    });
   } catch (error) {
     fail(error);
   }
 }
 
+// Published measurements and SVG charts do not need WebGPU. Flight controls
+// still use the genuine engine-ready gate and cannot start from this panel early.
+installControllerProfiles({
+  engine: () => engine,
+  ready: () => ready && !failed && !document.hidden && engine !== undefined,
+  room: () => roomSessionActive ? roomConnection : null,
+  local: () => browserGlobals.__wsorbLocalApi,
+});
 void start();

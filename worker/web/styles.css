@@ -34,7 +34,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .controller-toggle { position: absolute; inset-inline-start: 12px; inset-block-end: 12px; max-width: calc(100% - 24px); z-index: 1; }
 .controller-toggle, #controller-panel button, #controller-panel select { min-height: 40px; padding: 8px 12px; font: inherit; color: #e8edf3; background: #1c3042; border: 1px solid #9ab0c3; border-radius: 3px; }
 .controller-toggle, #controller-panel button { cursor: pointer; }
-#controller-panel :is(button, select, summary, .controller-results):focus-visible, .controller-toggle:focus-visible { outline: 2px solid #94d9f5; outline-offset: 3px; }
+#controller-panel :is(button, select, summary, a, pre, .controller-results, .analytics-chart-scroll):focus-visible, .controller-toggle:focus-visible { outline: 2px solid #94d9f5; outline-offset: 3px; }
 #controller-panel { width: min(60rem, calc(100% - 24px)); max-height: calc(100dvh - 24px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border: 1px solid #526374; color: #e8edf3; background: #101923; overflow-wrap: anywhere; }
 #controller-panel::backdrop { background: rgb(0 0 0 / .7); }
 .controller-heading, .controller-actions, .controller-fields { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; }
@@ -52,5 +52,50 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .controller-results caption { text-align: start; margin-block-end: 8px; color: #b7c6d4; }
 .controller-results :is(th, td) { border-bottom: 1px solid #526374; padding: 8px; font-variant-numeric: tabular-nums; }
 .controller-results td:not(:first-child) { white-space: nowrap; }
+.flight-analytics { margin-block-start: 24px; min-width: 0; --analytics-series-0: #94d9f5; --analytics-series-1: #ffcf88; --analytics-series-2: #acdcb0; --analytics-series-3: #d9b5ff; --analytics-series-4: #ffb5aa; --analytics-series-5: #e8edf3; --analytics-series-6: #a8ccff; }
+#controller-panel h3 { margin-block: 24px 12px; font-size: 1.125rem; line-height: 1.3; }
+#controller-panel h4 { margin-block: 20px 12px; font-size: 1rem; line-height: 1.3; }
+#controller-panel :is(section, details, .controller-results) { min-width: 0; max-width: 100%; }
+#controller-panel summary { min-height: 32px; cursor: pointer; padding-block: 4px; }
+#controller-panel a { color: #94d9f5; text-underline-offset: .15em; }
+#controller-panel :is(p, li, dd, caption, th) { overflow-wrap: anywhere; }
+.flight-analytics p { max-width: 75ch; }
+.flight-analytics > summary { font-weight: 600; }
+.flight-analytics > section + section { margin-block-start: 32px; }
+.analytics-manifest, .analytics-data { margin-block: 20px; }
+.analytics-manifest dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px 16px; }
+.analytics-manifest dt { color: #b7c6d4; }
+.analytics-manifest dd { margin: 0; font-variant-numeric: tabular-nums; }
+.analytics-manifest pre { max-height: 20rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #526374; padding: 12px; font-size: .875rem; }
+.analytics-controls { margin-block-start: 16px; }
+.analytics-figure { margin: 20px 0; }
+.analytics-figure figcaption { margin-block-end: 12px; color: #b7c6d4; font-size: .875rem; }
+.analytics-chart-scroll { overflow-x: auto; max-width: 100%; background: #070b10; border: 1px solid #526374; }
+.analytics-plot { display: block; width: 100%; min-width: 40rem; height: auto; font-family: inherit; font-variant-numeric: tabular-nums; }
+.analytics-grid { stroke: #526374; stroke-width: 1; }
+.analytics-axis { fill: none; stroke: #b7c6d4; stroke-width: 1.5; }
+.analytics-tick { fill: #b7c6d4; font-size: 14px; }
+.analytics-axis-label, .analytics-empty { fill: #e8edf3; font-size: 16px; }
+.analytics-series-0 { color: var(--analytics-series-0); }
+.analytics-series-1 { color: var(--analytics-series-1); stroke-dasharray: 9 4; }
+.analytics-series-2 { color: var(--analytics-series-2); stroke-dasharray: 2 4; }
+.analytics-series-3 { color: var(--analytics-series-3); stroke-dasharray: 14 4 3 4; }
+.analytics-series-4 { color: var(--analytics-series-4); stroke-dasharray: 5 3; }
+.analytics-series-5 { color: var(--analytics-series-5); stroke-dasharray: 15 5; }
+.analytics-series-6 { color: var(--analytics-series-6); stroke-dasharray: 3 3 9 3; }
+.analytics-line { fill: none; stroke: currentColor; stroke-width: 2; }
+.analytics-point { fill: currentColor; stroke: none; }
+.analytics-series-label { fill: currentColor; font-size: 15px; font-weight: 600; }
+.analytics-legend { display: grid; gap: 8px; padding-inline-start: 28px; font-size: .875rem; }
+.analytics-legend li { padding-inline-start: 4px; }
+.analytics-swatch { display: inline-block; width: 28px; margin-inline-end: 8px; vertical-align: middle; border-block-start: 3px solid currentColor; }
+:is(.analytics-series-1, .analytics-series-3, .analytics-series-4, .analytics-series-5, .analytics-series-6) .analytics-swatch { border-block-start-style: dashed; }
+.analytics-series-2 .analytics-swatch { border-block-start-style: dotted; }
+.analytics-downloads { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-block: 24px; }
+.analytics-downloads a, .analytics-data > a { display: inline-block; min-height: 32px; padding-block: 4px; }
+.flight-analytics .controller-results { margin-block-start: 12px; }
+.flight-analytics .controller-results th[scope="row"] { min-width: 12rem; }
+@media (max-width: 40rem) { #controller-panel { padding: 12px; } .analytics-manifest dl { grid-template-columns: minmax(0, 1fr); gap: 4px; } .analytics-manifest dd { margin-block-end: 8px; } }
+@media (forced-colors: active) { .flight-analytics { --analytics-series-0: CanvasText; --analytics-series-1: CanvasText; --analytics-series-2: CanvasText; --analytics-series-3: CanvasText; --analytics-series-4: CanvasText; --analytics-series-5: CanvasText; --analytics-series-6: CanvasText; } .analytics-chart-scroll { background: Canvas; } .analytics-grid, .analytics-axis { stroke: CanvasText; } .analytics-tick, .analytics-axis-label, .analytics-empty { fill: CanvasText; } }
 @media (max-width: 40rem) { .python-room { inset-block-end: 64px; } .controller-toggle { min-height: 44px; } }
 [hidden] { display: none !important; }

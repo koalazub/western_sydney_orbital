@@ -3,6 +3,7 @@
 import profiles from "../../src/wsorb/controllers/catalog.json";
 import scenario from "../../simulation/scenarios/phobos_escape.json";
 import { CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
+import { installFlightAnalytics } from "./flight-analytics.ts";
 import type { RoomEngine } from "./room-control.ts";
 
 type Connection = { origin: string; id: string; key: string };
@@ -126,11 +127,13 @@ export function installControllerProfiles(options: Options) {
   const owner = byId<HTMLSelectElement>("controller-owner");
   const profile = byId<HTMLSelectElement>("controller-profile");
   const run = byId<HTMLButtonElement>("run-controller");
+  run.disabled = true;
   const stop = byId<HTMLButtonElement>("stop-controller");
   const status = byId("controller-service-status");
   const error = byId("controller-error");
   const table = byId<HTMLTableElement>("controller-results-table");
   const sort = byId<HTMLSelectElement>("controller-result-sort");
+  const analytics = installFlightAnalytics();
   let view: View | undefined;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -210,6 +213,7 @@ export function installControllerProfiles(options: Options) {
     run.disabled = busy || !view.service.online || !!active || !options.ready();
     stop.disabled = busy || !active || active.stop_requested;
     renderResults(view.results);
+    analytics.updateRoomResults(view.results);
   }
   byId("controller-score-label").textContent = practiceScoreLabel;
   sort.addEventListener("change", () => { if (view) renderResults(view.results); });
@@ -217,6 +221,7 @@ export function installControllerProfiles(options: Options) {
     try { render(await request()()); }
     catch (cause) {
       view = undefined;
+      analytics.updateRoomResults([]);
       run.disabled = true;
       stop.disabled = true;
       status.textContent = cause instanceof Error ? cause.message : "Controller service is unavailable.";

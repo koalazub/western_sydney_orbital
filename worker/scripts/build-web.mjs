@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdir, copyFile, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, copyFile, readFile, writeFile, rm, lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -56,6 +56,34 @@ await Promise.all([
   // build:licenses owns dependency notices; imagery credits stay separate.
   copyFile(resolve(assetSource, "ATTRIBUTION.md"), resolve(output, "asset-notices.txt")),
 ]);
+// Only the curated, measurement-only publication is shipped. Never copy an
+// experiment directory, traces, Python sources, descriptors or camera captures.
+const analyticsSource = resolve(root, "..", "docs", "analytics", "team-comparison");
+let publishedAnalytics = false;
+try {
+  const info = await lstat(analyticsSource);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Analytics publication must be a real directory");
+  publishedAnalytics = true;
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (publishedAnalytics) {
+  const analyticsOutput = resolve(output, "analytics");
+  await mkdir(analyticsOutput, { recursive: true });
+  for (const name of ["dataset.json", "trials.csv", "aggregate.csv", "score-components.svg", "fuel-burns.svg", "turns.svg", "efficiency.svg"]) {
+    const path = resolve(analyticsSource, name);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 2 * 1024 * 1024) throw new Error("Invalid curated analytics asset");
+    const bytes = await readFile(path);
+    if (name === "dataset.json") {
+      const data = JSON.parse(bytes.toString("utf8"));
+      if (data.schema !== "wsorb.teammate_analytics" || data.schema_version !== 1
+        || !Array.isArray(data.trials) || !Array.isArray(data.profiles)) throw new Error("Unsupported curated analytics dataset");
+    }
+    const targetName = name === "dataset.json" ? "team-comparison.json" : name === "aggregate.csv" ? "summary.csv" : name;
+    await writeFile(resolve(analyticsOutput, targetName), bytes);
+  }
+}
 await build({
   entryPoints: [resolve(source, "app.ts")],
   outfile: resolve(output, "app.js"),
