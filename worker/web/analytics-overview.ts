@@ -1,5 +1,7 @@
 // Presentation only. The caller supplies validated measurements and native
 // receipts; this module never loads data or controls a flight.
+import { installChartInspector, type ChartInspectionPoint } from "./chart-inspector.ts";
+import { deriveMetricInsight } from "./analytics-insights.ts";
 export type OverviewRun = {
   id: string;
   profileId: string;
@@ -55,10 +57,14 @@ type Chart = {
   legend: HTMLUListElement;
   readouts: HTMLUListElement;
   note: HTMLElement;
+  guidance: HTMLElement;
+  insight: HTMLElement;
+  insightScope: HTMLElement;
   data: HTMLDetailsElement;
   table: HTMLDivElement;
   key: string;
   title: string;
+  disposeInspection?: () => void;
 };
 type Point = { time: number; value: number };
 type FuelTrace = { group: Group; run: OverviewRun; points: Array<Point | null>; secondary: boolean };
@@ -170,6 +176,12 @@ function makeChart(prefix: string, key: string, title: string): Chart {
   const legend = html("ul", "metric-chart__legend");
   const readouts = html("ul", "metric-chart__readouts");
   const note = html("p", "metric-chart__note");
+  const guidance = html("p", "metric-chart__guidance");
+  const insight = html("p", "metric-chart__insight");
+  const insightScope = html("p", "metric-chart__insight-scope");
+  guidance.id = `${prefix}-${key}-guidance`;
+  insight.id = `${prefix}-${key}-insight`;
+  panel.setAttribute("aria-describedby", `${guidance.id} ${insight.id}`);
   const data = html("details", "metric-chart__data");
   const summary = html("summary", "", "View data");
   const table = html("div", "overview-data-scroll");
@@ -177,8 +189,8 @@ function makeChart(prefix: string, key: string, title: string): Chart {
   table.setAttribute("role", "region");
   table.setAttribute("aria-label", `${title} data`);
   data.append(summary, table);
-  panel.append(header, plot, legend, readouts, note, data);
-  return { panel, plot, subtitle, legend, readouts, note, data, table, key: `${prefix}-${key}`, title };
+  panel.append(header, guidance, plot, legend, readouts, insight, insightScope, note, data);
+  return { panel, plot, subtitle, legend, readouts, note, guidance, insight, insightScope, data, table, key: `${prefix}-${key}`, title };
 }
 function newPlot(chart: Chart, description: string, height = 260) {
   const plot = svg("svg", {
@@ -190,13 +202,39 @@ function newPlot(chart: Chart, description: string, height = 260) {
   plot.append(svg("title", { id: `${chart.key}-title` }, chart.title), svg("desc", { id: `${chart.key}-description` }, description));
   return plot;
 }
-function replacePlot(chart: Chart, plot: SVGSVGElement) {
+function replacePlot(chart: Chart, plot: SVGSVGElement, points: ChartInspectionPoint[] = []) {
+  chart.disposeInspection?.();
   chart.plot.replaceWith(plot);
   chart.plot = plot;
+  chart.disposeInspection = points.length ? installChartInspector(chart.panel, plot, points,
+    "Hover for a recorded value. Focus this chart and use the arrow keys to inspect entries.") : undefined;
+}
+function renderInsight(chart: Chart, groups: Group[]) {
+  const metric = chart.panel.dataset.chart as "fuel" | "time" | "thrust" | "turn";
+  const insight = deriveMetricInsight(metric, groups);
+  chart.guidance.textContent = insight.guidance;
+  chart.insight.textContent = insight.observation;
+  chart.insightScope.textContent = insight.scope;
+}
+function plotGeometry(chart: Chart, bodyHeight: (labelUnits: number) => number) {
+  const measuredWidth = chart.plot.getBoundingClientRect().width;
+  const width = measuredWidth > 0 ? measuredWidth : 640;
+  const labelUnits = Math.max(15, 12 * 640 / width);
+  chart.panel.style.setProperty("--overview-svg-label", `${labelUnits}px`);
+  const top = Math.max(30, 1.8 * labelUnits);
+  const bottom = top + bodyHeight(labelUnits);
+  return { labelUnits, top, bottom, height: bottom + 3.5 * labelUnits,
+    tickBaseline: bottom + 1.4 * labelUnits, titleBaseline: bottom + 3.1 * labelUnits };
 }
 function emptyPlot(chart: Chart, message: string) {
-  const plot = newPlot(chart, message);
-  label(plot, 320, 128, message, { "text-anchor": "middle", class: "overview-empty-label" });
+  const geometry = plotGeometry(chart, units => Math.max(182, 6 * units));
+  const plot = newPlot(chart, message, geometry.height);
+  const suffix = " for this selection";
+  const lines = message.endsWith(suffix) ? [message.slice(0, -suffix.length), "for this selection"] : [message];
+  lines.forEach((line, index) => {
+    const y = (geometry.top + geometry.bottom) / 2 + (index - (lines.length - 1) / 2) * 1.7 * geometry.labelUnits;
+    label(plot, 320, y, line, { "text-anchor": "middle", class: "overview-empty-label" });
+  });
   replacePlot(chart, plot);
 }
 function legendItem(list: HTMLUListElement, text: string, color: string, dash = "none", secondary = false) {
@@ -263,17 +301,23 @@ function renderFuel(chart: Chart, groups: Group[]) {
   // Only the axis gets a fallback span. No observation is added at zero.
   const timeSpan = maximumTime - minimumTime || 1;
   const fuelSpan = maximumFuel > 0 ? maximumFuel * 1.08 : 1;
+  const geometry = plotGeometry(chart, units => Math.max(182, 9 * units));
+  const { top, bottom, labelUnits } = geometry;
   const x = (value: number) => 68 + (value - minimumTime) / timeSpan * 550;
-  const y = (value: number) => 212 - value / fuelSpan * 182;
-  const plot = newPlot(chart, "Cumulative fuel in kilograms against actual simulation time in seconds. Each repetition is a separate labeled trace. Straight segments connect adjacent recorded points only; nulls break lines. Exact samples are available in View data.");
+  const y = (value: number) => bottom - value / fuelSpan * (bottom - top);
+  const plot = newPlot(chart, "Cumulative fuel in kilograms against actual simulation time in seconds. Each repetition is a separate labeled trace. Straight segments connect adjacent recorded points only; nulls break lines. Exact samples are available in View data.", geometry.height);
+  const inspection = traces.flatMap(trace => trace.points.filter((point): point is Point => point !== null).map(point => ({
+    x: x(point.time), y: y(point.value), series: trace.run.id, title: `${trace.group.owner} / ${trace.group.label} · ${runScope(trace.run)}`,
+    values: [{ label: "Time", value: point.time, unit: "s" }, { label: "Fuel used", value: point.value, unit: "kg" }],
+  })));
   for (let i = 0; i <= 3; i++) {
     const fuel = fuelSpan * i / 3, time = minimumTime + timeSpan * i / 3;
     plot.append(svg("line", { x1: 68, x2: 618, y1: y(fuel), y2: y(fuel), stroke: GRID, class: "overview-grid-line" }));
-    label(plot, 58, y(fuel) + 4, tick(fuel), { "text-anchor": "end" });
-    label(plot, x(time), 234, tick(time), { "text-anchor": "middle" });
+    label(plot, 58, y(fuel) + 0.32 * labelUnits, tick(fuel), { "text-anchor": "end" });
+    label(plot, x(time), geometry.tickBaseline, tick(time), { "text-anchor": "middle" });
   }
-  label(plot, 68, 16, "kg", { class: "overview-axis-label" });
-  label(plot, 618, 256, "Simulation time, s", { "text-anchor": "end", class: "overview-axis-label" });
+  label(plot, 68, top - 0.8 * labelUnits, "kg", { class: "overview-axis-label" });
+  label(plot, 618, geometry.titleBaseline, "Simulation time, s", { "text-anchor": "end", class: "overview-axis-label" });
   // Secondary traces are drawn first so a coincident primary stays visible.
   const drawingOrder = [...traces.filter(trace => trace.secondary), ...traces.filter(trace => !trace.secondary)];
   for (const trace of drawingOrder) {
@@ -300,20 +344,20 @@ function renderFuel(chart: Chart, groups: Group[]) {
       const d = `M${x(first.time)} ${y(0)} ` + area.map(point => `L${x(point.time)} ${y(point.value)}`).join(" ") + ` L${x(last.time)} ${y(0)} Z`;
       plot.append(svg("path", { d, fill: trace.group.team.color, opacity: 0.07, class: "overview-area" }));
     }
-    const line = svg("path", { d: path, fill: "none", stroke: trace.group.team.color, "stroke-width": trace.secondary ? 2 : 3, "stroke-dasharray": dash, opacity: trace.secondary ? 0.65 : 1, "vector-effect": "non-scaling-stroke", class: "overview-series" });
+    const line = svg("path", { d: path, fill: "none", stroke: trace.group.team.color, "stroke-width": trace.secondary ? 2 : 3, "stroke-dasharray": dash, opacity: trace.secondary ? 0.65 : 1, "vector-effect": "non-scaling-stroke", class: "overview-series", "data-chart-inspection-series": trace.run.id });
     line.append(svg("title", {}, `${trace.group.owner} · ${trace.run.id} · ${runScope(trace.run)}`));
     plot.append(line);
     const available = trace.points.filter((point): point is Point => point !== null);
     available.forEach((point, index) => {
       const endpoint = index === 0 || index === available.length - 1;
-      const dot = svg("circle", { cx: x(point.time), cy: y(point.value), r: endpoint ? 3.5 : 1.5, fill: trace.group.team.color, opacity: trace.secondary ? 0.65 : 1, class: "overview-point" });
+      const dot = svg("circle", { cx: x(point.time), cy: y(point.value), r: endpoint ? 3.5 : 1.5, fill: trace.group.team.color, opacity: trace.secondary ? 0.65 : 1, class: "overview-point", "data-chart-inspection-series": trace.run.id });
       dot.append(svg("title", {}, `${trace.group.owner}, ${trace.run.id}: ${exact(point.time)} s, ${exact(point.value)} kg`));
       plot.append(dot);
     });
   }
   for (const trace of traces) legendItem(chart.legend, `${trace.group.owner} · ${trace.run.repetition === null ? trace.run.id : `rep ${trace.run.repetition}`}`, trace.group.team.color,
     trace.secondary ? trace.group.team.repeatDash : trace.group.team.dash, trace.secondary);
-  replacePlot(chart, plot);
+  replacePlot(chart, plot, inspection);
 }
 
 function renderDuration(chart: Chart, groups: Group[]) {
@@ -322,7 +366,7 @@ function renderDuration(chart: Chart, groups: Group[]) {
     scope: group.profile ? "Full cohort · median flight duration" : `Selected run · ${runScope(group.first)}`,
     outcome: group.profile ? `${group.profile.successes}/${group.profile.attempts} arrivals` : group.first.outcome ?? "Outcome unavailable" }));
   const allCohort = groups.every(group => group.profile !== undefined);
-  chart.subtitle.textContent = "Shorter duration is not automatically a better outcome";
+  chart.subtitle.textContent = "Observed duration · seconds";
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   chart.note.textContent = `${allCohort ? "Full-cohort medians" : "Selected-run observations"} · seconds. Durations may include failures and timeouts, not just arrivals.`;
   dataTable(chart, "Supplied observed flight durations, not completion-time rankings. Cohort medians keep their full-cohort scope; selected runs retain their outcomes.",
@@ -337,29 +381,35 @@ function renderDuration(chart: Chart, groups: Group[]) {
   if (!values.length) { emptyPlot(chart, "Flight durations unavailable for this selection"); return; }
   const largest = Math.max(...values), maximum = largest > 0 ? largest * 1.06 : 1;
   const x = (value: number) => 112 + value / maximum * 374;
-  const height = Math.max(260, rows.length * 54 + 76), bottom = height - 48;
+  const geometry = plotGeometry(chart, units => Math.max(182, rows.length * Math.max(54, 2.6 * units)));
+  const { top, bottom, height, labelUnits } = geometry;
+  const rowStep = Math.max(54, 2.6 * labelUnits);
+  const barHeight = Math.max(20, 0.8 * labelUnits);
   const plot = newPlot(chart, "Observed flight duration in seconds on a horizontal axis starting at zero. Bars show supplied full-cohort medians or an actual selected run, without recomputing aggregates. Shorter duration does not establish a better outcome: failures and timeouts may be included. Arrivals, outcomes, scope and exact values are available below and in View data. Zero is measured; n/a means unavailable.", height);
+  const inspection: ChartInspectionPoint[] = [];
   for (let i = 0; i <= 3; i++) {
     const value = maximum * i / 3;
-    plot.append(svg("line", { x1: x(value), x2: x(value), y1: 28, y2: bottom, stroke: GRID, class: "overview-grid-line" }));
-    label(plot, x(value), bottom + 21, tick(value), { "text-anchor": "middle" });
+    plot.append(svg("line", { x1: x(value), x2: x(value), y1: top, y2: bottom, stroke: GRID, class: "overview-grid-line" }));
+    label(plot, x(value), geometry.tickBaseline, tick(value), { "text-anchor": "middle" });
   }
-  plot.append(svg("line", { x1: x(0), x2: x(0), y1: 22, y2: bottom, stroke: MUTED, "stroke-width": 1.5, class: "overview-zero-line" }));
-  label(plot, 112, height - 3, "Observed flight duration, s", { class: "overview-axis-label" });
+  plot.append(svg("line", { x1: x(0), x2: x(0), y1: top, y2: bottom, stroke: MUTED, "stroke-width": 1.5, class: "overview-zero-line" }));
+  label(plot, 112, geometry.titleBaseline, "Observed flight duration, s", { class: "overview-axis-label" });
   rows.forEach((row, index) => {
-    const y = 46 + index * (bottom - 38) / rows.length;
-    label(plot, 12, y + 5, row.group.owner, { fill: TEXT, class: "overview-row-label" });
+    const y = top + (index + 0.5) * rowStep;
+    label(plot, 12, y + 0.32 * labelUnits, row.group.owner, { fill: TEXT, class: "overview-row-label" });
     if (finite(row.value)) {
-      const bar = svg("rect", { x: x(0), y: y - 10, width: x(row.value) - x(0), height: 20, rx: 3, fill: row.group.team.color, opacity: 0.8, class: "overview-duration-bar" });
+      const bar = svg("rect", { x: x(0), y: y - barHeight / 2, width: x(row.value) - x(0), height: barHeight, rx: 3, fill: row.group.team.color, opacity: 0.8, class: "overview-duration-bar", "data-chart-inspection-index": inspection.length, "pointer-events": "all" });
       bar.append(svg("title", {}, `${row.group.owner}: ${exact(row.value)} s; ${row.scope}; ${row.outcome}`));
       plot.append(bar);
-      plot.append(svg("line", { x1: x(row.value), x2: x(row.value), y1: y - 13, y2: y + 13, stroke: row.group.team.color, "stroke-width": 3, class: "overview-duration-marker" }));
-      const marker = svg("circle", { cx: x(row.value), cy: y, r: 4, fill: row.group.team.color });
+      plot.append(svg("line", { x1: x(row.value), x2: x(row.value), y1: y - barHeight / 2 - 3, y2: y + barHeight / 2 + 3, stroke: row.group.team.color, "stroke-width": 3, class: "overview-duration-marker" }));
+      const marker = svg("circle", { cx: x(row.value), cy: y, r: 4, fill: row.group.team.color, "data-chart-inspection-index": inspection.length });
       marker.append(svg("title", {}, `${exact(row.value)} s`)); plot.append(marker);
+      inspection.push({ x: x(row.value), y, title: `${row.group.owner} / ${row.group.label} · ${row.scope}`,
+        values: [{ label: "Flight duration", value: row.value, unit: "s" }, { label: "Arrivals / outcome", value: row.outcome }] });
     }
-    label(plot, 626, y + 5, finite(row.value) ? `${decimal(row.value)} s` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
+    label(plot, 626, y + 0.32 * labelUnits, finite(row.value) ? `${decimal(row.value)} s` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
   });
-  replacePlot(chart, plot);
+  replacePlot(chart, plot, inspection);
 }
 
 function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
@@ -395,38 +445,52 @@ function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
   if (!values.length) { emptyPlot(chart, "Native activity totals unavailable for this selection"); return; }
   const largest = Math.max(...values), maximum = largest > 0 ? largest * 1.06 : 1;
   const x = (value: number) => 112 + value / maximum * 374;
-  const height = Math.max(260, groups.length * 62 + 76), bottom = height - 48;
+  const geometry = plotGeometry(chart, units => Math.max(182, groups.length * (2 * Math.max(24, 1.7 * units) + 1.2 * units)));
+  const { top, bottom, height, labelUnits } = geometry;
+  const pairGap = Math.max(24, 1.7 * labelUnits);
+  const groupHeight = 2 * pairGap + 1.2 * labelUnits;
+  const barHeight = Math.max(14, 0.75 * labelUnits);
   const plot = newPlot(chart, `${metrics[0].label} and ${metrics[1].label} durations in seconds, grouped rather than stacked. The solid and dashed-outline bars represent distinct native counters, whose durations may overlap. Zero is a measured zero; n/a means unavailable. Native episode counts and ${turning ? "physical orientation angles" : "run identifiers"} follow the plot.`, height);
+  const inspection: ChartInspectionPoint[] = [];
   for (let i = 0; i <= 3; i++) {
     const value = maximum * i / 3;
-    plot.append(svg("line", { x1: x(value), x2: x(value), y1: 25, y2: bottom, stroke: GRID, class: "overview-grid-line" }));
-    label(plot, x(value), bottom + 22, tick(value), { "text-anchor": "middle" });
+    plot.append(svg("line", { x1: x(value), x2: x(value), y1: top, y2: bottom, stroke: GRID, class: "overview-grid-line" }));
+    label(plot, x(value), geometry.tickBaseline, tick(value), { "text-anchor": "middle" });
   }
-  label(plot, 112, height - 3, "Duration, s", { class: "overview-axis-label" });
+  label(plot, 112, geometry.titleBaseline, "Duration, s", { class: "overview-axis-label" });
   groups.forEach((group, index) => {
-    const rowY = 44 + index * (bottom - 30) / groups.length;
-    label(plot, 12, rowY + 9, group.owner, { fill: TEXT, class: "overview-row-label" });
+    const rowY = top + (index + 0.5) * groupHeight;
+    label(plot, 12, rowY + 0.32 * labelUnits, group.owner, { fill: TEXT, class: "overview-row-label" });
     metrics.forEach((metric, metricIndex) => {
-      const value = total(group.first, metric.key), y = rowY - 14 + metricIndex * 24;
+      const value = total(group.first, metric.key);
+      const centerY = rowY + (metricIndex - 0.5) * pairGap;
+      const y = centerY - barHeight / 2;
       if (finite(value)) {
-        const bar = svg("rect", { x: x(0), y, width: x(value) - x(0), height: 14, rx: 3,
+        const bar = svg("rect", { x: x(0), y, width: x(value) - x(0), height: barHeight, rx: 3,
           fill: metricIndex === 0 ? group.team.color : "none", stroke: group.team.color,
           "stroke-width": 1.5, "stroke-dasharray": metricIndex === 0 ? "none" : "4 3",
-          class: metricIndex === 0 ? "overview-activity-bar" : "overview-activity-bar overview-activity-bar--secondary" });
+          class: metricIndex === 0 ? "overview-activity-bar" : "overview-activity-bar overview-activity-bar--secondary",
+          "data-chart-inspection-index": inspection.length, "pointer-events": "all" });
         bar.append(svg("title", {}, `${group.owner}, ${group.first.id}, ${metric.key}: ${exact(value)} s; ${metric.count}: ${exact(total(group.first, metric.count))}`));
         plot.append(bar);
-        if (value === 0) plot.append(svg("line", { x1: x(0), x2: x(0), y1: y, y2: y + 14, stroke: group.team.color, "stroke-width": 2 }));
+        if (value === 0) plot.append(svg("line", { x1: x(0), x2: x(0), y1: y, y2: y + barHeight, stroke: group.team.color, "stroke-width": 2, "data-chart-inspection-index": inspection.length }));
+        inspection.push({ x: x(value), y: centerY, title: `${group.owner} / ${group.label} · ${metric.label} · ${runScope(group.first)}`,
+          values: [{ label: metric.label, value, unit: "s" }, { label: "Episodes", value: total(group.first, metric.count) },
+            ...(turning ? [{ label: "Orientation angle", value: total(group.first, "total_turn_angle_rad"), unit: "rad" }] : [])] });
       }
-      label(plot, 626, y + 12, finite(value) ? `${decimal(value)} s` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
+      label(plot, 626, centerY + 0.32 * labelUnits, finite(value) ? `${decimal(value)} s` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
     });
   });
-  replacePlot(chart, plot);
+  replacePlot(chart, plot, inspection);
 }
 
 export function installAnalyticsOverview(container: HTMLElement): { update(runs: OverviewRun[], profiles?: OverviewProfile[]): void } {
   const prefix = `analytics-overview-${++instanceCount}`;
   container.classList.add("analytics-overview");
   const cards = html("div", "overview-cards");
+  cards.tabIndex = 0;
+  cards.setAttribute("role", "region");
+  cards.setAttribute("aria-label", "Controller summaries, scroll horizontally on narrow screens");
   const grid = html("div", "overview-chart-grid");
   const empty = html("div", "overview-empty");
   empty.append(html("h4", "overview-empty__title", "No measured runs in this selection"), html("p", "overview-empty__hint", "Choose another seed or teammate, or run a test."));
@@ -438,27 +502,43 @@ export function installAnalyticsOverview(container: HTMLElement): { update(runs:
   grid.append(...charts.map(chart => chart.panel));
   cards.hidden = grid.hidden = true;
   container.replaceChildren(empty, cards, grid);
-  // Compensate viewBox scaling so plot labels stay about 12 CSS pixels at
-  // narrow widths. This changes typography only, never sampled geometry.
-  function sizeLabels() {
-    for (const chart of charts) {
-      const width = chart.plot.getBoundingClientRect().width;
-      if (width > 0) chart.panel.style.setProperty("--overview-svg-label", `${12 * 640 / width}px`);
-    }
-  }
-  if (typeof ResizeObserver !== "undefined") new ResizeObserver(sizeLabels).observe(container);
-  return {
-    update(runs, profiles) {
-      const groups = groupsOf(runs, profiles);
-      empty.hidden = groups.length > 0;
-      cards.hidden = grid.hidden = groups.length === 0;
-      cards.replaceChildren(...groups.map(pilotCard));
-      if (!groups.length) return;
+  let groups: Group[] = [];
+  let lastWidthKey = "";
+  let rendering = false;
+  function renderCharts(force = false) {
+    if (rendering || !groups.length) return;
+    const widths = charts.map(chart => chart.plot.getBoundingClientRect().width);
+    const widthKey = widths.every(width => width > 0) ? widths.map(width => width.toFixed(2)).join(":") : "";
+    // A height-only ResizeObserver notification must not rebuild the plots.
+    // Hidden updates use fallback geometry; opening the panel supplies a new
+    // positive width key and redraws that cached selection at its real width.
+    if (!force && (!widthKey || widthKey === lastWidthKey)) return;
+    lastWidthKey = widthKey;
+    rendering = true;
+    try {
       renderFuel(fuel, groups);
       renderDuration(time, groups);
       renderActivity(thrust, groups, false);
       renderActivity(turns, groups, true);
-      sizeLabels();
+      for (const chart of charts) renderInsight(chart, groups);
+    } finally {
+      rendering = false;
+    }
+  }
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => renderCharts()).observe(container);
+  return {
+    update(runs, profiles) {
+      groups = groupsOf(runs, profiles);
+      empty.hidden = groups.length > 0;
+      cards.hidden = grid.hidden = groups.length === 0;
+      cards.replaceChildren(...groups.map(pilotCard));
+      if (!groups.length) {
+        lastWidthKey = "";
+        for (const chart of charts) { chart.disposeInspection?.(); chart.disposeInspection = undefined; }
+        return;
+      }
+      // Selection changes must render even when the width has not changed.
+      renderCharts(true);
     },
   };
 }

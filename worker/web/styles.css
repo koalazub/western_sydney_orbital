@@ -111,6 +111,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #lab-publication-status > p { color: var(--lab-muted); font-size: .75rem; margin-block-end: 14px; }
 #lab-publication-status > p:empty { display: none; }
 .overview-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-block-end: 24px; }
+#controller-panel .overview-cards:focus-visible { outline: 2px solid #a9c8ff; outline-offset: 3px; }
 .pilot-card { min-width: 0; padding: 18px 20px; border: 1px solid var(--lab-border); border-radius: 10px; background: var(--lab-surface); font-variant-numeric: tabular-nums; }
 .pilot-card__name { font-size: .8125rem; font-weight: 650; }
 .pilot-card .pilot-card__value { font-size: 1.75rem; line-height: 1.2; font-weight: 650; letter-spacing: -.035em; margin-block: 14px 4px; color: var(--lab-text); }
@@ -140,6 +141,27 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .overview-data-table :is(th, td) { padding: 8px; border-block-end: 1px solid var(--lab-border); white-space: nowrap; }
 .overview-data-table caption { white-space: normal; text-align: start; padding-block: 8px; max-width: 65ch; }
 .metric-chart__note { color: var(--lab-muted); font-size: .625rem; line-height: 1.5; }
+.metric-chart__guidance { color: var(--lab-text); font-size: .75rem; line-height: 1.5; max-width: 65ch; margin-block: 2px 12px !important; }
+.metric-chart__insight { color: var(--lab-text); font-size: .8125rem; line-height: 1.6; max-width: 65ch; margin-block: 14px 4px !important; }
+.metric-chart__insight-scope { color: var(--lab-muted); font-size: .6875rem; margin-block-end: 10px !important; }
+.metric-chart :is(.metric-chart__insight, .metric-chart__insight-scope):empty { display: none; }
+#controller-panel .metric-chart[tabindex="0"]:focus-visible { outline: 2px solid #a9c8ff; outline-offset: 3px; }
+.chart-inspector-instructions { color: var(--lab-muted, #9ba7ba); font-size: .6875rem; line-height: 1.5; margin-block: 10px 0; }
+.chart-inspector-plot { cursor: crosshair; }
+.chart-inspector-tooltip { position: fixed; z-index: 8; max-width: min(280px, calc(100vw - 16px)); padding: 12px 14px; color: var(--lab-text, #edf1f7); background: var(--lab-bg, #101319); border: 1px solid var(--lab-input-border, #78869b); border-radius: 8px; box-shadow: 0 8px 24px #0008; font: 400 .8125rem/1.5 system-ui, sans-serif; font-variant-numeric: tabular-nums; overflow-wrap: break-word; pointer-events: none; }
+.chart-inspector-tooltip[hidden] { display: none; }
+.chart-inspector-tooltip__title { margin: 0 0 8px; font-weight: 600; color: var(--lab-text, #edf1f7); }
+.chart-inspector-tooltip__values { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; margin: 0; }
+.chart-inspector-tooltip__values dt { color: var(--lab-muted, #9ba7ba); }
+.chart-inspector-tooltip__values dd { margin: 0; text-align: end; max-width: 24ch; }
+.chart-inspector-crosshair { stroke: var(--lab-text, #edf1f7); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; pointer-events: none; }
+.chart-inspector-marker { fill: var(--lab-bg, #101319); stroke: var(--lab-text, #edf1f7); stroke-width: 2; vector-effect: non-scaling-stroke; pointer-events: none; }
+@media (max-width: 560px) {
+  #controller-panel .overview-cards { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 87%; overflow-x: auto; overscroll-behavior-inline: contain; gap: 12px; padding-block-end: 8px; scroll-snap-type: x proximity; }
+  #controller-panel .overview-cards:has(> .pilot-card:only-child) { grid-auto-columns: 100%; }
+  .overview-cards > .pilot-card { scroll-snap-align: start; }
+  .pilot-card__stats dd { font-size: .8125rem; }
+}
 .metric-chart details { margin-block-start: 10px; color: var(--lab-muted); font-size: .6875rem; }
 .lab-disclosure { border-block-start: 1px solid var(--lab-border); padding-block-start: 15px; margin-block-start: 22px; color: var(--lab-muted); }
 #controller-panel summary { min-height: 32px; cursor: pointer; padding-block: 4px; font-size: .8125rem; }

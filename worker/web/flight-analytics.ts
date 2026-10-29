@@ -5,6 +5,7 @@ import definitions from "../../simulation/scenarios/flight_analytics.json";
 import scoringReference from "../../src/wsorb/scoring_reference.json";
 import { CONTROLLER_EXECUTION_KIND, CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
 import { installAnalyticsOverview } from "./analytics-overview.ts";
+import { installChartInspector, type ChartInspectionPoint } from "./chart-inspector.ts";
 
 const DEFINITION_ID = "native_actuation_rotation_episodes_v1";
 const SOURCE_KIND = "native_physics_step_counters_with_sampled_public_series";
@@ -22,14 +23,14 @@ const NATIVE_NUMBERS = ["observed_sim_s", ...EPISODES.flatMap(name => [`${name}_
   ...EPISODES.map(name => `current_${name}_s`)];
 const FLAGS = EPISODES.map(name => `${name}_active`);
 const METRICS = [
-  { label: "Cumulative fuel used", unit: "kg", column: 1 },
-  { label: "Translation burn time", unit: "s", column: 2 },
-  { label: "Angular actuation time", unit: "s", column: 3 },
-  { label: "Physical turn time", unit: "s", column: 4 },
-  { label: "Total orientation angle", unit: "rad", column: 5 },
-  { label: "Relative speed", unit: "m/s", column: 6 },
-  { label: "Target range", unit: "m", column: 7 },
-  { label: "Cumulative damage", unit: "J", column: 8 },
+  { label: "Cumulative fuel used", unit: "kg", column: 1, guidance: "Use less fuel for a completed arrival. These are local fuel estimates." },
+  { label: "Translation burn time", unit: "s", column: 2, guidance: "Less engine-on time to reach the station is better. Compare fuel and damage too." },
+  { label: "Angular actuation time", unit: "s", column: 3, guidance: "Avoid unnecessary angular thrust. The lander can keep turning after thrust ends." },
+  { label: "Physical turn time", unit: "s", column: 4, guidance: "Reduce unnecessary spin. Physical turning and angular thrust are different measurements." },
+  { label: "Total orientation angle", unit: "rad", column: 5, guidance: "This is total rotation travelled, not remaining heading error. Avoid needless rotation." },
+  { label: "Relative speed", unit: "m/s", column: 6, guidance: "A slower arrival is safer. Arrival speed is separate from the completion-time score term." },
+  { label: "Target range", unit: "m", column: 7, guidance: "Smaller means closer to the station. Local arrival is entry within 50 m, not docking." },
+  { label: "Cumulative damage", unit: "J", column: 8, guidance: "Less collision damage is better. Damage above 209,200 J ends the local flight." },
 ];
 const TOTAL_LABELS: Record<string, string> = {
   observed_sim_s: "Observed simulation time, s", burn_count: "Translation burn episodes",
@@ -349,8 +350,12 @@ function extent(values: number[]): [number, number] {
 function tick(value: number) {
   return value !== 0 && (Math.abs(value) >= 100000 || Math.abs(value) < 0.01) ? value.toExponential(1) : String(Number(value.toPrecision(4)));
 }
+const customInspections = new Map<string, () => void>();
 function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[number]) {
+  customInspections.get(prefix)?.(); customInspections.delete(prefix);
   const svg = document.getElementById(`${prefix}-plot`) as unknown as SVGSVGElement;
+  const caption = svg.closest("figure")?.querySelector("figcaption");
+  if (caption) caption.textContent = `${metric.guidance} Scroll horizontally on narrow screens.`;
   const legend = byId<HTMLOListElement>(`${prefix}-legend`);
   const description = `${metric.label} in ${metric.unit} against actual simulation time in seconds. Points are recorded samples; lines only connect adjacent available samples. Missing values break lines. Full numeric data follows.`;
   svg.replaceChildren(svgNode("title", { id: `${prefix}-plot-title` }, `${metric.label} by simulation time`),
@@ -375,6 +380,7 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
   svg.append(svgNode("path", { d: "M88 40 V260 H696", class: "analytics-axis" }),
     svgNode("text", { x: "88", y: "23", class: "analytics-axis-label" }, `${metric.label}, ${metric.unit}`),
     svgNode("text", { x: "392", y: "314", "text-anchor": "middle", class: "analytics-axis-label" }, "Simulation time, s"));
+  const inspection: ChartInspectionPoint[] = [];
   selected.forEach((run, index) => {
     const style = `analytics-series-${index % 7}`;
     const entry = document.createElement("li");
@@ -388,11 +394,16 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
       path += `${connected ? "L" : "M"}${x(row[0]!).toFixed(3)} ${y(row[metric.column]!).toFixed(3)} `;
       connected = true;
       last = row;
-      svg.append(svgNode("circle", { cx: String(x(row[0]!)), cy: String(y(row[metric.column]!)), r: "2.5", class: `analytics-point ${style}` }));
+      const pointIndex = inspection.length;
+      inspection.push({ x: x(row[0]!), y: y(row[metric.column]!), series: run.id, title: `${run.label} · seed ${run.seed}`,
+        values: [{ label: "Time", value: row[0], unit: "s" }, { label: metric.label, value: row[metric.column], unit: metric.unit }, { label: "Outcome", value: run.outcome }] });
+      svg.append(svgNode("circle", { cx: String(x(row[0]!)), cy: String(y(row[metric.column]!)), r: "2.5", class: `analytics-point ${style}`, "data-chart-inspection-index": String(pointIndex), "data-chart-inspection-series": run.id }));
     }
-    svg.append(svgNode("path", { d: path, class: `analytics-line ${style}` }));
+    svg.append(svgNode("path", { d: path, class: `analytics-line ${style}`, "data-chart-inspection-series": run.id }));
     if (last) svg.append(svgNode("text", { x: String(x(last[0]!) + 7), y: String(y(last[metric.column]!) + 5), class: `analytics-series-label ${style}` }, String(index + 1)));
   });
+  const container = svg.closest<HTMLElement>(".analytics-chart-scroll");
+  if (container && inspection.length) customInspections.set(prefix, installChartInspector(container, svg, inspection));
 }
 
 function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void) {

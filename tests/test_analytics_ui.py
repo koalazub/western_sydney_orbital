@@ -215,6 +215,7 @@ def test_publication_validates_the_matched_cohort_instead_of_importing_jobs():
         "../shared/controller-jobs.ts",
         "../../src/wsorb/scoring_reference.json",
         "./analytics-overview.ts",
+        "./chart-inspector.ts",
     }
 
 
@@ -521,3 +522,15 @@ def test_fresh_confirmation_does_not_block_the_authenticated_page_lease(page):
     assert "window.confirm(" not in CONTROLLERS
     assert "dialog.showModal()" in CONTROLLERS
     assert 'dialog.returnValue === "run"' in CONTROLLERS
+
+
+def test_custom_metric_charts_share_actual_sample_inspection_and_reading_guidance():
+    graph = section("function renderGraph(", "function installPlot(")
+    assert "customInspections.get(prefix)?.()" in graph
+    assert "installChartInspector(container, svg, inspection)" in graph
+    assert 'label: "Time", value: row[0]' in graph
+    assert "label: metric.label, value: row[metric.column]" in graph
+    assert '"data-chart-inspection-series": run.id' in graph
+    assert "metric.guidance" in graph
+    assert "Less engine-on time to reach the station is better" in SOURCE
+    assert '.metric-chart[tabindex="0"]:focus-visible' in CSS

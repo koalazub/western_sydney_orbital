@@ -24,7 +24,6 @@ def test_public_interface_is_structural_and_has_no_data_or_control_capabilities(
     ):
         assert declaration in SOURCE
     for forbidden in (
-        "import ",
         "fetch(",
         "XMLHttpRequest",
         "WebSocket",
@@ -45,6 +44,8 @@ def test_public_interface_is_structural_and_has_no_data_or_control_capabilities(
         "new Function(",
     ):
         assert forbidden not in SOURCE
+    imports = re.findall(r'^import .*? from "([^"]+)";', SOURCE, re.MULTILINE)
+    assert set(imports) == {"./chart-inspector.ts", "./analytics-insights.ts"}
 
 
 def test_cards_and_four_chart_panels_are_the_default_visible_content():
@@ -124,6 +125,7 @@ def test_cards_keep_full_cohort_medians_separate_from_selected_run_values():
     assert "Full cohort · median flight duration" in cards
     assert "Selected run · ${runScope(group.first)}" in cards
     assert "value.title" in cards and "exact(time)" in cards
+    assert "`${decimal(fuel, 2)} kg`" in cards
     assert "`${decimal(damage)} J`" in cards
     assert "reduce(" not in SOURCE
     assert "best" not in cards.lower()
@@ -182,7 +184,8 @@ def test_flight_duration_has_measured_values_zero_baseline_scope_and_outcomes():
         "group.profile.successes",
         "group.profile.attempts",
         "group.first.outcome",
-        "Shorter duration is not automatically a better outcome",
+        "Observed duration · seconds",
+        "Shorter duration does not establish a better outcome",
         "Durations may include failures and timeouts, not just arrivals",
         "const x = (value: number) => 112 + value / maximum * 374",
         '"overview-zero-line"',
@@ -273,7 +276,10 @@ def test_empty_missing_and_zero_values_are_not_fabricated_results():
     assert "|| 0" not in SOURCE
     assert "No measured runs in this selection" in SOURCE
     assert "Choose another seed or teammate, or run a test" in SOURCE
-    assert "if (!groups.length) return" in SOURCE
+    empty = SOURCE.split("if (!groups.length) {", 1)[1].split("// Selection changes", 1)[0]
+    assert 'lastWidthKey = ""' in empty
+    assert "chart.disposeInspection?.()" in empty
+    assert "return;" in empty
     assert "Fuel samples unavailable for this selection" in SOURCE
     assert "Flight durations unavailable for this selection" in SOURCE
     assert "Native activity totals unavailable for this selection" in SOURCE
@@ -282,12 +288,114 @@ def test_empty_missing_and_zero_values_are_not_fabricated_results():
 
 def test_svg_stays_responsive_without_animation_or_fixed_dom_dimensions():
     assert 'viewBox: "0 0 640 260"' in SOURCE
-    assert "12 * 640 / width" in SOURCE
-    assert "new ResizeObserver(sizeLabels).observe(container)" in SOURCE
+    assert "viewBox: `0 0 640 ${height}`" in SOURCE
+    assert "new ResizeObserver(() => renderCharts()).observe(container)" in SOURCE
     chart = section("function makeChart(", "function newPlot(")
     assert "width:" not in chart and "height:" not in chart
     assert "animation" not in SOURCE.lower()
     assert '"vector-effect": "non-scaling-stroke"' in SOURCE
+    for stretching in ("scaleY", "textLength", "lengthAdjust", 'transform: "scale'):
+        assert stretching not in SOURCE
+
+
+def test_vertical_geometry_uses_actual_width_and_reserves_readable_axis_footer():
+    geometry = section("function plotGeometry(", "function emptyPlot(")
+    for real_width_geometry in (
+        "chart.plot.getBoundingClientRect().width",
+        "const width = measuredWidth > 0 ? measuredWidth : 640",
+        "const labelUnits = Math.max(15, 12 * 640 / width)",
+        'setProperty("--overview-svg-label", `${labelUnits}px`)',
+        "const top = Math.max(30, 1.8 * labelUnits)",
+        "const bottom = top + bodyHeight(labelUnits)",
+    ):
+        assert real_width_geometry in geometry
+    # These are declared spacing ratios, not simulated text measurements.
+    ratios = {
+        name: float(re.search(rf"{name}: bottom \+ ([\d.]+) \* labelUnits", geometry)[1])
+        for name in ("height", "tickBaseline", "titleBaseline")
+    }
+    assert (ratios["titleBaseline"] - ratios["tickBaseline"]) * 12 >= 18
+    assert ratios["height"] - ratios["titleBaseline"] >= 0.3
+    for start, end in (
+        ("function renderFuel(", "function renderDuration("),
+        ("function renderDuration(", "function renderActivity("),
+        ("function renderActivity(", "export function installAnalyticsOverview("),
+    ):
+        chart = section(start, end)
+        assert "geometry.tickBaseline" in chart
+        assert "geometry.titleBaseline" in chart
+        assert "bottom + 21" not in chart and "bottom + 22" not in chart
+        assert "height - 3" not in chart
+
+
+def test_fuel_and_duration_bodies_grow_without_changing_measurement_scales():
+    fuel = section("function renderFuel(", "function renderDuration(")
+    assert "plotGeometry(chart, units => Math.max(182, 9 * units))" in fuel
+    assert "68 + (value - minimumTime) / timeSpan * 550" in fuel
+    assert "bottom - value / fuelSpan * (bottom - top)" in fuel
+    assert "y(fuel) + 0.32 * labelUnits" in fuel
+    assert "top - 0.8 * labelUnits" in fuel
+    assert ", geometry.height)" in fuel
+    duration = section("function renderDuration(", "function renderActivity(")
+    assert "rows.length * Math.max(54, 2.6 * units)" in duration
+    assert "const rowStep = Math.max(54, 2.6 * labelUnits)" in duration
+    assert "top + (index + 0.5) * rowStep" in duration
+    assert duration.count("y + 0.32 * labelUnits") == 2
+    assert "112 + value / maximum * 374" in duration
+    assert "width: x(row.value) - x(0)" in duration
+
+
+def test_activity_value_pairs_and_groups_have_label_relative_vertical_clearance():
+    activity = section("function renderActivity(", "export function installAnalyticsOverview(")
+    assert "groups.length * (2 * Math.max(24, 1.7 * units) + 1.2 * units)" in activity
+    assert "const pairGap = Math.max(24, 1.7 * labelUnits)" in activity
+    assert "const groupHeight = 2 * pairGap + 1.2 * labelUnits" in activity
+    assert "top + (index + 0.5) * groupHeight" in activity
+    assert "rowY + (metricIndex - 0.5) * pairGap" in activity
+    assert "const y = centerY - barHeight / 2" in activity
+    assert "centerY + 0.32 * labelUnits" in activity
+    assert "rowY + 0.32 * labelUnits, group.owner" in activity
+    assert "height: barHeight" in activity
+    assert "width: x(value) - x(0)" in activity
+    pair_ratio = float(re.search(r"pairGap = Math.max\(24, ([\d.]+) \* labelUnits\)", activity)[1])
+    assert pair_ratio * 12 >= 20
+    assert "metricIndex * 24" not in activity
+
+
+def test_resize_rerenders_cached_selection_only_for_changed_positive_width():
+    install = section("export function installAnalyticsOverview(", "\nNOT_PRESENT")
+    for cache_guard in (
+        "let groups: Group[] = []",
+        'let lastWidthKey = ""',
+        "let rendering = false",
+        "function renderCharts(force = false)",
+        "if (rendering || !groups.length) return",
+        "charts.map(chart => chart.plot.getBoundingClientRect().width)",
+        "widths.every(width => width > 0)",
+        'widths.map(width => width.toFixed(2)).join(":")',
+        "if (!force && (!widthKey || widthKey === lastWidthKey)) return",
+        "lastWidthKey = widthKey",
+        "rendering = true",
+        "finally {\n      rendering = false",
+        "new ResizeObserver(() => renderCharts()).observe(container)",
+    ):
+        assert cache_guard in install
+    assert install.index("lastWidthKey = widthKey") < install.index("renderFuel(fuel, groups)")
+    update = install.split("update(runs, profiles) {", 1)[1]
+    assert "groups = groupsOf(runs, profiles)" in update
+    assert "const groups" not in update
+    assert "renderCharts(true)" in update
+    assert "sizeLabels" not in SOURCE
+
+
+def test_empty_plots_keep_accessible_names_and_separate_their_message_lines():
+    empty = section("function emptyPlot(", "function legendItem(")
+    assert "plotGeometry(chart, units => Math.max(182, 6 * units))" in empty
+    assert "newPlot(chart, message, geometry.height)" in empty
+    assert 'const suffix = " for this selection"' in empty
+    assert "lines.forEach((line, index)" in empty
+    assert "1.7 * geometry.labelUnits" in empty
+    assert "replacePlot(chart, plot)" in empty
 
 
 def _contrast(foreground: str, background: str, opacity: float = 1) -> float:
@@ -316,3 +424,34 @@ def test_declared_fallback_text_and_trace_colors_have_measured_contrast():
         for color in ("#4dd6c1", "#8aa7ff", "#ffb477", "#b8adff"):
             assert _contrast(color, background) >= 4.5
             assert _contrast(color, background, opacity=0.65) >= 3
+
+
+def test_inspection_uses_supplied_samples_and_disposes_old_plot_bindings():
+    replace = section("function replacePlot(", "function renderInsight(")
+    assert "chart.disposeInspection?.()" in replace
+    assert "installChartInspector(chart.panel, plot, points" in replace
+    fuel = section("function renderFuel(", "function renderDuration(")
+    assert "trace.points.filter((point): point is Point => point !== null)" in fuel
+    assert 'label: "Time", value: point.time' in fuel
+    assert 'label: "Fuel used", value: point.value' in fuel
+    assert '"data-chart-inspection-series": trace.run.id' in fuel
+    assert "series: trace.run.id" in fuel
+    for start, end in (
+        ("function renderDuration(", "function renderActivity("),
+        ("function renderActivity(", "export function installAnalyticsOverview("),
+    ):
+        bars = section(start, end)
+        assert '"data-chart-inspection-index": inspection.length' in bars
+        assert '"pointer-events": "all"' in bars
+        assert "replacePlot(chart, plot, inspection)" in bars
+
+
+def test_each_chart_has_visible_direction_and_scoped_data_insight():
+    insight = section("function renderInsight(", "function plotGeometry(")
+    assert "deriveMetricInsight(metric, groups)" in insight
+    assert "chart.guidance.textContent = insight.guidance" in insight
+    assert "chart.insight.textContent = insight.observation" in insight
+    assert "chart.insightScope.textContent = insight.scope" in insight
+    install = section("export function installAnalyticsOverview(", "\nNOT_PRESENT")
+    assert "for (const chart of charts) renderInsight(chart, groups)" in install
+    assert 'panel.setAttribute("aria-describedby", `${guidance.id} ${insight.id}`)' in SOURCE
