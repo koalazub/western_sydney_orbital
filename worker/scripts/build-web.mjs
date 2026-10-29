@@ -70,6 +70,13 @@ try {
 if (publishedAnalytics) {
   const analyticsOutput = resolve(output, "analytics");
   await mkdir(analyticsOutput, { recursive: true });
+  // Exercise the actual read-only browser data parser, without a DOM, engine or
+  // renderer substitute. This catches schema drift before shipping a dataset.
+  const parserBundle = await build({
+    entryPoints: [resolve(source, "flight-analytics.ts")], bundle: true, write: false,
+    format: "esm", platform: "neutral", target: "es2022", minify: true,
+  });
+  const parser = await import(`data:text/javascript;base64,${Buffer.from(parserBundle.outputFiles[0].contents).toString("base64")}`);
   for (const name of ["dataset.json", "trials.csv", "aggregate.csv", "score-components.svg", "fuel-burns.svg", "turns.svg", "efficiency.svg"]) {
     const path = resolve(analyticsSource, name);
     const info = await lstat(path);
@@ -78,7 +85,8 @@ if (publishedAnalytics) {
     if (name === "dataset.json") {
       const data = JSON.parse(bytes.toString("utf8"));
       if (data.schema !== "wsorb.teammate_analytics" || data.schema_version !== 1
-        || !Array.isArray(data.trials) || !Array.isArray(data.profiles)) throw new Error("Unsupported curated analytics dataset");
+        || !Array.isArray(data.trials) || !Array.isArray(data.profiles)
+        || !parser.validatePublication(data)) throw new Error("Unsupported curated analytics dataset");
     }
     const targetName = name === "dataset.json" ? "team-comparison.json" : name === "aggregate.csv" ? "summary.csv" : name;
     await writeFile(resolve(analyticsOutput, targetName), bytes);

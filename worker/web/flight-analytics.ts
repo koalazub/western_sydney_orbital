@@ -165,7 +165,7 @@ function validateProfileStats(entry: Record<string, unknown>, seeds: unknown[]):
   return true;
 }
 
-function validatePublication(value: unknown): Publication | null {
+export function validatePublication(value: unknown): Publication | null {
   if (!shape(value, ["schema", "schema_version", "comparison", "profiles", "trials"])
     || value.schema !== "wsorb.teammate_analytics" || value.schema_version !== 1
     || !Array.isArray(value.profiles) || value.profiles.length < 1 || value.profiles.length > profiles.length
