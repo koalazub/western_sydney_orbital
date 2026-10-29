@@ -1,0 +1,79 @@
+[
+  {
+    "id": "baseline",
+    "label": "Checkpoint baseline",
+    "owner": "WSO",
+    "contributor": "WSO",
+    "description": "Existing portable checkpoint controller with unchanged policy configuration and eligibility checks.",
+    "profile": "Checkpoint velocity, 8 m/s",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "src/wsorb/stp_policy.py"
+  },
+  {
+    "id": "body-axis",
+    "label": "Body-axis checkpoint",
+    "owner": "WSO",
+    "contributor": "WSO",
+    "description": "Existing matched checkpoint controller with body-axis candidate preference enabled.",
+    "profile": "Body-axis preference, 8 m/s",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "src/wsorb/stp_policy.py"
+  },
+  {
+    "id": "basic_pd_radar",
+    "label": "Basic PD + radar",
+    "owner": "Harry",
+    "contributor": "HY sweep harness selection; existing WSO basic_command math",
+    "description": "The HY experiment selects the existing position/velocity PD controller with short-range public-radar repulsion. No predicted clearance guarantee.",
+    "profile": "HY-selected basic PD, 0.5 m/s² cap",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "src/wsorb/flight/control.py"
+  },
+  {
+    "id": "coast",
+    "label": "Coast control trial",
+    "owner": "Harry",
+    "contributor": "HY sweep harness selection; existing WSO coast_command math",
+    "description": "Zero linear and angular acceleration from the HY sweep control trial. Does not brake or seek the station.",
+    "profile": "HY-selected zero command",
+    "experimental": true,
+    "target_seeking": false,
+    "source": "src/wsorb/flight/control.py"
+  },
+  {
+    "id": "bui_alpha_beta_mvp",
+    "label": "Alpha-beta + sidestep",
+    "owner": "Bui",
+    "contributor": "Bui; WSO bounded native adapter",
+    "description": "Original alpha-beta tracking and cruise/sidestep guidance with a reviewed 0.25 m/s² hold plus 0.25 m/s² sidestep profile. Experimental best effort, not certified avoidance or docking.",
+    "profile": "17 m/s cruise, 0.25 + 0.25 bounded burns",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "examples/mvp"
+  },
+  {
+    "id": "tom_kalman_velocity_mvp",
+    "label": "Kalman + velocity governor",
+    "owner": "Tom",
+    "contributor": "Tom; WSO bounded native adapter",
+    "description": "Original nearest-50 Kalman tracker and velocity candidates/cost/hysteresis. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
+    "profile": "17 m/s cruise, gain 2, 0.5 m/s² governor",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "examples/tom-mvp"
+  },
+  {
+    "id": "userapi_body_z",
+    "label": "Body +Z template",
+    "owner": "Tom",
+    "contributor": "UserAPI example template in Tom's source folder; WSO capped adapter",
+    "description": "Template only, not target-seeking. Original body [0, 0, 1] m/s² request is explicitly reduced to [0, 0, 0.5] for the native actuator limit. Does not import or run the licensed UserAPI entrypoint.",
+    "profile": "Template, body +Z at 0.5 m/s²",
+    "experimental": true,
+    "target_seeking": false,
+    "source": "examples/tom-mvp/UserAPI.py"
+  }
+]

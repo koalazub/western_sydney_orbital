@@ -8,9 +8,10 @@ public RPC instead. Existing flights are never configured, reset or tuned here.
 ``--await-owner`` keeps only readiness reads alive until an engine is ready, then
 inspects or runs once within the configured flight budgets. It never grants Run.
 
-The numeric controller is the same STPCheckpointController used by the licensed
-example. This transport is not spaceteams, SDK emulation or physics-parity
-evidence. The official ControllerSystem entry point remains separate.
+Reviewed named profiles share this transport and its native fences and leases.
+The baseline profiles retain the portable STPCheckpointController. Teammate
+profiles declare their practice adaptations separately. None of this transport
+is spaceteams, SDK emulation or physics-parity evidence.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import tempfile
 import time
 import uuid
 import weakref
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -119,7 +120,9 @@ class CheckpointOptions:
                 "invalid_options",
                 "Select exactly one of --isolated, --connection-file or --room-file.",
             )
-        if self.policy not in ("baseline", "body-axis", "compare"):
+        from .controllers import PROFILE_IDS
+
+        if self.policy not in (*PROFILE_IDS, "compare"):
             raise CheckpointError("invalid_options", "Unknown checkpoint policy.")
         if self.policy == "compare" and (not self.isolated or not self.run):
             raise CheckpointError("invalid_options", "Comparison requires --isolated and --run.")
@@ -174,9 +177,9 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
     )
     scope.add_argument("--room-file", type=Path, help="inspect or fly one connected hosted room")
     parser.add_argument("--run", action="store_true", help="explicitly claim control and fly")
-    parser.add_argument(
-        "--policy", choices=("baseline", "body-axis", "compare"), default="baseline"
-    )
+    from .controllers import PROFILE_IDS
+
+    parser.add_argument("--policy", choices=(*PROFILE_IDS, "compare"), default="baseline")
     parser.add_argument(
         "--duration-s", type=float, default=1800, help="simulation budget, at most 1800"
     )
@@ -737,6 +740,7 @@ def run_trial(
     owned: bool = False,
     deadline: float | None = None,
     expected_world: Mapping[str, Any] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Fly one explicit-consent trial with original-source leases and one actual grant.
 
@@ -749,11 +753,14 @@ def run_trial(
     if owned and (not options.isolated or client not in _OWNED_CLIENTS):
         raise CheckpointError("invalid_scope", "Owned rate changes require an isolated invocation.")
     from .control_contract import vector
+    from .controllers import catalog, create_controller, sample_from_observation
 
-    config = policy_config(policy)
-    from .stp_policy import STPCheckpointController
-
-    controller = STPCheckpointController(config)
+    profile = next((entry for entry in catalog() if entry["id"] == policy), None)
+    if profile is None:
+        raise CheckpointError("invalid_policy", "Select one reviewed controller profile.")
+    portable = policy in ("baseline", "body-axis")
+    controller = create_controller(policy)
+    config = asdict(policy_config(policy)) if portable else {"profile": profile["profile"]}
     origin_wall = time.monotonic()
     deadline = min(math.inf if deadline is None else deadline, origin_wall + options.wall_budget_s)
     with client.control_transaction():
@@ -796,7 +803,9 @@ def run_trial(
         "ok": False,
         "state": "starting",
         "policy": policy,
-        "policy_config": asdict(config),
+        "policy_config": config,
+        "profile": profile,
+        "execution_kind": "asynchronous_fenced_leased_API",
         "source_kind": _source_kind(client),
         "frame": observation.get("frame"),
         "rotation_convention": "active_xyzw",
@@ -840,6 +849,9 @@ def run_trial(
     try:
         while True:
             tick = time.monotonic()
+            if cancelled is not None and cancelled():
+                result["state"] = "stopped"
+                break
             observation = _observation(current)
             now = observation["time_s"]
             terminal = observation["mission"]["status"] != "running"
@@ -869,7 +881,11 @@ def run_trial(
                 expect_running, awaiting_play = True, False
             if not owned and current["runtime"].get("rate") != 1:
                 raise CheckpointError("external_rate", "External playback rate changed; yielding.")
-            sample = sample_from_snapshot(current, source_kind=_source_kind(client))
+            sample = (
+                sample_from_snapshot(current, source_kind=_source_kind(client))
+                if portable
+                else sample_from_observation(observation, source_kind=_source_kind(client))
+            )
             compute_started = time.monotonic()
             accel, angular = controller.command(
                 sample, observation["radar"], now_elapsed_time_s=now
@@ -900,11 +916,19 @@ def run_trial(
                 )
             # The policy owns its eligibility judgment. A valid zero command is
             # distinct from invalid-data coast, particularly before first Play.
-            if not policy_decision_eligible(policy_report, accel, angular, now):
+            eligible = (
+                policy_decision_eligible(policy_report, accel, angular, now)
+                if portable
+                else policy_report.get("eligible") is True
+            )
+            if not eligible:
                 raise CheckpointError(
                     "policy_ineligible", "Shared policy did not approve an eligible decision."
                 )
             lease = decision_lease(policy_report, now)
+            if cancelled is not None and cancelled():
+                result["state"] = "stopped"
+                break
             if time.monotonic() >= deadline:
                 result["state"] = "wall_budget_limit"
                 break
@@ -988,7 +1012,7 @@ def run_trial(
         result["final_world"] = world_metadata(current)
         result["world_metadata_unchanged"] = result["final_world"] == world
         result["wall_elapsed_s"] = time.monotonic() - origin_wall
-        result["native_success"] = native_success(current)
+        result["native_success"] = result["world_metadata_unchanged"] and native_success(current)
         result["ok"] = (
             result["native_success"]
             and result["world_metadata_unchanged"]
@@ -996,6 +1020,74 @@ def run_trial(
             and result["release_state"] == "acknowledged"
         )
     return result
+
+
+def run_profile_comparison(profiles: Sequence[str], options: CheckpointOptions) -> dict[str, Any]:
+    """Run each named profile once on its own matching, real stock world.
+
+    Each flight has its own bounded wall budget. A failed arrival remains an
+    outcome, not a reason to omit that profile or replace it with a baseline.
+    Manual stepped sweep results are never mixed into this leased comparison.
+    """
+    from .controllers import PROFILE_IDS
+
+    if (
+        not isinstance(options, CheckpointOptions)
+        or not options.isolated
+        or not options.run
+        or not isinstance(profiles, Sequence)
+        or isinstance(profiles, (str, bytes))
+        or not profiles
+        or len(profiles) > len(PROFILE_IDS)
+        or any(not isinstance(profile, str) for profile in profiles)
+        or len(set(profiles)) != len(profiles)
+        or any(profile not in PROFILE_IDS for profile in profiles)
+    ):
+        raise CheckpointError(
+            "invalid_comparison", "Select distinct reviewed profiles with --isolated and --run."
+        )
+    trials = []
+    expected_world = None
+    with diagnostics.diagnostics_context() if options.diagnostics else nullcontext():
+        for profile in profiles:
+            try:
+                deadline = time.monotonic() + options.wall_budget_s
+                with isolated_simulation(deadline=deadline) as client:
+                    trial = run_trial(
+                        client,
+                        options,
+                        policy=profile,
+                        owned=True,
+                        deadline=deadline,
+                        expected_world=expected_world,
+                    )
+                if expected_world is None:
+                    expected_world = trial.get("initial_world")
+                trials.append(trial)
+            except (Exception, KeyboardInterrupt) as error:
+                trials.append({"ok": False, "policy": profile, "error": _error(error, "setup")})
+                if isinstance(error, KeyboardInterrupt):
+                    break
+    matched = expected_world is not None and all(
+        trial.get("initial_world") == expected_world for trial in trials
+    )
+    return {
+        "schema": "wsorb.controller_comparison",
+        "schema_version": 1,
+        "ok": len(trials) == len(profiles)
+        and matched
+        and all(
+            "error" not in trial
+            and trial.get("world_metadata_unchanged") is True
+            and trial.get("release_state") == "acknowledged"
+            for trial in trials
+        ),
+        "execution_kind": "asynchronous_fenced_leased_API",
+        "matching_initial_worlds": matched,
+        "native_arrivals": sum(trial.get("native_success") is True for trial in trials),
+        "arrival_is_not_docking": True,
+        "trials": trials,
+    }
 
 
 def run_checkpoint(options: CheckpointOptions) -> dict[str, Any]:

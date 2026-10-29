@@ -34,6 +34,7 @@ from wsorb.checkpoint import (
     policy_config,
     policy_decision_eligible,
     run_checkpoint,
+    run_profile_comparison,
     run_trial,
     sample_from_snapshot,
     world_metadata,
@@ -64,6 +65,27 @@ def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connecti
     assert options.diagnostics is False
     with pytest.raises(CheckpointError, match="arguments"):
         parse_args([])
+
+
+def test_named_profiles_are_selectable_without_starting_an_engine_or_granting_run():
+    from wsorb.controllers import PROFILE_IDS, catalog
+
+    assert {entry["owner"] for entry in catalog()} >= {"Tom", "Harry", "Bui"}
+    for profile in PROFILE_IDS:
+        options = parse_args(["--isolated", "--policy", profile])
+        assert options.policy == profile
+        assert options.run is False
+
+
+def test_named_comparison_requires_owned_scope_explicit_consent_and_distinct_profiles():
+    options = CheckpointOptions(isolated=True, run=True)
+    for profiles in ([], ["coast", "coast"], ["unreviewed_script"], "coast"):
+        with pytest.raises(CheckpointError, match="reviewed"):
+            run_profile_comparison(profiles, options)
+    with pytest.raises(CheckpointError):
+        run_profile_comparison(["coast"], CheckpointOptions(isolated=True))
+    with pytest.raises(CheckpointError):
+        run_profile_comparison(["coast"], CheckpointOptions(room_file="private.json", run=True))
 
 
 def test_owner_wait_is_explicit_bounded_external_and_does_not_grant_run_consent():
@@ -580,6 +602,13 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
         assert sample.frame == after["observation"]["frame"]
         assert sample.elapsed_time_s == after["observation"]["navigation_sample_time_s"]
         assert sample.position_world_m.tolist() == after["observation"]["shuttle"]["position"]
+        cancelled = run_trial(
+            client, options, policy="baseline", owned=True, cancelled=lambda: True
+        )
+        assert cancelled["state"] == "stopped"
+        assert cancelled["decision_count"] == 0
+        assert cancelled["actuation_outcome"] == "not_attempted"
+        assert cancelled["release_state"] == "not_claimed"
         expired = run_trial(client, options, policy="baseline", owned=True, deadline=0)
         assert expired["state"] == "wall_budget_limit"
         assert expired["decision_count"] == 0
@@ -607,3 +636,41 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
         final = client.snapshot()
         assert final["observation"]["control_authority"]["status"] != "active"
         assert final["observation"]["applied_physics"]["requested"]["accel_body_mps2"] == [0, 0, 0]
+
+
+@pytest.mark.skipif(
+    os.environ.get("WSORB_CHECKPOINT_INTEGRATION") != "1",
+    reason="Opt in to short named-profile flights through the real owned HTTP/WASM backend.",
+)
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "body-axis",
+        "basic_pd_radar",
+        "coast",
+        "bui_alpha_beta_mvp",
+        "tom_kalman_velocity_mvp",
+        "userapi_body_z",
+    ],
+)
+def test_each_named_profile_runs_its_own_real_stock_world_with_native_leases(profile):
+    from wsorb.checkpoint import isolated_simulation
+
+    options = CheckpointOptions(
+        isolated=True, run=True, policy=profile, duration_s=1, wall_budget_s=30
+    )
+    with isolated_simulation() as client:
+        result = run_trial(client, options, policy=profile, owned=True)
+        assert result["policy"] == profile
+        assert result["profile"]["id"] == profile
+        assert result["execution_kind"] == "asynchronous_fenced_leased_API"
+        assert "error" not in result, result.get("error")
+        assert result["final"]["time_s"] >= 1
+        assert result["initial_world"]["debris_count"] == 500
+        assert result["initial_world"]["seed"] == 100
+        assert result["release_state"] == "acknowledged"
+        assert result["world_metadata_unchanged"] is True
+        assert result["command_usage"]["acknowledged_command_samples"] > 0
+        assert result["command_usage"]["max_linear_norm_mps2"] <= 0.5
+        assert result["command_usage"]["max_angular_norm_rad_s2"] <= 0.05
+        assert client.snapshot()["renderer"]["ready"] is False
