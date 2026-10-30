@@ -99,16 +99,15 @@ unit-check suite="all":
         devenv shell uv run --locked --extra lab pytest tests/test_flight_engine.py
     fi
 
-# Focused Python feedback without starting the native or browser suites.
-python-test *args:
-    devenv shell uv run --locked --extra lab pytest {{args}}
+# Python recipes always inspect the whole project, without file filters.
+python-test:
+    devenv tasks run wsorb:test
 
-python-format +paths:
-    devenv shell uv run --locked ruff format {{paths}}
+python-format:
+    devenv shell uv run --locked ruff format .
 
-python-check +paths:
-    devenv shell uv run --locked --extra lab ruff check {{paths}}
-    devenv shell uv run --locked --extra lab ruff format --check {{paths}}
+python-check:
+    devenv tasks run wsorb:lint
 
 # Compile and lint the actual engine and bundle the thin browser launcher.
 check:
@@ -117,6 +116,17 @@ check:
     nix shell --impure .#game --command cargo clippy --manifest-path simulation/Cargo.toml --locked --target wasm32-unknown-unknown --lib -- -D warnings
     nix shell --impure .#game --command npm --prefix worker run build:web
     git diff --check
+
+# Complete repository validation. Run every phase and retain any failure.
+verify:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    result=0
+    just build || result=1
+    just check || result=1
+    just unit-check all || result=1
+    just platform-check || result=1
+    exit "$result"
 
 # Build the WebGPU engine, optimize WASM and prepare browser assets.
 build:
