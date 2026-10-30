@@ -124,7 +124,7 @@ verify:
     result=0
     just build || result=1
     just check || result=1
-    just unit-check all || result=1
+    WSORB_CHECKPOINT_INTEGRATION=1 WSORB_DIAGNOSTICS_INTEGRATION=1 PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -ra" just unit-check all || result=1
     just platform-check || result=1
     exit "$result"
 
