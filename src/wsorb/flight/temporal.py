@@ -22,6 +22,7 @@ __all__ = ["MotionSegment", "TemporalObstacles", "motion_clear"]
 _MAX_OBSTACLES = 4099
 _MAX_SEGMENTS = 4
 _MAX_INTERVALS = 4096
+_INTERVAL_BATCH = 64
 _MAX_DURATION_S = 60.0
 _CONTINUITY_ATOL = 1e-8
 # Cover the per-axis continuity tolerance in 3D, as well as small coordinates.
@@ -124,9 +125,9 @@ def _chord_clear(
     start: npt.NDArray[np.float64],
     end: npt.NDArray[np.float64],
     radii: npt.NDArray[np.float64],
-) -> bool:
+) -> npt.NDArray[np.bool_]:
     if not all(np.isfinite(value).all() for value in (start, end, radii)):
-        return False
+        raise FloatingPointError("Unrepresentable chord bound")
     direction = end - start
     length_squared = np.sum(direction * direction, axis=1)
     along = np.divide(
@@ -138,7 +139,64 @@ def _chord_clear(
     np.clip(along, 0.0, 1.0, out=along)
     closest = start + along[:, None] * direction
     distances = np.hypot.reduce(closest, axis=1)
-    return bool(np.isfinite(distances).all() and np.all(distances > radii))
+    if not np.isfinite(distances).all():
+        raise FloatingPointError("Unrepresentable chord distance")
+    return distances > radii
+
+
+def _active_obstacles(segments, obstacles, horizon, obstacle_magnitude, maximum_radii):
+    """Exclude only rows with a positive bound over the entire continuous path.
+
+    A quadratic lies in the convex hull of its three Bezier control points.
+    Their maximum distance from the first position therefore encloses every
+    ownship position, including turns. A sphere's complete linear sweep must
+    stay beyond that enclosure plus its maximum growing radius and padding.
+    """
+    anchor = np.asarray(segments[0].position_m)
+    controls = []
+    previous_position = previous_velocity = None
+    own_scale = 0.0
+    for segment in segments:
+        position = np.asarray(segment.position_m)
+        velocity = np.asarray(segment.velocity_mps)
+        acceleration = np.asarray(segment.acceleration_mps2)
+        duration = segment.duration_s
+        if not math.isfinite(math.hypot(*segment.acceleration_mps2)):
+            raise FloatingPointError("Unrepresentable acceleration norm")
+        if previous_position is not None and (
+            not np.allclose(position, previous_position, rtol=0.0, atol=_CONTINUITY_ATOL)
+            or not np.allclose(velocity, previous_velocity, rtol=0.0, atol=_CONTINUITY_ATOL)
+        ):
+            raise ValueError("Discontinuous motion")
+        middle = position + velocity * (0.5 * duration)
+        previous_position = position + velocity * duration + acceleration * (0.5 * duration**2)
+        previous_velocity = velocity + acceleration * duration
+        controls.extend((position, middle, previous_position))
+        own_scale = max(
+            own_scale,
+            math.fsum(
+                (
+                    float(np.max(abs(position))),
+                    float(np.max(abs(velocity))) * duration,
+                    float(np.max(abs(acceleration))) * (0.5 * duration**2),
+                )
+            ),
+        )
+    reach = float(np.max(np.hypot.reduce(np.asarray(controls) - anchor, axis=1)))
+    travel = obstacles.velocities_mps * horizon
+    relative = obstacles.centers_m - anchor
+    squared = np.sum(travel * travel, axis=1)
+    along = np.divide(
+        -np.sum(relative * travel, axis=1), squared, out=np.zeros_like(squared), where=squared > 0.0
+    )
+    np.clip(along, 0.0, 1.0, out=along)
+    closest = np.hypot.reduce(relative + along[:, None] * travel, axis=1)
+    padding = _ABS_PADDING_M + _REL_PADDING * (
+        own_scale + obstacle_magnitude + maximum_radii + reach
+    )
+    if not math.isfinite(reach) or not np.isfinite(closest).all() or not np.isfinite(padding).all():
+        raise FloatingPointError("Unrepresentable all-path obstacle bound")
+    return closest <= maximum_radii + reach + padding
 
 
 def _motion_clear(
@@ -154,7 +212,8 @@ def _motion_clear(
     ):
         return False
     times = [_interval_times(duration, maximum) for duration in durations]
-    if sum(len(boundaries) - 1 for boundaries in times) > _MAX_INTERVALS:
+    interval_work = sum(len(boundaries) - 1 for boundaries in times)
+    if interval_work > _MAX_INTERVALS:
         return False
     horizon = math.fsum(durations)
     obstacle_magnitude = (
@@ -166,6 +225,19 @@ def _motion_clear(
         + obstacles.growth_mps * horizon
         + obstacles.growth_mps2 * (horizon * horizon)
     )
+    active = _active_obstacles(segments, obstacles, horizon, obstacle_magnitude, maximum_radii)
+    if not np.any(active):
+        return True
+    if not np.all(active):
+        obstacles = TemporalObstacles(
+            obstacles.centers_m[active],
+            obstacles.velocities_mps[active],
+            obstacles.radii_m[active],
+            obstacles.growth_mps[active],
+            obstacles.growth_mps2[active],
+        )
+        obstacle_magnitude = obstacle_magnitude[active]
+        maximum_radii = maximum_radii[active]
     previous_position = previous_velocity = None
     for index, (segment, boundaries) in enumerate(zip(segments, times, strict=True)):
         position = np.asarray(segment.position_m)
@@ -196,25 +268,64 @@ def _motion_clear(
             own_magnitude + obstacle_magnitude + maximum_radii
         )
         elapsed = math.fsum(durations[:index])
-        relative_start = position - (obstacles.centers_m + obstacles.velocities_mps * elapsed)
-        for interval in range(len(boundaries) - 1):
-            duration = float(boundaries[interval + 1] - boundaries[interval])
-            end_time = elapsed + float(boundaries[interval + 1])
-            relative_end = positions[interval + 1] - (
-                obstacles.centers_m + obstacles.velocities_mps * end_time
-            )
-            # A quadratic deviates from its chord by at most ||a|| * dt**2 / 8.
-            curvature = acceleration_norm * (duration * duration / 8.0)
-            radii = (
-                obstacles.radii_m
-                + obstacles.growth_mps * end_time
-                + obstacles.growth_mps2 * (end_time * end_time)
-                + curvature
-                + padding
-            )
-            if not _chord_clear(relative_start, relative_end, radii):
+        starts, ends = boundaries[:-1], boundaries[1:]
+        while len(starts):
+            unresolved = []
+            for first in range(0, len(starts), _INTERVAL_BATCH):
+                last = min(first + _INTERVAL_BATCH, len(starts))
+                local_start, local_end = starts[first:last, None], ends[first:last, None]
+                start_time, end_time = elapsed + local_start, elapsed + local_end
+                start_positions = (
+                    position + velocity * local_start + acceleration * (0.5 * local_start**2)
+                )
+                end_positions = (
+                    position + velocity * local_end + acceleration * (0.5 * local_end**2)
+                )
+                relative_start = start_positions[:, None, :] - (
+                    obstacles.centers_m + obstacles.velocities_mps * start_time[:, :, None]
+                )
+                relative_end = end_positions[:, None, :] - (
+                    obstacles.centers_m + obstacles.velocities_mps * end_time[:, :, None]
+                )
+                start_radii = (
+                    obstacles.radii_m
+                    + obstacles.growth_mps * start_time
+                    + obstacles.growth_mps2 * start_time**2
+                    + padding
+                )
+                end_radii = (
+                    obstacles.radii_m
+                    + obstacles.growth_mps * end_time
+                    + obstacles.growth_mps2 * end_time**2
+                    + padding
+                )
+                if np.any(np.hypot.reduce(relative_start, axis=2) <= start_radii) or np.any(
+                    np.hypot.reduce(relative_end, axis=2) <= end_radii
+                ):
+                    return False
+                # End radius bounds monotone growth throughout each interval;
+                # ||a|| dt²/8 bounds the complete quadratic's chord deviation.
+                curvature = acceleration_norm * (local_end - local_start) ** 2 / 8.0
+                clear = _chord_clear(
+                    relative_start.reshape(-1, 3),
+                    relative_end.reshape(-1, 3),
+                    (end_radii + curvature).reshape(-1),
+                ).reshape(last - first, len(obstacles.radii_m))
+                unresolved.extend(first + np.flatnonzero(~np.all(clear, axis=1)))
+            if not unresolved:
+                break
+            # A failed coarse enclosure is not necessarily a collision. Refine
+            # only unresolved intervals, retaining every obstacle and allowance.
+            # A clear parent already proves its full interval, not just samples.
+            interval_work += 2 * len(unresolved)
+            if interval_work > _MAX_INTERVALS:
                 return False
-            relative_start = relative_end
+            left, right = starts[unresolved], ends[unresolved]
+            middle = left + 0.5 * (right - left)
+            if np.any(middle <= left) or np.any(middle >= right):
+                return False
+            starts = np.column_stack((left, middle)).reshape(-1)
+            ends = np.column_stack((middle, right)).reshape(-1)
     return True
 
 
@@ -229,8 +340,11 @@ def motion_clear(
     Limits are four pieces, 60 seconds and 4096 total bounded intervals. Position
     and velocity continuity use rtol=0 and per-axis atol=1e-8. Clearance includes
     4e-8 metres plus 1024 float64 epsilons times an absolute arithmetic scale.
-    Curvature padding can conservatively reject a clear curve. Invalid inputs,
-    discontinuities, exhausted budgets and numeric overflow all return False.
+    Conservative chord failures are subdivided within the same 4096-check
+    budget. No interval is accepted without a continuous enclosure proof.
+    Far rows use a continuous all-path reach proof with their maximum radius;
+    every other row retains the interval checks and all supplied growth.
+    Invalid inputs, discontinuities, exhausted budgets and overflow return False.
     """
     if (
         not isinstance(segments, tuple)

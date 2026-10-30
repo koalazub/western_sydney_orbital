@@ -73,6 +73,20 @@ def test_curvature_bulge_hits_while_the_uninflated_chord_is_clear() -> None:
     assert motion_clear(higher, obstacle, max_interval_s=1.0)
 
 
+def test_all_path_bound_keeps_curved_interiors_fast_sweeps_and_full_growth():
+    # Both endpoints are the origin, while the actual quadratic reaches y=5.
+    loop = (MotionSegment(1.0, ZERO, (0.0, 20.0, 0.0), (0.0, -40.0, 0.0)),)
+    assert not motion_clear(loop, sphere((0.0, 5.0, 0.0), radius=0.1))
+    assert motion_clear(loop, sphere((0.0, 11.0, 0.0), radius=0.1))
+    assert not motion_clear(loop, sphere((0.0, 11.0, 0.0), radius=0.1, growth=12.0))
+    assert not motion_clear(loop, sphere((1000.0, 5.0, 0.0), (-2000.0, 0.0, 0.0), radius=0.1))
+
+
+def test_a_far_only_bound_does_not_accept_an_unrepresentable_acceleration_norm():
+    path = (MotionSegment(0.01, ZERO, ZERO, (1.7e308, 1.7e308, 1.7e308)),)
+    assert not motion_clear(path, sphere((1e308, 0.0, 0.0)))
+
+
 @pytest.mark.parametrize(("growth", "growth2"), [(1.0, 0.0), (0.0, 0.5), (0.5, 0.25)])
 def test_late_radius_growth_and_tangency_are_blocked(growth, growth2) -> None:
     obstacle = sphere((3.0, 0.0, 0.0), growth=growth, growth2=growth2)
@@ -279,6 +293,34 @@ def test_nonbinary_subdivision_still_checks_the_entire_horizon() -> None:
     stationary = (MotionSegment(2.0, ZERO, ZERO, ZERO),)
     assert motion_clear(stationary, sphere(), max_interval_s=0.1)
     assert not motion_clear(stationary, sphere((3.0, 0.0, 0.0), growth=1.0), max_interval_s=0.1)
+
+
+def test_subdivision_resolves_a_clear_growing_sphere_without_reducing_its_radius():
+    stationary = (MotionSegment(1.0, ZERO, ZERO, ZERO),)
+    obstacle = sphere((1.1, 0.0, 0.0), (2.0, 0.0, 0.0), radius=1.0, growth=2.0)
+    # Exact gap is (1.1 + 2t) - (1 + 2t) = 0.1 m for the entire path.
+    # A coarse chord using R(t_end) at t_start used to reject this clear path.
+    assert motion_clear(stationary, obstacle, max_interval_s=1.0)
+    assert motion_clear(stationary, obstacle)
+    assert not motion_clear(stationary, replace(obstacle, centers_m=np.array(((1.0, 0.0, 0.0),))))
+    assert not motion_clear(stationary, replace(obstacle, growth_mps2=np.array((0.25,))))
+    np.testing.assert_array_equal(obstacle.growth_mps, (2.0,))
+    np.testing.assert_array_equal(obstacle.radii_m, (1.0,))
+
+
+@pytest.mark.parametrize("collision_time", [15.9, 16.0, 16.1, 32.1, 39.9])
+def test_interval_batch_boundaries_keep_late_crossings_and_every_obstacle(collision_time):
+    path = (MotionSegment(40.0, ZERO, (1.0, 0.0, 0.0), ZERO),)
+    centers = np.full((203, 3), 1000.0)
+    velocities = np.zeros((203, 3))
+    centers[-1] = (collision_time, -2 * collision_time, 0.0)
+    velocities[-1] = (0.0, 2.0, 0.0)
+    obstacles = TemporalObstacles(
+        centers, velocities, np.full(203, 0.01), np.zeros(203), np.zeros(203)
+    )
+    assert not motion_clear(path, obstacles)
+    centers[-1, 2] = 1.0
+    assert motion_clear(path, replace(obstacles, centers_m=centers))
 
 
 def test_finite_inputs_with_unrepresentable_arithmetic_fail_closed() -> None:

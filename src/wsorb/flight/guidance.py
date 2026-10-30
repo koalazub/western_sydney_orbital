@@ -22,6 +22,7 @@ from .config import PlannerConfig, ResilienceConfig
 from .control import _bounded, coast_command, reference_to_body
 from .estimation import NavigationSample, StateEstimate, StateEstimator
 from .geometry import Capsule, CollisionIndex, segment_clear
+from .local_motion import LocalMotionPlanner, transit_motion
 from .planning import MAX_PREVIEW_POINTS, RoutePlan
 from .prediction import PlanningFrame, predict_obstacles, radar_rows
 
@@ -235,6 +236,8 @@ class ResilientGuidance:
         self._generation = 0
         self._frames: deque[_CheckedFrame] = deque(maxlen=8)
         self._route: RoutePlan | None = None
+        self._local_motion = LocalMotionPlanner()
+        self._local_preview_requested = False
         self._waypoint = 1
         self._next_waypoint: tuple[float, float, float] | None = None
         self._decision = "no_command_calculated"
@@ -260,10 +263,17 @@ class ResilientGuidance:
     def report(self) -> dict:
         return deepcopy(self._report)
 
+    @property
+    def uses_local_motion(self) -> bool:
+        """Whether this source selects fresh timed motion instead of a global route."""
+        return transit_motion(self._observation)
+
     def _invalidate(self) -> None:
         self._generation += 1
         self._frames.clear()
         self._route = None
+        self._local_motion = LocalMotionPlanner()
+        self._local_preview_requested = False
         self._waypoint = 1
         self._next_waypoint = None
         self._decision = "route_invalidated"
@@ -389,7 +399,14 @@ class ResilientGuidance:
             radar_model="anonymous_sample_envelopes_no_tracks_or_tangential_velocity_estimates",
             navigation_redundancy="none",
             camera_navigation="not_implemented",
-            command_gate="Sensor readiness also requires a current checked route at command time",
+            guidance_strategy="time_indexed_local_motion"
+            if self.uses_local_motion
+            else "frozen_capsule_waypoint_route",
+            command_gate=(
+                "Sensor readiness also requires current timed motion and a modeled stop"
+                if self.uses_local_motion
+                else "Sensor readiness also requires a current checked route at command time"
+            ),
         )
         self.result = GuidanceUpdate(
             deepcopy(self._observation),
@@ -574,7 +591,13 @@ class ResilientGuidance:
                 self._enter_loss()
                 return self._receipt()
             self._ready = True
-            if not self._frames or self._frames[-1].expires_at_s < now + self._lease:
+            if transit_motion(self._observation):
+                # Offer an advisory preview once per invalidation. A post-plan
+                # read must not request that same preview forever before the
+                # first command can perform its fresh independent motion check.
+                self._need_plan = not self._local_preview_requested
+                self._local_preview_requested = True
+            elif not self._frames or self._frames[-1].expires_at_s < now + self._lease:
                 self._need_plan = True
             self._report.update(
                 mode="degraded" if selected == "radar_backup" else "nominal",
@@ -608,6 +631,9 @@ class ResilientGuidance:
             point(field(ship, "position"), "shuttle.position"),
             point(field(ship, "velocity"), "shuttle.velocity"),
             tuple(vector(field(ship, "rotation"), "shuttle.rotation", length=4)),
+            None
+            if ship.get("angular_velocity_rad_s") is None
+            else point(ship["angular_velocity_rad_s"], "shuttle.angular_velocity_rad_s"),
         )
 
     def _inflate(self, frame: PlanningFrame) -> PlanningFrame:
@@ -679,7 +705,9 @@ class ResilientGuidance:
         if expires < self._now + self._lease:
             raise ValueError("Planning horizon cannot support the current decision lease")
         inflated = self._inflate(frame)
-        if not frame.at_waypoint:
+        if self.uses_local_motion:
+            inflated = replace(inflated, local_motion_only=True)
+        if not frame.at_waypoint and not inflated.local_motion_only:
             end = self._estimator.estimate(self._now + self._lease)
             inset = max(self.config.arrival_inset_m, 2.0 * end.position_uncertainty_m + 0.01)
             radius = frame.goal_radius_m - inset
@@ -875,6 +903,8 @@ class ResilientGuidance:
             observation = mapping(observation, "observation")
             if self._command_signature(observation) != self._signature:
                 return self._coast("Decision input is not the exact latest public source context")
+            if transit_motion(self._observation):
+                return self._local_command(route, gains)
             if not isinstance(route, RoutePlan):
                 return self._coast("No current checked Python route")
             checked = next((item for item in self._frames if item.frame is route.frame), None)
@@ -1128,3 +1158,73 @@ class ResilientGuidance:
             return body, np.zeros(3, dtype=np.float64)
         except (KeyError, TypeError, ValueError, OverflowError):
             return self._coast("Malformed, stale or unsupported route/controller input")
+
+    def _local_command(self, route, gains):
+        # A route can suggest a heading, but only if this worker registered its
+        # genuine source frame. Its old geometry never grants current clearance.
+        advisory = None
+        if isinstance(route, RoutePlan) and route.status == "candidate":
+            checked = next((item for item in self._frames if item.frame is route.frame), None)
+            if checked is not None and checked.generation == self._generation:
+                advisory = route
+        angular = np.zeros(3, dtype=np.float64)
+        if self._estimate.angular_velocity_rad_s is not None:
+            angular_limit = min(
+                0.05,
+                scalar(self._observation["max_angular_accel_rad_s2"], "max_angular_accel_rad_s2"),
+            )
+            angular = _bounded(
+                reference_to_body(
+                    -np.asarray(self._estimate.angular_velocity_rad_s) * 0.5,
+                    self._estimate.rotation_xyzw,
+                    "active_xyzw",
+                ),
+                angular_limit,
+            )
+        decision = self._local_motion.command(
+            self._observation,
+            self._estimator,
+            self.config,
+            self._lease,
+            mapping(gains, "gains"),
+            degraded=self._selected == "radar_backup",
+            route=advisory,
+        )
+        self._report.update(decision.report)
+        if not decision.report.get("admissible_local_candidates"):
+            linear, _ = self._coast(decision.report["reason"], replan=False)
+            if np.any(angular):
+                self._decision = "bounded_angular_rate_damping_without_translation_clearance"
+                self._report.update(
+                    can_command=True,
+                    mode="degraded" if self._selected == "radar_backup" else "nominal",
+                    decision=self._decision,
+                    command_gate=(
+                        "Eligible navigation permits bounded rate damping; "
+                        "linear clearance is not granted"
+                    ),
+                    angular_accel_limit_rad_s2=angular_limit,
+                )
+            return linear, angular
+        maximum = decision.report["reference_accel_limit_mps2"]
+        body = _bounded(
+            reference_to_body(
+                decision.acceleration_mps2, self._estimate.rotation_xyzw, "active_xyzw"
+            ),
+            maximum,
+        )
+        self._need_plan = False
+        self._waypoint = self._local_motion.waypoint
+        self._next_waypoint = point(decision.report["next_waypoint_world_m"], "local waypoint")
+        self._decision = "bounded_time_indexed_motion_with_modeled_stop"
+        self._decision_time = self._now
+        self._report.update(
+            mode="degraded" if self._selected == "radar_backup" else "nominal",
+            can_command=True,
+            requires_replan=False,
+            decision=self._decision,
+            decision_source_time_s=self._now,
+            decision_kind="calculated_only_not_applied_or_acknowledged",
+            command_gate="Current public occupancy and a modeled stop are checked per command",
+        )
+        return body, angular

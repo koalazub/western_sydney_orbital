@@ -23,6 +23,7 @@ class NavigationSample:
     position_m: Vec3
     velocity_mps: Vec3
     rotation_xyzw: tuple[float, float, float, float]
+    angular_velocity_rad_s: Vec3 | None = None
 
     @classmethod
     def from_public(cls, time_s: float, ship) -> NavigationSample:
@@ -35,7 +36,11 @@ class NavigationSample:
             raise ValueError("Navigation rotation must be nonzero")
         rotation = rotation / scale
         rotation /= math.hypot(*rotation)
-        return cls(timestamp, position, velocity, tuple(float(value) for value in rotation))
+        angular = ship.get("angular_velocity_rad_s")
+        angular = None if angular is None else point(angular, "shuttle.angular_velocity_rad_s")
+        return cls(
+            timestamp, position, velocity, tuple(float(value) for value in rotation), angular
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +52,7 @@ class StateEstimate:
     rotation_xyzw: tuple[float, float, float, float]
     position_uncertainty_m: float
     velocity_uncertainty_mps: float
+    angular_velocity_rad_s: Vec3 | None = None
 
     def to_report(self) -> dict:
         return {
@@ -55,6 +61,10 @@ class StateEstimate:
             "age_s": abs(self.time_s - self.source_time_s),
             "position_world_m": list(self.position_m),
             "velocity_world_mps": list(self.velocity_mps),
+            "angular_velocity_world_rad_s": None
+            if self.angular_velocity_rad_s is None
+            else list(self.angular_velocity_rad_s),
+            "angular_velocity_model": "optional_direct_navigation_sample_not_propagated",
             "rotation_xyzw": list(self.rotation_xyzw),
             "position_uncertainty_m": self.position_uncertainty_m,
             "velocity_uncertainty_mps": self.velocity_uncertainty_mps,
@@ -123,6 +133,7 @@ class StateEstimator:
             sample.rotation_xyzw,
             scalar(position_uncertainty, "position uncertainty"),
             scalar(velocity_uncertainty, "velocity uncertainty"),
+            sample.angular_velocity_rad_s,
         )
 
     def estimate(self, time_s: float) -> StateEstimate:

@@ -59,6 +59,9 @@ class PlanningFrame:
     # Python-derived provenance of the complete anonymous input array, not IDs.
     # It is deliberately absent from the external renderer/SDK schema.
     radar_fingerprint: bytes = b""
+    # A local controller can retain the forecast as context without presenting
+    # a short motion decision as a complete station-reaching route.
+    local_motion_only: bool = False
 
 
 def radar_rows(value: Any) -> npt.NDArray[np.float64]:

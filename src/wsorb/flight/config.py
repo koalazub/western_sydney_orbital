@@ -70,6 +70,10 @@ class ResilienceConfig:
     Faster cruise requires a separate, longer stopping-corridor forecast, bounded
     by ``max_stopping_horizon_s``. It retains every obstacle allowance and does
     not extend sensor freshness, route validity or the command lease.
+
+    Time-indexed local motion has a separate nominal braking ceiling. It is
+    also capped below current available actuator authority,
+    without reducing the independent uncertainty or clearance allowances.
     """
 
     planner: PlannerConfig = field(default_factory=lambda: PlannerConfig(forecast_horizon_s=6.0))
@@ -92,6 +96,7 @@ class ResilienceConfig:
     max_accel_mps2: float = 0.5
     degraded_max_accel_mps2: float = 0.25
     braking_accel_mps2: float = 0.25
+    local_braking_accel_mps2: float = 0.49
     max_cross_track_m: float = 20.0
     arrival_inset_m: float = 1.0
     max_stopping_horizon_s: float = 40.0
@@ -114,6 +119,7 @@ class ResilienceConfig:
             "max_accel_mps2",
             "degraded_max_accel_mps2",
             "braking_accel_mps2",
+            "local_braking_accel_mps2",
             "max_cross_track_m",
             "arrival_inset_m",
             "max_stopping_horizon_s",
@@ -147,6 +153,8 @@ class ResilienceConfig:
             raise ValueError("Degraded speed must not exceed nominal speed")
         if self.braking_accel_mps2 > self.max_accel_mps2:
             raise ValueError("braking_accel_mps2 must not exceed max_accel_mps2")
+        if self.local_braking_accel_mps2 > 0.5:
+            raise ValueError("local_braking_accel_mps2 must not exceed the reference command cap")
         if self.max_stopping_horizon_s > 60.0:
             raise ValueError("max_stopping_horizon_s must not exceed 60 seconds")
 

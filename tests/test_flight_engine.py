@@ -26,6 +26,7 @@ from wsorb.flight import (
     plan_route,
     predict_obstacles,
 )
+from wsorb.flight.control import reference_to_body
 from wsorb.local_api import control_context
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,13 +291,138 @@ def test_python_resilience_uses_actual_backup_then_coasts_through_shared_failure
     assert recovering.can_command, guidance.report
 
 
-def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine):
-    """Fly the real stock trial, not a preview or asynchronous-runner substitute."""
+def test_local_braking_reserve_is_below_actual_stock_actuator_deceleration(engine):
+    """Measure real default-world braking, without assigning position or speed."""
     initial = engine.query("observation")
-    assert initial["seed"] == 100
-    assert initial["flight_preset"] == "far_side_l2"
-    assert initial["experiment_settings"] == engine.baseline_settings
     assert initial["geometry"]["debris_count"] == 500
+    assert initial["experiment_settings"]["debris"]["speed_mps"] == 20.0
+    assert initial["experiment_settings"]["debris"]["speed_spread_mps"] == 4.0
+    for _ in range(8):
+        observation = engine.query("observation")
+        position = np.asarray(observation["shuttle"]["position"])
+        reference = position / np.linalg.norm(position) * 0.5
+        body = reference_to_body(reference, observation["shuttle"]["rotation"], "active_xyzw")
+        engine.command(**_leased_command(engine, observation, body, lease_sim_s=0.75))
+        engine.command(op="step", seconds=0.25)
+    before = engine.query("observation")
+    velocity = np.asarray(before["shuttle"]["velocity"])
+    speed = np.linalg.norm(velocity)
+    assert speed > 0.75, "The real actuator must first produce measurable velocity"
+    reference = -velocity / speed * 0.5
+    body = reference_to_body(reference, before["shuttle"]["rotation"], "active_xyzw")
+    engine.command(**_leased_command(engine, before, body, lease_sim_s=0.75))
+    engine.command(op="step", seconds=0.5)
+    after = engine.query("observation")
+    duration = after["time_s"] - before["time_s"]
+    deceleration = (speed - np.linalg.norm(after["shuttle"]["velocity"])) / duration
+    assert deceleration >= ResilientGuidance().config.local_braking_accel_mps2
+    # Also measure the opposing-gravity case. Produce inward motion with real
+    # bounded burns, then brake outward; never assign a velocity or move a body.
+    for _ in range(10):
+        observation = engine.query("observation")
+        position = np.asarray(observation["shuttle"]["position"])
+        reference = -position / np.linalg.norm(position) * 0.5
+        body = reference_to_body(reference, observation["shuttle"]["rotation"], "active_xyzw")
+        engine.command(**_leased_command(engine, observation, body, lease_sim_s=0.75))
+        engine.command(op="step", seconds=0.25)
+    inward = engine.query("observation")
+    position = np.asarray(inward["shuttle"]["position"])
+    velocity = np.asarray(inward["shuttle"]["velocity"])
+    speed = np.linalg.norm(velocity)
+    assert np.dot(position, velocity) < 0 and speed > 0.25
+    body = reference_to_body(-velocity / speed * 0.5, inward["shuttle"]["rotation"], "active_xyzw")
+    engine.command(**_leased_command(engine, inward, body, lease_sim_s=0.75))
+    engine.command(op="step", seconds=0.5)
+    after = engine.query("observation")
+    duration = after["time_s"] - inward["time_s"]
+    deceleration = (speed - np.linalg.norm(after["shuttle"]["velocity"])) / duration
+    assert deceleration >= ResilientGuidance().config.local_braking_accel_mps2
+    assert after["mission"]["damage"] == 0
+    assert after["geometry"]["debris_count"] == 500
+    assert after["manual_interventions"] == initial["manual_interventions"]
+    assert after["trial_revision"] == initial["trial_revision"]
+
+
+def test_transit_guidance_damps_genuine_native_spin_with_the_existing_angular_cap(engine):
+    """Create angular momentum through real bounded burns, never assigned state."""
+    initial = engine.query("observation")
+    for index in range(12):
+        observation = engine.query("observation")
+        position = np.asarray(observation["shuttle"]["position"])
+        linear = reference_to_body(
+            position / np.linalg.norm(position) * 0.5,
+            observation["shuttle"]["rotation"],
+            "active_xyzw",
+        )
+        request = _leased_command(engine, observation, linear, lease_sim_s=0.75)
+        request["angular_accel"] = [0.0, 0.05 if index >= 8 else 0.0, 0.0]
+        engine.command(**request)
+        engine.command(op="step", seconds=0.25)
+    before = engine.query("observation")
+    spin = np.linalg.norm(before["shuttle"]["angular_velocity_rad_s"])
+    assert spin > 0.02
+    guidance = ResilientGuidance()
+    ready = guidance.update(
+        before, wall_time_s=time.monotonic(), running=engine.query("runtime")["running"]
+    )
+    linear, angular = guidance.command(ready.observation, None, {})
+    assert ready.can_command
+    assert np.linalg.norm(linear) <= 0.5
+    assert 0.0 < np.linalg.norm(angular) <= 0.05
+    request = _leased_command(engine, before, linear, lease_sim_s=ready.lease_sim_s)
+    request["angular_accel"] = angular.tolist()
+    engine.command(**request)
+    engine.command(op="step", seconds=0.25)
+    after = engine.query("observation")
+    assert np.linalg.norm(after["shuttle"]["angular_velocity_rad_s"]) < spin
+    assert after["mission"]["damage"] == 0
+    assert after["geometry"]["debris_count"] == 500
+    assert after["experiment_settings"] == initial["experiment_settings"]
+    assert after["manual_interventions"] == initial["manual_interventions"]
+    assert after["trial_revision"] == initial["trial_revision"]
+
+
+def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine, tmp_path):
+    """Fly the real stock trial, not a preview or asynchronous-runner substitute."""
+    _fly_checkpoint(
+        engine,
+        seed=100,
+        settings=engine.baseline_settings,
+        trace_path=tmp_path / "public-flight.json",
+    )
+
+
+@pytest.mark.parametrize(
+    "seed, trajectory_adjustment",
+    [(101, "off"), (102, "off"), (100, "toward_lander")],
+    ids=["seed_101", "seed_102", "attraction_on"],
+)
+def test_transit_checkpoint_arrival_retains_real_physics_across_seeds_and_attraction(
+    engine, seed, trajectory_adjustment, tmp_path
+):
+    settings = deepcopy(engine.baseline_settings)
+    if trajectory_adjustment == "off":
+        settings["debris"].pop("trajectory_adjustment", None)
+    else:
+        settings["debris"]["trajectory_adjustment"] = trajectory_adjustment
+    engine.command(op="configure_flight", settings=settings, seed=seed, preset="far_side_l2")
+    _fly_checkpoint(
+        engine, seed=seed, settings=settings, trace_path=tmp_path / "public-flight.json"
+    )
+
+
+def _fly_checkpoint(engine, *, seed, settings, trace_path):
+    """Run the unchanged native arrival assertions for one owned physical trial."""
+    initial = engine.query("observation")
+    assert initial["seed"] == seed
+    assert initial["flight_preset"] == "far_side_l2"
+    assert initial["experiment_settings"] == settings
+    assert initial["geometry"]["debris_count"] == 500
+    assert initial["debris_distribution"] == {"kind": "transit_stream"}
+    assert initial["experiment_settings"]["debris"]["speed_mps"] == 20.0
+    assert initial["experiment_settings"]["debris"]["speed_spread_mps"] == 4.0
+    assert initial["max_accel_mps2"] == 0.5
+    assert initial["max_angular_accel_rad_s2"] == 0.05
     assert initial["geometry"]["arrival_radius_m"] == 50.0
     guidance = ResilientGuidance()
     config = guidance.config.planner
@@ -315,6 +441,8 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
     plans = 0
     progress_times = deque((30.0, 300.0))
     stop_reason = "simulation budget exhausted"
+    public_trace = []
+    next_trace_s = initial["time_s"]
 
     def diagnostic():
         return {
@@ -343,6 +471,10 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
             "first_coasts": first_coasts,
             "recent_decisions": list(recent),
             "guidance": guidance.report,
+            "nearest_public_radar_rows": sorted(
+                observation["radar"], key=lambda row: np.linalg.norm(row[0])
+            )[:4],
+            "public_trace_path": str(trace_path),
         }
 
     print("checkpoint initial " + json.dumps(diagnostic(), sort_keys=True), flush=True)
@@ -376,6 +508,19 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
                 planning_error = str(error)
         accel, angular = guidance.command(readiness.observation, route, {})
         report = guidance.report
+        if observation["time_s"] >= next_trace_s:
+            public_trace.append(
+                {
+                    "observation": observation,
+                    "guidance": report,
+                    "command_body_mps2": accel.tolist(),
+                    "command_body_rad_s2": angular.tolist(),
+                }
+            )
+            # Retain each genuine early decision so an escape failure can be
+            # diagnosed without reconstructing observations between samples.
+            elapsed_s = observation["time_s"] - initial["time_s"]
+            next_trace_s = observation["time_s"] + (0.25 if elapsed_s < 240.0 else 5.0)
         assert np.linalg.norm(accel) <= 0.5 + 1e-12
         assert np.linalg.norm(angular) <= 0.05 + 1e-12
         if np.linalg.norm(accel) > 0 or np.linalg.norm(angular) > 0:
@@ -428,6 +573,11 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
             assert before_time < observation["time_s"] <= before_time + step_s + 1e-6
         assert observation["manual_interventions"] == initial["manual_interventions"]
         assert observation["trial_revision"] == initial["trial_revision"]
+        assert observation["experiment_settings"] == initial["experiment_settings"]
+        assert observation["ship_tuning"] == initial["ship_tuning"]
+        assert observation["geometry"]["debris_count"] == 500
+        assert observation["max_accel_mps2"] == 0.5
+        assert observation["max_angular_accel_rad_s2"] == 0.05
         if progress_times and observation["time_s"] - initial["time_s"] >= progress_times[0]:
             progress_times.popleft()
             print("checkpoint progress " + json.dumps(diagnostic(), sort_keys=True), flush=True)
@@ -436,6 +586,8 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
             break
 
     result = diagnostic()
+    public_trace.append({"observation": observation, "guidance": guidance.report})
+    trace_path.write_text(json.dumps(public_trace, allow_nan=False), encoding="utf-8")
     print("checkpoint result " + json.dumps(result, sort_keys=True), flush=True)
     assert observation["mission"]["status"] == "success", json.dumps(result, sort_keys=True)
     assert result["range_m"] <= 50.0, result

@@ -315,6 +315,13 @@ def plan_route(frame: PlanningFrame, config: PlannerConfig) -> RoutePlan:
         or frame.departure_world_m[-1] != frame.start_world_m
     ):
         raise ValueError("Planning frame lacks known geometry or a complete departure")
+    if frame.local_motion_only:
+        return RoutePlan(
+            frame,
+            (),
+            "no_candidate",
+            "Time-indexed local motion is checked separately; no complete route is claimed",
+        )
     if frame.at_waypoint:
         if not segment_clear(frame.start_world_m, frame.start_world_m, frame.obstacles):
             return RoutePlan(

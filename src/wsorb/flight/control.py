@@ -65,10 +65,13 @@ def _bounded(value: npt.ArrayLike, maximum: float) -> npt.NDArray[np.float64]:
         return np.zeros(3)
     unit = result / scale
     length = math.hypot(*unit)
-    if scale > maximum / length or math.hypot(*result) > maximum:
-        # Leave one ulp for final Euclidean-norm rounding.
-        result = unit / length * np.nextafter(maximum, 0.0)
-        if math.hypot(*result) > maximum:
+    # Python's correctly rounded hypot and V8's scaled hypot can differ at
+    # the final bit. Keep the producer inside the unchanged transport cap,
+    # including normalization/multiplication rounding. Never relax validation.
+    interior = math.nextafter(maximum, 0.0, steps=4)
+    if scale > interior / length or math.hypot(*result) > interior:
+        result = unit / length * interior
+        if math.hypot(*result) > interior:
             result = np.nextafter(result, 0.0)
     return result
 

@@ -26,10 +26,23 @@ from wsorb.flight import (
     plan_route,
     predict_obstacles,
 )
-from wsorb.flight.control import reference_to_body
+from wsorb.flight.control import _bounded, reference_to_body
 from wsorb.flight.estimation import NavigationSample, StateEstimator
 from wsorb.flight.geometry import Capsule, CollisionIndex, segment_clear
 from wsorb.flight.planning import MAX_PREVIEW_POINTS, _Corridor, search_route
+
+
+@pytest.mark.parametrize("maximum", [0.05, 0.25, 0.5])
+def test_bounded_vectors_leave_cross_language_norm_rounding_room(maximum):
+    # Numeric counterexample: Python hypot rounds this to 0.05, while V8
+    # returns 0.05000000000000001. It is not an observation or a flight result.
+    value = np.array((0.022299939842492084, -0.04462785567072277, -0.0033267373287309302))
+    value *= maximum / 0.05
+    before = value.copy()
+    bounded = _bounded(value, maximum)
+    assert math.hypot(*bounded) <= math.nextafter(maximum, 0.0, steps=2)
+    assert np.sqrt(np.sum(bounded**2)) <= maximum
+    np.testing.assert_array_equal(value, before)
 
 
 def public_input() -> dict:
@@ -822,6 +835,9 @@ def test_resilience_defaults_are_immutable_bounded_and_respect_planner_freshness
         {"position_allowance_m": 21.0},
         {"velocity_allowance_mps": -1.0},
         {"max_accel_mps2": 0.51},
+        {"local_braking_accel_mps2": 0.51},
+        {"local_braking_accel_mps2": 0.0},
+        {"local_braking_accel_mps2": True},
         {"degraded_max_accel_mps2": 0.6},
         {"degraded_max_speed_mps": 9.0},
         {"arrival_inset_m": 0.0},
