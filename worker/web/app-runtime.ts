@@ -816,9 +816,13 @@ window.addEventListener("keydown", platformKey, { capture: true });
 window.addEventListener("keydown", preventViewportScroll);
 window.addEventListener("error", windowError);
 window.addEventListener("unhandledrejection", unhandledRejection);
-new ResizeObserver(() => {
+const viewportResize = new ResizeObserver(() => {
   if (engine && !failed) window.dispatchEvent(new Event("resize"));
-}).observe(viewport);
+});
+viewportResize.observe(viewport);
+// The Python tools reserve their own row. Expanding status or wrapping the
+// toolbar changes the canvas parent even when the outer viewport stays put.
+viewportResize.observe(byId("simulation-scene"));
 
 const megabytes = (bytes: number) => `${(bytes / 1048576).toFixed(2)} MB`;
 const startupDescriptions: Record<StartupStage, string> = {

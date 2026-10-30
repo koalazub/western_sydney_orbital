@@ -81,6 +81,43 @@ def section(start, end):
     return SOURCE.split(start, 1)[1].split(end, 1)[0]
 
 
+def test_game_tools_reserve_space_outside_the_native_canvas(page):
+    """Source layout contract, with actual sizing checked separately in Chrome."""
+    scene = page.ids["simulation-scene"]
+    canvas = page.ids["simulation-canvas"]
+    opener = page.ids["open-controllers"]
+    footer = next(element for element in page.elements if element["tag"] == "footer")
+    assert canvas["parents"][-1] is scene
+    assert scene not in opener["parents"]
+    assert footer in opener["parents"]
+    for identity in ("local-python-connection", "python-room"):
+        assert footer in page.ids[identity]["parents"]
+        assert scene not in page.ids[identity]["parents"]
+    assert "grid-template-rows: minmax(0, 1fr) auto" in CSS
+    tools = CSS.split(".simulation-tools {", 1)[1].split("}", 1)[0]
+    assert "flex-wrap: wrap" in tools and "overflow-y: auto" in tools
+    for selector in (".controller-toggle", ".python-room"):
+        rule = CSS.split(selector + " {", 1)[1].split("}", 1)[0]
+        assert "position: absolute" not in rule
+        assert "inset-" not in rule and "z-index" not in rule
+    runtime = (WEB / "app-runtime.ts").read_text()
+    assert 'viewportResize.observe(byId("simulation-scene"))' in runtime
+
+
+def test_table_headings_wrap_at_words_without_squeezing_numeric_columns():
+    headings = CSS.split('.controller-results th[scope="col"] {', 1)[1].split("}", 1)[0]
+    assert "min-width: 9rem" in headings and "max-width: 12rem" in headings
+    assert "white-space: normal" in headings
+    assert "word-break: normal" in headings and "overflow-wrap: normal" in headings
+    assert "vertical-align: bottom" in headings
+    tables = CSS.split(".controller-results table {", 1)[1].split("}", 1)[0]
+    assert "width: max-content" in tables and "tabular-nums" in tables
+    cells = CSS.split(".controller-results :is(th, td) {", 1)[1].split("}", 1)[0]
+    assert "white-space: nowrap" in cells
+    wrapper = CSS.split(".controller-results {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto" in wrapper
+
+
 def test_analytics_is_a_disclosure_inside_the_existing_native_dialog(page):
     assert page.duplicates == []
     panel = page.ids["controller-panel"]

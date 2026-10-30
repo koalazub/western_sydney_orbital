@@ -87,6 +87,12 @@ export function mountDashboard(panel: HTMLDialogElement) {
   byId("published-analytics-heading").textContent = "Published measurements";
   byId("controller-room-heading").textContent = "Connection results";
   byId("room-analytics-heading").textContent = "Connection traces";
+  for (const region of panel.querySelectorAll<HTMLElement>(".controller-results")) {
+    const hint = document.createElement("p");
+    hint.className = "table-scroll-hint";
+    hint.textContent = "Scroll horizontally to see all columns.";
+    region.prepend(hint);
+  }
 
   const titles: Record<string, string> = { compare: "Controller comparison", run: "Run a flight", data: "Recorded data" };
   const showView = (name: string) => {

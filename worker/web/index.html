@@ -10,7 +10,7 @@
 </head>
 <body>
   <main id="simulation-viewport" aria-label="Escape from Phobos simulation">
-    <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-keyshortcuts="Shift+C" hidden>Controller profiles</button>
+    <div id="simulation-scene" class="simulation-scene">
     <canvas id="simulation-canvas" tabindex="0" aria-label="Interactive Bevy simulation" aria-describedby="camera-instructions"></canvas>
     <section id="boot-screen" class="boot-screen" aria-labelledby="boot-title">
       <h1 id="boot-title">Escape from Phobos</h1>
@@ -40,15 +40,18 @@
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
-    <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
-      <p id="local-python-status" role="status"></p>
-      <p id="local-python-evidence" class="connection-evidence"></p>
-      <details class="connection-details"><summary>Connection & observed events</summary><p id="local-python-endpoint"></p><ol id="local-controller-events"></ol></details>
-    </section>
-    <section id="python-room" class="python-room" aria-label="Python connection" hidden>
-      <p id="python-room-status" role="status"></p>
-      <button id="disconnect-python" type="button" aria-keyshortcuts="Shift+Escape" hidden>Disconnect Python</button>
-    </section>
+    </div>
+    <footer class="simulation-tools" aria-label="Python flight tools">
+      <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-keyshortcuts="Shift+C" hidden>Controller profiles</button>
+      <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
+        <p id="local-python-status" role="status"></p>
+        <details class="connection-details"><summary>Connection & observed events</summary><p id="local-python-evidence" class="connection-evidence"></p><p id="local-python-endpoint"></p><ol id="local-controller-events"></ol></details>
+      </section>
+      <section id="python-room" class="python-room" aria-label="Python connection" hidden>
+        <p id="python-room-status" role="status"></p>
+        <button id="disconnect-python" type="button" aria-keyshortcuts="Shift+Escape" hidden>Disconnect Python</button>
+      </section>
+    </footer>
     <dialog id="python-permission" aria-labelledby="python-permission-title" aria-describedby="python-permission-detail">
       <h2 id="python-permission-title">Connect your Python controller?</h2>
       <p id="python-permission-detail">This private room link lets Python read this game's public sensors, claim control and fly the lander with expiring commands. Your Python code stays on your machine. Python can control this flight only after you allow the connection and start the script.</p>

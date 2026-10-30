@@ -1,7 +1,10 @@
 :root { color-scheme: dark; font-family: system-ui, sans-serif; font-size: 16px; line-height: 1.5; color: #e8edf3; background: #070b10; }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-#simulation-viewport { position: fixed; inset: 0; width: 100%; height: 100dvh; background: #070b10; }
+#simulation-viewport { position: fixed; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; width: 100%; height: 100dvh; background: #070b10; }
+.simulation-scene { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.simulation-tools { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; min-width: 0; max-block-size: 40dvh; overflow-y: auto; overscroll-behavior: contain; padding-block: 12px max(12px, env(safe-area-inset-bottom)); padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); border-block-start: 1px solid #303846; background: #0c1016; }
+.simulation-tools:not(:has(> :not([hidden]))) { display: none; }
 #simulation-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 #simulation-canvas:focus-visible { outline: 2px solid #94d9f5; outline-offset: -3px; }
 #simulation-viewport.windowed { inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(1440px, calc(100% - 32px)); height: min(86dvh, 900px); border: 1px solid #526374; }
@@ -21,9 +24,8 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .boot-screen :is(summary, pre):focus-visible { outline: 2px solid #94d9f5; outline-offset: 3px; }
 #reload-consequence, #diagnostics-status { font-size: .875rem; color: #b7c6d4; }
 .screen-reader-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-.python-room { position: absolute; inset-inline-end: 12px; inset-block-end: 12px; max-width: min(28rem, calc(100% - 24px)); max-height: 40%; overflow-y: auto; padding: 8px 12px; border: 1px solid #526374; background: #101923; overflow-wrap: anywhere; }
+.python-room { flex: 1 1 22rem; min-width: 0; padding: 8px 12px; border: 1px solid #526374; border-radius: 8px; background: #101923; overflow-wrap: anywhere; }
 .python-room p { margin: 0; }
-.local-python-connection { pointer-events: none; }
 .python-room button, #python-permission button { min-height: 40px; padding: 8px 12px; font: inherit; color: #e8edf3; background: #1c3042; border: 1px solid #9ab0c3; border-radius: 3px; cursor: pointer; }
 .python-room button { margin-top: 8px; }
 .python-room button:focus-visible, #python-permission button:focus-visible { outline: 2px solid #94d9f5; outline-offset: 3px; }
@@ -31,7 +33,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #python-permission::backdrop { background: rgb(0 0 0 / .7); }
 #python-permission h2 { margin-top: 0; font-size: 1.25rem; }
 #python-permission form { display: flex; flex-wrap: wrap; gap: 12px; }
-.controller-toggle { position: absolute; inset-inline-start: 16px; inset-block-end: 16px; max-width: calc(100% - 32px); z-index: 1; min-height: 42px; padding: 10px 16px; font: 600 .875rem/1.4 system-ui, sans-serif; color: #edf1f7; background: #171c24; border: 1px solid #78869b; border-radius: 8px; cursor: pointer; }
+.controller-toggle { flex: none; max-width: 100%; min-height: 42px; padding: 10px 16px; font: 600 .875rem/1.4 system-ui, sans-serif; color: #edf1f7; background: #171c24; border: 1px solid #78869b; border-radius: 8px; cursor: pointer; }
 #controller-panel {
   --lab-bg: #101319; --lab-surface: #171c24; --lab-raised: #1c2330; --lab-border: #303846;
   --lab-input-border: #78869b; --lab-text: #edf1f7; --lab-muted: #9ba7ba; --lab-accent: #92afff;
@@ -98,7 +100,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .lab-score-example > div { padding: 12px; border-radius: 6px; background: var(--lab-bg); }
 .lab-score-example dt { color: var(--lab-muted); font-size: .75rem; }
 .lab-score-example dd { margin: 6px 0 0; font-weight: 600; font-size: 1.25rem; }
-.local-python-connection { width: min(26rem, calc(100% - 32px)); padding: 12px 14px; border-radius: 8px; font-size: .75rem; line-height: 1.5; }
+.local-python-connection { padding: 12px 14px; font-size: .75rem; line-height: 1.5; }
 .local-python-connection #local-python-status { margin: 0; font-weight: 600; font-size: .8125rem; }
 .local-python-connection .connection-evidence { color: #bdcad9; margin: 5px 0 0; font-variant-numeric: tabular-nums; }
 .connection-details { margin-block-start: 8px; color: #bdcad9; font-size: .6875rem; pointer-events: auto; }
@@ -195,12 +197,15 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .lab-native-status { display: grid; gap: 4px; margin-block-end: 20px; padding: 12px 16px; border-inline-start: 2px solid var(--lab-accent); border-radius: 4px; background: var(--lab-surface); }
 .lab-native-status > p:first-child { font-weight: 600; font-size: .875rem; }
 .lab-native-status > p:last-child { color: var(--lab-muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
-.controller-results { overflow-x: auto; max-width: 100%; margin-block: 16px; overscroll-behavior: contain; }
-.controller-results table { min-width: 1100px; width: max-content; max-width: none; border-collapse: collapse; font-size: .75rem; text-align: start; font-variant-numeric: tabular-nums; }
+.controller-results { container-type: inline-size; overflow-x: auto; max-width: 100%; margin-block: 16px; overscroll-behavior: contain; }
+.table-scroll-hint { position: sticky; inset-inline-start: 0; width: fit-content; max-width: 100%; margin-block-end: 8px !important; color: var(--lab-muted); font-size: .75rem; }
+.controller-results table { min-width: 1100px; width: max-content; max-width: none; border-collapse: collapse; font-size: .8125rem; text-align: start; font-variant-numeric: tabular-nums; }
 .controller-results :is(th, td) { white-space: nowrap; overflow-wrap: normal; word-break: normal; padding: 12px 16px; border-block-end: 1px solid var(--lab-border); }
-.controller-results th { color: var(--lab-muted); font-size: .6875rem; font-weight: 600; }
+.controller-results th { color: var(--lab-muted); font-size: .75rem; font-weight: 600; }
+.controller-results th[scope="col"] { width: 12rem; min-width: 9rem; max-width: 12rem; white-space: normal; overflow-wrap: normal; word-break: normal; vertical-align: bottom; }
+.controller-results th[scope="col"]:first-child, .controller-results th[scope="row"] { width: 18rem; min-width: 18rem; max-width: 18rem; white-space: normal; overflow-wrap: normal; word-break: normal; }
 .controller-results th[scope="rowgroup"] { max-width: 75ch; white-space: normal; overflow-wrap: break-word; }
-.controller-results caption { text-align: start; color: var(--lab-muted); max-width: 75ch; font-size: .75rem; line-height: 1.6; margin-block-end: 12px; }
+.controller-results caption { width: min(75ch, 100cqi); max-width: 75ch; text-align: start; color: var(--lab-muted); font-size: .75rem; line-height: 1.6; margin-block-end: 12px; white-space: normal; word-break: normal; overflow-wrap: normal; }
 #lab-view-data .lab-surface > p { font-size: .75rem; line-height: 1.6; color: var(--lab-muted); max-width: 75ch; margin-block: 7px; }
 #controller-score-label { color: var(--lab-text) !important; font-size: 1rem !important; font-weight: 600; }
 #controller-score-detail code { display: block; margin-block: 16px 8px; color: var(--lab-text); font-size: .875rem; overflow-wrap: break-word; }
