@@ -22,16 +22,15 @@ impl Simulation {
             // It is never offered as an independent backup measurement.
             if let Some(observation) = self.state.observations.first() {
                 state.primary.acquisition_sequence = 1;
-                state.primary.sample = Some(RadarFrame {
-                    sample_time_s: observation.measurement_time_s,
-                    sequence: 1,
-                    rows: self
-                        .state
+                state.primary.sample = Some(RadarFrame::unversioned(
+                    observation.measurement_time_s,
+                    1,
+                    self.state
                         .observations
                         .iter()
                         .map(public_radar_row)
                         .collect(),
-                });
+                ));
             }
             self.state.sensor_state = Some(state);
         }
@@ -623,25 +622,31 @@ impl Simulation {
             .iter()
             .map(public_radar_row)
             .collect();
+        let distribution = self
+            .state
+            .experiment_settings
+            .map(|experiment| experiment.debris.distribution);
         let now = self.state.time_s;
         let state = self.sensor_state_mut();
         state.backup_rng_state = backup_rng;
         state.primary.acquisition_sequence = state.primary.acquisition_sequence.saturating_add(1);
         state.backup.acquisition_sequence = state.backup.acquisition_sequence.saturating_add(1);
         if state.mode(SensorUnitId::RadarPrimary) == SensorFaultMode::Nominal {
-            state.primary.sample = Some(RadarFrame {
-                sample_time_s: now,
-                sequence: state.primary.acquisition_sequence,
-                rows: primary_rows,
-            });
+            state.primary.sample = Some(RadarFrame::acquired(
+                now,
+                state.primary.acquisition_sequence,
+                primary_rows,
+                distribution,
+            ));
             state.primary.waiting_for_sample = false;
         }
         if state.mode(SensorUnitId::RadarBackup) == SensorFaultMode::Nominal {
-            state.backup.sample = Some(RadarFrame {
-                sample_time_s: now,
-                sequence: state.backup.acquisition_sequence,
-                rows: backup_rows,
-            });
+            state.backup.sample = Some(RadarFrame::acquired(
+                now,
+                state.backup.acquisition_sequence,
+                backup_rows,
+                distribution,
+            ));
             state.backup.waiting_for_sample = false;
         }
         self.sample_navigation_delivery();
@@ -678,28 +683,36 @@ impl Simulation {
         for unit in SensorUnitId::ALL {
             let state = self.state.sensor_state.as_ref();
             let mode = state.map_or(SensorFaultMode::Nominal, |state| state.mode(unit));
+            let mut radar_provenance = "unknown";
             let (sample_time, sequence, has_sample, waiting) = match unit {
                 SensorUnitId::RadarPrimary | SensorUnitId::RadarBackup => {
-                    let radar = state.map(|state| match unit {
-                        SensorUnitId::RadarPrimary => &state.primary,
-                        _ => &state.backup,
+                    let radar = state.and_then(|state| match unit {
+                        SensorUnitId::RadarPrimary => Some(&state.primary),
+                        SensorUnitId::RadarBackup => Some(&state.backup),
+                        SensorUnitId::CameraTop
+                        | SensorUnitId::CameraBottom
+                        | SensorUnitId::Navigation => None,
                     });
                     let sample = radar.and_then(|radar| radar.sample.as_ref());
                     if let Some(radar) = radar {
                         let available = mode == SensorFaultMode::Frozen
                             || (mode == SensorFaultMode::Nominal && !radar.waiting_for_sample);
-                        let rows = sample
-                            .filter(|_| available)
-                            .map_or_else(Vec::new, |sample| sample.rows.clone());
-                        if unit != SensorUnitId::RadarPrimary
-                            || mode != SensorFaultMode::Nominal
-                            || radar.waiting_for_sample
-                        {
-                            report[if unit == SensorUnitId::RadarPrimary {
-                                "radar"
-                            } else {
-                                "radar_backup"
-                            }] = json!(rows);
+                        let delivered = sample.filter(|_| available);
+                        let rows = delivered.map_or(&[][..], |sample| sample.rows.as_slice());
+                        // Rows and provenance belong to the same cached frame,
+                        // including nominal delivery after an archive restore.
+                        if unit == SensorUnitId::RadarPrimary {
+                            report["radar"] = json!(rows);
+                            if let Some(sample) = delivered {
+                                report["radar_selection"]["selection"] =
+                                    json!(sample.selection_label());
+                                radar_provenance = sample.primary_provenance();
+                            }
+                        } else {
+                            report["radar_backup"] = json!(rows);
+                            if let Some(sample) = delivered {
+                                radar_provenance = sample.backup_provenance();
+                            }
                         }
                     }
                     (
@@ -772,8 +785,7 @@ impl Simulation {
                 "sample_time_s": if matches!(delivery, SensorDelivery::Ready | SensorDelivery::Frozen) { sample_time } else { None },
                 "sequence": if matches!(delivery, SensorDelivery::Ready | SensorDelivery::Frozen) { sequence } else { None },
                 "provenance": match unit {
-                    SensorUnitId::RadarPrimary => "native_world_radar_primary_legacy_rng",
-                    SensorUnitId::RadarBackup => "native_world_radar_backup_independent_rng_v1",
+                    SensorUnitId::RadarPrimary | SensorUnitId::RadarBackup => radar_provenance,
                     SensorUnitId::CameraTop | SensorUnitId::CameraBottom => "native_gpu_rgb_capture",
                     SensorUnitId::Navigation => "native_unreplicated_navigation_readback_no_noise_model",
                 },
@@ -815,11 +827,12 @@ fn sample_backup(state: &Snapshot, rng: &mut u64) -> Vec<RadarRow> {
     };
     let cfg = settings();
     let mut rows = Vec::with_capacity(cfg.debris.radar_count);
+    let candidate_limit = radar_candidate_limit(state);
     for debris in state
         .assets
         .iter()
         .filter(|entity| entity.kind == EntityKind::Debris)
-        .take(cfg.debris.radar_count)
+        .take(candidate_limit)
     {
         let delta = sub(debris.position, shuttle.position);
         let range = norm(delta);
@@ -842,6 +855,7 @@ fn sample_backup(state: &Snapshot, rng: &mut u64) -> Vec<RadarRow> {
         ]);
     }
     rows.sort_by(|a, b| norm(a[0]).total_cmp(&norm(b[0])));
+    rows.truncate(cfg.debris.radar_count);
     rows
 }
 

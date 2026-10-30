@@ -1,5 +1,5 @@
 //! Persisted delivery state. These faults suppress real samples, not physics.
-use super::{AppliedPhysics, EntityState, MissionState};
+use super::{AppliedPhysics, DebrisDistribution, EntityState, MissionState};
 use serde::{Deserialize, Serialize};
 
 pub type RadarRow = [[f64; 3]; 3];
@@ -78,12 +78,109 @@ pub struct SensorFault {
     pub expires_at_sim_time_s: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RadarSelection {
+    #[default]
+    Unknown,
+    LegacyFixedSubset,
+    NearestNoisyCentersV1,
+}
+
+impl RadarSelection {
+    fn for_acquisition(distribution: Option<DebrisDistribution>) -> Self {
+        match distribution {
+            Some(DebrisDistribution::TransitStream) => Self::NearestNoisyCentersV1,
+            Some(DebrisDistribution::DirectedStream | DebrisDistribution::ImpactEjecta { .. })
+            | None => Self::LegacyFixedSubset,
+        }
+    }
+
+    fn candidate_limit(self, sample_limit: usize) -> usize {
+        match self {
+            Self::Unknown | Self::LegacyFixedSubset => sample_limit,
+            Self::NearestNoisyCentersV1 => usize::MAX,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RadarFrame {
     pub sample_time_s: f64,
     pub sequence: u64,
     pub rows: Vec<RadarRow>,
+    /// An absent version cannot establish how an archived sample was selected.
+    #[serde(default)]
+    selection: RadarSelection,
+}
+
+impl RadarFrame {
+    pub(crate) fn unversioned(sample_time_s: f64, sequence: u64, rows: Vec<RadarRow>) -> Self {
+        Self {
+            sample_time_s,
+            sequence,
+            rows,
+            selection: RadarSelection::Unknown,
+        }
+    }
+
+    pub(crate) fn acquired(
+        sample_time_s: f64,
+        sequence: u64,
+        rows: Vec<RadarRow>,
+        distribution: Option<DebrisDistribution>,
+    ) -> Self {
+        Self {
+            sample_time_s,
+            sequence,
+            rows,
+            selection: RadarSelection::for_acquisition(distribution),
+        }
+    }
+
+    pub(crate) fn acquisition_candidate_limit(
+        distribution: Option<DebrisDistribution>,
+        sample_limit: usize,
+    ) -> usize {
+        RadarSelection::for_acquisition(distribution).candidate_limit(sample_limit)
+    }
+
+    fn observed_selection(&self) -> RadarSelection {
+        if self.rows.is_empty() {
+            RadarSelection::Unknown
+        } else {
+            self.selection
+        }
+    }
+
+    pub(crate) fn selection_label(&self) -> &'static str {
+        match self.observed_selection() {
+            RadarSelection::Unknown => "unknown",
+            RadarSelection::LegacyFixedSubset => "legacy_fixed_subset",
+            RadarSelection::NearestNoisyCentersV1 => "nearest_noisy_centers",
+        }
+    }
+
+    pub(crate) fn primary_provenance(&self) -> &'static str {
+        match self.observed_selection() {
+            RadarSelection::Unknown => "unknown",
+            RadarSelection::LegacyFixedSubset => "native_world_radar_primary_legacy_rng",
+            RadarSelection::NearestNoisyCentersV1 => {
+                "native_world_radar_primary_nearest_noisy_centers_v1"
+            }
+        }
+    }
+
+    pub(crate) fn backup_provenance(&self) -> &'static str {
+        match self.observed_selection() {
+            RadarSelection::Unknown => "unknown",
+            RadarSelection::LegacyFixedSubset => "native_world_radar_backup_independent_rng_v1",
+            RadarSelection::NearestNoisyCentersV1 => {
+                "native_world_radar_backup_independent_rng_nearest_noisy_centers_v1"
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

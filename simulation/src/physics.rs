@@ -382,6 +382,13 @@ impl Simulation {
             "target": target,
             "mission": self.state.mission,
             "radar": radar,
+            "radar_selection": {
+                "schema_version": 1,
+                "selection": "unknown",
+                "sample_limit": config.debris.radar_count,
+                "total_physical_body_count": debris_count,
+                "unobserved_count_lower_bound": debris_count.saturating_sub(config.debris.radar_count),
+            },
             "geometry": {
                 "phobos_enclosing_radius_m": crate::model::phobos_enclosing_radius_m(),
                 "terrain_radius_at_shuttle_m": surface_radius,
@@ -981,14 +988,15 @@ impl Simulation {
         };
         let cfg = settings();
         let mut rows = Vec::with_capacity(cfg.debris.radar_count);
-        // Preserve the reference scan cap, without inventing rows when the
-        // local experiment contains fewer physical bodies, including zero.
+        // Transit selects after genuine noisy acquisition of every body. Older
+        // distributions keep their fixed subset and literal RNG draw order.
+        let candidate_limit = radar_candidate_limit(&self.state);
         for debris in self
             .state
             .assets
             .iter()
             .filter(|e| e.kind == EntityKind::Debris)
-            .take(cfg.debris.radar_count)
+            .take(candidate_limit)
         {
             let delta = sub(debris.position, shuttle.position);
             let range = norm(delta);
@@ -1020,9 +1028,19 @@ impl Simulation {
         // STU4-Sim c1e3fc8, Systems/Radar.py sorts noisy center position,
         // independently of its unclipped closest-range and diameter samples.
         rows.sort_by(|a, b| norm(a.relative_position_m).total_cmp(&norm(b.relative_position_m)));
+        rows.truncate(cfg.debris.radar_count);
         self.state.observations = rows;
         self.sample_sensor_deliveries();
     }
+}
+
+fn radar_candidate_limit(state: &Snapshot) -> usize {
+    crate::model::RadarFrame::acquisition_candidate_limit(
+        state
+            .experiment_settings
+            .map(|experiment| experiment.debris.distribution),
+        settings().debris.radar_count,
+    )
 }
 
 fn initial(seed: u64, experiment: Option<ExperimentSettings>) -> Result<Snapshot, String> {
@@ -1935,6 +1953,16 @@ mod tests {
         assert_eq!(observation["rotation_convention"], "active_xyzw");
         assert_eq!(observation["radar_clock"], "simulation_elapsed_seconds");
         assert_eq!(
+            observation["radar_selection"],
+            json!({
+                "schema_version": 1,
+                "selection": "nearest_noisy_centers",
+                "sample_limit": settings().debris.radar_count,
+                "total_physical_body_count": settings().debris.count,
+                "unobserved_count_lower_bound": settings().debris.count - settings().debris.radar_count,
+            })
+        );
+        assert_eq!(
             observation["geometry"]["debris_count"],
             settings().debris.count
         );
@@ -2282,75 +2310,98 @@ mod tests {
 
     #[test]
     fn radar_uses_noisy_center_sorting_and_unclipped_measurements_without_extra_rng_draws() {
-        let mut state = Simulation::new_default().snapshot();
-        let shuttle_position = lander_mut(&mut state).position;
-        let debris = state
-            .assets
-            .iter_mut()
-            .filter(|entity| entity.kind == EntityKind::Debris)
-            .take(settings().debris.radar_count)
-            .max_by(|a, b| a.radius_m.total_cmp(&b.radius_m))
-            .unwrap();
-        let nearby_id = debris.id;
-        debris.position = [
-            shuttle_position[0] + 0.5 * debris.radius_m,
-            shuttle_position[1],
-            shuttle_position[2],
-        ];
-        let mut sim = Simulation::from_state(state);
-        let mut expected_rng = sim.rng;
-        let shuttle = lander(&sim).clone();
-        let cfg = settings();
-        let mut expected = Vec::new();
-        for debris in sim
-            .state
-            .assets
-            .iter()
-            .filter(|entity| entity.kind == EntityKind::Debris)
-            .take(cfg.debris.radar_count)
-        {
-            let delta = sub(debris.position, shuttle.position);
-            let range = norm(delta);
-            let position = std::array::from_fn(|i| {
-                delta[i] + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m
+        for distribution in [
+            None,
+            Some(DebrisDistribution::DirectedStream),
+            Some(DebrisDistribution::impact_default()),
+            Some(DebrisDistribution::TransitStream),
+        ] {
+            let experiment = distribution.map(|distribution| {
+                let mut experiment = ExperimentSettings::default();
+                experiment.debris.distribution = distribution;
+                experiment
             });
-            let rate = dot(sub(debris.velocity, shuttle.velocity), delta) / range
-                + gaussian(&mut expected_rng) * cfg.sensors.range_rate_noise_mps;
-            let closest =
-                range - debris.radius_m + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m;
-            let diameter = debris.radius_m
-                * 2.0
-                * (1.0 + gaussian(&mut expected_rng) * cfg.debris.diameter_noise_fraction);
-            expected.push((debris.id, position, closest, rate, diameter));
-        }
-        expected.sort_by(|a, b| norm(a.1).total_cmp(&norm(b.1)));
-        sim.sample_radar();
-        assert_eq!(sim.rng, expected_rng);
-        for (actual, (id, position, closest, rate, diameter)) in
-            sim.state.observations.iter().zip(expected)
-        {
-            assert_eq!(actual.id, id);
-            assert_eq!(actual.relative_position_m, position);
-            assert_eq!(actual.range_m, closest);
-            assert_eq!(actual.range_rate_mps, rate);
-            assert_eq!(actual.diameter_m, diameter);
-        }
-        assert!(
-            sim.state
-                .observations
-                .iter()
-                .find(|row| row.id == nearby_id)
+            let mut state = Simulation::with_profile(settings().default_seed, experiment)
                 .unwrap()
-                .range_m
-                < 0.0
-        );
-        assert!(
-            sim.state
-                .observations
-                .windows(2)
-                .any(|pair| pair[0].range_m > pair[1].range_m),
-            "closest-range sorting must not replace noisy center sorting"
-        );
+                .snapshot();
+            let shuttle_position = lander_mut(&mut state).position;
+            let debris = state
+                .assets
+                .iter_mut()
+                .filter(|entity| entity.kind == EntityKind::Debris)
+                .take(settings().debris.radar_count)
+                .max_by(|a, b| a.radius_m.total_cmp(&b.radius_m))
+                .unwrap();
+            let nearby_id = debris.id;
+            debris.position = [
+                shuttle_position[0] + 0.5 * debris.radius_m,
+                shuttle_position[1],
+                shuttle_position[2],
+            ];
+            let mut sim = Simulation::from_state(state);
+            let mut expected_rng = sim.rng;
+            let shuttle = lander(&sim).clone();
+            let cfg = settings();
+            let candidate_count = if distribution == Some(DebrisDistribution::TransitStream) {
+                500
+            } else {
+                cfg.debris.radar_count
+            };
+            let mut expected = Vec::new();
+            for debris in sim
+                .state
+                .assets
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Debris)
+                .take(candidate_count)
+            {
+                let delta = sub(debris.position, shuttle.position);
+                let range = norm(delta);
+                let position = std::array::from_fn(|i| {
+                    delta[i] + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m
+                });
+                let rate = dot(sub(debris.velocity, shuttle.velocity), delta) / range
+                    + gaussian(&mut expected_rng) * cfg.sensors.range_rate_noise_mps;
+                let closest = range - debris.radius_m
+                    + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m;
+                let diameter = debris.radius_m
+                    * 2.0
+                    * (1.0 + gaussian(&mut expected_rng) * cfg.debris.diameter_noise_fraction);
+                expected.push((debris.id, position, closest, rate, diameter));
+            }
+            assert_eq!(expected.len(), candidate_count);
+            expected.sort_by(|a, b| norm(a.1).total_cmp(&norm(b.1)));
+            expected.truncate(cfg.debris.radar_count);
+            sim.sample_radar();
+            assert_eq!(sim.rng, expected_rng);
+            assert_eq!(sim.state.observations.len(), cfg.debris.radar_count);
+            for (actual, (id, position, closest, rate, diameter)) in
+                sim.state.observations.iter().zip(expected)
+            {
+                assert_eq!(actual.id, id);
+                assert_eq!(actual.relative_position_m, position);
+                assert_eq!(actual.range_m, closest);
+                assert_eq!(actual.range_rate_mps, rate);
+                assert_eq!(actual.diameter_m, diameter);
+                assert_eq!(actual.measurement_time_s, sim.state.time_s);
+            }
+            assert!(
+                sim.state
+                    .observations
+                    .iter()
+                    .find(|row| row.id == nearby_id)
+                    .unwrap()
+                    .range_m
+                    < 0.0
+            );
+            assert!(
+                sim.state
+                    .observations
+                    .windows(2)
+                    .any(|pair| pair[0].range_m > pair[1].range_m),
+                "closest-range sorting must not replace noisy center sorting"
+            );
+        }
     }
 
     #[test]

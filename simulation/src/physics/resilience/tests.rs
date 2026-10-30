@@ -119,6 +119,520 @@ fn backup_scans_real_bodies_with_a_separate_replayable_rng_and_no_hidden_fields(
 }
 
 #[test]
+fn transit_radars_select_a_near_body_beyond_the_first_200_without_dropping_physical_bodies() {
+    let mut state = simulation(500).snapshot();
+    let shuttle = state
+        .assets
+        .iter()
+        .find(|entity| entity.id == EntityId::Lander)
+        .unwrap()
+        .clone();
+    let near_position = [80.0, 60.0, 0.0];
+    let near_velocity = [-8.0, -6.0, 0.0];
+    let mut near_id = None;
+    let mut near_radius = 0.0;
+    // Controlled native world geometry, not assigned radar rows. Acquisition
+    // below must produce both measurements through their genuine noise paths.
+    for (index, debris) in state
+        .assets
+        .iter_mut()
+        .filter(|entity| entity.kind == EntityKind::Debris)
+        .enumerate()
+    {
+        let delta = if index == 400 {
+            near_id = Some(debris.id);
+            near_radius = debris.radius_m;
+            debris.velocity =
+                std::array::from_fn(|axis| shuttle.velocity[axis] + near_velocity[axis]);
+            near_position
+        } else {
+            [10_000.0 + index as f64 * 100.0, 1_000.0, 1_000.0]
+        };
+        debris.position = std::array::from_fn(|axis| shuttle.position[axis] + delta[axis]);
+    }
+    let mut sim = Simulation::from_state(state);
+    let before_assets = serde_json::to_value(&sim.state.assets).unwrap();
+    let before_handles = sim.handles.clone();
+    let before_colliders = sim.collider_ids.clone();
+    sim.sample_radar();
+    assert_eq!(sim.state.observations.first().unwrap().id, near_id.unwrap());
+    assert_eq!(
+        serde_json::to_value(&sim.state.assets).unwrap(),
+        before_assets
+    );
+    assert_eq!(sim.handles, before_handles);
+    assert_eq!(sim.collider_ids, before_colliders);
+    assert_eq!(
+        sim.state
+            .assets
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Debris)
+            .count(),
+        500
+    );
+    assert_eq!(sim.bodies.len(), 504);
+    assert_eq!(sim.colliders.len(), 504);
+    let report = sim.observation();
+    assert_eq!(
+        report["radar_selection"]["selection"],
+        "nearest_noisy_centers"
+    );
+    assert_eq!(report["radar_selection"]["total_physical_body_count"], 500);
+    assert_eq!(
+        report["radar_selection"]["unobserved_count_lower_bound"],
+        300
+    );
+    assert_ne!(report["radar"], report["radar_backup"]);
+    let cfg = settings();
+    for (field, unit) in [("radar", "radar_primary"), ("radar_backup", "radar_backup")] {
+        let rows: Vec<RadarRow> = serde_json::from_value(report[field].clone()).unwrap();
+        assert_eq!(rows.len(), 200);
+        assert!(
+            rows.windows(2)
+                .all(|pair| norm(pair[0][0]) <= norm(pair[1][0]))
+        );
+        let near = rows.first().unwrap();
+        assert!(norm(sub(near[0], near_position)) < 10.0 * cfg.sensors.range_noise_m);
+        assert_ne!(near[0], near_position);
+        assert!((near[1][0] - (100.0 - near_radius)).abs() < 10.0 * cfg.sensors.range_noise_m);
+        assert!((near[1][1] + 10.0).abs() < 10.0 * cfg.sensors.range_rate_noise_mps);
+        assert_ne!(near[1][1], -10.0);
+        assert!(
+            rows.iter()
+                .all(|row| row[2] == [sim.state.time_s, 0.0, 0.0])
+        );
+        assert_eq!(health(&report, unit)["delivery"], "ready");
+        assert_eq!(health(&report, unit)["sample_time_s"], sim.state.time_s);
+        assert!(
+            health(&report, unit)["provenance"]
+                .as_str()
+                .unwrap()
+                .contains("nearest_noisy_centers")
+        );
+        assert_eq!(
+            health(&report, unit)["noise"]["range_noise_m"],
+            cfg.sensors.range_noise_m
+        );
+        assert!(!report[field].to_string().contains("id"));
+        assert!(!report[field].to_string().contains("velocity"));
+    }
+}
+
+#[test]
+fn backup_radar_keeps_exact_noise_draws_and_the_legacy_fixed_subset_for_old_distributions() {
+    for distribution in [
+        None,
+        Some(DebrisDistribution::DirectedStream),
+        Some(DebrisDistribution::impact_default()),
+        Some(DebrisDistribution::TransitStream),
+    ] {
+        let experiment = distribution.map(|distribution| {
+            let mut experiment = ExperimentSettings::default();
+            experiment.debris.distribution = distribution;
+            experiment
+        });
+        let sim = Simulation::with_profile(100, experiment).unwrap();
+        let state = sim.snapshot();
+        let shuttle = ship(&sim);
+        let cfg = settings();
+        let candidate_count = if distribution == Some(DebrisDistribution::TransitStream) {
+            500
+        } else {
+            cfg.debris.radar_count
+        };
+        let mut actual_rng = state.sensor_state.as_ref().unwrap().backup_rng_state;
+        let mut expected_rng = actual_rng;
+        let mut expected = Vec::new();
+        for debris in state
+            .assets
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Debris)
+            .take(candidate_count)
+        {
+            let delta = sub(debris.position, shuttle.position);
+            let range = norm(delta);
+            let position = std::array::from_fn(|axis| {
+                delta[axis] + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m
+            });
+            let rate = dot(sub(debris.velocity, shuttle.velocity), delta) / range
+                + gaussian(&mut expected_rng) * cfg.sensors.range_rate_noise_mps;
+            let closest =
+                range - debris.radius_m + gaussian(&mut expected_rng) * cfg.sensors.range_noise_m;
+            let diameter = 2.0
+                * debris.radius_m
+                * (1.0 + gaussian(&mut expected_rng) * cfg.debris.diameter_noise_fraction);
+            expected.push([
+                position,
+                [closest, rate, diameter],
+                [state.time_s, 0.0, 0.0],
+            ]);
+        }
+        assert_eq!(expected.len(), candidate_count);
+        expected.sort_by(|a, b| norm(a[0]).total_cmp(&norm(b[0])));
+        expected.truncate(cfg.debris.radar_count);
+        assert_eq!(sample_backup(&state, &mut actual_rng), expected);
+        assert_eq!(actual_rng, expected_rng);
+        if distribution != Some(DebrisDistribution::TransitStream) {
+            assert_eq!(
+                sim.observation()["radar_selection"]["selection"],
+                "legacy_fixed_subset"
+            );
+            assert_eq!(
+                health(&sim.observation(), "radar_primary")["provenance"],
+                "native_world_radar_primary_legacy_rng"
+            );
+            assert_eq!(
+                health(&sim.observation(), "radar_backup")["provenance"],
+                "native_world_radar_backup_independent_rng_v1"
+            );
+        }
+    }
+}
+
+fn fixed_subset_transit_snapshot() -> Snapshot {
+    let mut experiment = ExperimentSettings::default();
+    experiment.debris.count = 500;
+    experiment.debris.distribution = DebrisDistribution::TransitStream;
+    let mut sim = Simulation::from_state(initial(100, Some(experiment)).unwrap());
+    let assets = serde_json::to_value(&sim.state.assets).unwrap();
+    // Exercise the genuine historical acquisition path on the transit world.
+    // Only the selector changes temporarily, not bodies, noise or returned rows.
+    sim.state
+        .experiment_settings
+        .as_mut()
+        .unwrap()
+        .debris
+        .distribution = DebrisDistribution::DirectedStream;
+    sim.sample_radar();
+    sim.state.experiment_settings = Some(experiment);
+    sim.state.rng_state = sim.rng;
+    assert_eq!(serde_json::to_value(&sim.state.assets).unwrap(), assets);
+    assert_eq!(sim.state.observations.len(), 200);
+    assert!(
+        sim.state
+            .observations
+            .iter()
+            .all(|row| matches!(row.id, EntityId::Debris(id) if id <= 200))
+    );
+    let report = sim.observation();
+    assert_eq!(
+        report["radar_selection"]["selection"],
+        "legacy_fixed_subset"
+    );
+    assert_eq!(
+        health(&report, "radar_primary")["provenance"],
+        "native_world_radar_primary_legacy_rng"
+    );
+    assert_eq!(
+        health(&report, "radar_backup")["provenance"],
+        "native_world_radar_backup_independent_rng_v1"
+    );
+    assert_ne!(report["radar"], report["radar_backup"]);
+    sim.snapshot()
+}
+
+fn strip_radar_selection_fields(archive: &mut Value) {
+    for channel in ["primary", "backup"] {
+        assert!(
+            archive["sensor_state"][channel]["sample"]
+                .as_object_mut()
+                .unwrap()
+                .remove("selection")
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn unversioned_transit_restore_keeps_original_rows_clocks_assets_and_rng_until_real_sampling() {
+    let original = serde_json::to_value(fixed_subset_transit_snapshot()).unwrap();
+    let period_s = 1.0 / settings().sensors.cadence_hz;
+    for has_delivery_caches in [true, false] {
+        let mut archive = original.clone();
+        if has_delivery_caches {
+            strip_radar_selection_fields(&mut archive);
+        } else {
+            archive.as_object_mut().unwrap().remove("sensor_state");
+        }
+        let archived_state: Snapshot = serde_json::from_value(archive).unwrap();
+        let expected = serde_json::to_value(&archived_state).unwrap();
+        let mut sim = simulation(0);
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(archived_state),
+        })
+        .unwrap();
+        // A full-state comparison includes the original noisy samples, clocks,
+        // sequences, both RNG streams, contacts, assets and mission state.
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), expected);
+        assert_eq!(sim.rng, sim.state.rng_state);
+        let report = sim.observation();
+        assert_eq!(
+            report["radar"],
+            original["sensor_state"]["primary"]["sample"]["rows"]
+        );
+        let expected_backup = if has_delivery_caches {
+            original["sensor_state"]["backup"]["sample"]["rows"].clone()
+        } else {
+            json!([])
+        };
+        assert_eq!(report["radar_backup"], expected_backup);
+        assert_eq!(report["radar_selection"]["selection"], "unknown");
+        for id in ["radar_primary", "radar_backup"] {
+            assert_eq!(health(&report, id)["provenance"], "unknown");
+        }
+        assert_eq!(sim.observation(), report);
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), expected);
+
+        sim.advance(period_s * 0.25);
+        let between_ticks = sim.observation();
+        assert_eq!(between_ticks["radar"], report["radar"]);
+        assert_eq!(between_ticks["radar_backup"], report["radar_backup"]);
+        assert_eq!(between_ticks["radar_selection"]["selection"], "unknown");
+        assert_eq!(
+            serde_json::to_value(&sim.state.observations).unwrap(),
+            original["observations"]
+        );
+        for id in ["radar_primary", "radar_backup"] {
+            assert_eq!(health(&between_ticks, id)["provenance"], "unknown");
+        }
+
+        sim.advance(period_s);
+        let fresh = sim.observation();
+        assert_eq!(
+            fresh["radar_selection"]["selection"],
+            "nearest_noisy_centers"
+        );
+        assert_eq!(fresh["radar_selection"]["total_physical_body_count"], 500);
+        assert_eq!(fresh["radar_selection"]["sample_limit"], 200);
+        assert_eq!(
+            fresh["radar_selection"]["unobserved_count_lower_bound"],
+            300
+        );
+        assert!(!fresh["radar_selection"].to_string().contains("id"));
+        assert!(!fresh["radar_selection"].to_string().contains("velocity"));
+        for (field, id) in [("radar", "radar_primary"), ("radar_backup", "radar_backup")] {
+            let sensor = health(&fresh, id);
+            let sample_time_s = sensor["sample_time_s"].as_f64().unwrap();
+            assert!(sample_time_s > 0.0);
+            assert_eq!(sensor["delivery"], "ready");
+            assert!(
+                sensor["provenance"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nearest_noisy_centers")
+            );
+            let rows = fresh[field].as_array().unwrap();
+            assert_eq!(rows.len(), 200);
+            assert!(
+                rows.iter()
+                    .all(|row| row[2] == json!([sample_time_s, 0.0, 0.0]))
+            );
+            assert!(!fresh[field].to_string().contains("id"));
+            assert!(!fresh[field].to_string().contains("velocity"));
+        }
+        let acquired = serde_json::to_value(sim.snapshot()).unwrap();
+        for channel in ["primary", "backup"] {
+            assert_eq!(
+                acquired["sensor_state"][channel]["sample"]["selection"],
+                "nearest_noisy_centers_v1"
+            );
+        }
+        sim.execute(PhysicsCommand::Restore {
+            state: Box::new(serde_json::from_value(acquired.clone()).unwrap()),
+        })
+        .unwrap();
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), acquired);
+        let restored = sim.observation();
+        for field in ["radar", "radar_backup", "radar_selection"] {
+            assert_eq!(restored[field], fresh[field]);
+        }
+    }
+}
+
+#[test]
+fn frozen_radar_selection_is_independent_of_fresh_peer_acquisition_and_survives_restore() {
+    let original = serde_json::to_value(fixed_subset_transit_snapshot()).unwrap();
+    let period_s = 1.0 / settings().sensors.cadence_hz;
+    for versioned in [true, false] {
+        for frozen_primary in [true, false] {
+            let mut archive = original.clone();
+            if !versioned {
+                strip_radar_selection_fields(&mut archive);
+            }
+            let mut sim = Simulation::from_state(serde_json::from_value(archive).unwrap());
+            let (target, channel, field, unit, peer_field, peer_unit) = if frozen_primary {
+                (
+                    SensorFaultTarget::RadarPrimary,
+                    "primary",
+                    "radar",
+                    "radar_primary",
+                    "radar_backup",
+                    "radar_backup",
+                )
+            } else {
+                (
+                    SensorFaultTarget::RadarBackup,
+                    "backup",
+                    "radar_backup",
+                    "radar_backup",
+                    "radar",
+                    "radar_primary",
+                )
+            };
+            sim.set_sensor_fault(target, SensorFaultMode::Frozen, Some(1.0))
+                .unwrap();
+            let frozen_frame = serde_json::to_value(sim.snapshot()).unwrap()["sensor_state"]
+                [channel]["sample"]
+                .clone();
+            sim.advance(period_s * 1.25);
+            let report = sim.observation();
+            let mixed = serde_json::to_value(sim.snapshot()).unwrap();
+            assert_eq!(mixed["sensor_state"][channel]["sample"], frozen_frame);
+            assert_eq!(report[field], frozen_frame["rows"]);
+            assert_ne!(
+                report[peer_field],
+                original["sensor_state"][if frozen_primary { "backup" } else { "primary" }]["sample"]
+                    ["rows"]
+            );
+            let frozen = health(&report, unit);
+            assert_eq!(frozen["delivery"], "frozen");
+            assert_eq!(frozen["sample_time_s"], frozen_frame["sample_time_s"]);
+            assert_eq!(frozen["sequence"], frozen_frame["sequence"]);
+            let frozen_provenance = if !versioned {
+                "unknown"
+            } else if frozen_primary {
+                "native_world_radar_primary_legacy_rng"
+            } else {
+                "native_world_radar_backup_independent_rng_v1"
+            };
+            assert_eq!(frozen["provenance"], frozen_provenance);
+            let peer = health(&report, peer_unit);
+            assert_eq!(peer["delivery"], "ready");
+            assert!(peer["sample_time_s"].as_f64().unwrap() > 0.0);
+            assert!(
+                peer["provenance"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nearest_noisy_centers")
+            );
+            let primary_selection = if !frozen_primary {
+                "nearest_noisy_centers"
+            } else if versioned {
+                "legacy_fixed_subset"
+            } else {
+                "unknown"
+            };
+            assert_eq!(report["radar_selection"]["selection"], primary_selection);
+
+            let mut restored = simulation(0);
+            restored
+                .execute(PhysicsCommand::Restore {
+                    state: Box::new(serde_json::from_value(mixed.clone()).unwrap()),
+                })
+                .unwrap();
+            assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), mixed);
+            assert_eq!(restored.rng, sim.rng);
+            let restored_report = restored.observation();
+            for field in ["radar", "radar_backup", "radar_selection"] {
+                assert_eq!(restored_report[field], report[field]);
+            }
+            for id in ["radar_primary", "radar_backup"] {
+                assert_eq!(health(&restored_report, id), health(&report, id));
+            }
+
+            restored
+                .set_sensor_fault(target, SensorFaultMode::Nominal, None)
+                .unwrap();
+            let waiting = restored.observation();
+            assert_eq!(waiting[field], json!([]));
+            assert_eq!(health(&waiting, unit)["delivery"], "waiting_for_sample");
+            assert_eq!(health(&waiting, unit)["provenance"], "unknown");
+            assert_eq!(waiting[peer_field], report[peer_field]);
+            assert_eq!(
+                waiting["radar_selection"]["selection"],
+                if frozen_primary {
+                    "unknown"
+                } else {
+                    "nearest_noisy_centers"
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(restored.snapshot()).unwrap()["sensor_state"][channel]["sample"],
+                frozen_frame
+            );
+            restored.advance(period_s * 1.25);
+            let recovered = restored.observation();
+            assert_eq!(
+                recovered["radar_selection"]["selection"],
+                "nearest_noisy_centers"
+            );
+            for id in ["radar_primary", "radar_backup"] {
+                let sensor = health(&recovered, id);
+                assert_eq!(sensor["delivery"], "ready");
+                assert!(
+                    sensor["provenance"]
+                        .as_str()
+                        .unwrap()
+                        .contains("nearest_noisy_centers")
+                );
+                assert!(
+                    sensor["sample_time_s"].as_f64().unwrap()
+                        > peer["sample_time_s"].as_f64().unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn missing_and_withheld_radar_samples_do_not_claim_current_selection_coverage() {
+    let mut sim =
+        Simulation::from_state(initial(100, Some(ExperimentSettings::default())).unwrap());
+    let before = serde_json::to_value(sim.snapshot()).unwrap();
+    let report = sim.observation();
+    assert_eq!(report["radar_selection"]["selection"], "unknown");
+    for id in ["radar_primary", "radar_backup"] {
+        assert_eq!(health(&report, id)["delivery"], "waiting_for_sample");
+        assert_eq!(health(&report, id)["provenance"], "unknown");
+    }
+    assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+    sim.set_sensor_fault(
+        SensorFaultTarget::RadarPrimary,
+        SensorFaultMode::Frozen,
+        Some(1.0),
+    )
+    .unwrap();
+    sim.advance(1.25 / settings().sensors.cadence_hz);
+    let report = sim.observation();
+    assert_eq!(report["radar"], json!([]));
+    assert_eq!(report["radar_selection"]["selection"], "unknown");
+    assert_eq!(health(&report, "radar_primary")["provenance"], "unknown");
+    assert_eq!(
+        health(&report, "radar_primary")["delivery"],
+        "waiting_for_sample"
+    );
+    assert!(
+        health(&report, "radar_backup")["provenance"]
+            .as_str()
+            .unwrap()
+            .contains("nearest_noisy_centers")
+    );
+    sim.set_sensor_fault(
+        SensorFaultTarget::RadarBus,
+        SensorFaultMode::Unavailable,
+        Some(1.0),
+    )
+    .unwrap();
+    let report = sim.observation();
+    assert_eq!(report["radar_selection"]["selection"], "unknown");
+    for (field, id) in [("radar", "radar_primary"), ("radar_backup", "radar_backup")] {
+        assert_eq!(report[field], json!([]));
+        assert_eq!(health(&report, id)["delivery"], "unavailable");
+        assert_eq!(health(&report, id)["provenance"], "unknown");
+    }
+}
+
+#[test]
 fn delivery_faults_do_not_change_primary_noise_draws_world_dynamics_or_backup_noise() {
     let mut nominal = simulation(12);
     let mut faulted = simulation(12);
@@ -214,9 +728,11 @@ fn genuine_empty_scans_are_ready_and_are_not_outages() {
     let mut sim = simulation(0);
     assert_eq!(sim.observation()["radar"], json!([]));
     assert_eq!(sim.observation()["radar_backup"], json!([]));
+    assert_eq!(sim.observation()["radar_selection"]["selection"], "unknown");
     for id in ["radar_primary", "radar_backup"] {
         assert_eq!(health(&sim.observation(), id)["delivery"], "ready");
         assert_eq!(health(&sim.observation(), id)["sequence"], 1);
+        assert_eq!(health(&sim.observation(), id)["provenance"], "unknown");
     }
     sim.set_sensor_fault(
         SensorFaultTarget::RadarBus,
