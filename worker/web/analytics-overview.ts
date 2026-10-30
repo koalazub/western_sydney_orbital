@@ -38,6 +38,13 @@ export type OverviewProfile = {
   median_time_s?: unknown;
   median_fuel_used_kg?: unknown;
   median_damage_j?: unknown;
+  median_burn_duration_s?: unknown;
+  median_burn_count?: unknown;
+  median_angular_burn_duration_s?: unknown;
+  median_angular_burn_count?: unknown;
+  median_turn_duration_s?: unknown;
+  median_turn_count?: unknown;
+  median_total_turn_angle_rad?: unknown;
 } & Record<string, unknown>;
 
 type Team = { color: string; dash: string; repeatDash: string };
@@ -52,6 +59,7 @@ type Group = {
 };
 type Chart = {
   panel: HTMLElement;
+  heading: HTMLElement;
   plot: SVGSVGElement;
   subtitle: HTMLElement;
   legend: HTMLUListElement;
@@ -127,7 +135,7 @@ function groupsOf(runs: OverviewRun[], profiles?: OverviewProfile[]): Group[] {
     const owner = profile?.owner ?? (parts.length > 1 ? parts[0] : first.label);
     const name = profile?.label ?? (parts.length > 1 ? parts.slice(1).join(" / ").replace(/, repetition \d+$/, "") : id);
     return { id, owner, label: name, profile, runs: selected, first, team: TEAMS[owner.toLowerCase()] ?? TEAMS.wso };
-  });
+  }).filter(group => profiles === undefined || group.profile !== undefined);
   if (profiles) groups.sort((left, right) => profiles.findIndex(profile => profile.id === left.id) - profiles.findIndex(profile => profile.id === right.id));
   return groups;
 }
@@ -151,8 +159,8 @@ function pilotCard(group: Group) {
   const profile = group.profile;
   const time = profile ? profile.median_time_s : group.first.measurement.time_s;
   const value = html("p", "pilot-card__value", finite(time) ? `${decimal(time)} s` : "n/a");
-  value.title = `Observed flight duration: ${exact(time)} s`;
-  card.append(value, html("p", "pilot-card__scope", profile ? "Full cohort · median flight duration" : `Selected run · ${runScope(group.first)}`));
+  value.title = `${profile ? "Cohort median" : "Recorded run"} observed duration: ${exact(time)} s`;
+  card.append(value, html("p", "pilot-card__scope", profile ? "Cohort median · observed duration" : `Recorded run · ${runScope(group.first)}`));
   const stats = html("dl", "pilot-card__stats");
   const fuel = profile ? profile.median_fuel_used_kg : group.first.measurement.fuel_used_kg;
   const damage = profile ? profile.median_damage_j : group.first.measurement.damage_j;
@@ -190,7 +198,12 @@ function makeChart(prefix: string, key: string, title: string): Chart {
   table.setAttribute("aria-label", `${title} data`);
   data.append(summary, table);
   panel.append(header, guidance, plot, legend, readouts, insight, insightScope, note, data);
-  return { panel, plot, subtitle, legend, readouts, note, guidance, insight, insightScope, data, table, key: `${prefix}-${key}`, title };
+  return { panel, heading, plot, subtitle, legend, readouts, note, guidance, insight, insightScope, data, table, key: `${prefix}-${key}`, title };
+}
+function chartTitle(chart: Chart, title: string, cohort: boolean) {
+  chart.title = `${title} · ${cohort ? "cohort median" : "recorded run"}`;
+  chart.heading.textContent = chart.title;
+  chart.table.setAttribute("aria-label", `${chart.title} data`);
 }
 function newPlot(chart: Chart, description: string, height = 260) {
   const plot = svg("svg", {
@@ -207,7 +220,7 @@ function replacePlot(chart: Chart, plot: SVGSVGElement, points: ChartInspectionP
   chart.plot.replaceWith(plot);
   chart.plot = plot;
   chart.disposeInspection = points.length ? installChartInspector(chart.panel, plot, points,
-    "Hover for a recorded value. Focus this chart and use the arrow keys to inspect entries.") : undefined;
+    "Hover for a supplied value. Focus this chart and use the arrow keys to inspect entries.") : undefined;
 }
 function renderInsight(chart: Chart, groups: Group[]) {
   const metric = chart.panel.dataset.chart as "fuel" | "time" | "thrust" | "turn";
@@ -269,9 +282,62 @@ function selectionCaption(groups: Group[]) {
   if (seeds.length === 1 && repetitions.length === 1) return runScope(selected[0]);
   return "First selected repetition per profile; seeds and run IDs in data";
 }
+function cohortCaption(groups: Group[]) {
+  return groups.map(group => `${group.owner} ${group.profile!.successes}/${group.profile!.attempts} arrivals`).join("; ");
+}
+function activityValue(group: Group, key: string) {
+  return group.profile ? numeric(group.profile[`median_${key}`]) : total(group.first, key);
+}
+
+function renderCohortFuel(chart: Chart, groups: Group[]) {
+  chartTitle(chart, "Fuel", true);
+  chart.subtitle.textContent = "Cohort median · local fuel estimate, kg";
+  chart.legend.replaceChildren(); chart.readouts.replaceChildren();
+  chart.note.textContent = `${cohortCaption(groups)} · published cohort medians, including non-arrivals. Local fuel counters are not verified as comparable with real-world or STP fuel mass.`;
+  const rows = groups.map(group => ({ group, value: numeric(group.profile!.median_fuel_used_kg) }));
+  dataTable(chart, "Published local median fuel, not a cumulative trace or STP-comparable fuel mass. No run values substitute for missing medians.",
+    ["Profile", "Source field", "Local median fuel, kg", "Arrivals / attempts"], rows.map(({ group, value }) => [
+      `${group.owner} / ${group.label}`, "median_fuel_used_kg", exact(value), `${group.profile!.successes}/${group.profile!.attempts}`,
+    ]));
+  const values = rows.map(row => row.value).filter(finite);
+  if (!values.length) { emptyPlot(chart, "Cohort fuel medians unavailable for this selection"); return; }
+  const largest = Math.max(...values), maximum = largest > 0 ? largest * 1.06 : 1;
+  const geometry = plotGeometry(chart, units => Math.max(182, rows.length * Math.max(54, 2.6 * units)));
+  const { top, bottom, height, labelUnits } = geometry;
+  const x = (value: number) => 112 + value / maximum * 374;
+  const rowStep = Math.max(54, 2.6 * labelUnits);
+  const barHeight = Math.max(20, 0.8 * labelUnits);
+  const plot = newPlot(chart, "Published cohort median local fuel estimates in kilograms, on a zero-based horizontal axis. These bars are not cumulative traces. Each cohort retains its arrival count, including failures and timeouts. The local counter is not verified as comparable with STP fuel mass. Exact source values are in View data.", height);
+  const inspection: ChartInspectionPoint[] = [];
+  for (let i = 0; i <= 3; i++) {
+    const value = maximum * i / 3;
+    plot.append(svg("line", { x1: x(value), x2: x(value), y1: top, y2: bottom, stroke: GRID, class: "overview-grid-line" }));
+    label(plot, x(value), geometry.tickBaseline, tick(value), { "text-anchor": "middle" });
+  }
+  plot.append(svg("line", { x1: x(0), x2: x(0), y1: top, y2: bottom, stroke: MUTED, class: "overview-zero-line" }));
+  label(plot, 112, geometry.titleBaseline, "Local median fuel, kg", { class: "overview-axis-label" });
+  rows.forEach(({ group, value }, index) => {
+    const y = top + (index + 0.5) * rowStep;
+    label(plot, 12, y + 0.32 * labelUnits, group.owner, { fill: TEXT, class: "overview-row-label" });
+    if (finite(value)) {
+      const bar = svg("rect", { x: x(0), y: y - barHeight / 2, width: x(value) - x(0), height: barHeight, rx: 3, fill: group.team.color, opacity: 0.8,
+        class: "overview-duration-bar", "data-chart-inspection-index": inspection.length, "pointer-events": "all" });
+      bar.append(svg("title", {}, `${group.owner}: Local median fuel ${exact(value)} kg; median_fuel_used_kg; ${group.profile!.successes}/${group.profile!.attempts} arrivals`));
+      plot.append(bar, svg("circle", { cx: x(value), cy: y, r: 4, fill: group.team.color, "data-chart-inspection-index": inspection.length }));
+      inspection.push({ x: x(value), y, title: `${group.owner} / ${group.label} · cohort median`, values: [
+        { label: "Local median fuel", value, unit: "kg" }, { label: "Source field", value: "median_fuel_used_kg" },
+        { label: "Arrivals / attempts", value: `${group.profile!.successes}/${group.profile!.attempts}` },
+      ] });
+    }
+    label(plot, 626, y + 0.32 * labelUnits, finite(value) ? `${decimal(value, 2)} kg` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
+  });
+  replacePlot(chart, plot, inspection);
+}
 
 function renderFuel(chart: Chart, groups: Group[]) {
-  chart.subtitle.textContent = "Cumulative fuel · local estimate, kg";
+  if (groups.every(group => group.profile !== undefined)) { renderCohortFuel(chart, groups); return; }
+  chartTitle(chart, "Fuel over time", false);
+  chart.subtitle.textContent = "Recorded run · cumulative local fuel estimate, kg";
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   const traces: FuelTrace[] = [];
   const rows: string[][] = [];
@@ -292,7 +358,7 @@ function renderFuel(chart: Chart, groups: Group[]) {
   }
   dataTable(chart, "Actual recorded fuel samples. Null values remain unavailable.", ["Run", "Time, s", "Fuel, kg"], rows);
   const seeds = [...new Set(groups.flatMap(group => group.runs.map(run => run.seed)))];
-  chart.note.textContent = `Seed ${seeds.join(", ")} · recorded samples. Repeats stay separate; gaps stay open.`;
+  chart.note.textContent = `Seed ${seeds.join(", ")} · recorded samples. Repeats stay separate; gaps stay open. Local fuel counters are not verified as comparable with STP fuel mass.`;
   if (!traces.length) { emptyPlot(chart, "Fuel samples unavailable for this selection"); return; }
   const points = traces.flatMap(trace => trace.points.filter((point): point is Point => point !== null));
   const minimumTime = Math.min(...points.map(point => point.time));
@@ -363,10 +429,11 @@ function renderFuel(chart: Chart, groups: Group[]) {
 function renderDuration(chart: Chart, groups: Group[]) {
   const rows: DurationRow[] = groups.map(group => ({ group,
     value: numeric(group.profile ? group.profile.median_time_s : group.first.measurement.time_s),
-    scope: group.profile ? "Full cohort · median flight duration" : `Selected run · ${runScope(group.first)}`,
+    scope: group.profile ? "Cohort median · observed duration" : `Recorded run · ${runScope(group.first)}`,
     outcome: group.profile ? `${group.profile.successes}/${group.profile.attempts} arrivals` : group.first.outcome ?? "Outcome unavailable" }));
   const allCohort = groups.every(group => group.profile !== undefined);
-  chart.subtitle.textContent = "Observed duration · seconds";
+  chartTitle(chart, "Observed duration", allCohort);
+  chart.subtitle.textContent = `${allCohort ? "Cohort median" : "Recorded run"} · observed duration, seconds`;
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   chart.note.textContent = `${allCohort ? "Full-cohort medians" : "Selected-run observations"} · seconds. Durations may include failures and timeouts, not just arrivals.`;
   dataTable(chart, "Supplied observed flight durations, not completion-time rankings. Cohort medians keep their full-cohort scope; selected runs retain their outcomes.",
@@ -413,6 +480,7 @@ function renderDuration(chart: Chart, groups: Group[]) {
 }
 
 function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
+  const cohort = groups.every(group => group.profile !== undefined);
   const metrics: BarMetric[] = turning ? [
     { key: "turn_duration_s", label: "Physical turning", count: "turn_count" },
     { key: "angular_burn_duration_s", label: "Angular actuation", count: "angular_burn_count" },
@@ -420,28 +488,31 @@ function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
     { key: "burn_duration_s", label: "Translation burn", count: "burn_count" },
     { key: "angular_burn_duration_s", label: "Angular actuation", count: "angular_burn_count" },
   ];
-  chart.subtitle.textContent = turning ? "Physical motion vs angular thrust · seconds" : "Translation and angular thrust · seconds";
+  chartTitle(chart, turning ? "Turning vs actuation" : "Thrust activity", cohort);
+  chart.subtitle.textContent = `${cohort ? "Cohort median" : "Recorded run"} · ${turning ? "physical motion vs angular thrust" : "translation and angular thrust"}, seconds`;
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   legendItem(chart.legend, `${metrics[0].label} · solid`, MUTED);
   legendItem(chart.legend, `${metrics[1].label} · dashed outline`, MUTED, "4 3");
-  chart.note.textContent = `${selectionCaption(groups)} · native physics-step totals. ${turning ? "Turning can continue without angular thrust." : "Durations overlap; bars are not stacked."}`;
+  chart.note.textContent = `${cohort ? `${cohortCaption(groups)} · published cohort medians of native physics-step totals, including non-arrivals` : `${selectionCaption(groups)} · native physics-step totals`}. ${turning ? "Turning can continue without angular thrust." : "Durations overlap; bars are not stacked."}`;
   const tableRows: string[][] = [];
   for (const group of groups) {
-    for (const metric of metrics) tableRows.push([`${group.owner} · ${group.first.id} · ${runScope(group.first)}`, `${metric.label} · ${metric.key}`, exact(total(group.first, metric.key)), exact(total(group.first, metric.count))]);
-    if (turning) tableRows.push([`${group.owner} · ${group.first.id} · ${runScope(group.first)}`, "Orientation angle · total_turn_angle_rad", exact(total(group.first, "total_turn_angle_rad")), "n/a"]);
+    const source = group.profile ? `${group.owner} / ${group.label} · cohort median · ${group.profile.successes}/${group.profile.attempts} arrivals` : `${group.owner} · ${group.first.id} · ${runScope(group.first)}`;
+    const fieldPrefix = group.profile ? "median_" : "";
+    for (const metric of metrics) tableRows.push([source, `${metric.label} · ${fieldPrefix}${metric.key}`, exact(activityValue(group, metric.key)), `${fieldPrefix}${metric.count}: ${exact(activityValue(group, metric.count))}`]);
+    if (turning) tableRows.push([source, `Orientation angle · ${fieldPrefix}total_turn_angle_rad`, exact(activityValue(group, "total_turn_angle_rad")), "n/a"]);
     const readout = html("li", "overview-readout");
     readout.style.setProperty("--pilot-color", group.team.color);
     const counts = turning
-      ? `${exact(total(group.first, "turn_count"))} turns · ${decimal(total(group.first, "total_turn_angle_rad"), 2)} rad`
-      : `${exact(total(group.first, "burn_count"))} translation / ${exact(total(group.first, "angular_burn_count"))} angular episodes`;
+      ? `${exact(activityValue(group, "turn_count"))} turns / ${exact(activityValue(group, "angular_burn_count"))} angular episodes · ${decimal(activityValue(group, "total_turn_angle_rad"), 2)} rad`
+      : `${exact(activityValue(group, "burn_count"))} translation / ${exact(activityValue(group, "angular_burn_count"))} angular episodes`;
     const detail = html("span", "overview-readout__value", counts);
-    detail.title = turning ? `turn_count: ${exact(total(group.first, "turn_count"))}; total_turn_angle_rad: ${exact(total(group.first, "total_turn_angle_rad"))}; angular_burn_count: ${exact(total(group.first, "angular_burn_count"))}` : counts;
+    detail.title = `${group.profile ? "Cohort median" : "Recorded run"} · ${counts}`;
     readout.append(html("strong", "overview-readout__name", group.owner), detail);
     chart.readouts.append(readout);
   }
-  dataTable(chart, turning ? "First selected repetition per profile. Native physical-turn and angular-actuation totals; angle is in radians, durations in seconds." : "First selected repetition per profile. Native actuation durations in seconds and contiguous episode counts.",
+  dataTable(chart, `${cohort ? "Published cohort medians, including non-arrivals. Missing medians stay unavailable; durations and counts are separate medians." : "Actual first selected repetition per profile, not an aggregate."} ${turning ? "Native physical-turn and angular-actuation totals; angle is in radians, durations in seconds." : "Native actuation durations in seconds and contiguous episode counts."}`,
     ["Run", "Native metric", "Value", "Episodes"], tableRows);
-  const values = groups.flatMap(group => metrics.map(metric => total(group.first, metric.key))).filter(finite);
+  const values = groups.flatMap(group => metrics.map(metric => activityValue(group, metric.key))).filter(finite);
   if (!values.length) { emptyPlot(chart, "Native activity totals unavailable for this selection"); return; }
   const largest = Math.max(...values), maximum = largest > 0 ? largest * 1.06 : 1;
   const x = (value: number) => 112 + value / maximum * 374;
@@ -462,7 +533,7 @@ function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
     const rowY = top + (index + 0.5) * groupHeight;
     label(plot, 12, rowY + 0.32 * labelUnits, group.owner, { fill: TEXT, class: "overview-row-label" });
     metrics.forEach((metric, metricIndex) => {
-      const value = total(group.first, metric.key);
+      const value = activityValue(group, metric.key);
       const centerY = rowY + (metricIndex - 0.5) * pairGap;
       const y = centerY - barHeight / 2;
       if (finite(value)) {
@@ -471,12 +542,16 @@ function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
           "stroke-width": 1.5, "stroke-dasharray": metricIndex === 0 ? "none" : "4 3",
           class: metricIndex === 0 ? "overview-activity-bar" : "overview-activity-bar overview-activity-bar--secondary",
           "data-chart-inspection-index": inspection.length, "pointer-events": "all" });
-        bar.append(svg("title", {}, `${group.owner}, ${group.first.id}, ${metric.key}: ${exact(value)} s; ${metric.count}: ${exact(total(group.first, metric.count))}`));
+        const source = group.profile ? "cohort median" : `${group.first.id} · ${runScope(group.first)}`;
+        const fieldPrefix = group.profile ? "median_" : "";
+        bar.append(svg("title", {}, `${group.owner}, ${source}, ${fieldPrefix}${metric.key}: ${exact(value)} s; ${fieldPrefix}${metric.count}: ${exact(activityValue(group, metric.count))}`));
         plot.append(bar);
         if (value === 0) plot.append(svg("line", { x1: x(0), x2: x(0), y1: y, y2: y + barHeight, stroke: group.team.color, "stroke-width": 2, "data-chart-inspection-index": inspection.length }));
-        inspection.push({ x: x(value), y: centerY, title: `${group.owner} / ${group.label} · ${metric.label} · ${runScope(group.first)}`,
-          values: [{ label: metric.label, value, unit: "s" }, { label: "Episodes", value: total(group.first, metric.count) },
-            ...(turning ? [{ label: "Orientation angle", value: total(group.first, "total_turn_angle_rad"), unit: "rad" }] : [])] });
+        inspection.push({ x: x(value), y: centerY, title: `${group.owner} / ${group.label} · ${metric.label} · ${source}`,
+          values: [{ label: group.profile ? `Median ${metric.label.toLowerCase()}` : metric.label, value, unit: "s" },
+            { label: group.profile ? "Median episodes" : "Episodes", value: activityValue(group, metric.count) },
+            { label: "Source fields", value: `${fieldPrefix}${metric.key}; ${fieldPrefix}${metric.count}` },
+            ...(turning ? [{ label: group.profile ? "Median orientation angle" : "Orientation angle", value: activityValue(group, "total_turn_angle_rad"), unit: "rad" }] : [])] });
       }
       label(plot, 626, centerY + 0.32 * labelUnits, finite(value) ? `${decimal(value)} s` : "n/a", { fill: TEXT, "text-anchor": "end", class: "overview-value" });
     });

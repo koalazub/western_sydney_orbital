@@ -1,11 +1,17 @@
-"""Source contracts only, not runtime, browser, or published-data proof."""
+"""Source and pure derivation contracts, not DOM, browser, or publication proof."""
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-SOURCE = (Path(__file__).resolve().parents[1] / "worker/web/analytics-insights.ts").read_text()
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = (ROOT / "worker/web/analytics-insights.ts").read_text()
 
 
 def section(start: str, end: str) -> str:
@@ -156,7 +162,7 @@ def test_selected_run_scope_matches_both_seed_and_actual_repetition_before_compa
     assert "rows.slice(0, 2).map(row =>" in selected
 
 
-def test_fuel_and_thrust_use_actual_first_run_values_never_profile_medians():
+def test_selected_fuel_and_thrust_use_actual_run_values_never_profile_medians():
     values = section("function selectedValue(", "function fuelContext(")
     assert "nonnegative(group.first.measurement.fuel_used_kg)" in values
     assert "nonnegative(group.first.measurement.time_s)" in values
@@ -221,7 +227,7 @@ def test_time_cohorts_require_valid_positive_attempts_and_all_recorded_arrivals(
     assert (
         "counts !== null && counts.attempts > 0 && counts.successes === counts.attempts" in complete
     )
-    cohort = section("function cohortTime(", "function mixedTime(")
+    cohort = section("function cohortTime(", "function cohortValue(")
     assert "groups.filter(group => completedCohort(group.profile!))" in cohort
     assert "readings(completed, group => group.profile?.median_time_s)" in cohort
     assert "group.first" not in cohort
@@ -237,23 +243,38 @@ def test_time_cohorts_require_valid_positive_attempts_and_all_recorded_arrivals(
     assert "More all-arrival cohorts with duration data are needed for a comparison" in cohort
 
 
-def test_time_keeps_full_cohort_and_selected_seed_scopes_separate():
+def test_all_metrics_keep_full_cohort_and_recorded_run_scopes_separate():
     derive = SOURCE.split("export function deriveMetricInsight(", 1)[1]
-    assert 'if (metric === "time")' in derive
     assert "groups.filter(group => group.profile !== undefined)" in derive
-    assert "if (profiled.length === groups.length)" in derive
-    assert "observation: cohortTime(groups), scope: cohortScope(groups)" in derive
-    assert "if (profiled.length) return mixedTime(groups)" in derive
-    assert derive.index("cohortTime(groups)") < derive.index("selectedScope(groups)")
+    assert "if (profiled.length)" in derive
+    assert "cohortTime(profiled)" in derive
+    assert "cohortTurn(profiled)" in derive
+    assert "cohortFuelOrThrust(metric, profiled)" in derive
+    assert "scope: cohortScope(profiled)" in derive
+    assert "Unmatched selected-run scopes excluded" in derive
+    assert derive.index("cohortTime(profiled)") < derive.index("selectedScope(groups)")
+    assert "group.first" not in derive
     scope = section("function cohortScope(", "function cohortContext(")
     assert "Full-cohort medians, not the selected seed" in scope
     assert "countText(profileCounts(group.profile!))" in scope
-    mixed = section("function mixedTime(", "export function deriveMetricInsight(")
-    assert "group.profile ? group.profile.median_time_s : group.first.measurement.time_s" in mixed
-    assert "arrived(group.first)" in mixed
-    assert "without a recorded arrival" in mixed
-    assert "different scopes and are unranked" in mixed
-    assert "minimum(" not in mixed
+    cohort = section("function cohortValue(", "export function deriveMetricInsight(")
+    for median in (
+        "median_fuel_used_kg",
+        "median_time_s",
+        "median_burn_duration_s",
+        "median_turn_duration_s",
+        "median_burn_count",
+        "median_turn_count",
+        "median_angular_burn_duration_s",
+        "median_angular_burn_count",
+    ):
+        assert f"group.profile?.{median}" in cohort
+    assert "group.first" not in cohort
+    assert "arrived(" not in cohort
+    assert "integerCount(" not in cohort  # Median counts can be fractional.
+    assert "Missing cohort medians are not replaced with a selected run" in cohort
+    assert "Duration and count are separate medians, not one recorded flight" in cohort
+    assert "Local fuel counters are not verified as comparable with STP fuel mass" in derive
     assert "median(" not in SOURCE
     assert ".reduce(" not in SOURCE
 
@@ -349,3 +370,198 @@ def test_no_score_algorithm_nominal_weights_or_hardcoded_observed_results():
     # Numeric literals belong to validation, formatting, or readout limits only.
     without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', SOURCE)
     assert not re.search(r"\b\d+\.\d+\b", without_strings)
+
+
+def _derive(cases: list[dict]) -> list[dict]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable for the pure TypeScript derivation contract")
+    script = """
+import { deriveMetricInsight } from './worker/web/analytics-insights.ts';
+const cases = JSON.parse(process.argv[1]);
+const before = JSON.stringify(cases);
+const results = cases.map(({metric, groups}) => deriveMetricInsight(metric, groups));
+if (JSON.stringify(cases) !== before) throw new Error('Derivation mutated its inputs');
+console.log(JSON.stringify(results));
+"""
+    process = subprocess.run(
+        [node, "--input-type=module", "-e", script, json.dumps(cases)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return json.loads(process.stdout)
+
+
+def _group(owner: str = "Pilot", **profile_overrides) -> dict:
+    return {
+        "owner": owner,
+        "first": {
+            "label": owner,
+            "outcome": "success",
+            "seed": 7,
+            "repetition": 1,
+            "measurement": {"time_s": 911.25, "fuel_used_kg": 922.75, "damage_j": 933.5},
+            "analytics": {
+                "totals": {
+                    "burn_duration_s": 944.25,
+                    "burn_count": 955,
+                    "turn_duration_s": 966.75,
+                    "turn_count": 977,
+                    "angular_burn_duration_s": 988.5,
+                    "angular_burn_count": 999,
+                    "total_turn_angle_rad": 900.125,
+                }
+            },
+        },
+        "profile": {
+            "attempts": 10,
+            "successes": 10,
+            "median_time_s": 51.25,
+            "median_fuel_used_kg": 12.75,
+            "median_damage_j": 0,
+            "median_burn_duration_s": 21.25,
+            "median_burn_count": 4.5,
+            "median_turn_duration_s": 61.75,
+            "median_turn_count": 5.5,
+            "median_angular_burn_duration_s": 8.5,
+            "median_angular_burn_count": 6.5,
+            **profile_overrides,
+        },
+    }
+
+
+def test_cpu_all_cohort_insights_ignore_contradictory_selected_run_values():
+    metrics = ("fuel", "time", "thrust", "turn")
+    group = _group()
+    changed = _group()
+    changed["first"] = {
+        **changed["first"],
+        "outcome": "timeout",
+        "measurement": {"time_s": 1, "fuel_used_kg": 2, "damage_j": 3},
+        "analytics": {"totals": {"burn_duration_s": 4, "turn_duration_s": 5}},
+    }
+    results = _derive(
+        [{"metric": metric, "groups": [entry]} for entry in (group, changed) for metric in metrics]
+    )
+    assert results[:4] == results[4:]
+    for result in results:
+        assert "Pilot 10/10 arrivals" in result["scope"]
+        for run_value in ("911.2", "922.75", "933.5", "944.2", "966.8", "988.5", "999"):
+            assert run_value not in result["observation"]
+    assert "12.75 kg" in results[0]["observation"]
+    assert "51.3 s" in results[1]["observation"]
+    assert "21.3 s" in results[2]["observation"]
+    assert "4.5 median translation episodes" in results[2]["observation"]
+    assert "61.8 s" in results[3]["observation"]
+    assert "5.5 median physical turns" in results[3]["observation"]
+    assert "8.5 s median angular thrust" in results[3]["observation"]
+    assert "6.5 median angular episodes" in results[3]["observation"]
+
+
+def test_cpu_missing_cohort_medians_never_substitute_selected_run_values():
+    missing = _group(
+        median_time_s=None,
+        median_fuel_used_kg=None,
+        median_burn_duration_s=None,
+        median_turn_duration_s=None,
+    )
+    results = _derive(
+        [{"metric": metric, "groups": [missing]} for metric in ("fuel", "time", "thrust", "turn")]
+    )
+    for result in results:
+        assert (
+            "unavailable" in result["observation"]
+            or "No all-arrival cohort has an available" in result["observation"]
+        )
+        assert "911" not in result["observation"]
+        assert "922" not in result["observation"]
+        assert "944" not in result["observation"]
+        assert "966" not in result["observation"]
+
+
+def test_cpu_nonarrival_cohorts_never_win_even_with_lower_medians():
+    complete = _group("Arrived")
+    incomplete = _group(
+        "Incomplete",
+        successes=9,
+        median_time_s=0,
+        median_fuel_used_kg=0,
+        median_burn_duration_s=0,
+        median_turn_duration_s=0,
+    )
+    invalid = _group("Invalid", attempts=0, successes=0, median_time_s=0, median_fuel_used_kg=0)
+    results = _derive(
+        [
+            {"metric": metric, "groups": [incomplete, invalid, complete]}
+            for metric in ("fuel", "time", "thrust")
+        ]
+    )
+    for result in results:
+        assert result["observation"].startswith("Arrived is the only all-arrival cohort")
+        assert "Incomplete 9/10 arrivals" in result["scope"]
+        assert "Invalid 0/0 arrivals" in result["scope"]
+        assert "lowest" not in result["observation"]
+        assert "shortest" not in result["observation"]
+
+
+def test_cpu_recorded_run_mode_keeps_two_repetitions_and_nonarrival_rules():
+    first = _group()
+    first.pop("profile")
+    second = json.loads(json.dumps(first))
+    second["first"]["repetition"] = 2
+    second["first"]["measurement"].update(time_s=42.5, fuel_used_kg=14.25)
+    second["first"]["analytics"]["totals"].update(burn_duration_s=19.75, turn_duration_s=23.5)
+    stopped = json.loads(json.dumps(second))
+    stopped["first"]["outcome"] = "stopped"
+    results = _derive(
+        [
+            {"metric": metric, "groups": [group]}
+            for group in (first, second, stopped)
+            for metric in ("fuel", "time", "thrust", "turn")
+        ]
+    )
+    for result in results[:4]:
+        assert "rep 1" in result["scope"]
+        assert "cohort" not in result["scope"].lower()
+    for result in results[4:8]:
+        assert "rep 2" in result["scope"]
+    assert "922.75 kg" in results[0]["observation"]
+    assert "14.25 kg" in results[4]["observation"]
+    assert "42.5 s" in results[5]["observation"]
+    assert "19.8 s" in results[6]["observation"]
+    assert "23.5 s" in results[7]["observation"]
+    for result in results[8:]:
+        assert "No recorded arrivals" in result["observation"]
+        assert "stay unranked" in result["observation"]
+
+
+def test_cpu_cohort_zero_medians_are_measured_not_missing_and_mixed_scopes_are_excluded():
+    zero = _group(
+        median_time_s=0,
+        median_fuel_used_kg=0,
+        median_burn_duration_s=0,
+        median_burn_count=0,
+        median_turn_duration_s=0,
+        median_turn_count=0,
+        median_angular_burn_duration_s=0,
+        median_angular_burn_count=0,
+    )
+    unmatched = _group("Unmatched")
+    unmatched.pop("profile")
+    results = _derive(
+        [
+            {"metric": metric, "groups": [zero, unmatched]}
+            for metric in ("fuel", "time", "thrust", "turn")
+        ]
+    )
+    for result in results:
+        assert "Unmatched selected-run scopes excluded" in result["scope"]
+        assert "Unmatched" not in result["observation"]
+        assert "unavailable" not in result["observation"]
+    assert "0.00 kg" in results[0]["observation"]
+    assert "0.0 s" in results[1]["observation"]
+    assert "0.0 median translation episodes" in results[2]["observation"]
+    assert "0.0 median physical turns" in results[3]["observation"]

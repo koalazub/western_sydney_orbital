@@ -18,6 +18,12 @@ export type InsightProfile = {
   median_time_s?: unknown;
   median_fuel_used_kg?: unknown;
   median_damage_j?: unknown;
+  median_burn_duration_s?: unknown;
+  median_burn_count?: unknown;
+  median_angular_burn_duration_s?: unknown;
+  median_angular_burn_count?: unknown;
+  median_turn_duration_s?: unknown;
+  median_turn_count?: unknown;
 };
 
 export type InsightGroup = {
@@ -234,28 +240,66 @@ function cohortTime(groups: InsightGroup[]): string {
     : `${names(winners)} share the shortest full-cohort median among ${among}, ${decimal(winners[0].value)} s`;
   return `${summary}. ${cohortContext(winners, completed, completed.length < groups.length)}`;
 }
-function mixedTime(groups: InsightGroup[]): MetricInsight {
-  const data = groups.flatMap(group => {
-    const value = nonnegative(group.profile ? group.profile.median_time_s : group.first.measurement.time_s);
-    if (value === null) return [];
-    return [group.profile
-      ? `${name(group)}'s full-cohort median is ${decimal(value)} s, with ${countText(profileCounts(group.profile))}`
-      : `${name(group)}'s selected-run duration is ${decimal(value)} s, ${arrived(group.first) ? "with a recorded arrival" : "without a recorded arrival"}`];
-  });
-  return {
-    guidance: GUIDANCE.time,
-    observation: `${data.length ? data.slice(0, 2).join("; ") : "Duration data are unavailable for these mixed scopes"}. Full-cohort medians and selected-run durations have different scopes and are unranked.`,
-    scope: "Mixed full-cohort and selected-run scopes · unranked",
-  };
+function cohortValue(metric: Metric, group: InsightGroup): number | null {
+  if (metric === "fuel") return nonnegative(group.profile?.median_fuel_used_kg);
+  if (metric === "time") return nonnegative(group.profile?.median_time_s);
+  if (metric === "thrust") return nonnegative(group.profile?.median_burn_duration_s);
+  return nonnegative(group.profile?.median_turn_duration_s);
+}
+function cohortQuantity(metric: Metric, value: number): string {
+  if (metric === "fuel") return `${decimal(value, 2)} kg of local estimated fuel`;
+  if (metric === "thrust") return `${decimal(value)} s of translation thrust`;
+  if (metric === "turn") return `${decimal(value)} s of physical turning`;
+  return `${decimal(value)} s of observed duration`;
+}
+function cohortActivityDetail(metric: "thrust" | "turn", group: InsightGroup): string {
+  const count = nonnegative(metric === "thrust" ? group.profile?.median_burn_count : group.profile?.median_turn_count);
+  const angular = nonnegative(group.profile?.median_angular_burn_duration_s);
+  const angularCount = nonnegative(group.profile?.median_angular_burn_count);
+  const episodes = count === null ? "median episode count unavailable" : `${decimal(count)} median ${metric === "thrust" ? "translation episodes" : "physical turns"}`;
+  const actuation = angular === null ? "median angular-thrust duration unavailable" : `${decimal(angular)} s median angular thrust`;
+  const angularEpisodes = angularCount === null ? "median angular episode count unavailable" : `${decimal(angularCount)} median angular episodes`;
+  return `${episodes}; ${actuation}; ${angularEpisodes}`;
+}
+function cohortFuelOrThrust(metric: "fuel" | "thrust", groups: InsightGroup[]): string {
+  const completed = groups.filter(group => completedCohort(group.profile!));
+  const rows = readings(completed, group => cohortValue(metric, group));
+  if (!rows.length) {
+    const recorded = readings(groups, group => cohortValue(metric, group))[0];
+    const detail = recorded ? `${name(recorded.group)}'s full-cohort median is ${cohortQuantity(metric, recorded.value)}, with ${countText(profileCounts(recorded.group.profile!))}. ` : "";
+    return `${detail}No all-arrival cohort has an available ${metric === "fuel" ? "fuel" : "translation-thrust"} median. Lower fuel use or activity only indicates efficiency for completed arrivals; failed, stopped, and unknown outcomes stay unranked.`;
+  }
+  if (rows.length === 1) {
+    const row = rows[0];
+    const activity = metric === "thrust" ? ` ${cohortActivityDetail(metric, row.group)}.` : "";
+    return `${name(row.group)} is the only all-arrival cohort with an available median, ${cohortQuantity(metric, row.value)}, with ${countText(profileCounts(row.group.profile!))}.${activity} More all-arrival cohorts with data are needed for a comparison.`;
+  }
+  const lowest = minimum(rows);
+  const summary = `${names(lowest)}${lowest.length > 1 ? " share" : " has"} the lowest full-cohort median ${metric === "fuel" ? "local fuel estimate" : "translation-thrust duration"} among all-arrival cohorts with available data, ${cohortQuantity(metric, lowest[0].value)}`;
+  const excluded = completed.length < groups.length ? " Cohorts without all arrivals are excluded." : "";
+  const damage = damageWarning(completed, true);
+  const context = metric === "thrust"
+    ? `${cohortActivityDetail(metric, lowest[0].group)}. ${cohortContext(lowest, completed, false)} Engine-on time alone is not fuel efficiency.`
+    : `Compare median observed duration and damage too${damage ? `; ${damage}` : ""}.`;
+  return `${summary}.${excluded} ${context}`;
+}
+function cohortTurn(groups: InsightGroup[]): string {
+  const rows = readings(groups, group => group.profile?.median_turn_duration_s);
+  if (!rows.length) return "Cohort median physical-turn totals are unavailable. Missing cohort medians are not replaced with a selected run.";
+  const details = rows.map(row => `${name(row.group)} has ${cohortQuantity("turn", row.value)} as its full-cohort median; ${cohortActivityDetail("turn", row.group)}`).join(". ");
+  return `${details}. Duration and count are separate medians, not one recorded flight. Physical turning can continue without angular thrust; these medians do not locate coasting intervals. Lower activity alone is not better, and cohorts without all arrivals stay unranked.`;
 }
 
 export function deriveMetricInsight(metric: "fuel" | "time" | "thrust" | "turn", groups: InsightGroup[]): MetricInsight {
   const guidance = GUIDANCE[metric];
   if (!groups.length) return { guidance, observation: "No measured runs in this selection. Choose a seed or run a test to compare completed flights.", scope: "No selected runs." };
-  if (metric === "time") {
-    const profiled = groups.filter(group => group.profile !== undefined);
-    if (profiled.length === groups.length) return { guidance, observation: cohortTime(groups), scope: cohortScope(groups) };
-    if (profiled.length) return mixedTime(groups);
+  const profiled = groups.filter(group => group.profile !== undefined);
+  if (profiled.length) {
+    const observation = metric === "time" ? cohortTime(profiled) : metric === "turn" ? cohortTurn(profiled) : cohortFuelOrThrust(metric, profiled);
+    const meaning = metric === "fuel" ? " · Local fuel counters are not verified as comparable with STP fuel mass"
+      : metric === "thrust" ? " · Engine-on time, not burn count, fuel use, or an official score" : "";
+    return { guidance, observation, scope: cohortScope(profiled) + meaning
+      + (profiled.length < groups.length ? " · Unmatched selected-run scopes excluded" : "") };
   }
   const selection = selectedScope(groups);
   const meaning = metric === "thrust" ? " · Engine-on time, not burn count, fuel use, or an official score"

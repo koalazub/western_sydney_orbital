@@ -118,6 +118,37 @@ def test_table_headings_wrap_at_words_without_squeezing_numeric_columns():
     assert "overflow-x: auto" in wrapper
 
 
+def test_single_run_is_an_explicit_read_only_selection_beside_aggregate():
+    assert 'data-measurement-view="aggregate" aria-pressed="true">Aggregate' in SHELL
+    assert 'data-measurement-view="run" aria-pressed="false">Single run' in SHELL
+    assert 'id="overview-run" aria-describedby="overview-selection-status"' in SHELL
+    assert 'id="overview-selection-status"' in SHELL
+    assert "matching.filter(run => run.id === runChoice.value)" in SOURCE
+    assert "aggregate ? selectedProfiles : undefined" in SOURCE
+    assert 'runChoice.addEventListener("change", published.render)' in SOURCE
+    assert "No averaging with other runs." in SOURCE
+    assert "not summed fuel" in SOURCE
+    assert "${run.label} · seed ${run.seed} · ${run.id}" in SOURCE
+    assert 'new Option("All recorded seeds", "all")' in SOURCE
+    assert 'seedChoice.disabled = measurementView === "aggregate"' in SOURCE
+    assert 'new Option(`Seed ${run.seed} · rep ${run.repetition ?? "n/a"}' in SOURCE
+    legend = CSS.split(".lab-measurement-view legend {", 1)[1].split("}", 1)[0]
+    assert "float:" not in legend
+
+
+def test_fuel_explanation_names_the_actual_single_run_and_counter_mismatch(page):
+    notes = page.ids["fuel-model-notes"]
+    assert notes["tag"] == "details"
+    assert '"fuel-model-notes"' in SHELL
+    text = content(notes)
+    assert "trial-00004" in text and "84.996 kg" in text
+    assert "one flight, not fuel summed across the cohort" in text
+    assert "timestep multiplication is commented out" in text
+    assert "does not multiply by vehicle mass" in text
+    assert "no reliable conversion" in text
+    assert "Recorded measurements stay unchanged" in text
+
+
 def test_analytics_is_a_disclosure_inside_the_existing_native_dialog(page):
     assert page.duplicates == []
     panel = page.ids["controller-panel"]

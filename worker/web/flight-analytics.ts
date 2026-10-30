@@ -406,13 +406,14 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
   if (container && inspection.length) customInspections.set(prefix, installChartInspector(container, svg, inspection));
 }
 
-function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void) {
+function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void, chooseRuns?: (runs: PlotRun[]) => PlotRun[]) {
   const metric = byId<HTMLSelectElement>(`${prefix}-metric`), seed = byId<HTMLSelectElement>(`${prefix}-seed`);
   const profile = byId<HTMLSelectElement>(`${prefix}-profile`), download = byId<HTMLAnchorElement>(`${prefix}-csv`);
   let runs: PlotRun[] = [], csvUrl: string | undefined;
   metric.replaceChildren(...METRICS.map((item, i) => new Option(`${item.label}, ${item.unit}`, String(i))));
   function render() {
-    const selected = runs.filter(run => String(run.seed) === seed.value && (profile.value === "all" || run.profileId === profile.value));
+    const matching = runs.filter(run => (seed.value === "all" || String(run.seed) === seed.value) && (profile.value === "all" || run.profileId === profile.value));
+    const selected = chooseRuns ? chooseRuns(matching) : matching;
     onSelection?.(selected);
     const column = METRICS[Number(metric.value)] ?? METRICS[0];
     renderGraph(prefix, selected, column);
@@ -442,12 +443,14 @@ function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void) {
   for (const control of [metric, seed, profile]) control.addEventListener("change", render);
   addEventListener("pagehide", () => { if (csvUrl) URL.revokeObjectURL(csvUrl); }, { once: true });
   return {
+    render,
     update(next: PlotRun[]) {
       runs = next;
       const oldSeed = seed.value, oldProfile = profile.value;
       const seeds = [...new Set(runs.map(run => run.seed))].sort((a, b) => a - b);
-      seed.replaceChildren(...seeds.map(value => new Option(String(value), String(value))));
-      seed.value = seeds.includes(Number(oldSeed)) && oldSeed !== "" ? oldSeed : seeds.includes(100) ? "100" : String(seeds[0] ?? "");
+      seed.replaceChildren(...(prefix === "published-analytics" ? [new Option("All recorded seeds", "all")] : []), ...seeds.map(value => new Option(String(value), String(value))));
+      seed.value = oldSeed === "all" || (oldSeed === "" && prefix === "published-analytics") ? "all"
+        : seeds.includes(Number(oldSeed)) && oldSeed !== "" ? oldSeed : seeds.includes(100) ? "100" : String(seeds[0] ?? "");
       const available = profiles.filter(entry => runs.some(run => run.profileId === entry.id));
       profile.replaceChildren(new Option("Compare all profiles", "all"), ...available.map(entry => new Option(`${entry.owner} / ${entry.label}`, entry.id)));
       profile.value = available.some(entry => entry.id === oldProfile) ? oldProfile : "all";
@@ -510,7 +513,45 @@ export function installFlightAnalytics() {
   let publishedProfiles: PublishedProfile[] = [];
   const publishedOverview = installAnalyticsOverview(byId("dashboard-overview"));
   const roomOverview = installAnalyticsOverview(byId("dashboard-room-overview"));
-  const published = installPlot("published-analytics", selected => publishedOverview.update(selected, publishedProfiles));
+  const runChoice = byId<HTMLSelectElement>("overview-run");
+  const seedChoice = byId<HTMLSelectElement>("published-analytics-seed");
+  const measurementButtons = document.querySelectorAll<HTMLButtonElement>("[data-measurement-view]");
+  let measurementView: "aggregate" | "run" = "aggregate";
+  let lastSingleSeed = "100";
+  const choosePublishedRuns = (matching: PlotRun[]) => {
+    const previous = runChoice.value;
+    runChoice.replaceChildren(...matching.map(run => new Option(`Seed ${run.seed} · rep ${run.repetition ?? "n/a"} · ${run.id} · ${run.label}`, run.id)));
+    runChoice.value = matching.some(run => run.id === previous) ? previous : matching[0]?.id ?? "";
+    runChoice.disabled = measurementView !== "run" || matching.length === 0;
+    seedChoice.disabled = measurementView === "aggregate" || matching.length === 0;
+    return measurementView === "run" ? matching.filter(run => run.id === runChoice.value) : matching;
+  };
+  const published = installPlot("published-analytics", selected => {
+    const aggregate = measurementView === "aggregate";
+    const selectedProfiles = publishedProfiles.filter(profile => selected.some(run => run.profileId === profile.id));
+    publishedOverview.update(selected, aggregate ? selectedProfiles : undefined);
+    byId("lab-cohort-label").textContent = `${selected.length} recorded ${selected.length === 1 ? "flight" : "flights"}`;
+    const summary = byId("overview-selection-status");
+    if (aggregate) {
+      const seeds = new Set(selected.map(run => run.seed));
+      summary.textContent = `Aggregate · ${selected.length} recorded flights across ${seeds.size} seeds. Cards and charts show cohort medians, not summed fuel. Arrival rates count every attempt. Individual flights remain available in Single run.`;
+    } else {
+      const run = selected[0];
+      summary.textContent = run ? `One recorded flight · ${run.label} · seed ${run.seed} · ${run.id}. ${run.outcome}. ${run.analytics?.sample_count ?? 0} recorded samples. No averaging with other runs.` : "No recorded flight matches this selection.";
+    }
+  }, choosePublishedRuns);
+  for (const button of measurementButtons) button.addEventListener("click", () => {
+    const next = button.dataset.measurementView;
+    if ((next !== "aggregate" && next !== "run") || next === measurementView) return;
+    if (measurementView === "run") lastSingleSeed = seedChoice.value;
+    measurementView = next;
+    for (const item of measurementButtons) item.setAttribute("aria-pressed", String(item === button));
+    byId("overview-run-field").hidden = next !== "run";
+    seedChoice.value = next === "aggregate" ? "all" : lastSingleSeed;
+    if (seedChoice.selectedIndex < 0) seedChoice.selectedIndex = 0;
+    published.render();
+  });
+  runChoice.addEventListener("change", published.render);
   const room = installPlot("room-analytics", selected => roomOverview.update(selected));
   const cohort = byId<HTMLSelectElement>("room-analytics-cohort");
   const status = byId("published-analytics-load-status"), retry = byId<HTMLButtonElement>("retry-published-analytics");

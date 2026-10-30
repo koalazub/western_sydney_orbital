@@ -24,7 +24,10 @@ export function mountDashboard(panel: HTMLDialogElement) {
       <div class="lab-scroll">
         <section id="lab-view-compare" class="lab-view" aria-label="Controller comparison">
           <div class="lab-section-heading"><div><h3>Performance overview</h3><p>Recorded flight performance, side by side.</p></div><span id="lab-cohort-label" class="lab-badge">Matched trials</span></div>
+          <fieldset class="lab-measurement-view"><legend>Measurement view</legend><button type="button" data-measurement-view="aggregate" aria-pressed="true">Aggregate</button><button type="button" data-measurement-view="run" aria-pressed="false">Single run</button></fieldset>
           <div class="lab-toolbar"><div id="lab-comparison-filters" class="lab-filter-group"></div><div class="lab-toolbar__note">L2 station <span>·</span> 500 debris bodies</div></div>
+          <label id="overview-run-field" class="lab-run-selector" for="overview-run" hidden>Recorded flight<select id="overview-run" aria-describedby="overview-selection-status" disabled></select></label>
+          <p id="overview-selection-status" class="lab-selection-status" role="status">Aggregate summaries use all recorded seeds and repetitions.</p>
           <div id="lab-publication-status"></div>
           <div class="lab-score-notice"><div><strong>STP raw score: n/a <span aria-hidden="true">·</span> Final points: n/a</strong><span>STP points unavailable. Local fuel uses a different counter.</span></div><button type="button" class="lab-text-button" data-lab-view="data">View scoring formula</button></div>
           <div id="dashboard-overview"><div class="lab-loading"><span class="lab-loading__bar"></span><h4>Loading measured flights</h4><p>The scoreboard and charts will appear here.</p></div></div>
@@ -67,7 +70,7 @@ export function mountDashboard(panel: HTMLDialogElement) {
   byId("controller-fresh-warning").textContent = "A fresh test replaces this tab's flight. You will be asked to confirm.";
 
   const notes = byId("lab-data-notes");
-  for (const id of ["controller-score-label", "controller-score-detail", "controller-score-sources", "controller-score-comparison"]) notes.append(byId(id));
+  for (const id of ["controller-score-label", "controller-score-detail", "controller-score-sources", "controller-score-comparison", "fuel-model-notes"]) notes.append(byId(id));
   const results = byId("lab-room-results");
   results.append(byId("controller-room-heading"), byId("controller-result-sort").closest(".controller-fields")!, byId("controller-results-table").closest(".controller-results")!);
   byId("controller-result-sort").closest<HTMLElement>(".controller-fields")!.hidden = true;

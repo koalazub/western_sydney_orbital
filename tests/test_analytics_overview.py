@@ -1,11 +1,17 @@
-"""Read-only source contracts, not a DOM substitute or visual/browser proof."""
+"""Source and pure numeric contracts, not DOM or visual/browser proof."""
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-SOURCE = (Path(__file__).resolve().parents[1] / "worker/web/analytics-overview.ts").read_text()
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = (ROOT / "worker/web/analytics-overview.ts").read_text()
 
 
 def section(start: str, end: str) -> str:
@@ -105,6 +111,7 @@ def test_cards_keep_full_cohort_medians_separate_from_selected_run_values():
     grouping = section("function groupsOf(", "function stat(")
     assert "grouped.get(run.profileId)" in grouping
     assert "profiles?.find(entry => entry.id === id)" in grouping
+    assert "profiles === undefined || group.profile !== undefined" in grouping
     assert "selected.find(run => run.repetition === 1) ?? selected[0]" in grouping
     assert "if (profiles) groups.sort(" in grouping
     assert "profiles.findIndex(profile => profile.id === left.id)" in grouping
@@ -122,8 +129,8 @@ def test_cards_keep_full_cohort_medians_separate_from_selected_run_values():
     assert 'profile ? "Median fuel · local est." : "Run fuel · local est."' in cards
     assert 'profile ? "Median damage" : "Run damage"' in cards
     assert 'html("p", "pilot-card__value", finite(time) ? `${decimal(time)} s` : "n/a")' in cards
-    assert "Full cohort · median flight duration" in cards
-    assert "Selected run · ${runScope(group.first)}" in cards
+    assert "Cohort median · observed duration" in cards
+    assert "Recorded run · ${runScope(group.first)}" in cards
     assert "value.title" in cards and "exact(time)" in cards
     assert "`${decimal(fuel, 2)} kg`" in cards
     assert "`${decimal(damage)} J`" in cards
@@ -179,12 +186,14 @@ def test_flight_duration_has_measured_values_zero_baseline_scope_and_outcomes():
     duration = section("function renderDuration(", "function renderActivity(")
     for measured_duration in (
         "group.profile.median_time_s : group.first.measurement.time_s",
-        "Full cohort · median flight duration",
-        "Selected run · ${runScope(group.first)}",
+        "Cohort median · observed duration",
+        "Recorded run · ${runScope(group.first)}",
         "group.profile.successes",
         "group.profile.attempts",
         "group.first.outcome",
-        "Observed duration · seconds",
+        'chartTitle(chart, "Observed duration", allCohort)',
+        '"Cohort median" : "Recorded run"',
+        "observed duration, seconds",
         "Shorter duration does not establish a better outcome",
         "Durations may include failures and timeouts, not just arrivals",
         "const x = (value: number) => 112 + value / maximum * 374",
@@ -239,8 +248,12 @@ def test_native_activity_durations_counts_and_physical_rotation_stay_distinct():
         "total_turn_angle_rad",
     ):
         assert f'"{field}"' in activity
-    assert "total(group.first, metric.key)" in activity
-    assert "total(group.first, metric.count)" in activity
+    assert "activityValue(group, metric.key)" in activity
+    assert "activityValue(group, metric.count)" in activity
+    value = section("function activityValue(", "function renderCohortFuel(")
+    assert (
+        "group.profile ? numeric(group.profile[`median_${key}`]) : total(group.first, key)" in value
+    )
     assert "native physics-step totals" in activity
     assert "Turning can continue without angular thrust" in activity
     assert "Durations overlap; bars are not stacked" in activity
@@ -444,6 +457,154 @@ def test_inspection_uses_supplied_samples_and_disposes_old_plot_bindings():
         assert '"data-chart-inspection-index": inspection.length' in bars
         assert '"pointer-events": "all"' in bars
         assert "replacePlot(chart, plot, inspection)" in bars
+
+
+def test_cohort_fuel_bars_use_only_published_medians_with_exact_inspection_and_sources():
+    cohort = section("function renderCohortFuel(", "function renderFuel(")
+    assert "numeric(group.profile!.median_fuel_used_kg)" in cohort
+    assert "median_fuel_used_kg" in cohort
+    assert 'label: "Local median fuel", value, unit: "kg"' in cohort
+    assert 'label: "Source field", value: "median_fuel_used_kg"' in cohort
+    assert "group.profile!.successes" in cohort and "group.profile!.attempts" in cohort
+    assert (
+        "Local fuel counters are not verified as comparable with real-world or STP fuel mass"
+        in cohort
+    )
+    assert "not cumulative traces" in cohort
+    assert "No run values substitute for missing medians" in cohort
+    for forbidden in ("group.first", "samples", "interpolate", "average", "reduce("):
+        assert forbidden not in cohort
+    for construction in (
+        'chartTitle(chart, "Fuel", true)',
+        "plotGeometry(chart, units => Math.max(182, rows.length * Math.max(54, 2.6 * units)))",
+        "geometry.tickBaseline",
+        "geometry.titleBaseline",
+        "width: x(value) - x(0)",
+        '"data-chart-inspection-index": inspection.length',
+        '"pointer-events": "all"',
+        "replacePlot(chart, plot, inspection)",
+        "exact(value)",
+    ):
+        assert construction in cohort
+    fuel = section("function renderFuel(", "function renderDuration(")
+    assert fuel.index("renderCohortFuel(chart, groups); return;") < fuel.index("const traces:")
+    titles = section("function chartTitle(", "function newPlot(")
+    assert 'cohort ? "cohort median" : "recorded run"' in titles
+    assert "chart.heading.textContent = chart.title" in titles
+    assert "`${chart.title} data`" in titles
+
+
+def test_activity_cohort_fields_and_counts_never_fall_back_to_a_run():
+    for field in (
+        "median_burn_duration_s",
+        "median_burn_count",
+        "median_angular_burn_duration_s",
+        "median_angular_burn_count",
+        "median_turn_duration_s",
+        "median_turn_count",
+    ):
+        assert f"{field}?: unknown" in SOURCE
+    activity = section("function renderActivity(", "export function installAnalyticsOverview(")
+    assert 'const fieldPrefix = group.profile ? "median_" : ""' in activity
+    assert "${fieldPrefix}${metric.key}" in activity
+    assert "${fieldPrefix}${metric.count}" in activity
+    assert "durations and counts are separate medians" in activity
+    assert (
+        "published cohort medians of native physics-step totals, including non-arrivals" in activity
+    )
+    assert 'label: group.profile ? "Median episodes" : "Episodes"' in activity
+    assert "total(group.first," not in activity
+
+
+def test_cpu_grouping_and_activity_selection_keep_cohort_and_two_repetitions_separate():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable for the pure numeric TypeScript contract")
+    script = r"""
+import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
+import { runInNewContext } from 'node:vm';
+const source = readFileSync('worker/web/analytics-overview.ts', 'utf8');
+const code = stripTypeScriptTypes(source).replace(/^import .*;$/gm, '').replace(/^export /gm, '');
+const input = JSON.parse(process.argv[1]);
+const result = runInNewContext(code + `
+  const before = JSON.stringify(input);
+  const cohort = groupsOf(input.runs, input.profiles);
+  const missing = groupsOf(input.runs, [{ ...input.profiles[0], median_burn_duration_s: null }]);
+  const single = input.runs.slice(0, 2).map(run => {
+    const group = groupsOf([run])[0];
+    return { id: group.first.id, duration: activityValue(group, 'burn_duration_s'),
+      count: activityValue(group, 'burn_count'), physical: activityValue(group, 'turn_duration_s'),
+      angular: activityValue(group, 'angular_burn_duration_s') };
+  });
+  ({ cohort: cohort.map(group => ({ runs: group.runs.length,
+       duration: activityValue(group, 'burn_duration_s'), count: activityValue(group, 'burn_count'),
+       physical: activityValue(group, 'turn_duration_s'),
+       angular: activityValue(group, 'angular_burn_duration_s') })),
+     missing: activityValue(missing[0], 'burn_duration_s'), single,
+     empty: groupsOf(input.runs, []).length, unchanged: JSON.stringify(input) === before });
+`, { input });
+console.log(JSON.stringify(result));
+"""
+    runs = [
+        {
+            "id": f"trial-{repetition}",
+            "profileId": "profile-a",
+            "label": "Owner / profile-a",
+            "seed": 7,
+            "repetition": repetition,
+            "analytics": {
+                "totals": {
+                    "burn_duration_s": duration,
+                    "burn_count": count,
+                    "turn_duration_s": duration + 5,
+                    "angular_burn_duration_s": duration / 2,
+                }
+            },
+        }
+        for repetition, duration, count in ((1, 12.25, 3), (2, 29.75, 8))
+    ]
+    runs.append({**runs[0], "id": "unmatched", "profileId": "not-published"})
+    profiles = [
+        {
+            "id": "profile-a",
+            "owner": "Owner",
+            "label": "profile-a",
+            "attempts": 10,
+            "successes": 9,
+            "median_burn_duration_s": 63.125,
+            "median_burn_count": 4.5,
+            "median_turn_duration_s": 101.875,
+            "median_angular_burn_duration_s": 0,
+        }
+    ]
+    process = subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            script,
+            json.dumps({"runs": runs, "profiles": profiles}),
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    result = json.loads(process.stdout)
+    assert result == {
+        "cohort": [
+            {"runs": 2, "duration": 63.125, "count": 4.5, "physical": 101.875, "angular": 0}
+        ],
+        "missing": None,
+        "single": [
+            {"id": "trial-1", "duration": 12.25, "count": 3, "physical": 17.25, "angular": 6.125},
+            {"id": "trial-2", "duration": 29.75, "count": 8, "physical": 34.75, "angular": 14.875},
+        ],
+        "empty": 0,
+        "unchanged": True,
+    }
 
 
 def test_each_chart_has_visible_direction_and_scoped_data_insight():
