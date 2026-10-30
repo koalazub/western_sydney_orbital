@@ -256,7 +256,17 @@ hosted-artifact-check:
     const sha256=createHash('sha256').update(bytes).digest('hex');
     assert.equal(bytes.length,expected.bytes);
     assert.equal(sha256,expected.sha256);
-    console.log(JSON.stringify({url:base,bytes:bytes.length,sha256,result:'PASS'},null,2));
+    const web_assets=[];
+    for(const name of ['index.html','styles.css','app.js']) {
+      const asset=await request(name==='index.html'?'':name);
+      assert.equal(asset.status,200);
+      const actual=Buffer.from(await asset.arrayBuffer());
+      const local=await readFile(`worker/public/${name}`);
+      const digest=value=>createHash('sha256').update(value).digest('hex');
+      assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
+      web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
+    }
+    console.log(JSON.stringify({url:base,bytes:bytes.length,sha256,web_assets,result:'PASS'},null,2));
     JS
 
 disable-ci:
