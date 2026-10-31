@@ -93,7 +93,7 @@ unit-check suite="all":
         nix shell --impure .#game --command cargo test --manifest-path simulation/Cargo.toml --locked --lib
     fi
     if [[ "$suite" == all || "$suite" == python ]]; then
-        devenv tasks run wsorb:test
+        just python-test
     fi
     if [[ "$suite" == wasm ]]; then
         devenv shell uv run --locked --extra lab pytest tests/test_flight_engine.py
@@ -101,7 +101,7 @@ unit-check suite="all":
 
 # Python recipes always inspect the whole project, without file filters.
 python-test:
-    devenv tasks run wsorb:test
+    devenv shell uv run --locked --extra lab pytest
 
 python-format:
     devenv shell uv run --locked ruff format .
@@ -383,6 +383,30 @@ history:
 
 describe revision message:
     jj describe -r {{quote(revision)}} -m {{quote(message)}}
+
+fetch:
+    jj git fetch --remote origin
+
+pull-requests:
+    gh pr list --state open --limit 100 --json number,title,headRefName,baseRefName,url
+
+merge message left right:
+    jj new -r {{quote(left)}} -r {{quote(right)}} -m {{quote(message)}}
+
+merge-history message left right:
+    jj new --no-edit -r {{quote(left)}} -r {{quote(right)}} -m {{quote(message)}}
+
+merge-resolve-from revision +paths:
+    jj restore --from {{quote(revision)}} -- {{paths}}
+
+merge-resolve-into revision source +paths:
+    jj restore --from {{quote(source)}} --into {{quote(revision)}} -- {{paths}}
+
+rebase-work revision:
+    jj rebase --source @ --onto {{quote(revision)}}
+
+tree-diff left right:
+    jj diff --from {{quote(left)}} --to {{quote(right)}} --summary
 
 commit message +paths:
     jj commit -m {{quote(message)}} {{paths}}
