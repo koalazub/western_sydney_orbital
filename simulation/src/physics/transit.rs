@@ -14,18 +14,16 @@ impl TransitVolume {
         use std::sync::OnceLock;
         static L1: OnceLock<TransitVolume> = OnceLock::new();
         static L2: OnceLock<TransitVolume> = OnceLock::new();
+        static COMPETITION: OnceLock<TransitVolume> = OnceLock::new();
         let cache = match preset {
             FlightPreset::MarsFacingL1 => &L1,
             FlightPreset::FarSideL2 => &L2,
+            FlightPreset::CompetitionReference => &COMPETITION,
         };
         *cache.get_or_init(|| {
             let origin =
                 Vector::from_array(crate::model::landing_site_for(preset).lander_position_m);
-            let environment = crate::astrophysics::environment(settings().gravity);
-            let target = Vector::from_array(match preset {
-                FlightPreset::MarsFacingL1 => environment.l1_position_m,
-                FlightPreset::FarSideL2 => environment.l2_position_m,
-            });
+            let target = Vector::from_array(super::target_position_for(preset));
             let route = target - origin;
             let along = route.normalize();
             let across = (Vector::Y - along * along.y).normalize();

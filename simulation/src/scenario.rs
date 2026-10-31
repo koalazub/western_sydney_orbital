@@ -5,8 +5,9 @@ mod validation;
 pub use model::{
     CameraMount, CameraSource, CameraSourceStatus, Contacts, Crater, Debris,
     DebrisTrajectoryAdjustmentConstants, DebugThrust, FieldOfViewConvention, Gravity, Integration,
-    Lander, Lighting, Limits, Mission, Pad, Practice, RockSurface, Scenario, Sensors, ShipCameras,
-    Terrain, TransitStreamSettings,
+    Lander, Lighting, Limits, Mission, OfficialCloudSettings, OfficialDebrisClass,
+    OfficialDebrisClassId, OfficialRadarSettings, Pad, Practice, RockSurface, Scenario, Sensors,
+    ShipCameras, Terrain, TransitStreamSettings,
 };
 
 use std::sync::OnceLock;

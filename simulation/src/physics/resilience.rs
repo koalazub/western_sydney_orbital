@@ -1037,6 +1037,12 @@ pub(super) fn validate_sensor_state(snapshot: &Snapshot) -> Result<(), String> {
         targets.push(fault.target);
     }
     let valid_time = |time: f64| time.is_finite() && time >= 0.0 && time <= snapshot.time_s;
+    // The official cloud publishes a rolling scan: rows are acquired at
+    // different 120 Hz iterations, so each row keeps its own timestamp at or
+    // before the publication time. Every other distribution keeps one frame clock.
+    let rolling = snapshot
+        .experiment_settings
+        .is_some_and(|experiment| experiment.debris.distribution.is_official_cloud());
     for radar in [&state.primary, &state.backup] {
         if let Some(sample) = &radar.sample
             && (!valid_time(sample.sample_time_s)
@@ -1047,8 +1053,18 @@ pub(super) fn validate_sensor_state(snapshot: &Snapshot) -> Result<(), String> {
                         .radar_count
                         .min(snapshot.assets.len().saturating_sub(3))
                 || sample.rows.iter().any(|row| {
-                    !row.iter().flatten().all(|value| value.is_finite())
-                        || row[2] != [sample.sample_time_s, 0.0, 0.0]
+                    if !row.iter().flatten().all(|value| value.is_finite()) {
+                        return true;
+                    }
+                    if rolling {
+                        !(row[2][0].is_finite()
+                            && row[2][0] >= 0.0
+                            && row[2][0] <= sample.sample_time_s
+                            && row[2][1] == 0.0
+                            && row[2][2] == 0.0)
+                    } else {
+                        row[2] != [sample.sample_time_s, 0.0, 0.0]
+                    }
                 }))
         {
             return Err("Invalid archived radar delivery sample.".into());

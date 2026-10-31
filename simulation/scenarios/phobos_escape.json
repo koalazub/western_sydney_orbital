@@ -9,7 +9,27 @@
   },
   "flight_presets": {
     "mars_facing_l1": { "label": "Mars-facing launch to L1", "launch_side": "mars_facing", "target_region": "L1", "target_name": "Return ship · Mars–Phobos L1" },
-    "far_side_l2": { "label": "Far-side launch to L2", "launch_side": "far_side", "target_region": "L2", "target_name": "Return ship · Mars–Phobos L2" }
+    "far_side_l2": { "label": "Far-side launch to L2", "launch_side": "far_side", "target_region": "L2", "target_name": "Return ship · Mars–Phobos L2" },
+    "competition_reference": { "label": "Competition reference · 1.31 km hop", "launch_side": "far_side", "target_region": "local_up", "target_name": "Competition reference target · 1.31 km local up", "target_distance_m": 1305.8 }
+  },
+  "official_cloud": {
+    "version": 1,
+    "count": 500,
+    "half_extents_m": [300.0, 300.0, 500.0],
+    "vertical_offset_m": 500.0,
+    "drift_reference_mu_m3_s2": 707500.0,
+    "drift_reference_radius_m": 11100.0,
+    "drift_speed_fraction_min": 0.05,
+    "drift_speed_fraction_max": 0.1,
+    "mass_scale_exponent": 3.0,
+    "collision_radius_max_m": 20.0,
+    "classes": [
+      { "id": "rock1", "weight": 0.45, "radar_diameter_m": 0.08, "scale_min": 10.0, "scale_max": 400.0, "base_mass_kg": 0.63 },
+      { "id": "rock2", "weight": 0.35, "radar_diameter_m": 0.05, "scale_min": 20.0, "scale_max": 800.0, "base_mass_kg": 0.3 },
+      { "id": "rock3", "weight": 0.15, "radar_diameter_m": 0.01, "scale_min": 40.0, "scale_max": 1000.0, "base_mass_kg": 0.2 },
+      { "id": "exploded_tank", "weight": 0.05, "radar_diameter_m": 17.0, "scale_min": 1.0, "scale_max": 1.0, "base_mass_kg": 700.0 }
+    ],
+    "radar": { "version": 1, "observed_count": 200, "iteration_hz": 120.0, "publish_every_rows": 50 }
   },
   "impact_ejecta_defaults": { "source_direction": [-1.0, 0.0, 0.0], "kick_velocity_mps": [-1.0, 0.0, 0.0], "tangential_speed_mps": 7.0, "patch_half_angle_deg": 15.0 },
   "transit_stream": { "version": 1, "transverse_half_width_m": 450.0, "launch_trail_m": 500.0, "target_lead_m": 500.0 },
@@ -62,7 +82,7 @@
     "space_boost_enabled": false
   },
   "pad": { "half_extents_m": [20.0,20.0,1.0], "lander_clearance_m": 5.85,"fixed_mass_kg":1.0e12 },
-  "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 1.15, "nominal_time_s": 120.0,"score_offset":0.5 },
+  "mission": { "target_name":"Return ship · Mars–Phobos L2", "target_region":"L2", "target_mass_kg": 4000000.0, "target_radius_m": 20.0, "arrival_radius_m": 50.0, "impact_threshold_j": 209200.0, "nominal_fuel_kg": 75.0, "nominal_time_s": 120.0,"score_offset":0.5 },
   "debris": { "count": 500, "x_min_m": 13600.0, "x_span_m": 5000.0, "y_half_width_m": 450.0, "z_half_width_m": 450.0, "speed_min_mps": 0.25, "speed_span_mps": 0.65, "radius_min_m": 0.4, "radius_span_m": 40.0, "density_kg_m3": 500.0, "spin_max_rad_s": 0.2, "radar_count": 200, "diameter_noise_fraction": 0.05 },
   "sensors": { "range_noise_m": 2.0, "range_rate_noise_mps": 0.02, "cadence_hz": 10.0 },
   "ship_cameras": {

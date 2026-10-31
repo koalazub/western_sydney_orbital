@@ -19,20 +19,27 @@ fn actual(sim: &Simulation, id: EntityId) -> &RigidBody {
 }
 
 #[test]
-fn both_presets_use_real_opposite_pads_and_the_matching_lagrange_target() {
+fn every_preset_uses_real_opposite_pads_and_its_declared_target() {
     let mut sim = Simulation::with_experiment(1, small_experiment(3)).unwrap();
-    for preset in [FlightPreset::MarsFacingL1, FlightPreset::FarSideL2] {
-        sim.configure_flight(small_experiment(3), Some(42), preset)
-            .unwrap();
+    for preset in FlightPreset::ALL {
+        let experiment = small_experiment(if preset == FlightPreset::CompetitionReference {
+            0
+        } else {
+            3
+        });
+        sim.configure_flight(experiment, Some(42), preset).unwrap();
         let state = sim.snapshot();
         let definition = settings().flight_preset(preset);
-        let expected_target = match preset {
-            FlightPreset::MarsFacingL1 => state.environment.l1_position_m,
-            FlightPreset::FarSideL2 => state.environment.l2_position_m,
-        };
+        let expected_target = target_position_for(preset);
+        if preset == FlightPreset::FarSideL2 {
+            assert_eq!(expected_target, state.environment.l2_position_m);
+        }
+        if preset == FlightPreset::MarsFacingL1 {
+            assert_eq!(expected_target, state.environment.l1_position_m);
+        }
         let sign = match preset {
             FlightPreset::MarsFacingL1 => 1.0,
-            FlightPreset::FarSideL2 => -1.0,
+            FlightPreset::FarSideL2 | FlightPreset::CompetitionReference => -1.0,
         };
         assert_eq!(state.flight_preset, preset);
         assert_eq!(state.mission.target_region, preset.target_region());
@@ -64,7 +71,9 @@ fn both_presets_use_real_opposite_pads_and_the_matching_lagrange_target() {
         let mut mismatched = state;
         mismatched.flight_preset = match preset {
             FlightPreset::MarsFacingL1 => FlightPreset::FarSideL2,
-            FlightPreset::FarSideL2 => FlightPreset::MarsFacingL1,
+            FlightPreset::FarSideL2 | FlightPreset::CompetitionReference => {
+                FlightPreset::MarsFacingL1
+            }
         };
         assert!(
             sim.execute(PhysicsCommand::Restore {
@@ -74,6 +83,63 @@ fn both_presets_use_real_opposite_pads_and_the_matching_lagrange_target() {
         );
         assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), archive);
     }
+}
+
+#[test]
+fn competition_reference_is_an_exact_1305_8_m_local_up_hop_with_a_50_m_keep_out() {
+    let mut config = small_experiment(0);
+    config.debris.count = 0;
+    let mut sim = Simulation::with_experiment(100, config).unwrap();
+    sim.configure_flight(config, Some(100), FlightPreset::CompetitionReference)
+        .unwrap();
+    let state = sim.snapshot();
+    let site = crate::model::landing_site_for(FlightPreset::CompetitionReference);
+    let far = crate::model::landing_site_for(FlightPreset::FarSideL2);
+    assert_eq!(state.flight_preset, FlightPreset::CompetitionReference);
+    assert_eq!(
+        state.mission.target_region,
+        crate::domain::LagrangeRegion::LocalUp
+    );
+    assert!((state.mission.initial_distance_m - 1305.8).abs() <= 1.0e-9);
+    assert!((state.mission.target_distance_m - 1305.8).abs() <= 1.0e-9);
+    assert_eq!(settings().mission.arrival_radius_m, 50.0);
+    assert_eq!(settings().mission.impact_threshold_j, 209_200.0);
+    assert_eq!(settings().mission.nominal_fuel_kg, 75.0);
+    assert_eq!(settings().mission.nominal_time_s, 120.0);
+    let target = asset(&sim, EntityId::ReturnShip).position;
+    let expected: [f64; 3] =
+        std::array::from_fn(|axis| site.lander_position_m[axis] + site.normal[axis] * 1305.8);
+    assert_eq!(target.map(f64::to_bits), expected.map(f64::to_bits));
+    // The competition preset starts on the archived far-side site, but it is not
+    // the far-side L2 target and remains explicitly serialized.
+    assert_eq!(
+        site.surface_position_m.map(f64::to_bits),
+        far.surface_position_m.map(f64::to_bits)
+    );
+    assert_eq!(
+        site.lander_position_m.map(f64::to_bits),
+        far.lander_position_m.map(f64::to_bits)
+    );
+    assert!((target[0] - expected[0]).abs() <= 1.0e-9);
+    assert!(target_position_for(FlightPreset::FarSideL2)[0] < 0.0);
+    assert_eq!(
+        serde_json::to_value(&state).unwrap()["flight_preset"],
+        json!("competition_reference")
+    );
+    assert_eq!(
+        sim.observation()["flight_preset"],
+        json!("competition_reference")
+    );
+    assert!(state.mission.score_label.contains("not STP counter parity"));
+    assert_eq!(
+        state.mission.scoring,
+        crate::domain::MissionScoring::OfficialTimeDamageFuelV1
+    );
+    assert_eq!(
+        sim.observation()["geometry"]["arrival_radius_m"],
+        json!(50.0)
+    );
+    validate(&state).unwrap();
 }
 
 #[test]

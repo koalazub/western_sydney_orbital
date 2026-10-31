@@ -571,7 +571,9 @@ fn impact_settings(
     draft: &mut WorldDraft,
 ) -> Result<&mut crate::model::ImpactEjectaSettings, String> {
     match &mut draft.settings.debris.distribution {
-        DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => Err(
+        DebrisDistribution::DirectedStream
+        | DebrisDistribution::TransitStream
+        | DebrisDistribution::OfficialCloud => Err(
             "Select Impact ejecta in the world draft before editing ejection parameters.".into(),
         ),
         DebrisDistribution::ImpactEjecta { settings } => Ok(settings),
@@ -663,9 +665,9 @@ fn apply_action(
                     DistributionChoice::Transit => DebrisDistribution::TransitStream,
                     DistributionChoice::Stream => DebrisDistribution::DirectedStream,
                     DistributionChoice::Impact => match world.settings.debris.distribution {
-                        DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
-                            DebrisDistribution::impact_default()
-                        }
+                        DebrisDistribution::DirectedStream
+                        | DebrisDistribution::TransitStream
+                        | DebrisDistribution::OfficialCloud => DebrisDistribution::impact_default(),
                         distribution @ DebrisDistribution::ImpactEjecta { .. } => distribution,
                     },
                 };
@@ -1137,6 +1139,7 @@ fn world_summary(state: &InstrumentEditors) -> String {
         match draft.settings.debris.distribution {
             DebrisDistribution::DirectedStream => "directed stream",
             DebrisDistribution::TransitStream => "transit traffic along the station route",
+            DebrisDistribution::OfficialCloud => "official relative cloud",
             DebrisDistribution::ImpactEjecta { .. } => "impact ejecta",
         },
         draft.settings.debris.count,
@@ -1156,5 +1159,6 @@ fn preset_label(preset: crate::model::FlightPreset) -> &'static str {
     match preset {
         crate::model::FlightPreset::MarsFacingL1 => "Mars-facing L1",
         crate::model::FlightPreset::FarSideL2 => "far-side L2",
+        crate::model::FlightPreset::CompetitionReference => "competition reference",
     }
 }

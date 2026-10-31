@@ -1510,6 +1510,7 @@ fn region_label(region: LagrangeRegion) -> &'static str {
     match region {
         LagrangeRegion::L1 => "L1",
         LagrangeRegion::L2 => "L2",
+        LagrangeRegion::LocalUp => "local up",
     }
 }
 

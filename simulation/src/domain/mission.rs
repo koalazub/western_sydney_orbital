@@ -54,4 +54,7 @@ pub enum LagrangeRegion {
     L1,
     #[default]
     L2,
+    /// The competition target is a local-up point, not a collinear Lagrange point.
+    #[serde(rename = "local_up")]
+    LocalUp,
 }

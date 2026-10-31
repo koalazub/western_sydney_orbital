@@ -421,7 +421,9 @@ impl InstrumentEditors {
 
     pub fn impact(&self) -> Option<crate::model::ImpactEjectaSettings> {
         match self.world?.settings.debris.distribution {
-            DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => None,
+            DebrisDistribution::DirectedStream
+            | DebrisDistribution::TransitStream
+            | DebrisDistribution::OfficialCloud => None,
             DebrisDistribution::ImpactEjecta { settings } => Some(settings),
         }
     }

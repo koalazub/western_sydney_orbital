@@ -278,6 +278,128 @@ fn debug_dynamics_uses_actual_bodies_and_reads_do_not_advance_the_clock() {
 }
 
 #[test]
+fn official_cloud_matches_the_relative_box_weights_sizes_masses_and_drift() {
+    let mut config = ExperimentSettings::default();
+    config.debris.distribution = DebrisDistribution::OfficialCloud;
+    let cloud = &settings().official_cloud;
+    let mut sim = Simulation::with_experiment(100, config).unwrap();
+    let repeated = Simulation::with_experiment(100, config).unwrap();
+    assert_eq!(
+        serde_json::to_value(sim.snapshot()).unwrap(),
+        serde_json::to_value(repeated.snapshot()).unwrap()
+    );
+    let site = crate::model::landing_site_for(FlightPreset::CompetitionReference);
+    let up = Vector::from_array(site.normal);
+    let center = Vector::from_array(site.lander_position_m) + up * cloud.vertical_offset_m;
+    let (speed_min, speed_max) = cloud.drift_speed_range_mps();
+    assert!((speed_min - 0.399_182_723_632_733).abs() < 1.0e-12);
+    assert!((speed_max - 0.798_365_447_265_466).abs() < 1.0e-12);
+    let mut class_counts = [0usize; 4];
+    let mut maximum_radius: f64 = 0.0;
+    for asteroid in sim
+        .state
+        .assets
+        .iter()
+        .filter(|asset| asset.kind == EntityKind::Debris)
+    {
+        for axis in 0..3 {
+            assert!(
+                (asteroid.position[axis] - center[axis]).abs()
+                    <= cloud.half_extents_m[axis] + 1.0e-9,
+                "body {} axis {axis} exceeds the official box",
+                asteroid.id
+            );
+        }
+        let speed = norm(asteroid.velocity);
+        assert!((speed_min - 1.0e-12..=speed_max + 1.0e-12).contains(&speed));
+        assert!(dot(asteroid.velocity, site.normal).abs() <= 1.0e-12);
+        let class_index = cloud
+            .classes
+            .iter()
+            .position(|class| {
+                let scale = asteroid.radius_m / (0.5 * class.radar_diameter_m);
+                scale >= class.scale_min - 1.0e-12
+                    && scale <= class.scale_max + 1.0e-12
+                    && (asteroid.mass_kg - class.mass_kg(scale, cloud.mass_scale_exponent)).abs()
+                        <= asteroid.mass_kg * 1.0e-12
+            })
+            .unwrap_or_else(|| panic!("body {} does not match an official class", asteroid.id));
+        class_counts[class_index] += 1;
+        maximum_radius = maximum_radius.max(asteroid.radius_m);
+        let body = body(&sim, asteroid.id);
+        assert!(body.is_dynamic() && body.is_ccd_enabled());
+        assert!((body.mass() - asteroid.mass_kg).abs() <= asteroid.mass_kg * 1.0e-12);
+        assert_eq!(body.linvel().to_array(), asteroid.velocity);
+    }
+    assert_eq!(class_counts.iter().sum::<usize>(), 500);
+    assert!(class_counts.iter().all(|count| *count > 0));
+    assert!(maximum_radius <= cloud.collision_radius_max_m + 1.0e-12);
+    assert!(maximum_radius > 0.0);
+    assert_eq!(
+        sim.state
+            .assets
+            .iter()
+            .filter(|asset| asset.kind == EntityKind::Debris)
+            .count(),
+        500
+    );
+    assert_eq!(
+        sim.observation()["debris_distribution"],
+        json!(config.debris.distribution)
+    );
+    assert_eq!(sim.observation()["debris_births_enabled"], false);
+    assert_eq!(sim.observation()["debris_flow_active"], false);
+    // The official cloud is spawned once and never recycled.
+    let id = EntityId::Debris(1);
+    let handle = sim.handles[&id];
+    sim.bodies[handle].set_translation(Vector::new(1_000_000.0, 0.0, 0.0), true);
+    sim.advance(settings().integration.fixed_step_s);
+    assert!(sim.bodies[handle].translation().x > 999_999.0);
+    assert_eq!(
+        sim.state
+            .assets
+            .iter()
+            .filter(|asset| asset.kind == EntityKind::Debris)
+            .count(),
+        500
+    );
+    validate(&sim.snapshot()).unwrap();
+}
+
+#[test]
+fn official_class_weight_draw_boundaries_are_exact() {
+    let cloud = &settings().official_cloud;
+    for (draw, expected) in [
+        (0.0, crate::scenario::OfficialDebrisClassId::Rock1),
+        (0.449_999, crate::scenario::OfficialDebrisClassId::Rock1),
+        (0.45, crate::scenario::OfficialDebrisClassId::Rock2),
+        (0.799_999, crate::scenario::OfficialDebrisClassId::Rock2),
+        (0.8, crate::scenario::OfficialDebrisClassId::Rock3),
+        (0.949_999, crate::scenario::OfficialDebrisClassId::Rock3),
+        // The cumulative f64 boundary is 0.45 + 0.35 + 0.15 = 0.9500000000000001,
+        // matching Python's accumulation order. 0.95 is still Rock3.
+        (
+            0.950_000_000_000_000_1,
+            crate::scenario::OfficialDebrisClassId::ExplodedTank,
+        ),
+        (
+            0.999_999,
+            crate::scenario::OfficialDebrisClassId::ExplodedTank,
+        ),
+    ] {
+        assert_eq!(official_cloud::class_for_draw(cloud, draw).id, expected);
+    }
+    let rock2 = &cloud.classes[1];
+    assert_eq!(rock2.radius_m(rock2.scale_max), 20.0);
+    assert!(
+        (rock2.mass_kg(rock2.scale_max, cloud.mass_scale_exponent)
+            - rock2.base_mass_kg * 800.0_f64.powi(3))
+        .abs()
+            <= rock2.base_mass_kg * 800.0_f64.powi(3) * 1.0e-12
+    );
+}
+
+#[test]
 fn ten_thousand_then_one_hundred_thousand_real_bodies_construct_and_take_one_ordinary_step() {
     assert_eq!(crate::model::MAX_DEBRIS_COUNT, 100_000);
     // One heavy test, sequential cases. No huge snapshot/JSON clones or parallel

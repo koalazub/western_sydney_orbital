@@ -444,6 +444,7 @@ impl Simulation {
         self.state.active_contacts = self.touching.iter().copied().collect();
         self.state.active_contacts.sort();
         self.state.observations.clear();
+        self.state.official_radar = None;
         self.invalidate_sensor_samples();
         self.state.launch_site_direction = Some(movement.direction);
         self.state.mission.target_distance_m = movement.target_distance_m;

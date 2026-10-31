@@ -1,5 +1,8 @@
 use crate::{
-    domain::{MissionPhase, MissionStatus, ScoreBreakdown, ScoreProgressBasis},
+    domain::{
+        MissionPhase, MissionScoring, MissionStatus, ScoreBreakdown, ScoreFormula,
+        ScoreProgressBasis,
+    },
     model::MissionState,
     scenario::Mission,
 };
@@ -33,7 +36,7 @@ pub struct Assessment {
 }
 
 /// Pure mission-state assessment: no physics, clocks, events, or renderer state.
-pub fn assess(_mission: &MissionState, metrics: FlightMetrics, config: &Mission) -> Assessment {
+pub fn assess(mission: &MissionState, metrics: FlightMetrics, config: &Mission) -> Assessment {
     let status = if metrics.damage_j > config.impact_threshold_j {
         MissionStatus::FailedDamage
     } else if metrics.distance_m <= config.arrival_radius_m {
@@ -55,14 +58,151 @@ pub fn assess(_mission: &MissionState, metrics: FlightMetrics, config: &Mission)
         }
         MissionStatus::Running => MissionPhase::OnPad,
     };
-    // Local fuel is integrated SI mass, not STP's per-iteration activity counter.
-    // Withhold new scores until compatible source counters are available.
+    let (score, score_breakdown) = match (mission.scoring, status) {
+        (MissionScoring::OfficialTimeDamageFuelV1, MissionStatus::Success) => {
+            let breakdown = official_breakdown(
+                metrics.time_s,
+                metrics.damage_j,
+                mission.fuel_used_kg,
+                ScoreProgressBasis::TimeRatio,
+                config,
+            );
+            (Some(breakdown.total), Some(breakdown))
+        }
+        (MissionScoring::OfficialTimeDamageFuelV1, MissionStatus::FailedDamage) => {
+            let breakdown = official_loss_breakdown(
+                metrics.distance_m,
+                mission.initial_distance_m,
+                metrics.damage_j,
+                mission.fuel_used_kg,
+                config,
+            );
+            (Some(breakdown.total), Some(breakdown))
+        }
+        // Local fuel is integrated SI mass, not STP's per-iteration activity counter.
+        // Archived local diagnostics remain unscored unless explicitly selected.
+        _ => (None, None),
+    };
     Assessment {
         status,
         phase,
-        score: None,
-        score_breakdown: None,
+        score,
+        score_breakdown,
     }
+}
+
+/// Scoring.py `TimeScore`: nominal / elapsed, or zero at the initial instant.
+pub fn time_score(time_s: f64, nominal_time_s: f64) -> f64 {
+    if time_s != 0.0 {
+        nominal_time_s / time_s
+    } else {
+        0.0
+    }
+}
+
+/// Scoring.py `DamagePenalty`: two times the accumulated damage ratio.
+pub fn damage_penalty(damage_j: f64, maximum_damage_j: f64) -> f64 {
+    2.0 * damage_j / maximum_damage_j
+}
+
+/// Scoring.py `FuelPenalty`: nonnegative fuel ratio. The local counter is
+/// integrated SI propellant mass, not the source's per-iteration activity count.
+pub fn fuel_penalty(fuel_used_kg: f64, nominal_fuel_kg: f64) -> f64 {
+    (fuel_used_kg / nominal_fuel_kg).max(0.0)
+}
+
+/// Scoring.py `FullScoreWin`, using the scenario's remap offset (0.5 -> 50 points).
+#[cfg(test)]
+pub fn official_win_score(time_s: f64, damage_j: f64, fuel_used_kg: f64, config: &Mission) -> f64 {
+    let raw = time_score(time_s, config.nominal_time_s)
+        - damage_penalty(damage_j, config.impact_threshold_j)
+        - fuel_penalty(fuel_used_kg, config.nominal_fuel_kg);
+    remap_unclamped(raw, -config.score_offset, config.score_offset, 0.0, 100.0)
+}
+
+/// Scoring.py `FullScoreLoss`, using the local current/initial range ratio.
+#[cfg(test)]
+pub fn official_loss_score(
+    distance_m: f64,
+    initial_distance_m: f64,
+    damage_j: f64,
+    fuel_used_kg: f64,
+    config: &Mission,
+) -> f64 {
+    let progress = if initial_distance_m > 0.0 {
+        distance_m / initial_distance_m
+    } else {
+        0.0
+    };
+    let raw = -progress
+        - damage_penalty(damage_j, config.impact_threshold_j)
+        - fuel_penalty(fuel_used_kg, config.nominal_fuel_kg);
+    remap_unclamped(raw, -config.score_offset, config.score_offset, 0.0, 100.0)
+}
+
+fn official_breakdown(
+    time_s: f64,
+    damage_j: f64,
+    fuel_used_kg: f64,
+    progress_basis: ScoreProgressBasis,
+    config: &Mission,
+) -> ScoreBreakdown {
+    let progress = time_score(time_s, config.nominal_time_s);
+    let damage = damage_penalty(damage_j, config.impact_threshold_j);
+    let fuel = fuel_penalty(fuel_used_kg, config.nominal_fuel_kg);
+    let progress_points = 100.0 * progress;
+    let collision_penalty_points = 100.0 * damage;
+    let fuel_penalty_points = 100.0 * fuel;
+    let offset_points = 100.0 * config.score_offset;
+    ScoreBreakdown {
+        formula: ScoreFormula::OfficialTimeDamageFuelV1,
+        progress_basis,
+        progress_points,
+        collision_penalty_points,
+        fuel_penalty_points,
+        offset_points,
+        total: progress_points - collision_penalty_points - fuel_penalty_points + offset_points,
+        nominal_time_s: config.nominal_time_s,
+        nominal_fuel_kg: config.nominal_fuel_kg,
+        impact_threshold_j: config.impact_threshold_j,
+    }
+}
+
+fn official_loss_breakdown(
+    distance_m: f64,
+    initial_distance_m: f64,
+    damage_j: f64,
+    fuel_used_kg: f64,
+    config: &Mission,
+) -> ScoreBreakdown {
+    let progress = if initial_distance_m > 0.0 {
+        -distance_m / initial_distance_m
+    } else {
+        0.0
+    };
+    let damage = damage_penalty(damage_j, config.impact_threshold_j);
+    let fuel = fuel_penalty(fuel_used_kg, config.nominal_fuel_kg);
+    let progress_points = 100.0 * progress;
+    let collision_penalty_points = 100.0 * damage;
+    let fuel_penalty_points = 100.0 * fuel;
+    let offset_points = 100.0 * config.score_offset;
+    ScoreBreakdown {
+        formula: ScoreFormula::OfficialTimeDamageFuelV1,
+        progress_basis: ScoreProgressBasis::RemainingDistanceRatio,
+        progress_points,
+        collision_penalty_points,
+        fuel_penalty_points,
+        offset_points,
+        total: progress_points - collision_penalty_points - fuel_penalty_points + offset_points,
+        nominal_time_s: config.nominal_time_s,
+        nominal_fuel_kg: config.nominal_fuel_kg,
+        impact_threshold_j: config.impact_threshold_j,
+    }
+}
+
+#[cfg(test)]
+fn remap_unclamped(value: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> f64 {
+    out_min + (out_max - out_min) * (value - in_min) / (in_max - in_min)
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -345,6 +485,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn official_time_damage_fuel_formula_matches_the_source_arithmetic() {
+        let cfg = &crate::scenario::settings().mission;
+        assert_eq!(cfg.nominal_time_s, 120.0);
+        assert_eq!(cfg.nominal_fuel_kg, 75.0);
+        assert_eq!(cfg.impact_threshold_j, 209_200.0);
+        assert_eq!(cfg.arrival_radius_m, 50.0);
+        assert_eq!(time_score(0.0, 120.0), 0.0);
+        assert_eq!(time_score(120.0, 120.0), 1.0);
+        assert_eq!(damage_penalty(209_200.0, 209_200.0), 2.0);
+        assert_eq!(fuel_penalty(37.5, 75.0), 0.5);
+        assert!((official_win_score(120.0, 0.0, 75.0, cfg) - 50.0).abs() < 1.0e-9);
+        assert!((official_win_score(60.0, 104_600.0, 0.0, cfg) - 150.0).abs() < 1.0e-9);
+        assert!((official_win_score(240.0, 0.0, 37.5, cfg) - 50.0).abs() < 1.0e-9);
+        assert!((official_loss_score(652.9, 1305.8, 313_800.0, 37.5, cfg) + 350.0).abs() < 1.0e-9);
+
+        let mission = MissionState {
+            scoring: MissionScoring::OfficialTimeDamageFuelV1,
+            initial_distance_m: 1305.8,
+            // The official nominal run spends the nominal 75 kg, so its
+            // time/damage/fuel raw score is zero and the mapped score is 50.
+            fuel_used_kg: 75.0,
+            ..Default::default()
+        };
+        let metrics = FlightMetrics {
+            distance_m: 50.0,
+            lander_position_m: [-13_000.0, 0.0, 0.0],
+            pad_position_m: [-12_990.0, 0.0, 0.0],
+            time_s: 120.0,
+            damage_j: 0.0,
+            minimum_step_s: 0.05,
+            transit_x_m: -13_600.0,
+            on_pad_radius_m: 5.0,
+        };
+        let result = assess(&mission, metrics, cfg);
+        assert_eq!(result.status, MissionStatus::Success);
+        let breakdown = result.score_breakdown.unwrap();
+        assert!((result.score.unwrap() - 50.0).abs() < 1.0e-9);
+        assert_eq!(breakdown.formula, ScoreFormula::OfficialTimeDamageFuelV1);
+        assert_eq!(breakdown.progress_basis, ScoreProgressBasis::TimeRatio);
+        assert!((breakdown.progress_points - 100.0).abs() < 1.0e-9);
+        assert!((breakdown.collision_penalty_points).abs() < 1.0e-9);
+        assert!((breakdown.fuel_penalty_points - 100.0).abs() < 1.0e-9);
+        assert!((breakdown.offset_points - 50.0).abs() < 1.0e-9);
+        assert!((breakdown.total - 50.0).abs() < 1.0e-9);
+        assert_eq!(
+            serde_json::to_value(breakdown.formula).unwrap(),
+            serde_json::json!("official_time_damage_fuel_v1")
+        );
+        assert_eq!(
+            serde_json::to_value(MissionScoring::OfficialTimeDamageFuelV1).unwrap(),
+            serde_json::json!("official_time_damage_fuel_v1")
+        );
+    }
+
+    #[test]
+    fn official_loss_receipt_preserves_negative_totals_and_archived_modes_stay_unscored() {
+        let cfg = &crate::scenario::settings().mission;
+        let mission = MissionState {
+            scoring: MissionScoring::OfficialTimeDamageFuelV1,
+            initial_distance_m: 1305.8,
+            fuel_used_kg: 37.5,
+            ..Default::default()
+        };
+        let result = assess(
+            &mission,
+            FlightMetrics {
+                distance_m: 652.9,
+                damage_j: 313_800.0,
+                ..metrics()
+            },
+            cfg,
+        );
+        assert_eq!(result.status, MissionStatus::FailedDamage);
+        let breakdown = result.score_breakdown.unwrap();
+        assert_eq!(
+            breakdown.progress_basis,
+            ScoreProgressBasis::RemainingDistanceRatio
+        );
+        assert!((breakdown.progress_points + 50.0).abs() < 1.0e-9);
+        assert!((breakdown.collision_penalty_points - 300.0).abs() < 1.0e-9);
+        assert!((breakdown.fuel_penalty_points - 50.0).abs() < 1.0e-9);
+        assert!((breakdown.offset_points - 50.0).abs() < 1.0e-9);
+        assert!((breakdown.total + 350.0).abs() < 1.0e-9);
+        assert!((result.score.unwrap() + 350.0).abs() < 1.0e-9);
+        let archived = MissionState {
+            initial_distance_m: 1305.8,
+            ..Default::default()
+        };
+        let unscored = assess(&archived, metrics(), cfg);
+        assert!(unscored.score.is_none() && unscored.score_breakdown.is_none());
+        assert!(MissionScoring::default().is_archived());
     }
 
     #[test]

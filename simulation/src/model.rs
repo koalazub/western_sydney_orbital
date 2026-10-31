@@ -1,8 +1,8 @@
-pub use crate::domain::FlightPreset;
 use crate::domain::{
     EntityId, EntityKind, EntityStatus, FlightAnalytics, LagrangeRegion, MissionPhase,
     MissionStatus, ScoreBreakdown,
 };
+pub use crate::domain::{FlightPreset, MissionScoring};
 pub use crate::propulsion::ThrustApplication;
 pub use crate::terrain::{
     LandingSite, landing_site, landing_site_at_direction, landing_site_for, phobos_geometry,
@@ -21,8 +21,8 @@ pub use avionics::{
 mod experiment_settings;
 pub use experiment_settings::{
     DebrisDistribution, DebrisExperimentSettings, DebrisFlowTuning, DebrisTrajectoryAdjustment,
-    ExperimentSettings, ImpactEjectaSettings, MAX_DEBRIS_COUNT, ShipExperimentSettings, ShipTuning,
-    StreamAxis,
+    ExperimentSettings, ImpactEjectaSettings, MAX_DEBRIS_COUNT, OFFICIAL_CLOUD_COUNT,
+    ShipExperimentSettings, ShipTuning, StreamAxis,
 };
 pub fn phobos_radii_m() -> [f64; 3] {
     crate::scenario::settings().gravity.phobos_radii_m
@@ -92,6 +92,19 @@ pub struct Snapshot {
     /// or impulses from an old archive that has no cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debris_trajectory_adjustment_state: Option<DebrisTrajectoryAdjustmentState>,
+    /// Rolling first-200 official radar acquisition. Absent in every other mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_radar: Option<OfficialRadarState>,
+}
+
+/// One rolling row per 120 Hz radar iteration. `rolling_rows` stays in actor
+/// index order while the published `Snapshot::observations` is distance-sorted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfficialRadarState {
+    pub version: u32,
+    pub iteration: u64,
+    pub rolling_rows: Vec<Observation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +394,9 @@ pub struct MissionState {
     pub score_label: String,
     #[serde(default)]
     pub score_breakdown: Option<ScoreBreakdown>,
+    /// Absent in archives that predate the source-equivalent scoring selector.
+    #[serde(default, skip_serializing_if = "MissionScoring::is_archived")]
+    pub scoring: MissionScoring,
     #[serde(default)]
     pub phase: MissionPhase,
     pub target_region: LagrangeRegion,
@@ -403,6 +419,7 @@ impl Default for MissionState {
             score: None,
             score_label: String::new(),
             score_breakdown: None,
+            scoring: MissionScoring::ArchivedUnscored,
             phase: MissionPhase::OnPad,
             target_region: LagrangeRegion::L2,
             flight_analytics: None,

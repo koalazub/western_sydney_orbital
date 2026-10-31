@@ -103,6 +103,12 @@ pub(super) fn initial_velocity(
         DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
             debris_birth_velocity(rng, cfg)
         }
+        DebrisDistribution::OfficialCloud => {
+            let up = Vector::from_array(position)
+                .try_normalize()
+                .unwrap_or(Vector::Z);
+            official_cloud::tangential_velocity(rng, up)
+        }
         DebrisDistribution::ImpactEjecta { settings: impact } => {
             let center = unit_direction(impact.source_direction);
             // Prefer the declared rotating frame's +Y orbit normal. The fallback

@@ -286,7 +286,7 @@ fn footprint_clearance(
 /// Uses opposite physical hemispheres, without rotating or relabeling the world.
 pub fn landing_site_for(preset: FlightPreset) -> LandingSite {
     match preset {
-        FlightPreset::FarSideL2 => landing_site(),
+        FlightPreset::FarSideL2 | FlightPreset::CompetitionReference => landing_site(),
         FlightPreset::MarsFacingL1 => {
             let (vertices, triangles) = phobos_geometry();
             let (index, surface) = vertices

@@ -73,10 +73,10 @@ impl Simulation {
         if self.state.experiment_settings.is_some_and(|experiment| {
             matches!(
                 experiment.debris.distribution,
-                DebrisDistribution::ImpactEjecta { .. }
+                DebrisDistribution::ImpactEjecta { .. } | DebrisDistribution::OfficialCloud
             )
         }) {
-            return Err("Live stream tuning is unavailable for impact ejecta. Configure a new flight to change ejecta settings.".into());
+            return Err("Live stream tuning is unavailable for impact ejecta or the official cloud. Configure a new flight to change these settings.".into());
         }
         settings.validate()?;
         let delta = Vector::from_array(sub(

@@ -1,4 +1,4 @@
-use super::model::{Scenario, Terrain};
+use super::model::{OfficialDebrisClassId, OfficialRadarSettings, Scenario, Terrain};
 use crate::domain::{FlightPreset, ShipCameraId};
 
 pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
@@ -11,6 +11,7 @@ pub(super) fn validate(s: &Scenario) -> Result<(), &'static str> {
     s.impact_ejecta_defaults
         .validate()
         .map_err(|_| "invalid impact ejecta defaults")?;
+    validate_official_cloud(s)?;
     validate_transit_and_adjustment(s)?;
     validate_flight_presets(s)?;
     validate_limits(s)?;
@@ -81,7 +82,7 @@ fn validate_limits(s: &Scenario) -> Result<(), &'static str> {
 }
 
 fn validate_flight_presets(s: &Scenario) -> Result<(), &'static str> {
-    for preset in [FlightPreset::MarsFacingL1, FlightPreset::FarSideL2] {
+    for preset in FlightPreset::ALL {
         let config = s.flight_preset(preset);
         if config.label.trim().is_empty()
             || config.target_name.trim().is_empty()
@@ -93,11 +94,94 @@ fn validate_flight_presets(s: &Scenario) -> Result<(), &'static str> {
             );
         }
     }
+    if s.flight_preset(FlightPreset::CompetitionReference)
+        .target_distance_m
+        != Some(1305.8)
+    {
+        return Err("competition reference target must be exactly 1305.8 m");
+    }
+    for preset in [FlightPreset::MarsFacingL1, FlightPreset::FarSideL2] {
+        if s.flight_preset(preset).target_distance_m.is_some() {
+            return Err("collinear flight presets must not carry a local-up target distance");
+        }
+    }
     let legacy = s.flight_preset(FlightPreset::FarSideL2);
     if legacy.target_region != s.mission.target_region
         || legacy.target_name != s.mission.target_name
     {
         return Err("far-side L2 preset must retain the archived mission target");
+    }
+    Ok(())
+}
+
+fn validate_official_cloud(s: &Scenario) -> Result<(), &'static str> {
+    let cloud = &s.official_cloud;
+    if cloud.version != 1
+        || cloud.count != crate::model::OFFICIAL_CLOUD_COUNT
+        || cloud.half_extents_m != [300.0, 300.0, 500.0]
+        || cloud.vertical_offset_m != 500.0
+        || cloud.drift_reference_mu_m3_s2 != 707_500.0
+        || cloud.drift_reference_radius_m != 11_100.0
+        || cloud.drift_speed_fraction_min != 0.05
+        || cloud.drift_speed_fraction_max != 0.1
+        || cloud.mass_scale_exponent != 3.0
+        || cloud.collision_radius_max_m != 20.0
+    {
+        return Err("official debris cloud constants differ from the source profile");
+    }
+    let expected_classes = [
+        (OfficialDebrisClassId::Rock1, 0.45, 0.08, 10.0, 400.0, 0.63),
+        (OfficialDebrisClassId::Rock2, 0.35, 0.05, 20.0, 800.0, 0.3),
+        (OfficialDebrisClassId::Rock3, 0.15, 0.01, 40.0, 1_000.0, 0.2),
+        (
+            OfficialDebrisClassId::ExplodedTank,
+            0.05,
+            17.0,
+            1.0,
+            1.0,
+            700.0,
+        ),
+    ];
+    if cloud.classes.len() != expected_classes.len()
+        || cloud
+            .classes
+            .iter()
+            .zip(expected_classes)
+            .any(|(class, expected)| {
+                class.id != expected.0
+                    || class.weight != expected.1
+                    || class.radar_diameter_m != expected.2
+                    || class.scale_min != expected.3
+                    || class.scale_max != expected.4
+                    || class.base_mass_kg != expected.5
+            })
+    {
+        return Err("official debris class weights, scales, sizes, or masses are invalid");
+    }
+    let maximum_radius = cloud
+        .classes
+        .iter()
+        .map(|class| class.radius_m(class.scale_max))
+        .fold(0.0_f64, f64::max);
+    if (maximum_radius - cloud.collision_radius_max_m).abs() > 1.0e-9 {
+        return Err("official debris collision radius cap does not match the class sizes");
+    }
+    validate_official_radar(cloud.radar, s.debris.radar_count)
+}
+
+fn validate_official_radar(
+    radar: OfficialRadarSettings,
+    scenario_radar_count: usize,
+) -> Result<(), &'static str> {
+    if radar.version != 1
+        || radar.observed_count != 200
+        || radar.iteration_hz != 120.0
+        || radar.publish_every_rows != 50
+        || radar.observed_count > crate::model::OFFICIAL_CLOUD_COUNT
+        || radar.publish_every_rows > radar.observed_count
+        || scenario_radar_count != radar.observed_count
+    {
+        return Err("official radar schedule must observe 200 rows at 120 Hz and publish every 50");
     }
     Ok(())
 }
@@ -220,9 +304,14 @@ fn validate_mission(s: &Scenario) -> Result<(), &'static str> {
             1.0e15,
         )
         || !m.score_offset.is_finite()
+        || m.score_offset != 0.5
         || m.arrival_radius_m <= m.target_radius_m
+        || m.arrival_radius_m != 50.0
+        || m.impact_threshold_j != 209_200.0
+        || m.nominal_fuel_kg != 75.0
+        || m.nominal_time_s != 120.0
     {
-        return Err("mission settings are invalid");
+        return Err("mission settings are invalid or differ from the official metadata");
     }
     Ok(())
 }
@@ -461,6 +550,14 @@ mod tests {
             scenario.flight_preset(FlightPreset::FarSideL2).target_name,
             scenario.mission.target_name
         );
+        let competition = scenario.flight_preset(FlightPreset::CompetitionReference);
+        assert_eq!(competition.label, "Competition reference · 1.31 km hop");
+        assert_eq!(competition.launch_side, crate::domain::LaunchSide::FarSide);
+        assert_eq!(
+            competition.target_region,
+            crate::domain::LagrangeRegion::LocalUp
+        );
+        assert_eq!(competition.target_distance_m, Some(1305.8));
         let mut invalid = scenario.clone();
         invalid.flight_presets.far_side_l2.launch_side = crate::domain::LaunchSide::MarsFacing;
         assert!(validate_flight_presets(&invalid).is_err());
@@ -473,6 +570,70 @@ mod tests {
         invalid = scenario.clone();
         invalid.flight_presets.far_side_l2.target_name = "Relabeled return ship".into();
         assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid
+            .flight_presets
+            .competition_reference
+            .target_distance_m = Some(1300.0);
+        assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid
+            .flight_presets
+            .competition_reference
+            .target_distance_m = None;
+        assert!(validate_flight_presets(&invalid).is_err());
+        invalid = scenario.clone();
+        invalid.flight_presets.far_side_l2.target_distance_m = Some(1305.8);
+        assert!(validate_flight_presets(&invalid).is_err());
+    }
+
+    #[test]
+    fn official_cloud_and_radar_constants_are_versioned_and_validated() {
+        let scenario = crate::scenario::settings();
+        validate_official_cloud(scenario).unwrap();
+        let cloud = &scenario.official_cloud;
+        assert_eq!(cloud.count, 500);
+        assert_eq!(cloud.half_extents_m, [300.0, 300.0, 500.0]);
+        assert_eq!(cloud.vertical_offset_m, 500.0);
+        assert_eq!(cloud.drift_reference_mu_m3_s2, 707_500.0);
+        assert_eq!(cloud.drift_reference_radius_m, 11_100.0);
+        assert_eq!(
+            cloud.drift_speed_range_mps(),
+            (
+                0.05_f64 * (707_500.0_f64 / 11_100.0).sqrt(),
+                0.1_f64 * (707_500.0_f64 / 11_100.0).sqrt()
+            )
+        );
+        assert_eq!(cloud.collision_radius_max_m, 20.0);
+        assert_eq!(cloud.classes.len(), 4);
+        assert_eq!(cloud.radar.observed_count, 200);
+        assert_eq!(cloud.radar.iteration_hz, 120.0);
+        assert_eq!(cloud.radar.publish_every_rows, 50);
+        for mutate in 0..12 {
+            let mut invalid = scenario.clone();
+            match mutate {
+                0 => invalid.official_cloud.version = 2,
+                1 => invalid.official_cloud.count = 499,
+                2 => invalid.official_cloud.half_extents_m[0] = 301.0,
+                3 => invalid.official_cloud.vertical_offset_m = 499.0,
+                4 => invalid.official_cloud.drift_reference_mu_m3_s2 = 708_700.0,
+                5 => invalid.official_cloud.drift_reference_radius_m = 9_100.0,
+                6 => invalid.official_cloud.mass_scale_exponent = 2.0,
+                7 => invalid.official_cloud.classes[0].weight = 0.44,
+                8 => invalid.official_cloud.classes[1].scale_max = 801.0,
+                9 => invalid.official_cloud.classes[3].base_mass_kg = 701.0,
+                10 => invalid.official_cloud.radar.publish_every_rows = 49,
+                11 => invalid.official_cloud.radar.iteration_hz = 60.0,
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_official_cloud(&invalid).is_err(),
+                "mutation {mutate}"
+            );
+        }
+        let mut invalid = scenario.clone();
+        invalid.debris.radar_count = 199;
+        assert!(validate_official_cloud(&invalid).is_err());
     }
 
     #[test]

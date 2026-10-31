@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_DEBRIS_COUNT: usize = 100_000;
+/// The official competition cloud is a fixed 500-actor field.
+pub const OFFICIAL_CLOUD_COUNT: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +85,8 @@ pub enum DebrisDistribution {
     DirectedStream,
     #[serde(deserialize_with = "deserialize_empty_distribution")]
     TransitStream,
+    #[serde(deserialize_with = "deserialize_empty_distribution")]
+    OfficialCloud,
     ImpactEjecta {
         settings: ImpactEjectaSettings,
     },
@@ -95,6 +99,10 @@ impl DebrisDistribution {
 
     pub const fn is_stream(&self) -> bool {
         matches!(self, Self::DirectedStream | Self::TransitStream)
+    }
+
+    pub const fn is_official_cloud(&self) -> bool {
+        matches!(self, Self::OfficialCloud)
     }
 
     pub fn impact_default() -> Self {
@@ -211,6 +219,18 @@ impl ExperimentSettings {
         }
         match debris.distribution {
             DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {}
+            DebrisDistribution::OfficialCloud => {
+                if debris.count != OFFICIAL_CLOUD_COUNT {
+                    return Err(format!(
+                        "debris.count must be {OFFICIAL_CLOUD_COUNT} for official_cloud"
+                    ));
+                }
+                if debris.trajectory_adjustment != DebrisTrajectoryAdjustment::Off {
+                    return Err(
+                        "official_cloud does not support a debris trajectory adjustment".into(),
+                    );
+                }
+            }
             DebrisDistribution::ImpactEjecta { settings } => settings.validate()?,
         }
         if !finite_between(debris.radius_min_m, 0.05, 100.0)
@@ -480,6 +500,8 @@ mod tests {
             serde_json::json!({"kind": "directed_stream", "orbit_speed_mps": 7.0}),
             serde_json::json!({"kind": "transit_stream", "settings": {}}),
             serde_json::json!({"kind": "transit_stream", "target_lander": true}),
+            serde_json::json!({"kind": "official_cloud", "settings": {}}),
+            serde_json::json!({"kind": "official_cloud", "num_debris": 500}),
             serde_json::json!({"kind": "fracture_solver"}),
             serde_json::json!({"kind": "impact_ejecta"}),
             serde_json::json!({"kind": "impact_ejecta", "settings": {}, "policy": "orbit"}),
@@ -504,6 +526,8 @@ mod tests {
         assert!(DebrisDistribution::DirectedStream.is_stream());
         assert!(DebrisDistribution::TransitStream.is_stream());
         assert!(!DebrisDistribution::impact_default().is_stream());
+        assert!(!DebrisDistribution::OfficialCloud.is_stream());
+        assert!(DebrisDistribution::OfficialCloud.is_official_cloud());
         let defaults = ExperimentSettings::default();
         assert_eq!(
             defaults.debris.distribution,
@@ -641,6 +665,38 @@ mod tests {
             },
         };
         assert!(experiment.validate().is_err());
+    }
+
+    #[test]
+    fn official_cloud_is_selectable_and_keeps_the_fixed_official_population() {
+        let mut settings = ExperimentSettings::default();
+        settings.debris.distribution = DebrisDistribution::OfficialCloud;
+        settings.validate().unwrap();
+        assert_eq!(settings.debris.count, OFFICIAL_CLOUD_COUNT);
+        let value = serde_json::to_value(settings).unwrap();
+        assert_eq!(
+            value["debris"]["distribution"],
+            serde_json::json!({"kind": "official_cloud"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ExperimentSettings>(value).unwrap(),
+            settings
+        );
+        settings.debris.count = OFFICIAL_CLOUD_COUNT - 1;
+        assert!(settings.validate().is_err());
+        settings.debris.count = OFFICIAL_CLOUD_COUNT + 1;
+        assert!(settings.validate().is_err());
+        settings.debris.count = OFFICIAL_CLOUD_COUNT;
+        settings.debris.trajectory_adjustment = DebrisTrajectoryAdjustment::TowardLander;
+        assert!(settings.validate().is_err());
+        settings.debris.trajectory_adjustment = DebrisTrajectoryAdjustment::Off;
+        settings.validate().unwrap();
+        let mut explicit = serde_json::to_value(settings).unwrap();
+        explicit["debris"]["distribution"] = serde_json::json!({"kind": "official_cloud"});
+        assert_eq!(
+            serde_json::from_value::<ExperimentSettings>(explicit).unwrap(),
+            settings
+        );
     }
 
     #[test]

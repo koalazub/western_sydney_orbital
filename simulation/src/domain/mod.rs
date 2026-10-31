@@ -14,4 +14,4 @@ pub use command::{EngineAction, PlaybackRate, ViewportAction};
 pub use entity::{EntityId, EntityKind, EntityStatus};
 pub use flight::{FlightPreset, LaunchSide};
 pub use mission::{LagrangeRegion, MissionPhase, MissionStatus};
-pub use scoring::{ScoreBreakdown, ScoreFormula, ScoreProgressBasis};
+pub use scoring::{MissionScoring, ScoreBreakdown, ScoreFormula, ScoreProgressBasis};

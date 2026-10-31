@@ -11,6 +11,7 @@ pub struct Scenario {
     pub experiment_settings: crate::model::ExperimentSettings,
     pub flight_presets: FlightPresets,
     pub impact_ejecta_defaults: crate::model::ImpactEjectaSettings,
+    pub official_cloud: OfficialCloudSettings,
     pub transit_stream: TransitStreamSettings,
     pub debris_trajectory_adjustment: DebrisTrajectoryAdjustmentConstants,
     /// Frozen calibration reference for archived None corridor live overrides.
@@ -40,6 +41,77 @@ pub struct TransitStreamSettings {
     pub target_lead_m: f64,
 }
 
+/// Official SpawnDebris.py relative cloud, entity weights and radar schedule.
+/// Values are versioned data; the terrain site supplies the local-up direction.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfficialCloudSettings {
+    pub version: u32,
+    pub count: usize,
+    /// Body-frame half extents around the offset centre, from Spread_m.
+    pub half_extents_m: [f64; 3],
+    /// Offset along the lander site's local up, from VerticalOffset_m.
+    pub vertical_offset_m: f64,
+    /// sqrt(mu / radius) uses the official Phobos value, not the local mesh.
+    pub drift_reference_mu_m3_s2: f64,
+    pub drift_reference_radius_m: f64,
+    pub drift_speed_fraction_min: f64,
+    pub drift_speed_fraction_max: f64,
+    pub mass_scale_exponent: f64,
+    pub collision_radius_max_m: f64,
+    pub classes: Vec<OfficialDebrisClass>,
+    pub radar: OfficialRadarSettings,
+}
+
+impl OfficialCloudSettings {
+    pub fn drift_speed_range_mps(&self) -> (f64, f64) {
+        let orbital = (self.drift_reference_mu_m3_s2 / self.drift_reference_radius_m).sqrt();
+        (
+            self.drift_speed_fraction_min * orbital,
+            self.drift_speed_fraction_max * orbital,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfficialDebrisClass {
+    pub id: OfficialDebrisClassId,
+    pub weight: f64,
+    pub radar_diameter_m: f64,
+    pub scale_min: f64,
+    pub scale_max: f64,
+    pub base_mass_kg: f64,
+}
+
+impl OfficialDebrisClass {
+    pub fn radius_m(&self, scale: f64) -> f64 {
+        0.5 * self.radar_diameter_m * scale
+    }
+
+    pub fn mass_kg(&self, scale: f64, exponent: f64) -> f64 {
+        self.base_mass_kg * scale.powf(exponent)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OfficialDebrisClassId {
+    Rock1,
+    Rock2,
+    Rock3,
+    ExplodedTank,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfficialRadarSettings {
+    pub version: u32,
+    pub observed_count: usize,
+    pub iteration_hz: f64,
+    pub publish_every_rows: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DebrisTrajectoryAdjustmentConstants {
@@ -58,6 +130,7 @@ impl Scenario {
         match preset {
             FlightPreset::MarsFacingL1 => &self.flight_presets.mars_facing_l1,
             FlightPreset::FarSideL2 => &self.flight_presets.far_side_l2,
+            FlightPreset::CompetitionReference => &self.flight_presets.competition_reference,
         }
     }
 }
@@ -67,6 +140,7 @@ impl Scenario {
 pub struct FlightPresets {
     pub mars_facing_l1: FlightPresetSettings,
     pub far_side_l2: FlightPresetSettings,
+    pub competition_reference: FlightPresetSettings,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -76,6 +150,10 @@ pub struct FlightPresetSettings {
     pub launch_side: LaunchSide,
     pub target_region: LagrangeRegion,
     pub target_name: String,
+    /// Required only for the local-up competition target; lagrange presets use
+    /// their computed collinear environment positions.
+    #[serde(default)]
+    pub target_distance_m: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

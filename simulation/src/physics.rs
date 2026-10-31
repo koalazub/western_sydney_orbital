@@ -1,12 +1,12 @@
 use crate::domain::{
     EntityId, EntityKind, EntityStatus, FlightAnalytics, FlightAnalyticsStep, LagrangeRegion,
-    MissionPhase, MissionStatus,
+    MissionPhase, MissionScoring, MissionStatus,
 };
 use crate::mission::{self, FlightMetrics};
 use crate::model::{
     AppliedActuatorWrench, DebrisDistribution, DebrisExperimentSettings, DebrisFlowTuning,
-    EntityState, Event, ExperimentSettings, FlightPreset, MissionState, Observation, PrimaryBody,
-    ShipTuning, Snapshot, ThrustApplication,
+    EntityState, Event, ExperimentSettings, FlightPreset, MissionState, Observation,
+    OfficialRadarState, PrimaryBody, ShipTuning, Snapshot, ThrustApplication,
 };
 #[cfg(test)]
 use crate::propulsion::{accel_limit, space_shape_is_valid};
@@ -25,6 +25,7 @@ mod applied;
 mod debris;
 mod live_tuning;
 mod lookahead;
+mod official_cloud;
 mod placement;
 mod resilience;
 mod spatial_index;
@@ -41,6 +42,26 @@ fn body() -> PrimaryBody {
         radii_m: settings().gravity.phobos_radii_m,
         mu_m3_s2: settings().gravity.phobos_mu_m3_s2,
         rotation_period_s: settings().gravity.phobos_rotation_period_s,
+    }
+}
+
+/// Canonical preset target. The competition route is measured along the local
+/// surface normal from the archived far-side lander site; it is not a Lagrange point.
+pub(super) fn target_position_for(preset: FlightPreset) -> [f64; 3] {
+    let config = settings();
+    let flight = config.flight_preset(preset);
+    let environment = crate::astrophysics::environment(config.gravity);
+    match flight.target_region {
+        LagrangeRegion::L1 => environment.l1_position_m,
+        LagrangeRegion::L2 => environment.l2_position_m,
+        LagrangeRegion::LocalUp => {
+            let distance = flight
+                .target_distance_m
+                .expect("validated competition reference target distance");
+            let site = crate::model::landing_site_for(preset);
+            let up = Vector::from_array(site.normal);
+            (Vector::from_array(site.lander_position_m) + up * distance).to_array()
+        }
     }
 }
 
@@ -811,9 +832,15 @@ impl Simulation {
             self.enforce_sensor_and_command_deadlines();
             self.update_mission();
             self.sample_navigation_delivery();
-            let cadence = settings().sensors.cadence_hz;
-            if (self.state.time_s * cadence).floor() > (before * cadence).floor() {
+            if is_official_cloud_snapshot(&self.state) {
+                // The official radar schedule advances by 120 Hz virtual rows
+                // regardless of the slower primary sensor delivery cadence.
                 self.sample_radar();
+            } else {
+                let cadence = settings().sensors.cadence_hz;
+                if (self.state.time_s * cadence).floor() > (before * cadence).floor() {
+                    self.sample_radar();
+                }
             }
             // Birth/recycle draws also happen between sensor ticks.
             self.state.rng_state = self.rng;
@@ -826,7 +853,7 @@ impl Simulation {
             return;
         };
         match experiment.debris.distribution {
-            DebrisDistribution::ImpactEjecta { .. } => return,
+            DebrisDistribution::ImpactEjecta { .. } | DebrisDistribution::OfficialCloud => return,
             DebrisDistribution::DirectedStream => {}
             DebrisDistribution::TransitStream => {
                 self.recycle_transit_debris(self.state.debris_flow().apply_to(experiment.debris));
@@ -927,7 +954,7 @@ impl Simulation {
         // axis. Reflect only its phase coordinates for L1, never physical state.
         let phase_x_sign = match self.state.flight_preset {
             FlightPreset::MarsFacingL1 => -1.0,
-            FlightPreset::FarSideL2 => 1.0,
+            FlightPreset::FarSideL2 | FlightPreset::CompetitionReference => 1.0,
         };
         let mut phase_lander_position = lander_position;
         let mut phase_pad_position = pad_position;
@@ -983,6 +1010,10 @@ impl Simulation {
     }
 
     fn sample_radar(&mut self) {
+        if is_official_cloud_snapshot(&self.state) {
+            self.sample_official_radar();
+            return;
+        }
         let Some(shuttle) = self.state.assets.iter().find(|e| e.id == EntityId::Lander) else {
             return;
         };
@@ -998,32 +1029,12 @@ impl Simulation {
             .filter(|e| e.kind == EntityKind::Debris)
             .take(candidate_limit)
         {
-            let delta = sub(debris.position, shuttle.position);
-            let range = norm(delta);
-            let relative_velocity = sub(debris.velocity, shuttle.velocity);
-            let position = std::array::from_fn(|i| {
-                delta[i] + gaussian(&mut self.rng) * cfg.sensors.range_noise_m
-            });
-            let geometric_rate = if range > 0.0 {
-                dot(relative_velocity, delta) / range
-            } else {
-                0.0
-            };
-            let rate = geometric_rate + gaussian(&mut self.rng) * cfg.sensors.range_rate_noise_mps;
-            rows.push(Observation {
-                id: debris.id,
-                kind: debris.kind,
-                relative_position_m: position,
-                // Analysis-only truth; observation() never exposes this field.
-                relative_velocity_mps: relative_velocity,
-                range_m: range - debris.radius_m
-                    + gaussian(&mut self.rng) * cfg.sensors.range_noise_m,
-                range_rate_mps: rate,
-                diameter_m: debris.radius_m
-                    * 2.0
-                    * (1.0 + gaussian(&mut self.rng) * cfg.debris.diameter_noise_fraction),
-                measurement_time_s: self.state.time_s,
-            });
+            rows.push(measure_observation(
+                &mut self.rng,
+                shuttle,
+                debris,
+                self.state.time_s,
+            ));
         }
         // STU4-Sim c1e3fc8, Systems/Radar.py sorts noisy center position,
         // independently of its unclipped closest-range and diameter samples.
@@ -1031,6 +1042,171 @@ impl Simulation {
         rows.truncate(cfg.debris.radar_count);
         self.state.observations = rows;
         self.sample_sensor_deliveries();
+    }
+
+    /// Source Radar.py rolls one actor per 120 Hz iteration. The local fixed
+    /// physics step updates all due virtual rows together, preserving each row's
+    /// own radar-loop timestamp. Only every 50th row is published, distance-sorted.
+    fn sample_official_radar(&mut self) {
+        let Some(shuttle) = self
+            .state
+            .assets
+            .iter()
+            .find(|e| e.id == EntityId::Lander)
+            .cloned()
+        else {
+            return;
+        };
+        let radar = settings().official_cloud.radar;
+        let sample_count = radar.observed_count;
+        if sample_count == 0 {
+            return;
+        }
+        if self.state.official_radar.is_none() {
+            let ids: Vec<EntityId> = self
+                .state
+                .assets
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Debris)
+                .take(sample_count)
+                .map(|entity| entity.id)
+                .collect();
+            if ids.len() != sample_count {
+                return;
+            }
+            let mut rows = Vec::with_capacity(sample_count);
+            for id in ids {
+                let Some(debris) = self
+                    .state
+                    .assets
+                    .iter()
+                    .find(|entity| entity.id == id)
+                    .cloned()
+                else {
+                    return;
+                };
+                rows.push(measure_observation(
+                    &mut self.rng,
+                    &shuttle,
+                    &debris,
+                    self.state.time_s,
+                ));
+            }
+            let mut published = rows.clone();
+            published.sort_by(|a, b| {
+                norm(a.relative_position_m).total_cmp(&norm(b.relative_position_m))
+            });
+            self.state.observations = published;
+            self.state.official_radar = Some(OfficialRadarState {
+                version: 1,
+                iteration: iteration_at(self.state.time_s, radar.iteration_hz),
+                rolling_rows: rows,
+            });
+            self.sample_sensor_deliveries();
+            return;
+        }
+        let target = iteration_at(self.state.time_s, radar.iteration_hz);
+        let publish_every = radar.publish_every_rows as u64;
+        let mut published = false;
+        // A restored or externally modified clock may be far ahead. Retry the
+        // remaining virtual iterations on later calls rather than freezing here.
+        let mut budget = sample_count.saturating_mul(10).max(1_000);
+        while let Some(state) = self.state.official_radar.as_ref() {
+            if state.iteration >= target || budget == 0 {
+                break;
+            }
+            let index = (state.iteration as usize) % sample_count;
+            let Some(row) = state.rolling_rows.get(index) else {
+                break;
+            };
+            let iteration = state.iteration;
+            let id = row.id;
+            let Some(debris) = self
+                .state
+                .assets
+                .iter()
+                .find(|entity| entity.id == id)
+                .cloned()
+            else {
+                break;
+            };
+            let tick = iteration + 1;
+            let row = measure_observation(
+                &mut self.rng,
+                &shuttle,
+                &debris,
+                tick as f64 / radar.iteration_hz,
+            );
+            let publish = publish_every != 0 && tick % publish_every == 0;
+            let sorted = {
+                let Some(state) = self.state.official_radar.as_mut() else {
+                    break;
+                };
+                state.rolling_rows[index] = row;
+                state.iteration = tick;
+                if publish {
+                    let mut sorted = state.rolling_rows.clone();
+                    sorted.sort_by(|a, b| {
+                        norm(a.relative_position_m).total_cmp(&norm(b.relative_position_m))
+                    });
+                    Some(sorted)
+                } else {
+                    None
+                }
+            };
+            if let Some(sorted) = sorted {
+                self.state.observations = sorted;
+                published = true;
+            }
+            budget -= 1;
+        }
+        if published {
+            self.sample_sensor_deliveries();
+        }
+    }
+}
+
+fn is_official_cloud_snapshot(state: &Snapshot) -> bool {
+    state
+        .experiment_settings
+        .is_some_and(|experiment| experiment.debris.distribution.is_official_cloud())
+}
+
+fn iteration_at(time_s: f64, iteration_hz: f64) -> u64 {
+    // Summed fixed steps can land an ulp below an exact 120 Hz boundary.
+    // Absorb only that arithmetic error; never advance a whole iteration.
+    ((time_s * iteration_hz) + 1.0e-9).floor().max(0.0) as u64
+}
+
+fn measure_observation(
+    rng: &mut u64,
+    shuttle: &EntityState,
+    debris: &EntityState,
+    measurement_time_s: f64,
+) -> Observation {
+    let cfg = settings();
+    let delta = sub(debris.position, shuttle.position);
+    let range = norm(delta);
+    let relative_velocity = sub(debris.velocity, shuttle.velocity);
+    let position = std::array::from_fn(|i| delta[i] + gaussian(rng) * cfg.sensors.range_noise_m);
+    let geometric_rate = if range > 0.0 {
+        dot(relative_velocity, delta) / range
+    } else {
+        0.0
+    };
+    let rate = geometric_rate + gaussian(rng) * cfg.sensors.range_rate_noise_mps;
+    Observation {
+        id: debris.id,
+        kind: debris.kind,
+        relative_position_m: position,
+        // Analysis-only truth; observation() never exposes this field.
+        relative_velocity_mps: relative_velocity,
+        range_m: range - debris.radius_m + gaussian(rng) * cfg.sensors.range_noise_m,
+        range_rate_mps: rate,
+        diameter_m: debris.radius_m
+            * 2.0
+            * (1.0 + gaussian(rng) * cfg.debris.diameter_noise_fraction),
+        measurement_time_s,
     }
 }
 
@@ -1078,12 +1254,13 @@ fn initial_for_flight(
     if experiment.is_some_and(|experiment| {
         matches!(
             experiment.debris.distribution,
-            DebrisDistribution::ImpactEjecta { .. }
+            DebrisDistribution::ImpactEjecta { .. } | DebrisDistribution::OfficialCloud
         )
     }) && debris_flow_override.is_some()
     {
         return Err(
-            "Impact ejecta cannot carry a live stream override; configure a new flight.".into(),
+            "This debris distribution cannot carry a live stream override; configure a new flight."
+                .into(),
         );
     }
     let mut rng = seed.max(1);
@@ -1113,11 +1290,7 @@ fn initial_for_flight(
         flow.validate()?;
     }
     assets.push(ship);
-    let env = crate::astrophysics::environment(cfg.gravity);
-    let target_position = match flight.target_region {
-        LagrangeRegion::L1 => env.l1_position_m,
-        LagrangeRegion::L2 => env.l2_position_m,
-    };
+    let target_position = target_position_for(preset);
     let mut target = entity(
         EntityId::ReturnShip,
         EntityKind::ReturnShip,
@@ -1142,41 +1315,46 @@ fn initial_for_flight(
     if let Some(experiment) = experiment {
         let debris =
             debris_flow_override.map_or(experiment.debris, |flow| flow.apply_to(experiment.debris));
-        let mut spawn_index = spawn_index(&assets, debris.radius_max_m);
-        let birth = match debris.distribution {
-            DebrisDistribution::DirectedStream | DebrisDistribution::ImpactEjecta { .. } => {
-                DebrisBirth::InitialShell
+        if debris.distribution.is_official_cloud() {
+            official_cloud::spawn(&mut rng, &mut assets, experiment, preset)?;
+        } else {
+            let mut spawn_index = spawn_index(&assets, debris.radius_max_m);
+            let birth = match debris.distribution {
+                DebrisDistribution::DirectedStream | DebrisDistribution::ImpactEjecta { .. } => {
+                    DebrisBirth::InitialShell
+                }
+                DebrisDistribution::TransitStream => {
+                    DebrisBirth::InitialTransit(TransitVolume::for_preset(preset))
+                }
+                DebrisDistribution::OfficialCloud => unreachable!("handled above"),
+            };
+            // DirectedStream keeps its original shell and draw order. TransitStream
+            // fills the canonical launch-to-target box. All bodies then use ordinary
+            // gravity, contacts and any explicitly enabled real adjustment impulses.
+            for i in 0..experiment.debris.count {
+                // A quadratic size sample keeps plenty of small rocks without
+                // excluding the large end of the configured physical radius range.
+                let size = uniform(&mut rng);
+                let radius =
+                    debris.radius_min_m + (debris.radius_max_m - debris.radius_min_m) * size * size;
+                let position = debris_birth_position(
+                    &mut rng, debris, radius, &spawn_index, None, birth,
+                ).ok_or("experiment volume cannot safely place its population within the bounded birth budget")?;
+                let velocity = debris::initial_velocity(&mut rng, debris, position);
+                let id = EntityId::Debris((i + 1) as u32);
+                let mut asteroid = entity(
+                    id,
+                    EntityKind::Debris,
+                    position,
+                    velocity,
+                    radius,
+                    debris_mass_kg(radius),
+                );
+                asteroid.name = format!("Debris {}", i + 1);
+                asteroid.angular_velocity_rad_s = debris_birth_spin(&mut rng);
+                spawn_index.insert(id, position, radius);
+                assets.push(asteroid);
             }
-            DebrisDistribution::TransitStream => {
-                DebrisBirth::InitialTransit(TransitVolume::for_preset(preset))
-            }
-        };
-        // DirectedStream keeps its original shell and draw order. TransitStream
-        // fills the canonical launch-to-target box. All bodies then use ordinary
-        // gravity, contacts and any explicitly enabled real adjustment impulses.
-        for i in 0..experiment.debris.count {
-            // A quadratic size sample keeps plenty of small rocks without
-            // excluding the large end of the configured physical radius range.
-            let size = uniform(&mut rng);
-            let radius =
-                debris.radius_min_m + (debris.radius_max_m - debris.radius_min_m) * size * size;
-            let position = debris_birth_position(
-                &mut rng, debris, radius, &spawn_index, None, birth,
-            ).ok_or("experiment volume cannot safely place its population within the bounded birth budget")?;
-            let velocity = debris::initial_velocity(&mut rng, debris, position);
-            let id = EntityId::Debris((i + 1) as u32);
-            let mut asteroid = entity(
-                id,
-                EntityKind::Debris,
-                position,
-                velocity,
-                radius,
-                debris_mass_kg(radius),
-            );
-            asteroid.name = format!("Debris {}", i + 1);
-            asteroid.angular_velocity_rad_s = debris_birth_spin(&mut rng);
-            spawn_index.insert(id, position, radius);
-            assets.push(asteroid);
         }
     } else {
         // Archive-only branch. Keep the original draw order and fixed corridor,
@@ -1226,7 +1404,7 @@ fn initial_for_flight(
         trial_start_launch_site_direction: None,
         frame: cfg.frame_description.clone(),
         body: body(),
-        environment: env,
+        environment: crate::astrophysics::environment(cfg.gravity),
         experiment_settings: experiment,
         ship_tuning_override,
         debris_flow_override,
@@ -1245,9 +1423,17 @@ fn initial_for_flight(
             damage: 0.0,
             status: MissionStatus::Running,
             score: None,
-            score_label: "STP points unavailable: incompatible local fuel and damage counters"
-                .into(),
+            score_label: if preset == FlightPreset::CompetitionReference {
+                "Local estimate · official time/damage/fuel formula · not STP counter parity".into()
+            } else {
+                "STP points unavailable: incompatible local fuel and damage counters".into()
+            },
             score_breakdown: None,
+            scoring: if preset == FlightPreset::CompetitionReference {
+                MissionScoring::OfficialTimeDamageFuelV1
+            } else {
+                MissionScoring::ArchivedUnscored
+            },
             phase: MissionPhase::OnPad,
             target_region: flight.target_region,
             flight_analytics: Some(FlightAnalytics::default()),
@@ -1257,6 +1443,7 @@ fn initial_for_flight(
         active_contacts: vec![],
         sensor_state: Some(crate::model::SensorState::new(seed)),
         debris_trajectory_adjustment_state: trajectory_adjustment::initial_state(experiment),
+        official_radar: None,
     })
 }
 
@@ -1302,9 +1489,9 @@ fn debris_birth_position(
         let position = match birth {
             DebrisBirth::InitialShell => {
                 let direction = match cfg.distribution {
-                    DebrisDistribution::DirectedStream | DebrisDistribution::TransitStream => {
-                        random_direction(rng)
-                    }
+                    DebrisDistribution::DirectedStream
+                    | DebrisDistribution::TransitStream
+                    | DebrisDistribution::OfficialCloud => random_direction(rng),
                     DebrisDistribution::ImpactEjecta { settings } => {
                         debris::source_direction(rng, settings)
                     }
@@ -1407,6 +1594,10 @@ fn profile_base_description(
                 "local_experiment_v1: {}; canonical launch-to-target transit stream, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP parity.",
                 settings().flight_preset(preset).label
             ),
+            (_, DebrisDistribution::OfficialCloud) => format!(
+                "local_experiment_v1: {}; official relative debris cloud and local tangential drift, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP runtime parity.",
+                settings().flight_preset(preset).label
+            ),
             (_, DebrisDistribution::ImpactEjecta { .. }) => format!(
                 "local_experiment_v1: {}; post-impact cloud initial conditions with gravity and real contacts, not a fracture solver or guaranteed orbit; not STP parity.",
                 settings().flight_preset(preset).label
@@ -1488,6 +1679,43 @@ fn has_legacy_lander_thrust_cap(e: &EntityState) -> bool {
         )
         && e.max_thrust_n == settings().lander.mass_kg * settings().lander.max_accel_mps2
 }
+fn validate_official_radar_state(s: &Snapshot) -> Result<(), String> {
+    let Some(radar) = &s.official_radar else {
+        return Ok(());
+    };
+    let config = settings().official_cloud.radar;
+    let official = s
+        .experiment_settings
+        .is_some_and(|experiment| experiment.debris.distribution.is_official_cloud());
+    if !official || radar.version != 1 || radar.rolling_rows.len() != config.observed_count {
+        return Err("official radar state does not match the official cloud".into());
+    }
+    if radar.rolling_rows.iter().enumerate().any(|(index, row)| {
+        row.id != EntityId::Debris(index as u32 + 1)
+            || row.kind != EntityKind::Debris
+            || !row
+                .relative_position_m
+                .into_iter()
+                .chain(row.relative_velocity_mps)
+                .chain([
+                    row.range_m,
+                    row.range_rate_mps,
+                    row.diameter_m,
+                    row.measurement_time_s,
+                ])
+                .all(f64::is_finite)
+            || row.measurement_time_s < 0.0
+            || row.measurement_time_s > s.time_s + settings().integration.fixed_step_s
+    }) {
+        return Err("official radar rolling rows are invalid".into());
+    }
+    let expected_iterations = iteration_at(s.time_s, config.iteration_hz);
+    if radar.iteration > expected_iterations.saturating_add(1) {
+        return Err("official radar iteration is ahead of the simulation clock".into());
+    }
+    Ok(())
+}
+
 fn validate(s: &Snapshot) -> Result<(), String> {
     resilience::validate_sensor_state(s)?;
     if let Some(analytics) = &s.mission.flight_analytics {
@@ -1496,6 +1724,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     if let Some(experiment) = s.experiment_settings {
         experiment.validate()?;
     }
+    validate_official_radar_state(s)?;
     trajectory_adjustment::validate_state(s)?;
     if let Some(ship) = s.ship_tuning_override {
         ship.validate()?;
@@ -1512,12 +1741,13 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     if s.experiment_settings.is_some_and(|experiment| {
         matches!(
             experiment.debris.distribution,
-            DebrisDistribution::ImpactEjecta { .. }
+            DebrisDistribution::ImpactEjecta { .. } | DebrisDistribution::OfficialCloud
         )
     }) && s.debris_flow_override.is_some()
     {
         return Err(
-            "Impact ejecta cannot carry a live stream override; configure a new flight.".into(),
+            "This debris distribution cannot carry a live stream override; configure a new flight."
+                .into(),
         );
     }
     if s.tuning_revision == 0
@@ -1526,6 +1756,11 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         return Err("live tuning overrides require a nonzero tuning_revision".into());
     }
     let ship_tuning = s.ship_tuning();
+    let expected_scoring = if s.flight_preset == FlightPreset::CompetitionReference {
+        MissionScoring::OfficialTimeDamageFuelV1
+    } else {
+        MissionScoring::ArchivedUnscored
+    };
     let debris_count = s
         .experiment_settings
         .map_or(settings().debris.count, |config| config.debris.count);
@@ -1579,6 +1814,7 @@ fn validate(s: &Snapshot) -> Result<(), String> {
         || s.mission.fuel_used_kg < 0.0
         || s.mission.damage < 0.0
         || s.mission.target_region != settings().flight_preset(s.flight_preset).target_region
+        || s.mission.scoring != expected_scoring
         || s.mission.score.is_some_and(|v| !v.is_finite())
         || !mission::valid_archived_breakdown(&s.mission)
     {
@@ -2402,6 +2638,95 @@ mod tests {
                 "closest-range sorting must not replace noisy center sorting"
             );
         }
+    }
+
+    #[test]
+    fn official_cloud_radar_rolls_the_first_200_rows_and_publishes_every_50() {
+        let mut config = ExperimentSettings::default();
+        config.debris.distribution = DebrisDistribution::OfficialCloud;
+        let mut sim = Simulation::with_experiment(100, config).unwrap();
+        let radar = settings().official_cloud.radar;
+        assert_eq!(radar.observed_count, 200);
+        assert_eq!(radar.iteration_hz, 120.0);
+        assert_eq!(radar.publish_every_rows, 50);
+        assert_eq!(sim.state.observations.len(), 200);
+        assert_eq!(
+            sim.observation()["radar_selection"]["selection"],
+            json!("official_first_200_rolling")
+        );
+        for (index, row) in sim.state.observations.iter().enumerate() {
+            assert!(row.measurement_time_s == 0.0);
+            assert!(
+                matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 200),
+                "row {index} is not one of the first 200 actors"
+            );
+        }
+        assert!(sim.state.observations.windows(2).all(|pair| {
+            norm(pair[0].relative_position_m) <= norm(pair[1].relative_position_m)
+        }));
+
+        // Six 120 Hz iterations fit in one 0.05 s step. Nothing publishes yet,
+        // so the published frame and its per-row stamps stay at the t=0 sort.
+        sim.advance(settings().integration.fixed_step_s);
+        let initial = sim.snapshot();
+        assert!(
+            initial
+                .observations
+                .iter()
+                .all(|row| row.measurement_time_s == 0.0)
+        );
+        let rolling = initial.official_radar.as_ref().unwrap();
+        assert_eq!(rolling.iteration, 6);
+        assert!(
+            rolling.rolling_rows[..6]
+                .iter()
+                .all(|row| row.measurement_time_s > 0.0)
+        );
+        assert!(
+            rolling.rolling_rows[6..]
+                .iter()
+                .all(|row| row.measurement_time_s == 0.0)
+        );
+
+        // At 0.45 s the 50th iteration has published. The published frame is
+        // sorted by noisy distance; exactly 50 rows carry that update's stamps.
+        sim.advance(0.4);
+        assert!((sim.state.time_s - 0.45).abs() < 1.0e-12);
+        assert_eq!(sim.state.observations.len(), 200);
+        assert_eq!(
+            sim.state
+                .observations
+                .iter()
+                .filter(|row| row.measurement_time_s > 0.0)
+                .count(),
+            50
+        );
+        assert!(sim.state.observations.windows(2).all(|pair| {
+            norm(pair[0].relative_position_m) <= norm(pair[1].relative_position_m)
+        }));
+        let newest = sim
+            .state
+            .observations
+            .iter()
+            .map(|row| row.measurement_time_s)
+            .fold(0.0_f64, f64::max);
+        assert!((newest - 50.0 / 120.0).abs() < 1.0e-12);
+        assert_eq!(sim.state.official_radar.as_ref().unwrap().iteration, 54);
+        assert!(
+            sim.state
+                .observations
+                .iter()
+                .all(|row| { matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 200) })
+        );
+        validate(&sim.snapshot()).unwrap();
+
+        // The transit stress field keeps its nearest-200 acquisition mode.
+        let transit = Simulation::with_experiment(100, ExperimentSettings::default()).unwrap();
+        assert_eq!(
+            transit.observation()["radar_selection"]["selection"],
+            json!("nearest_noisy_centers")
+        );
+        assert_eq!(transit.state.observations.len(), 200);
     }
 
     #[test]
