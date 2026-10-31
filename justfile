@@ -411,6 +411,6 @@ tree-diff left right:
 commit message +paths:
     jj commit -m {{quote(message)}} {{paths}}
 
-push:
-    jj bookmark set main -r @-
+push revision="@-":
+    jj bookmark set main -r {{quote(revision)}}
     jj git push --bookmark main
