@@ -96,6 +96,13 @@ pub(crate) enum ApiRequest {
         lease_sim_s: f64,
         expected_context: CommandContext,
     },
+    RenewControl {
+        controller_fence: crate::model::ControlFence,
+        source_time_s: f64,
+        lease_sim_s: f64,
+        expected_context: CommandContext,
+        expected_sensor_revision: u32,
+    },
     ReleaseControl {
         run_id: String,
         expected_epoch: u32,
@@ -142,6 +149,11 @@ pub(crate) enum Dispatch {
     ClaimControl {
         request: crate::model::ControlClaim,
         expected_context: CommandContext,
+    },
+    RenewControl {
+        request: crate::model::ControlRenewal,
+        expected_context: CommandContext,
+        expected_sensor_revision: u32,
     },
     ReleaseControl {
         request: crate::model::ControlRelease,
@@ -261,6 +273,21 @@ impl ApiRequest {
                 },
                 expected_context,
             },
+            Self::RenewControl {
+                controller_fence,
+                source_time_s,
+                lease_sim_s,
+                expected_context,
+                expected_sensor_revision,
+            } => Dispatch::RenewControl {
+                request: crate::model::ControlRenewal {
+                    controller_fence,
+                    source_time_s,
+                    lease_sim_s,
+                },
+                expected_context,
+                expected_sensor_revision,
+            },
             Self::SetSensorFault {
                 target,
                 mode,
@@ -306,6 +333,11 @@ enum CommandResponse {
     Acknowledgement,
 }
 
+enum CommandResult {
+    Snapshot(std::rc::Rc<Snapshot>),
+    OwnershipRenewal(crate::model::ControlRenewalReceipt),
+}
+
 fn execute_response(json: &str, response: CommandResponse) -> String {
     let result = (|| {
         if json.len() > 1024 * 1024 {
@@ -315,7 +347,21 @@ fn execute_response(json: &str, response: CommandResponse) -> String {
         }
         let request: ApiRequest = serde_json::from_str(json)
             .map_err(|error| CommandError::Rejected(error.to_string()))?;
-        let dispatch = request.into_dispatch().map_err(CommandError::Rejected)?;
+        let dispatch = match request.into_dispatch().map_err(CommandError::Rejected)? {
+            Dispatch::RenewControl {
+                request,
+                expected_context,
+                expected_sensor_revision,
+            } => {
+                return crate::session::dispatch_renew_control(
+                    request,
+                    expected_context,
+                    expected_sensor_revision,
+                )
+                .map(CommandResult::OwnershipRenewal);
+            }
+            dispatch => dispatch,
+        };
         match dispatch {
             Dispatch::CheckedCommand {
                 accel,
@@ -349,9 +395,13 @@ fn execute_response(json: &str, response: CommandResponse) -> String {
             } => crate::session::dispatch_launchpad_checked(surface_direction, expected_context),
             dispatch => crate::session::dispatch(dispatch).map_err(CommandError::Rejected),
         }
+        .map(CommandResult::Snapshot)
     })();
     match result {
-        Ok(state) => match response {
+        Ok(CommandResult::OwnershipRenewal(receipt)) => {
+            serde_json::json!({"ok":true,"ownership_renewal":receipt}).to_string()
+        }
+        Ok(CommandResult::Snapshot(state)) => match response {
             CommandResponse::Snapshot => {
                 serde_json::json!({"ok":true,"state":state.as_ref()}).to_string()
             }
@@ -376,6 +426,69 @@ mod tests {
     use super::*;
     use crate::{model::ExperimentSettings, physics::Simulation};
     use serde_json::{Value, json};
+
+    #[test]
+    fn ownership_renewal_requires_both_contexts_and_a_complete_typed_fence_without_vectors() {
+        let renewal = json!({
+            "op": "renew_control", "source_time_s": 0.1, "lease_sim_s": 0.75,
+            "expected_sensor_revision": 0,
+            "expected_context": {"trial_revision": 0, "tuning_revision": 0,
+                "manual_interventions": 0, "seed": 100, "running": true},
+            "controller_fence": {"epoch": 0, "term": 1, "run_id": "run", "controller_id": "primary"},
+        });
+        assert!(matches!(
+            serde_json::from_value::<ApiRequest>(renewal.clone())
+                .unwrap()
+                .into_dispatch()
+                .unwrap(),
+            Dispatch::RenewControl { .. }
+        ));
+        for field in renewal.as_object().unwrap().keys() {
+            let mut missing = renewal.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ApiRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["epoch", "term", "run_id", "controller_id"] {
+            let mut missing = renewal.clone();
+            missing["controller_fence"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<ApiRequest>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("accel", json!([0.0, 0.0, 0.0])),
+            ("angular_accel", json!([0.0, 0.0, 0.0])),
+            ("expected_epoch", json!(0)),
+            ("expected_term", json!(1)),
+            ("expected_sensor_revision", json!(-1)),
+            ("expected_sensor_revision", json!(4294967296_u64)),
+            ("source_time_s", json!(true)),
+            ("controller_fence", Value::Null),
+        ] {
+            let mut invalid = renewal.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<ApiRequest>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("epoch", json!(-1)),
+            ("term", json!(true)),
+            ("term", json!(0.5)),
+        ] {
+            let mut invalid = renewal.clone();
+            invalid["controller_fence"][field] = value;
+            assert!(serde_json::from_value::<ApiRequest>(invalid).is_err());
+        }
+    }
 
     #[test]
     fn authority_envelopes_have_exact_required_fields_and_typed_fences() {

@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 mod avionics;
 pub use avionics::{
     CommandWatchdog, CommandWatchdogStatus, ControlAuthority, ControlAuthorityStatus, ControlClaim,
-    ControlFence, ControlRelease, LeaseError, LeasedCommand, NavigationDeliveryState,
-    NavigationSample, RadarDeliveryState, RadarFrame, RadarRow, SensorDelivery, SensorFault,
-    SensorFaultMode, SensorFaultTarget, SensorState, SensorUnitId, delivery as sensor_delivery,
-    valid_control_id,
+    ControlFence, ControlRelease, ControlRenewal, ControlRenewalReceipt, LeaseError, LeasedCommand,
+    NavigationDeliveryState, NavigationSample, RadarDeliveryState, RadarFrame, RadarRow,
+    SensorDelivery, SensorFault, SensorFaultMode, SensorFaultTarget, SensorState, SensorUnitId,
+    delivery as sensor_delivery, valid_control_id,
 };
 #[path = "experiment_settings.rs"]
 mod experiment_settings;

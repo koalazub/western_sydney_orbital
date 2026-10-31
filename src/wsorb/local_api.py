@@ -54,6 +54,7 @@ COMMANDS = frozenset(
         "set_command",
         "set_leased_command",
         "claim_control",
+        "renew_control",
         "release_control",
         "set_sensor_fault",
         "clear_sensor_faults",
@@ -472,6 +473,28 @@ def controller_fence(snapshot: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ownership_command(request: Mapping[str, Any]) -> dict[str, Any]:
     op = request.get("op")
+    if op == "renew_control":
+        if set(request) != {
+            "op",
+            "controller_fence",
+            "source_time_s",
+            "lease_sim_s",
+            "expected_context",
+            "expected_sensor_revision",
+        }:
+            raise ValueError(
+                "renew_control requires the exact fence, original source and both contexts"
+            )
+        return {
+            "op": op,
+            "controller_fence": _controller_fence(request["controller_fence"]),
+            "source_time_s": _source_time(request["source_time_s"]),
+            "lease_sim_s": _bounded_number(request["lease_sim_s"], "lease_sim_s", 0.05, 0.75),
+            "expected_context": _expected_context(request["expected_context"]),
+            "expected_sensor_revision": _integer(
+                request["expected_sensor_revision"], "expected_sensor_revision", 0xFFFFFFFF
+            ),
+        }
     fields = {"op", "run_id", "expected_epoch", "expected_context"}
     if op == "claim_control":
         fields |= {"controller_id", "expected_term", "source_time_s", "lease_sim_s"}
@@ -493,6 +516,51 @@ def _ownership_command(request: Mapping[str, Any]) -> dict[str, Any]:
             lease_sim_s=_bounded_number(request["lease_sim_s"], "lease_sim_s", 0.05, 1.0),
         )
     return parsed
+
+
+def ownership_renewal_supported(snapshot: Mapping[str, Any]) -> bool:
+    """Require an explicit native advertisement, never a client or transport version."""
+    observation = snapshot.get("observation") if isinstance(snapshot, Mapping) else None
+    capabilities = (
+        observation.get("control_capabilities") if isinstance(observation, Mapping) else None
+    )
+    renewal = capabilities.get("ownership_renewal") if isinstance(capabilities, Mapping) else None
+    return (
+        isinstance(renewal, Mapping)
+        and type(renewal.get("schema_version")) is int
+        and renewal["schema_version"] == 1
+        and type(renewal.get("max_lease_sim_s")) in (int, float)
+        and renewal["max_lease_sim_s"] == 0.75
+    )
+
+
+def _control_renewal_request(snapshot, *, controller_fence, lease_sim_s):
+    if not ownership_renewal_supported(snapshot):
+        raise ValueError("This native source does not advertise ownership renewal support")
+    observation = snapshot.get("observation") if isinstance(snapshot, Mapping) else None
+    health = observation.get("sensor_health") if isinstance(observation, Mapping) else None
+    if (
+        not isinstance(health, Mapping)
+        or type(health.get("schema_version")) is not int
+        or health["schema_version"] != 1
+    ):
+        raise ValueError("Ownership renewal requires actual schema-version-1 sensor_health")
+    fence = _controller_fence(controller_fence)
+    authority = _control_authority(snapshot)
+    if authority["status"] != "active" or any(
+        authority[name] != value for name, value in fence.items()
+    ):
+        raise ValueError("Ownership renewal requires this source's actual active owner fence")
+    return _ownership_command(
+        {
+            "op": "renew_control",
+            "controller_fence": fence,
+            "source_time_s": observation.get("time_s"),
+            "lease_sim_s": lease_sim_s,
+            "expected_context": control_context(snapshot),
+            "expected_sensor_revision": health.get("revision"),
+        }
+    )
 
 
 def _resilience_command(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1016,6 +1084,55 @@ class LocalSimulation:
         )
         return self.command(request)
 
+    def renew_control(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        controller_fence: Mapping[str, Any],
+        lease_sim_s: float = 0.75,
+    ) -> dict[str, Any]:
+        """Renew only the already-active native owner from this genuine source.
+
+        Returns the native ownership receipt without a second snapshot request.
+        It installs no command and changes no watchdog or actuator measurement.
+        Native checks both contexts, the exact live fence and the source deadline.
+        Expired owners cannot reclaim through this operation. Nothing is retried.
+        """
+        request = _control_renewal_request(
+            snapshot, controller_fence=controller_fence, lease_sim_s=lease_sim_s
+        )
+        result = self.command(request)
+        receipt = result.get("ownership_renewal")
+        try:
+            if not isinstance(receipt, Mapping) or set(receipt) != {
+                "source_time_s",
+                "lease_sim_s",
+                "sensor_revision",
+                "control_authority",
+            }:
+                raise ValueError("Missing native ownership receipt")
+            authority = _control_authority({"observation": receipt})
+            if (
+                _source_time(receipt["source_time_s"]) != request["source_time_s"]
+                or _bounded_number(receipt["lease_sim_s"], "lease_sim_s", 0.05, 0.75)
+                != request["lease_sim_s"]
+                or type(receipt["sensor_revision"]) is not int
+                or receipt["sensor_revision"] != request["expected_sensor_revision"]
+                or authority["status"] != "active"
+                or any(
+                    authority[name] != value for name, value in request["controller_fence"].items()
+                )
+                or authority["expires_at_sim_time_s"]
+                != request["source_time_s"] + request["lease_sim_s"]
+            ):
+                raise ValueError("Native renewal receipt differs from the original request")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise LocalApiError(
+                "Ownership renewal was acknowledged without a matching native receipt. "
+                "Inspect actual state; no renewal was retried."
+            ) from error
+        return {**receipt, "control_authority": authority}
+
     def set_sensor_fault(
         self, target: str, mode: str, *, duration_sim_s: float = 5.0
     ) -> dict[str, Any]:
@@ -1214,7 +1331,7 @@ class LocalSimulation:
             raise ValueError("Unsupported local lab command; read data through snapshot()")
         if op in ("set_sensor_fault", "clear_sensor_faults", "set_leased_command"):
             request = _resilience_command(request)
-        elif op in ("claim_control", "release_control"):
+        elif op in ("claim_control", "renew_control", "release_control"):
             request = _ownership_command(request)
         timeout = max(self.timeout_s, WORLD_CALL_TIMEOUT_S) if op in WORLD_OPERATIONS else None
         return self._call({"method": "command", "command": dict(request)}, timeout_s=timeout)

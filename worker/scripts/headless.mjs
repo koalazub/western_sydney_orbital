@@ -140,7 +140,12 @@ export async function createHeadless({ publicRoot, rootRealPath, engineBuild }) 
           if (result.ok === false) return failure(result, result.code);
           if (result.ok !== true) throw new Error("Native engine did not return a valid command acknowledgement");
           // This is the native ACK only. Queued playback is read on a later tick.
-          value = { ok: true };
+          if (call.command.op === "renew_control") {
+            if (!result.ownership_renewal || typeof result.ownership_renewal !== "object") {
+              throw new Error("Native ownership renewal receipt unavailable");
+            }
+            value = { ok: true, ownership_renewal: result.ownership_renewal };
+          } else value = { ok: true };
         } else if (call.method === "preview") {
           const result = JSON.parse(api.set_navigation_preview(JSON.stringify(call.preview)));
           if (result.ok !== true) return failure(result, result.code);

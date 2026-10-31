@@ -284,6 +284,7 @@ def test_every_other_inherited_public_operation_is_blocked_before_even_a_snapsho
         "snapshot",
         "control_transaction",
         "claim_control",
+        "renew_control",
         "release_control",
         "set_leased_command",
         "play_checked",
@@ -388,6 +389,50 @@ def test_native_ownership_and_original_context_are_copied_without_changing_sourc
     parsed["command"]["expected_context"]["trial_revision"] = 10
     assert context["trial_revision"] == 3
     assert parsed["command"]["source_time_s"] == 12.5
+
+
+def test_room_ownership_renewal_copies_only_the_exact_native_ownership_envelope():
+    context, fence = _checked_metadata()
+    renewal = {
+        "op": "renew_control",
+        "controller_fence": fence,
+        "source_time_s": 12.5,
+        "lease_sim_s": 0.75,
+        "expected_context": context,
+        "expected_sensor_revision": 7,
+    }
+    parsed = _room_command(renewal)
+    assert parsed == renewal
+    parsed["controller_fence"]["term"] = 99
+    assert fence["term"] == 8
+    for request in [
+        {**renewal, "lease_sim_s": 0.750001},
+        {**renewal, "accel": [0, 0, 0]},
+        {key: value for key, value in renewal.items() if key != "expected_sensor_revision"},
+    ]:
+        with pytest.raises(ValueError):
+            _room_command(request)
+
+
+def test_room_forwards_the_real_native_ownership_receipt_without_an_actuator_snapshot(room_owner):
+    from wsorb.local_api import controller_fence, ownership_renewal_supported
+
+    _, _, _, path, _ = room_owner
+    client = RoomSimulation.from_file(path, allow_loopback=True, timeout_s=2)
+    initial = client.snapshot()
+    assert ownership_renewal_supported(initial)
+    grant = client.claim_control("room_renewal", "primary", initial, lease_sim_s=0.5)
+    fence = controller_fence(grant)
+    before = client.snapshot()
+    receipt = client.renew_control(before, controller_fence=fence)
+    assert set(receipt) == {"source_time_s", "lease_sim_s", "sensor_revision", "control_authority"}
+    assert receipt["source_time_s"] == before["observation"]["time_s"]
+    assert {name: receipt["control_authority"][name] for name in fence} == fence
+    after = client.snapshot()
+    assert after["observation"]["command_watchdog"] == before["observation"]["command_watchdog"]
+    assert after["observation"]["time_s"] == before["observation"]["time_s"]
+    assert after["runtime"]["running"] is False
+    client.release_control("room_renewal", fence["epoch"], after)
 
 
 def test_rpc_envelopes_use_fresh_uuids_and_bounded_integer_wall_deadlines():

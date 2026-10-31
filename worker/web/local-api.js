@@ -3,7 +3,7 @@ const POLL_MS = 50;
 const REQUEST_TIMEOUT_MS = 2500;
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
-const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
+const COMMANDS = new Set(["pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control", "renew_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
 const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 // Only these native rejections establish that an invoked command was unapplied.
 const UNAPPLIED_COMMAND_CODES = new Set(["stale_context", "command_expired"]);
@@ -259,7 +259,12 @@ export function connect(token) {
         if (result.ok !== true) throw new Error("Engine did not return a valid command acknowledgement");
         // Pause/play/view can be queued by the engine. This is only an ACK,
         // never a claim that the next Bevy frame has applied their effects.
-        value = { ok: true };
+        if (job.command.op === "renew_control") {
+          if (!result.ownership_renewal || typeof result.ownership_renewal !== "object") {
+            throw new Error("Native ownership renewal receipt unavailable");
+          }
+          value = { ok: true, ownership_renewal: result.ownership_renewal };
+        } else value = { ok: true };
       } else return failure("Unsupported local browser job");
       log("local.ack", { ok: true, command_invoked: commandInvoked });
       return { envelope: { id: job.id, ok: true, value }, commandInvoked };

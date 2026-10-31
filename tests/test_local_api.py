@@ -32,12 +32,15 @@ from wsorb.local_api import (
     SensorUnavailableError,
     StaleContextError,
     _connection,
+    _control_renewal_request,
     _leased_command_request,
     _ownership_command,
     _resilience_command,
     _seconds,
     _vector,
+    control_context,
     controller_fence,
+    ownership_renewal_supported,
     validate_experiment_settings,
     validate_surface_direction,
 )
@@ -488,6 +491,115 @@ def test_ownership_envelopes_validate_exact_fields_without_connecting():
             controller_fence(metadata)
 
 
+def test_ownership_renewal_requires_native_capability_and_never_installs_vectors():
+    """Request construction and compatibility rules only, not native flight evidence."""
+    context = {
+        "trial_revision": 3,
+        "tuning_revision": 4,
+        "manual_interventions": 2,
+        "seed": 100,
+        "running": True,
+    }
+    fence = {"epoch": 5, "term": 8, "run_id": "run_1", "controller_id": "controller-A"}
+    metadata = {
+        "observation": {
+            **{key: value for key, value in context.items() if key != "running"},
+            "time_s": 12.5,
+            "sensor_health": {"schema_version": 1, "revision": 7},
+            "control_authority": {**fence, "status": "active", "expires_at_sim_time_s": 12.75},
+            "control_capabilities": {
+                "ownership_renewal": {"schema_version": 1, "max_lease_sim_s": 0.75}
+            },
+        },
+        "runtime": {"running": True},
+    }
+    assert ownership_renewal_supported(metadata)
+    request = _control_renewal_request(metadata, controller_fence=fence, lease_sim_s=0.75)
+    assert request == {
+        "op": "renew_control",
+        "controller_fence": fence,
+        "source_time_s": 12.5,
+        "lease_sim_s": 0.75,
+        "expected_context": context,
+        "expected_sensor_revision": 7,
+    }
+    assert "accel" not in request and "angular_accel" not in request
+    request["controller_fence"]["term"] = 99
+    assert fence["term"] == 8
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    for capability in [
+        None,
+        {},
+        {"ownership_renewal": True},
+        {"ownership_renewal": {"schema_version": True, "max_lease_sim_s": 0.75}},
+        {"ownership_renewal": {"schema_version": 2, "max_lease_sim_s": 0.75}},
+        {"ownership_renewal": {"schema_version": 1, "max_lease_sim_s": 1.0}},
+    ]:
+        older = deepcopy(metadata)
+        older["observation"]["control_capabilities"] = capability
+        assert not ownership_renewal_supported(older)
+        with pytest.raises(ValueError, match="does not advertise"):
+            client.renew_control(older, controller_fence=fence)
+    older = deepcopy(metadata)
+    del older["observation"]["control_capabilities"]
+    assert not ownership_renewal_supported(older)
+    # The exact existing actuator request still works with the old source schema.
+    assert (
+        _leased_command_request(
+            [0, 0, 0], [0, 0, 0], older, controller_fence=fence, lease_sim_s=0.75
+        )["source_time_s"]
+        == 12.5
+    )
+    with pytest.raises(ValueError, match="does not advertise"):
+        client.renew_control(older, controller_fence=fence)
+    with pytest.raises(ValueError, match="active owner"):
+        client.renew_control(metadata, controller_fence={**fence, "term": 9})
+
+
+def test_ownership_renewal_bounds_and_exact_fields_are_checked_before_network_io():
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    request = {
+        "op": "renew_control",
+        "source_time_s": 12.5,
+        "lease_sim_s": 0.75,
+        "expected_sensor_revision": 7,
+        "expected_context": {
+            "trial_revision": 3,
+            "tuning_revision": 4,
+            "manual_interventions": 2,
+            "seed": 100,
+            "running": True,
+        },
+        "controller_fence": {"epoch": 5, "term": 8, "run_id": "run_1", "controller_id": "leader"},
+    }
+    assert _ownership_command(request) == request
+    invalid = [{key: value for key, value in request.items() if key != field} for field in request]
+    invalid.extend(
+        {**request, field: value}
+        for field, value in [
+            ("accel", [0, 0, 0]),
+            ("angular_accel", [0, 0, 0]),
+            ("extra", 0),
+            ("source_time_s", True),
+            ("source_time_s", -1),
+            ("source_time_s", float("nan")),
+            ("lease_sim_s", 0.049),
+            ("lease_sim_s", 0.750001),
+            ("lease_sim_s", float("inf")),
+            ("lease_sim_s", True),
+            ("expected_sensor_revision", True),
+            ("expected_sensor_revision", -1),
+            ("expected_sensor_revision", 2**32),
+            ("expected_context", {**request["expected_context"], "running": 1}),
+            ("controller_fence", None),
+            ("controller_fence", {**request["controller_fence"], "term": True}),
+        ]
+    )
+    for command in invalid:
+        with pytest.raises(ValueError):
+            client.command(command)
+
+
 def test_sensor_fault_input_checks_do_not_touch_the_network():
     client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
     for target, mode, duration in [
@@ -886,6 +998,67 @@ def test_headless_manual_takeover_rejects_old_claim_write_and_release_without_cl
     assert after["observation"]["applied_physics"]["requested"]["accel_body_mps2"] == [0.1, 0, 0]
     assert after["observation"]["time_s"] == manual["observation"]["time_s"]
     assert after["runtime"]["running"] is False
+
+
+def test_headless_ownership_receipt_preserves_original_watchdog_until_real_runtime_expiry(
+    headless_server,
+):
+    client = headless_server
+    initial = client.snapshot()
+    assert ownership_renewal_supported(initial)
+    assert initial["observation"]["control_capabilities"]["ownership_renewal"] == {
+        "schema_version": 1,
+        "max_lease_sim_s": 0.75,
+    }
+    grant = client.claim_control("renewal_run", "leader", initial, lease_sim_s=0.2)
+    fence = controller_fence(grant)
+    source = client.snapshot()
+    client.set_leased_command(
+        [0, 0.2, 0], [0, 0, 0], source, lease_sim_s=0.2, controller_fence=fence
+    )
+    before = client.snapshot()
+    watchdog = before["observation"]["command_watchdog"]
+    receipt = client.renew_control(before, controller_fence=fence)
+    assert set(receipt) == {"source_time_s", "lease_sim_s", "sensor_revision", "control_authority"}
+    assert receipt["source_time_s"] == before["observation"]["time_s"]
+    assert receipt["lease_sim_s"] == 0.75
+    assert receipt["sensor_revision"] == before["observation"]["sensor_health"]["revision"]
+    assert {name: receipt["control_authority"][name] for name in fence} == fence
+    assert receipt["control_authority"]["expires_at_sim_time_s"] == receipt["source_time_s"] + 0.75
+    after = client.snapshot()
+    assert after["observation"]["command_watchdog"]["source_time_s"] == watchdog["source_time_s"]
+    assert (
+        after["observation"]["command_watchdog"]["expires_at_sim_time_s"]
+        == watchdog["expires_at_sim_time_s"]
+    )
+    expired_command = _wait_for_actual_snapshot(
+        client, lambda value: value["observation"]["command_watchdog"]["status"] == "expired"
+    )
+    assert controller_fence(expired_command) == fence
+    assert expired_command["observation"]["time_s"] == before["observation"]["time_s"]
+    assert expired_command["observation"]["applied_physics"]["requested"]["accel_body_mps2"] == [
+        0,
+        0,
+        0,
+    ]
+    with pytest.raises(StaleContextError):
+        client.renew_control(expired_command, controller_fence=fence)
+    expired_owner = _wait_for_actual_snapshot(
+        client, lambda value: value["observation"]["control_authority"]["status"] == "expired"
+    )
+    with pytest.raises(StaleContextError):
+        client.command(
+            {
+                "op": "renew_control",
+                "controller_fence": fence,
+                "lease_sim_s": 0.75,
+                "source_time_s": expired_owner["observation"]["time_s"],
+                "expected_context": {**control_context(expired_owner)},
+                "expected_sensor_revision": expired_owner["observation"]["sensor_health"][
+                    "revision"
+                ],
+            }
+        )
 
 
 def test_headless_never_accepts_browser_page_leases_or_browser_results(headless_server):
@@ -1507,6 +1680,74 @@ def test_fault_and_lease_server_validation_requires_an_actual_browser_for_valid_
                 assert local_server._token not in json.dumps(failure)
             finally:
                 rejected.value.close()
+    assert local_server.status()["connected"] is False
+    assert local_server.status()["busy"] is False
+
+
+def test_ownership_renewal_http_schema_remains_authenticated_exact_and_bounded(local_server):
+    request = {
+        "op": "renew_control",
+        "source_time_s": 12.5,
+        "lease_sim_s": 0.75,
+        "expected_sensor_revision": 7,
+        "expected_context": {
+            "trial_revision": 3,
+            "tuning_revision": 4,
+            "manual_interventions": 2,
+            "seed": 100,
+            "running": True,
+        },
+        "controller_fence": {"epoch": 5, "term": 8, "run_id": "run_1", "controller_id": "leader"},
+    }
+    payload = {"method": "command", "command": request}
+    with pytest.raises(HTTPError) as denied:
+        _http(
+            local_server,
+            "/__local/call",
+            headers={"Content-Type": "application/json"},
+            payload=payload,
+        )
+    try:
+        assert denied.value.code == 401
+    finally:
+        denied.value.close()
+    headers = {"Authorization": f"Bearer {local_server._token}", "Content-Type": "application/json"}
+    # A valid envelope is not an execution or a replacement browser acknowledgement.
+    with pytest.raises(HTTPError) as unavailable:
+        _http(local_server, "/__local/call", headers=headers, payload=payload)
+    try:
+        assert unavailable.value.code == 503
+    finally:
+        unavailable.value.close()
+    invalid = [{key: value for key, value in request.items() if key != field} for field in request]
+    invalid.extend(
+        {**request, field: value}
+        for field, value in [
+            ("lease_sim_s", 0.049),
+            ("lease_sim_s", 0.750001),
+            ("source_time_s", True),
+            ("source_time_s", -1),
+            ("expected_sensor_revision", -1),
+            ("expected_sensor_revision", 2**32),
+            ("controller_fence", None),
+            ("controller_fence", {**request["controller_fence"], "term": True}),
+            ("expected_context", {**request["expected_context"], "running": 1}),
+            ("accel", [0, 0, 0]),
+            ("angular_accel", [0, 0, 0]),
+        ]
+    )
+    for command in invalid:
+        with pytest.raises(HTTPError) as rejected:
+            _http(
+                local_server,
+                "/__local/call",
+                headers=headers,
+                payload={"method": "command", "command": command},
+            )
+        try:
+            assert rejected.value.code == 400
+        finally:
+            rejected.value.close()
     assert local_server.status()["connected"] is False
     assert local_server.status()["busy"] is False
 

@@ -1047,6 +1047,294 @@ fn fenced_lease(sim: &Simulation, fence: &ControlFence, duration: f64) -> Leased
     }
 }
 
+fn ownership_renewal(sim: &Simulation, fence: &ControlFence, duration: f64) -> ControlRenewal {
+    ControlRenewal {
+        controller_fence: fence.clone(),
+        source_time_s: sim.state.time_s,
+        lease_sim_s: duration,
+    }
+}
+
+#[test]
+fn ownership_capability_is_optional_metadata_outside_the_unchanged_authority_schema() {
+    let sim = simulation(0);
+    let report = sim.observation();
+    assert_eq!(
+        report["control_capabilities"]["ownership_renewal"],
+        json!({
+            "schema_version": 1, "max_lease_sim_s": 0.75,
+        })
+    );
+    assert_eq!(report["control_authority"].as_object().unwrap().len(), 6);
+    assert_eq!(report["control_authority"]["status"], "idle");
+    assert_eq!(report["command_watchdog"]["status"], "idle");
+}
+
+#[test]
+fn minimum_ownership_renewal_uses_its_actual_new_source_without_claiming_or_installing_a_command() {
+    let mut sim = simulation(0);
+    let fence = claim(&mut sim, "run", "primary", 0.05);
+    sim.advance(0.02);
+    let source = sim.state.time_s;
+    let watchdog = sim.observation()["command_watchdog"].clone();
+    let receipt = sim
+        .renew_control(ownership_renewal(&sim, &fence, 0.05))
+        .unwrap();
+    assert_eq!(receipt.source_time_s, source);
+    assert_eq!(
+        receipt.control_authority.expires_at_sim_time_s,
+        Some(source + 0.05)
+    );
+    assert_eq!(receipt.control_authority.fence(), Some(fence));
+    assert_eq!(sim.observation()["command_watchdog"], watchdog);
+    assert_eq!(ship(&sim).commanded_accel_mps2, [0.0; 3]);
+}
+
+#[test]
+fn cohorts_without_an_ownership_heartbeat_keep_the_original_direct_actuator_lease_contract() {
+    let mut sim = simulation(0);
+    let fence = claim(&mut sim, "legacy_run", "primary", 0.75);
+    sim.set_leased_command(fenced_lease(&sim, &fence, 0.1))
+        .unwrap();
+    assert_eq!(sim.control_authority().expires_at_sim_time_s, Some(0.1));
+    assert_eq!(
+        sim.observation()["command_watchdog"]["expires_at_sim_time_s"],
+        0.1
+    );
+    sim.advance(0.1);
+    assert_eq!(
+        sim.control_authority().status,
+        ControlAuthorityStatus::Expired
+    );
+    assert_eq!(ship(&sim).commanded_accel_mps2, [0.0; 3]);
+}
+
+#[test]
+fn ownership_renewal_changes_only_authority_and_the_original_command_expires_normally() {
+    let mut sim = simulation(0);
+    let primary = claim(&mut sim, "run", "primary", 0.2);
+    sim.set_leased_command(fenced_lease(&sim, &primary, 0.2))
+        .unwrap();
+    sim.advance(0.05);
+    let before = sim.snapshot();
+    let applied = serde_json::to_value(sim.applied_physics().unwrap()).unwrap();
+    let command_runtime_deadline = sim.control_runtime.command_deadline_s;
+    let request = ownership_renewal(&sim, &primary, 0.75);
+    let receipt = sim.renew_control(request.clone()).unwrap();
+    assert_eq!(receipt.source_time_s, before.time_s);
+    assert_eq!(receipt.lease_sim_s, 0.75);
+    assert_eq!(receipt.sensor_revision, sim.sensor_revision());
+    assert_eq!(receipt.control_authority, sim.control_authority());
+    assert_eq!(receipt.control_authority.fence(), Some(primary.clone()));
+    assert_eq!(
+        receipt.control_authority.expires_at_sim_time_s,
+        Some(before.time_s + 0.75)
+    );
+    assert_eq!(
+        sim.control_runtime.command_deadline_s,
+        command_runtime_deadline
+    );
+    assert_eq!(
+        serde_json::to_value(sim.applied_physics().unwrap()).unwrap(),
+        applied
+    );
+    let mut original = serde_json::to_value(before).unwrap();
+    let mut renewed = serde_json::to_value(sim.snapshot()).unwrap();
+    original["sensor_state"]["control_authority"].take();
+    renewed["sensor_state"]["control_authority"].take();
+    assert_eq!(renewed, original, "only native ownership may change");
+
+    let archive = sim.snapshot();
+    validate_sensor_state(&archive).unwrap();
+    let mut invalid = archive.clone();
+    invalid
+        .sensor_state
+        .as_mut()
+        .unwrap()
+        .control_authority
+        .as_mut()
+        .unwrap()
+        .expires_at_sim_time_s = Some(0.1);
+    assert!(validate_sensor_state(&invalid).is_err());
+    let unchanged = serde_json::to_value(sim.snapshot()).unwrap();
+    assert!(matches!(
+        sim.renew_control(request),
+        Err(LeaseError::StaleContext)
+    ));
+    assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), unchanged);
+
+    sim.advance(0.2);
+    assert_eq!(
+        sim.control_authority().status,
+        ControlAuthorityStatus::Active
+    );
+    assert_eq!(sim.control_authority().fence(), Some(primary.clone()));
+    let watchdog = &sim.state.sensor_state.as_ref().unwrap().command_watchdog;
+    assert_eq!(watchdog.status, CommandWatchdogStatus::Expired);
+    assert_eq!(watchdog.source_time_s, Some(0.0));
+    assert_eq!(watchdog.expires_at_sim_time_s, Some(0.2));
+    assert_eq!(ship(&sim).commanded_accel_mps2, [0.0; 3]);
+    assert_eq!(ship(&sim).commanded_angular_accel_rad_s2, [0.0; 3]);
+    assert!(sim.state.time_s > 0.2);
+
+    // A separately calculated fresh command still needs normal fenced admission.
+    let source = sim.state.time_s;
+    sim.set_leased_command(fenced_lease(&sim, &primary, 0.05))
+        .unwrap();
+    assert_eq!(sim.control_authority().expires_at_sim_time_s, Some(0.8));
+    assert_eq!(
+        sim.observation()["command_watchdog"]["source_time_s"],
+        source
+    );
+    assert_eq!(
+        sim.observation()["command_watchdog"]["expires_at_sim_time_s"],
+        source + 0.05
+    );
+    let mut restored = simulation(0);
+    restored
+        .execute(PhysicsCommand::Restore {
+            state: Box::new(archive),
+        })
+        .unwrap();
+    assert_eq!(
+        restored.control_authority().status,
+        ControlAuthorityStatus::Revoked
+    );
+    assert_eq!(ship(&restored).commanded_accel_mps2, [0.0; 3]);
+}
+
+#[test]
+fn ownership_renewal_rejects_stale_fences_sources_bounds_and_expired_or_revoked_owners_atomically()
+{
+    let mut sim = simulation(0);
+    let primary = claim(&mut sim, "run", "primary", 0.2);
+    sim.set_leased_command(fenced_lease(&sim, &primary, 0.2))
+        .unwrap();
+    sim.advance(0.05);
+    let request = ownership_renewal(&sim, &primary, 0.75);
+    let mut invalid = vec![
+        ControlRenewal {
+            lease_sim_s: 0.049,
+            ..request.clone()
+        },
+        ControlRenewal {
+            lease_sim_s: 0.750001,
+            ..request.clone()
+        },
+        ControlRenewal {
+            lease_sim_s: f64::NAN,
+            ..request.clone()
+        },
+        ControlRenewal {
+            lease_sim_s: f64::INFINITY,
+            ..request.clone()
+        },
+        ControlRenewal {
+            source_time_s: -1.0,
+            ..request.clone()
+        },
+        ControlRenewal {
+            source_time_s: sim.state.time_s + 0.01,
+            ..request.clone()
+        },
+        ControlRenewal {
+            source_time_s: f64::NAN,
+            ..request.clone()
+        },
+        ControlRenewal {
+            source_time_s: 0.0,
+            lease_sim_s: 0.05,
+            ..request.clone()
+        },
+    ];
+    for fence in [
+        ControlFence {
+            epoch: primary.epoch + 1,
+            ..primary.clone()
+        },
+        ControlFence {
+            term: primary.term + 1,
+            ..primary.clone()
+        },
+        ControlFence {
+            run_id: "another_run".into(),
+            ..primary.clone()
+        },
+        ControlFence {
+            controller_id: "standby".into(),
+            ..primary.clone()
+        },
+        ControlFence {
+            controller_id: "bad/owner".into(),
+            ..primary.clone()
+        },
+    ] {
+        invalid.push(ControlRenewal {
+            controller_fence: fence,
+            ..request.clone()
+        });
+    }
+    for request in invalid {
+        let before = serde_json::to_value(sim.snapshot()).unwrap();
+        let runtime = sim.control_runtime;
+        assert!(sim.renew_control(request).is_err());
+        assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+        assert_eq!(sim.control_runtime.deadline_s, runtime.deadline_s);
+        assert_eq!(
+            sim.control_runtime.command_deadline_s,
+            runtime.command_deadline_s
+        );
+    }
+    sim.advance(0.2);
+    let before = serde_json::to_value(sim.snapshot()).unwrap();
+    assert!(matches!(
+        sim.renew_control(ownership_renewal(&sim, &primary, 0.75)),
+        Err(LeaseError::StaleContext)
+    ));
+    assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+    let peer = claim(&mut sim, "run", "standby", 0.2);
+    assert_eq!(peer.term, primary.term + 1);
+    let before = serde_json::to_value(sim.snapshot()).unwrap();
+    assert!(matches!(
+        sim.renew_control(ownership_renewal(&sim, &primary, 0.75)),
+        Err(LeaseError::StaleContext)
+    ));
+    assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+    sim.set_manual_thrust([0.0, 0.2, 0.0]).unwrap();
+    let before = serde_json::to_value(sim.snapshot()).unwrap();
+    assert!(matches!(
+        sim.renew_control(ownership_renewal(&sim, &peer, 0.75)),
+        Err(LeaseError::StaleContext)
+    ));
+    assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+}
+
+#[test]
+fn ownership_renewal_cannot_hold_a_leader_without_eligible_native_sensor_delivery() {
+    for target in [SensorFaultTarget::Navigation, SensorFaultTarget::RadarBus] {
+        for mode in [SensorFaultMode::Frozen, SensorFaultMode::Unavailable] {
+            let mut sim = simulation(0);
+            let primary = claim(&mut sim, "run", "primary", 0.2);
+            sim.set_leased_command(fenced_lease(&sim, &primary, 0.2))
+                .unwrap();
+            sim.advance(0.05);
+            sim.set_sensor_fault(target, mode, Some(1.0)).unwrap();
+            let before = serde_json::to_value(sim.snapshot()).unwrap();
+            let runtime = sim.control_runtime;
+            assert!(matches!(
+                sim.renew_control(ownership_renewal(&sim, &primary, 0.75)),
+                Err(LeaseError::Unavailable)
+            ));
+            assert_eq!(serde_json::to_value(sim.snapshot()).unwrap(), before);
+            assert_eq!(sim.control_runtime.deadline_s, runtime.deadline_s);
+            assert_eq!(
+                sim.control_runtime.command_deadline_s,
+                runtime.command_deadline_s
+            );
+        }
+    }
+}
+
 #[test]
 fn actual_authority_excludes_a_healthy_leader_then_fences_late_primary_writes() {
     let mut sim = simulation(0);

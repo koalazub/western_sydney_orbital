@@ -86,6 +86,12 @@ function command(value: unknown): asserts value is Record<string, unknown> {
       shape(value, ["op", "run_id", "expected_epoch", "expected_context"]);
       if (!controlId(value.run_id) || !unsigned(value.expected_epoch)) invalid("Invalid controller release");
       break;
+    case "renew_control":
+      shape(value, ["op", "controller_fence", "source_time_s", "lease_sim_s", "expected_context", "expected_sensor_revision"]);
+      lease(value);
+      if ((value.lease_sim_s as number) > 0.75 || !unsigned(value.expected_sensor_revision)) invalid("Invalid ownership renewal lease or sensor revision");
+      fence(value.controller_fence);
+      break;
     case "set_leased_command":
       shape(value, ["op", "accel", "angular_accel", "source_time_s", "lease_sim_s", "expected_context", "expected_sensor_revision", "controller_fence"]);
       lease(value);
@@ -191,6 +197,10 @@ function runCall(
     if (result.ok !== true) throw new Error("Native acknowledgement unavailable");
     // Play is queued by the real engine. This ACK does not assert it has run.
     recordDiagnostic("room.ack", () => ({ ...trace, diagnostics, method: "command", ok: true, command_invoked: true }));
+    if ((call.command as Record<string, unknown>).op === "renew_control") {
+      if (!record(result.ownership_renewal)) throw new Error("Native ownership renewal receipt unavailable");
+      return { ok: true, value: { ok: true, ownership_renewal: result.ownership_renewal } };
+    }
     return { ok: true, value: { ok: true } };
   } catch (error) {
     if (execution.commandInvoked) {

@@ -2,9 +2,9 @@
 use super::*;
 use crate::model::{
     CommandWatchdog, CommandWatchdogStatus, ControlAuthority, ControlAuthorityStatus, ControlClaim,
-    ControlFence, ControlRelease, LeaseError, LeasedCommand, NavigationSample, RadarFrame,
-    RadarRow, SensorDelivery, SensorFault, SensorFaultMode, SensorFaultTarget, SensorState,
-    SensorUnitId, sensor_delivery, valid_control_id,
+    ControlFence, ControlRelease, ControlRenewal, ControlRenewalReceipt, LeaseError, LeasedCommand,
+    NavigationSample, RadarFrame, RadarRow, SensorDelivery, SensorFault, SensorFaultMode,
+    SensorFaultTarget, SensorState, SensorUnitId, sensor_delivery, valid_control_id,
 };
 
 /// Live runtime clock only. Neither value is loaded from or written to an archive.
@@ -12,6 +12,8 @@ use crate::model::{
 pub(super) struct ControlRuntimeClock {
     now_s: Option<f64>,
     deadline_s: Option<f64>,
+    command_deadline_s: Option<f64>,
+    ownership_renewed: bool,
 }
 
 impl Simulation {
@@ -63,6 +65,7 @@ impl Simulation {
         if let Some(authority) = authority {
             if authority.status != ControlAuthorityStatus::Active {
                 self.control_runtime.deadline_s = None;
+                self.control_runtime.ownership_renewed = false;
             }
             self.sensor_state_mut().control_authority = Some(authority);
         }
@@ -72,6 +75,8 @@ impl Simulation {
         self.control_runtime = ControlRuntimeClock {
             now_s: previous.control_runtime.now_s,
             deadline_s: None,
+            command_deadline_s: None,
+            ownership_renewed: false,
         };
     }
 
@@ -101,7 +106,24 @@ impl Simulation {
                     Some(if deadline.is_finite() { deadline } else { now });
             }
         }
-        self.expire_control_authority()
+        let command_expiry = self.state.sensor_state.as_ref().and_then(|state| {
+            (state.command_watchdog.status == CommandWatchdogStatus::Active
+                && state.command_watchdog.controller_fence.is_some())
+            .then_some(state.command_watchdog.expires_at_sim_time_s)
+            .flatten()
+        });
+        if let Some(expiry) = command_expiry {
+            if previous.is_some_and(|previous| now < previous) {
+                self.control_runtime.command_deadline_s = Some(now);
+            } else if self.control_runtime.command_deadline_s.is_none() {
+                let start = previous.unwrap_or_else(|| (now - time.delta_secs_f64()).max(0.0));
+                let deadline = start + expiry - self.state.time_s;
+                self.control_runtime.command_deadline_s =
+                    Some(if deadline.is_finite() { deadline } else { now });
+            }
+        }
+        let authority_expired = self.expire_control_authority();
+        self.expire_command_lease() || authority_expired
     }
 
     fn control_deadline_elapsed(&self, authority: &ControlAuthority) -> bool {
@@ -257,6 +279,7 @@ impl Simulation {
             expires_at_sim_time_s: Some(expiry),
         }));
         self.control_runtime.deadline_s = runtime_expiry;
+        self.control_runtime.ownership_renewed = false;
         Ok(())
     }
 
@@ -278,6 +301,53 @@ impl Simulation {
         }
         self.revoke_control().map_err(LeaseError::Rejected)?;
         Ok(())
+    }
+
+    /// Keep this live owner only. Never claim a term or touch an actuator lease.
+    pub fn renew_control(
+        &mut self,
+        request: ControlRenewal,
+    ) -> Result<ControlRenewalReceipt, LeaseError> {
+        if !request.lease_sim_s.is_finite() || !(0.05..=0.75).contains(&request.lease_sim_s) {
+            return Err(LeaseError::Rejected(
+                "Ownership renewal lease_sim_s must be between 0.05 and 0.75.".into(),
+            ));
+        }
+        let expiry = self.command_deadline(request.source_time_s, request.lease_sim_s)?;
+        let runtime_expiry = self.command_runtime_deadline(expiry)?;
+        let mut authority = self.control_authority();
+        if !valid_control_id(&request.controller_fence.run_id)
+            || !valid_control_id(&request.controller_fence.controller_id)
+            || authority.status != ControlAuthorityStatus::Active
+            || authority.fence().as_ref() != Some(&request.controller_fence)
+            || self.control_deadline_elapsed(&authority)
+            || authority
+                .expires_at_sim_time_s
+                .is_none_or(|old| expiry <= old)
+        {
+            return Err(LeaseError::StaleContext);
+        }
+        if !self.autonomous_delivery_ready() {
+            return Err(LeaseError::Unavailable);
+        }
+        // Extending a lease on a held simulation source must not slide its real
+        // runtime origin. Only the source-based deadline increase is available.
+        let runtime_expiry = match (runtime_expiry, self.control_runtime.deadline_s) {
+            (Some(proposed), Some(previous)) => {
+                Some(proposed.min(previous + (expiry - authority.expires_at_sim_time_s.unwrap())))
+            }
+            (proposed, _) => proposed,
+        };
+        authority.expires_at_sim_time_s = Some(expiry);
+        self.install_control_authority(Some(authority.clone()));
+        self.control_runtime.deadline_s = runtime_expiry;
+        self.control_runtime.ownership_renewed = true;
+        Ok(ControlRenewalReceipt {
+            source_time_s: request.source_time_s,
+            lease_sim_s: request.lease_sim_s,
+            sensor_revision: self.sensor_revision(),
+            control_authority: authority,
+        })
     }
 
     /// Checked Play may start this cohort but must not authorize a revoked one.
@@ -444,22 +514,44 @@ impl Simulation {
         if nonzero && !self.autonomous_delivery_ready() {
             return Err(LeaseError::Unavailable);
         }
-        let runtime_expiry = if request.controller_fence.is_some() {
+        let command_runtime_expiry = if request.controller_fence.is_some() {
             self.command_runtime_deadline(expiry)?
         } else {
             None
         };
+        let authority_expiry = request.controller_fence.as_ref().map(|_| {
+            if self.control_runtime.ownership_renewed {
+                self.control_authority()
+                    .expires_at_sim_time_s
+                    .unwrap()
+                    .max(expiry)
+            } else {
+                // Cohorts that never opted into ownership-only renewal retain
+                // the existing direct atomic actuator-renewal contract.
+                expiry
+            }
+        });
+        let authority_runtime_expiry = match authority_expiry {
+            Some(owner_expiry)
+                if !self.control_runtime.ownership_renewed
+                    || expiry >= self.control_authority().expires_at_sim_time_s.unwrap() =>
+            {
+                self.command_runtime_deadline(owner_expiry)?
+            }
+            _ => self.control_runtime.deadline_s,
+        };
         // Do not route fenced writes through manual SetCommand's consent takeover.
         self.set_bounded_command(request.accel, request.angular_accel)
             .map_err(LeaseError::Rejected)?;
-        if request.controller_fence.is_some() {
+        if let Some(authority_expiry) = authority_expiry {
             self.sensor_state_mut()
                 .control_authority
                 .as_mut()
                 .expect("validated live controller authority")
-                .expires_at_sim_time_s = Some(expiry);
-            self.control_runtime.deadline_s = runtime_expiry;
+                .expires_at_sim_time_s = Some(authority_expiry);
+            self.control_runtime.deadline_s = authority_runtime_expiry;
         }
+        self.control_runtime.command_deadline_s = command_runtime_expiry;
         self.sensor_state_mut().command_watchdog = CommandWatchdog {
             status: CommandWatchdogStatus::Active,
             source_time_s: Some(request.source_time_s),
@@ -493,6 +585,7 @@ impl Simulation {
     }
 
     pub(super) fn cancel_command_lease(&mut self) {
+        self.control_runtime.command_deadline_s = None;
         if let Some(state) = &mut self.state.sensor_state {
             state.command_watchdog = CommandWatchdog::default();
         }
@@ -526,6 +619,7 @@ impl Simulation {
         if watchdog.status != CommandWatchdogStatus::Active {
             return;
         }
+        self.control_runtime.command_deadline_s = None;
         // A successful manual/legacy replacement already removed this marker.
         // Zero forces, not velocity. The next normal step still applies gravity.
         self.set_bounded_command([0.0; 3], [0.0; 3])
@@ -556,16 +650,26 @@ impl Simulation {
     pub(super) fn enforce_sensor_and_command_deadlines(&mut self) {
         self.expire_sensor_faults();
         self.expire_control_authority();
+        self.expire_command_lease();
+    }
+
+    fn expire_command_lease(&mut self) -> bool {
         let expired = self.state.sensor_state.as_ref().is_some_and(|state| {
             state.command_watchdog.status == CommandWatchdogStatus::Active
-                && state
+                && (state
                     .command_watchdog
                     .expires_at_sim_time_s
                     .is_some_and(|expiry| expiry <= self.state.time_s)
+                    || self
+                        .control_runtime
+                        .now_s
+                        .zip(self.control_runtime.command_deadline_s)
+                        .is_some_and(|(now, deadline)| deadline <= now))
         });
         if expired {
             self.clear_owned_lease(CommandWatchdogStatus::Expired);
         }
+        expired
     }
 
     pub(super) fn invalidate_sensor_samples(&mut self) {
@@ -675,6 +779,9 @@ impl Simulation {
     }
 
     pub(super) fn project_sensor_delivery(&self, report: &mut Value) {
+        report["control_capabilities"] = json!({
+            "ownership_renewal": {"schema_version": 1, "max_lease_sim_s": 0.75}
+        });
         report["control_authority"] = json!(self.control_authority());
         report["radar_backup"] = json!([]);
         report["navigation_sample_time_s"] = json!(self.state.time_s);
@@ -1035,7 +1142,10 @@ pub(super) fn validate_sensor_state(snapshot: &Snapshot) -> Result<(), String> {
                     || (watchdog.status == CommandWatchdogStatus::Active
                         && (authority.status != ControlAuthorityStatus::Active
                             || authority.fence().as_ref() != Some(fence)
-                            || authority.expires_at_sim_time_s != watchdog.expires_at_sim_time_s))
+                            || authority
+                                .expires_at_sim_time_s
+                                .zip(watchdog.expires_at_sim_time_s)
+                                .is_none_or(|(owner, command)| owner < command)))
             })
         {
             return Err("Invalid archived controller command fence.".into());

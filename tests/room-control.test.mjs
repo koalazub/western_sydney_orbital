@@ -31,14 +31,14 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
     seed: value.observation.seed,
     running: value.runtime.running,
   });
-  const claim = value => ({
-    op: "claim_control", run_id: "room-test", controller_id: "native-primary",
+  const claim = (value, run_id = "room-test") => ({
+    op: "claim_control", run_id, controller_id: "native-primary",
     expected_epoch: value.observation.control_authority.epoch,
     expected_term: value.observation.control_authority.term,
     source_time_s: value.observation.time_s, lease_sim_s: 1, expected_context: context(value),
   });
-  const release = value => ({
-    op: "release_control", run_id: "room-test", expected_epoch: value.observation.control_authority.epoch,
+  const release = (value, run_id = "room-test") => ({
+    op: "release_control", run_id, expected_epoch: value.observation.control_authority.epoch,
     expected_context: context(value),
   });
   const leased = value => {
@@ -51,6 +51,14 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
         epoch: authority.epoch, term: authority.term,
         run_id: authority.run_id ?? "room-test", controller_id: authority.controller_id ?? "native-primary",
       },
+    };
+  };
+  const renewed = value => {
+    const request = leased(value);
+    return {
+      op: "renew_control", controller_fence: request.controller_fence,
+      source_time_s: request.source_time_s, lease_sim_s: 0.75,
+      expected_context: request.expected_context, expected_sensor_revision: request.expected_sensor_revision,
     };
   };
   const preInvocation = call => {
@@ -84,6 +92,7 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
       assert.equal(result.renderer.started, false);
       assert.equal(result.renderer.ready, false);
       assert.equal(result.cameras.configured, false);
+      assert.deepEqual(result.observation.control_capabilities.ownership_renewal, { schema_version: 1, max_lease_sim_s: 0.75 });
       assert.deepEqual(result.cameras.views, []);
       for (const field of ["state", "assets", "rng_state", "sensor_state"]) {
         assert.equal(Object.hasOwn(result.observation, field), false, `${field} is not a public observation`);
@@ -117,7 +126,7 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
 
     await t.test("only exact checked command shapes, fences and bounded vectors are admitted", () => {
       const before = snapshot();
-      const requests = [claim(before), release(before), leased(before), { op: "play", rate: 1, expected_context: context(before) }];
+      const requests = [claim(before), release(before), leased(before), renewed(before), { op: "play", rate: 1, expected_context: context(before) }];
       for (const request of requests) {
         for (const missing of Object.keys(request)) {
           const invalid = structuredClone(request);
@@ -144,6 +153,10 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
         preInvocation(envelope("command", { command: { op: "play", rate, expected_context: context(before) } }));
       }
       const bounded = leased(before);
+      for (const [field, value] of [["lease_sim_s", 0.750001], ["lease_sim_s", 0.049],
+        ["expected_sensor_revision", true], ["controller_fence", null], ["accel", [0, 0, 0]], ["angular_accel", [0, 0, 0]]]) {
+        preInvocation(envelope("command", { command: { ...renewed(before), [field]: value } }));
+      }
       for (const [field, value] of [
         ["accel", [0.4, 0.4, 0]], ["accel", [0, 0, 0.50001]], ["accel", [NaN, 0, 0]],
         ["accel", [Infinity, 0, 0]], ["accel", [false, 0, 0]], ["accel", ["0", 0, 0]], ["accel", [0, 0]],
@@ -266,6 +279,62 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
       assert.equal(expired.renderer.started, false);
       assert.equal(expired.renderer.ready, false);
       assert.equal(expired.cameras.configured, false);
+    });
+
+    await t.test("ownership renewal forwards its actual native receipt without installing or extending actuation", () => {
+      // Reset only this test-owned native WASM after the existing claim/Play
+      // regression has completed. Reset must establish the real new trial;
+      // changing an old request's epoch or playback context would not isolate it.
+      const previous = snapshot();
+      assert.deepEqual(JSON.parse(api.control(JSON.stringify({ op: "reset" }))), { ok: true });
+      assert.equal(headless.status().physics_ready, true);
+      const before = snapshot();
+      assert.equal(before.runtime.running, false);
+      assert.equal(before.observation.time_s, 0);
+      assert.equal(before.observation.seed, previous.observation.seed);
+      assert.equal(before.observation.trial_revision, previous.observation.trial_revision + 1);
+      assert.deepEqual(before.observation.experiment_settings, previous.observation.experiment_settings);
+      const priorAuthority = previous.observation.control_authority;
+      const resetAuthority = before.observation.control_authority;
+      if (["active", "expired"].includes(priorAuthority.status)) {
+        assert.equal(resetAuthority.status, "revoked");
+        assert.equal(resetAuthority.epoch, priorAuthority.epoch + 1);
+        assert.equal(resetAuthority.term, priorAuthority.term);
+        assert.equal(resetAuthority.run_id, priorAuthority.run_id);
+        assert.equal(resetAuthority.controller_id, null);
+        assert.equal(resetAuthority.expires_at_sim_time_s, null);
+      } else {
+        assert.deepEqual(resetAuthority, priorAuthority);
+      }
+      assert.equal(before.observation.command_watchdog.status, "idle");
+      // This is a new explicit cohort for the reset trial. All context and
+      // expected-counter fields still come directly from its native observation.
+      const run = "ownership-renewal-test";
+      assert.notEqual(run, before.observation.control_authority.run_id);
+      assert.equal(invoke("command", { command: { ...claim(before, run), lease_sim_s: 0.1 } }).ok, true);
+      const granted = snapshot();
+      assert.equal(invoke("command", { command: { ...leased(granted), lease_sim_s: 0.05 } }).ok, true);
+      const source = snapshot();
+      const request = renewed(source);
+      const response = invoke("command", { command: request });
+      assert.equal(response.ok, true, response.error);
+      const after = snapshot();
+      assert.deepEqual(response, { ok: true, value: { ok: true, ownership_renewal: {
+        source_time_s: source.observation.time_s, lease_sim_s: 0.75,
+        sensor_revision: source.observation.sensor_health.revision,
+        control_authority: after.observation.control_authority,
+      } } });
+      assert.equal(after.observation.control_authority.run_id, run);
+      assert.equal(after.observation.control_authority.expires_at_sim_time_s, request.source_time_s + 0.75);
+      assert.equal(after.observation.control_authority.term, source.observation.control_authority.term);
+      assert.deepEqual(after.observation.command_watchdog, source.observation.command_watchdog);
+      assert.deepEqual(after.observation.shuttle, source.observation.shuttle);
+      assert.deepEqual(after.observation.applied_physics, source.observation.applied_physics);
+      assert.equal(after.observation.time_s, source.observation.time_s);
+      assert.deepEqual(after.runtime, source.runtime);
+      nativeRejection(request, "stale_context");
+      assert.deepEqual(snapshot(), after);
+      assert.deepEqual(invoke("command", { command: release(after, run) }), { ok: true, value: { ok: true } });
     });
   } finally {
     // Stop only this test's scheduler. Never issue native pause/reset/release on

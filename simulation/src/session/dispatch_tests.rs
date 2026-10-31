@@ -1350,6 +1350,14 @@ fn control_lease(fence: &crate::model::ControlFence, duration: f64) -> Value {
     })
 }
 
+fn control_renewal(fence: &crate::model::ControlFence, duration: f64) -> Value {
+    serde_json::json!({
+        "op": "renew_control", "controller_fence": fence,
+        "source_time_s": snapshot().time_s, "lease_sim_s": duration,
+        "expected_sensor_revision": sensor_revision(),
+    })
+}
+
 fn assert_control_rejected_unchanged(mut request: Value, code: &str) {
     if request.get("expected_context").is_none() {
         request["expected_context"] = context_json(current_context());
@@ -1367,6 +1375,136 @@ fn assert_control_rejected_unchanged(mut request: Value, code: &str) {
     assert_eq!(playback_state(), runtime);
     assert_eq!(keyboard_state(), keyboard);
     assert_eq!(queued_actions(), actions);
+}
+
+#[test]
+fn ownership_renewal_returns_only_a_native_receipt_without_publication_or_actuator_changes() {
+    let _app = fresh_app();
+    assert_eq!(
+        observation()["control_capabilities"]["ownership_renewal"]["schema_version"],
+        1
+    );
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.1))["ok"],
+        true
+    );
+    let fence = actual_fence();
+    assert_eq!(control_call(control_lease(&fence, 0.1))["ok"], true);
+    let before = physics_json();
+    let published = snapshot();
+    let runtime = playback_state();
+    let actions = queued_actions();
+    let keyboard = keyboard_state();
+    let applied = serde_json::to_value(applied_physics().unwrap()).unwrap();
+    let response = control_call(control_renewal(&fence, 0.75));
+    assert_eq!(
+        response,
+        serde_json::json!({"ok": true, "ownership_renewal": {
+            "source_time_s": published.time_s, "lease_sim_s": 0.75,
+            "sensor_revision": sensor_revision(), "control_authority": observation()["control_authority"],
+        }})
+    );
+    assert_eq!(actual_fence(), fence);
+    assert_eq!(
+        observation()["control_authority"]["expires_at_sim_time_s"],
+        published.time_s + 0.75
+    );
+    let mut after = physics_json();
+    let mut before = before;
+    after["sensor_state"]["control_authority"].take();
+    before["sensor_state"]["control_authority"].take();
+    assert_eq!(after, before);
+    assert!(Rc::ptr_eq(&published, &snapshot()));
+    assert_eq!(
+        serde_json::to_value(applied_physics().unwrap()).unwrap(),
+        applied
+    );
+    assert_eq!(playback_state(), runtime);
+    assert_eq!(queued_actions(), actions);
+    assert_eq!(keyboard_state(), keyboard);
+    assert_control_rejected_unchanged(control_renewal(&fence, 0.75), "stale_context");
+}
+
+#[test]
+fn ownership_renewal_fails_closed_on_native_context_sensor_input_authority_and_pending_actions() {
+    for change in [
+        "trial",
+        "tuning",
+        "manual",
+        "sensor",
+        "navigation_unavailable",
+        "radar_unavailable",
+        "pending_play",
+        "pause",
+        "view_only",
+        "running",
+        "seed",
+        "follower",
+    ] {
+        let mut app = fresh_app();
+        assert_eq!(
+            control_call(control_claim("run", "primary", 0, 0, 0.1))["ok"],
+            true
+        );
+        let fence = actual_fence();
+        let mut request = control_renewal(&fence, 0.75);
+        request["expected_context"] = context_json(current_context());
+        match change {
+            "trial" => {
+                request["expected_context"]["trial_revision"] =
+                    serde_json::json!(trial_revision() + 1)
+            }
+            "tuning" => {
+                let mut settings = snapshot().ship_tuning();
+                settings.thrust_scale = 2.0;
+                dispatch(Dispatch::Physics(PhysicsCommand::TuneShip { settings })).unwrap();
+            }
+            "manual" => {
+                dispatch(Dispatch::Physics(PhysicsCommand::SetCommand {
+                    accel: [0.0, 0.2, 0.0],
+                    angular_accel: [0.0; 3],
+                }))
+                .unwrap();
+            }
+            "sensor" => {
+                dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+                    target: crate::model::SensorFaultTarget::RadarBackup,
+                    mode: crate::model::SensorFaultMode::Frozen,
+                    duration_sim_s: Some(1.0),
+                }))
+                .unwrap();
+            }
+            "navigation_unavailable" | "radar_unavailable" => {
+                let target = if change == "navigation_unavailable" {
+                    crate::model::SensorFaultTarget::Navigation
+                } else {
+                    crate::model::SensorFaultTarget::RadarBus
+                };
+                dispatch(Dispatch::Physics(PhysicsCommand::SetSensorFault {
+                    target,
+                    mode: crate::model::SensorFaultMode::Unavailable,
+                    duration_sim_s: Some(1.0),
+                }))
+                .unwrap();
+                request["expected_sensor_revision"] = serde_json::json!(sensor_revision());
+            }
+            "pending_play" => {
+                dispatch_play_checked(PlaybackRate::RealTime, current_context()).unwrap();
+            }
+            "pause" => request_action(EngineAction::Pause),
+            "view_only" => {
+                app.world_mut().resource_mut::<PlaybackState>().can_control = false;
+                frame(&mut app, Duration::ZERO);
+            }
+            "running" => request["expected_context"]["running"] = serde_json::json!(true),
+            "seed" => request["expected_context"]["seed"] = serde_json::json!(101),
+            "follower" => {
+                request["controller_fence"]["controller_id"] = serde_json::json!("standby")
+            }
+            _ => unreachable!(),
+        }
+        assert_control_rejected_unchanged(request, "stale_context");
+    }
 }
 
 #[test]
@@ -1579,6 +1717,42 @@ fn real_clock_app() -> App {
         });
     app.update();
     app
+}
+
+#[test]
+fn paused_ownership_renewal_cannot_extend_the_original_actuator_runtime_deadline() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.2))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.05))["ok"], true);
+    let before = observation();
+    let watchdog = before["command_watchdog"].clone();
+    assert_eq!(control_call(control_renewal(&primary, 0.75))["ok"], true);
+    assert_eq!(observation()["command_watchdog"], watchdog);
+    std::thread::sleep(Duration::from_millis(100));
+    app.update();
+    assert_eq!(observation()["time_s"], before["time_s"]);
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert_eq!(actual_fence(), primary);
+    assert_eq!(observation()["command_watchdog"]["status"], "expired");
+    assert_eq!(
+        observation()["command_watchdog"]["source_time_s"],
+        watchdog["source_time_s"]
+    );
+    assert_eq!(
+        observation()["command_watchdog"]["expires_at_sim_time_s"],
+        watchdog["expires_at_sim_time_s"]
+    );
+    assert_eq!(ship(&snapshot()).commanded_accel_mps2, [0.0; 3]);
+    // Repeating a held source must not slide either private runtime deadline.
+    assert_control_rejected_unchanged(control_renewal(&primary, 0.75), "stale_context");
+    std::thread::sleep(Duration::from_millis(800));
+    app.update();
+    assert_eq!(observation()["control_authority"]["status"], "expired");
+    assert_control_rejected_unchanged(control_renewal(&primary, 0.75), "stale_context");
 }
 
 #[test]

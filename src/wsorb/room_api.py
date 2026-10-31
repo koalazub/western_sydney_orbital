@@ -300,7 +300,7 @@ def _room_command(request: Any) -> dict[str, Any]:
     if not isinstance(request, Mapping):
         raise ValueError("Hosted room commands must be typed mappings")
     op = request.get("op")
-    if op in ("claim_control", "release_control"):
+    if op in ("claim_control", "renew_control", "release_control"):
         return _ownership_command(request)
     if op == "set_leased_command":
         parsed = _resilience_command(request)

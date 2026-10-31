@@ -48,7 +48,7 @@ const mode = oneOf("orbit", "first_person", "third_person", "free", "overview", 
 const stage = oneOf("initializing", "preparing_view", "drawing_world", "presenting", "waiting_for_gpu", "ready", "failed");
 const entity: Selector = value => typeof value === "string" && /^(Shuttle|Target|LandingPad|Phobos|Mars|L1|L2|Debris[0-9]{1,10})$/.test(value) ? value : undefined;
 const method = oneOf("snapshot", "command", "raycast", "pan_tilt", "capture", "preview");
-const op = oneOf("pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow");
+const op = oneOf("pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control", "renew_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright", "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow");
 const code = oneOf("stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample");
 
 // Own data properties only. Neither disabled logging nor allowlisting invokes

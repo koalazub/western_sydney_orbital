@@ -204,6 +204,14 @@ function validateCall(value) {
       validateContext(command.expected_context, true);
       validateLease(command);
       break;
+    case "renew_control":
+      shape(command, ["op", "controller_fence", "source_time_s", "lease_sim_s", "expected_context", "expected_sensor_revision"]);
+      validateFence(command.controller_fence);
+      validateContext(command.expected_context, true);
+      validateUnsigned(command.expected_sensor_revision, "expected_sensor_revision");
+      validateLease(command);
+      if (command.lease_sim_s > 0.75) invalid("Ownership renewal lease_sim_s must be at most 0.75");
+      break;
     case "release_control":
       shape(command, ["op", "run_id", "expected_epoch", "expected_context"]);
       validateId(command.run_id, "run_id");
@@ -233,7 +241,7 @@ function validateCall(value) {
       }
       break;
     default:
-      invalid("Allowed command ops: pause, play, step, reset, set_command, set_leased_command, claim_control, release_control, set_sensor_fault, clear_sensor_faults, stop, view, debug_upright, configure_experiment, configure_flight, place_lander, move_launchpad, tune_ship, tune_debris_flow");
+      invalid("Allowed command ops: pause, play, step, reset, set_command, set_leased_command, claim_control, renew_control, release_control, set_sensor_fault, clear_sensor_faults, stop, view, debug_upright, configure_experiment, configure_flight, place_lander, move_launchpad, tune_ship, tune_debris_flow");
   }
 }
 
@@ -393,6 +401,25 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     } else if (call.method === "raycast") {
       shape(result.value, ["source_seed", "source_time_s", "frame", "origin_world_m", "direction_world", "max_distance_m", "hit"]);
       if (result.value.hit !== null && !record(result.value.hit)) invalid("Raycast hit must be a real hit report or null");
+    } else if (call.method === "command" && call.command.op === "renew_control") {
+      shape(result.value, ["ok", "ownership_renewal"]);
+      if (result.value.ok !== true) invalid("Ownership renewal requires a native acknowledgement");
+      const receipt = result.value.ownership_renewal;
+      shape(receipt, ["source_time_s", "lease_sim_s", "sensor_revision", "control_authority"]);
+      validateLease(receipt);
+      validateUnsigned(receipt.sensor_revision, "sensor_revision");
+      const authority = receipt.control_authority;
+      shape(authority, ["epoch", "term", "run_id", "controller_id", "status", "expires_at_sim_time_s"]);
+      validateUnsigned(authority.epoch, "epoch");
+      validateUnsigned(authority.term, "term");
+      validateId(authority.run_id, "run_id");
+      validateId(authority.controller_id, "controller_id");
+      if (receipt.source_time_s !== call.command.source_time_s || receipt.lease_sim_s !== call.command.lease_sim_s
+        || receipt.sensor_revision !== call.command.expected_sensor_revision || authority.status !== "active"
+        || ["epoch", "term", "run_id", "controller_id"].some(name => authority[name] !== call.command.controller_fence[name])
+        || authority.expires_at_sim_time_s !== receipt.source_time_s + receipt.lease_sim_s) {
+        invalid("Ownership renewal receipt must match the original source, sensor revision and active fence");
+      }
     } else if (call.method !== "snapshot") {
       shape(result.value, ["ok"]);
       if (result.value.ok !== true) invalid("Commands return an acknowledgement only");

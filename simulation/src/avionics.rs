@@ -296,6 +296,24 @@ pub struct ControlClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ControlRenewal {
+    pub controller_fence: ControlFence,
+    pub source_time_s: f64,
+    pub lease_sim_s: f64,
+}
+
+/// An ownership receipt, not a sensor sample or an actuator application.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRenewalReceipt {
+    pub source_time_s: f64,
+    pub lease_sim_s: f64,
+    pub sensor_revision: u32,
+    pub control_authority: ControlAuthority,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlRelease {
     pub run_id: String,
     pub expected_epoch: u32,

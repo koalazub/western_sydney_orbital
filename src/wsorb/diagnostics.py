@@ -45,6 +45,7 @@ _OPS = _enum(
     "set_command",
     "set_leased_command",
     "claim_control",
+    "renew_control",
     "release_control",
     "set_sensor_fault",
     "clear_sensor_faults",

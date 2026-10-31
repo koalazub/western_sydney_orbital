@@ -297,6 +297,13 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
             request,
             expected_context,
         } => dispatch_claim_control(request, expected_context).map_err(|error| error.to_string()),
+        Dispatch::RenewControl {
+            request,
+            expected_context,
+            expected_sensor_revision,
+        } => dispatch_renew_control(request, expected_context, expected_sensor_revision)
+            .map(|_| snapshot())
+            .map_err(|error| error.to_string()),
         Dispatch::ReleaseControl {
             request,
             expected_context,
@@ -402,6 +409,25 @@ pub(crate) fn dispatch_release_control(
         })
         .map_err(lease_command_error)?;
     Ok(publish(state))
+}
+
+pub(crate) fn dispatch_renew_control(
+    request: crate::model::ControlRenewal,
+    expected: CommandContext,
+    expected_sensor_revision: u32,
+) -> Result<crate::model::ControlRenewalReceipt, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    if sensor_revision() != expected_sensor_revision
+        || ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running))
+    {
+        return Err(CommandError::StaleContext);
+    }
+    // No world snapshot, publication, keyboard handoff or queued action is changed.
+    // The small receipt comes from the same synchronous native ownership write.
+    SIMULATION
+        .with(|simulation| simulation.borrow_mut().renew_control(request))
+        .map_err(lease_command_error)
 }
 
 fn validate_context(

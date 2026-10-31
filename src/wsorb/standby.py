@@ -102,16 +102,20 @@ def known_busy(error: BaseException) -> bool:
     return isinstance(error, LocalBusyError)
 
 
-def read_public_snapshot(sim: LocalSimulation, stop: Any) -> dict[str, Any]:
+def read_public_snapshot(
+    sim: LocalSimulation, stop: Any, *, deadline_wall_s: float | None = None
+) -> dict[str, Any]:
     """Retry only known-busy reads briefly. Unknown failures are never retried here."""
     deadline = time.monotonic() + min(0.5, sim.timeout_s)
+    if deadline_wall_s is not None:
+        deadline = min(deadline, deadline_wall_s)
     while True:
         try:
             return sim.snapshot()
         except LocalApiError as error:
             if not known_busy(error) or time.monotonic() >= deadline or stop.is_set():
                 raise
-            stop.wait(0.025)
+            stop.wait(min(0.025, max(0.0, deadline - time.monotonic())))
 
 
 def standby_policy_data(
@@ -384,11 +388,20 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
     # Imported here so experiment can use the data/lifecycle helpers without a
     # module import cycle. No parent policy, client object or closure is unpickled.
     from .experiment import (
+        _decision_key,
         _guidance_key,
         _preview_controller,
+        advance_controller_tick,
         controller_interruption,
+        controller_lease_within_run,
+        controller_ownership_renewal_lease,
+        controller_poll_delay,
+        controller_source_budget,
+        controller_source_can_wait,
         guidance_due,
+        request_fresh_controller_source,
         retime_run,
+        wait_for_controller_poll,
     )
 
     channel = _DataChannel(endpoint)
@@ -407,6 +420,18 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
         "plan_count": 0,
         "last_command_time_s": None,
         "last_command_fence": None,
+        "command_count": 0,
+        "nonzero_command_count": 0,
+        "expired_decision_count": 0,
+        "command_rejection": None,
+        "ownership_renewal_count": 0,
+        "last_ownership_renewal": None,
+        "last_ownership_renewal_ack_wall_s": None,
+        "ownership_renewal_rejection": None,
+        "last_decision_source_time_s": None,
+        "last_decision_duration_wall_s": None,
+        "last_decision_interval_wall_s": None,
+        "last_command_validation_kind": None,
         "resilience": None,
         "error": None,
     }
@@ -415,18 +440,36 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
     play_deadline = active["play_deadline"]
     fence = None
     pending = None
-    active.update(next_decision=0.0, decision_time=None, last_decision_wall=None)
+    last_publication_wall = 0.0
+    last_publication_duration_wall = 0.0
+    active.update(
+        next_decision=0.0,
+        decision_time=None,
+        last_decision_wall=None,
+        last_tick_wall=None,
+        next_poll=0.0,
+        command_pending_read=False,
+    )
     try:
         while not stop.is_set():
+            poll_started = time.monotonic()
+            report.update(
+                control_phase="reading_public_snapshot",
+                last_poll_started_wall_s=poll_started,
+            )
             message = channel.receive()
             if message is not None:
                 pending = message
             try:
-                snapshot = read_public_snapshot(sim, stop)
+                snapshot = read_public_snapshot(
+                    sim,
+                    stop,
+                    deadline_wall_s=time.monotonic() + min(0.1, 1 / active["cadence"]),
+                )
             except LocalApiError as error:
                 if not known_busy(error):
                     raise
-                stop.wait(1 / poll_hz)
+                stop.wait(min(0.025, 1 / poll_hz))
                 continue
             observation, runtime = snapshot["observation"], snapshot["runtime"]
             authority = control_authority(snapshot)
@@ -440,9 +483,11 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                 report.update(state="yielded", notice=interruption)
                 break
             active["last_time"] = observation["time_s"]
+            active["command_pending_read"] = False
             if runtime["running"]:
                 active["expect_running"] = True
                 awaiting_play = False
+                active["awaiting_play"] = False
             if pending is not None:
                 from .experiment import RunLimits
 
@@ -480,7 +525,44 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
             )
             if ready.requires_replan:
                 route, previous_plan = None, None
-            if guidance_due(previous_plan, observation, data["policy_revision"], replan_s):
+            primary_or_other_leader = (
+                authority["status"] == "active" and authority["controller_id"] != identity
+            )
+            if primary_or_other_leader:
+                # Consume authentic sensor history, but do not run a planner or
+                # calculate a command that this native follower cannot apply.
+                active["continuous_source_reads"] = False
+                report.update(
+                    resilience=guidance.report,
+                    state="following",
+                    decision_schedule="not_calculated_while_another_native_leader_is_active",
+                    planning_schedule="following_sensor_updates_only",
+                    acquisition_schedule="polling_without_continuous_control_acquisition",
+                )
+                channel.offer(report)
+                stop.wait(1 / poll_hz)
+                continue
+            active["continuous_source_reads"] = guidance.uses_local_motion and runtime["running"]
+            report["acquisition_schedule"] = (
+                "fresh_public_reads_between_strict_calculations"
+                if active["continuous_source_reads"]
+                else "polling_without_continuous_control_acquisition"
+            )
+            if guidance.uses_local_motion:
+                # The timed command performs its own current occupancy and stop
+                # checks. A global geometric preview neither grants clearance
+                # nor belongs on this leader's short leased command path.
+                route, previous_plan = None, None
+                report["planning_schedule"] = "timed_command_without_global_preview"
+                report["advisory_schedule"] = "no_advisory_http_during_timed_control"
+            elif guidance_due(
+                previous_plan,
+                observation,
+                data["policy_revision"],
+                replan_s,
+                local_motion=guidance.uses_local_motion,
+                requires_replan=ready.requires_replan,
+            ):
                 previous_plan = _guidance_key(observation, data["policy_revision"])
                 route = None
                 if ready.can_command:
@@ -499,11 +581,134 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                     last_plan_time_s=observation["time_s"],
                     last_plan=route.to_preview() if route is not None else None,
                 )
+            input_due = active["continuous_source_reads"] or poll_started >= active["next_poll"]
+            prepared_wall = time.monotonic()
+            active["input_prepare_wall_s"] = max(0.0, prepared_wall - poll_started)
+            report["last_poll_duration_wall_s"] = prepared_wall - poll_started
+            if input_due and not awaiting_play and active["decision_time"] != observation["time_s"]:
+                now_wall = time.monotonic()
+                wait_s = max(0.0, active["next_decision"] - now_wall)
+                lease = ready.lease_sim_s or config.lease_sim_s
+                budget = controller_source_budget(
+                    active,
+                    snapshot,
+                    poll_started_wall_s=poll_started,
+                    now_wall_s=now_wall,
+                    lease_sim_s=lease,
+                    wait_wall_s=0.0 if active["continuous_source_reads"] else wait_s,
+                )
+                report["source_hold_budget"] = budget
+                if (
+                    not active["continuous_source_reads"]
+                    and wait_s > 0.0
+                    and not controller_source_can_wait(budget)
+                ):
+                    request_fresh_controller_source(active, now_wall)
+                    report["command_rejection"] = "source_or_authority_budget_requires_fresh_read"
+                    channel.offer(report)
+                    wait_for_controller_poll(
+                        stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                    )
+                    continue
+                if wait_s > 0 and not active["continuous_source_reads"]:
+                    report["control_phase"] = "waiting_within_original_source_and_authority_leases"
+                    if wait_for_controller_poll(stop, wait_s):
+                        break
+                    budget = controller_source_budget(
+                        active,
+                        snapshot,
+                        poll_started_wall_s=poll_started,
+                        now_wall_s=time.monotonic(),
+                        lease_sim_s=lease,
+                    )
+                    report["source_hold_budget"] = budget
+                    if not controller_source_can_wait(budget):
+                        request_fresh_controller_source(active, time.monotonic())
+                        report["command_rejection"] = (
+                            "source_or_authority_budget_expired_during_hold"
+                        )
+                        channel.offer(report)
+                        continue
+            decision_started = time.monotonic()
+            if (
+                not input_due
+                or decision_started < active["next_decision"]
+                or active["decision_time"] == observation["time_s"]
+                or (awaiting_play and not runtime["running"])
+            ):
+                if awaiting_play and decision_started >= play_deadline:
+                    release = True
+                    report.update(state="error", error="Checked Play did not start in time")
+                    break
+                report.update(
+                    resilience=guidance.report,
+                    state="leading" if authority["status"] == "active" else "awaiting_native_claim",
+                    decision_schedule="waiting_for_next_requested_tick",
+                )
+                channel.offer(report)
+                wait_for_controller_poll(
+                    stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                )
+                continue
+            if stop.is_set():
+                break
+            if (
+                time.monotonic() >= active["deadline"]
+                or observation["time_s"] - active["origin"] >= active["duration"]
+            ):
+                release = True
+                report.update(state="completed", notice="Original run limit reached")
+                break
+            renewal_lease = controller_ownership_renewal_lease(
+                active, snapshot, fence, config.lease_sim_s
+            )
+            if renewal_lease is not None and fence["controller_id"] == identity:
+                report["control_phase"] = "renewing_ownership_without_actuator_changes"
+                try:
+                    receipt = sim.renew_control(
+                        snapshot, controller_fence=fence, lease_sim_s=renewal_lease
+                    )
+                except (StaleContextError, CommandExpiredError) as error:
+                    route, previous_plan = None, None
+                    report["ownership_renewal_rejection"] = (
+                        "native_ownership_source_expired"
+                        if isinstance(error, CommandExpiredError)
+                        else "native_ownership_stale_context"
+                    )
+                    channel.offer(report)
+                    continue
+                except LocalApiError as error:
+                    if not known_busy(error):
+                        raise
+                    report["ownership_renewal_rejection"] = "known_busy_before_ownership_renewal"
+                    channel.offer(report)
+                    continue
+                active["ownership_renewal_receipt"] = receipt
+                report.update(
+                    ownership_renewal_count=report["ownership_renewal_count"] + 1,
+                    last_ownership_renewal=receipt,
+                    last_ownership_renewal_ack_wall_s=time.monotonic(),
+                    ownership_renewal_rejection=None,
+                )
+            if stop.is_set():
+                break
+            # Ownership I/O precedes the calculation. It is neither an actuator
+            # command nor a replacement public acquisition.
+            decision_started = time.monotonic()
+            advance_controller_tick(
+                active, poll_started, decision_started, prepared_wall_s=prepared_wall
+            )
+            report["last_decision_interval_wall_s"] = active["last_decision_interval_wall_s"]
+            report["control_phase"] = "calculating_checked_command"
             accel, angular = guidance.command(ready.observation, route, data["gains"])
             lease = ready.lease_sim_s
             if lease == 0:
                 accel, angular, lease = np.zeros(3), np.zeros(3), config.lease_sim_s
-            if route is not None and (np.any(accel) or np.any(angular)):
+            if (
+                route is not None
+                and not guidance.uses_local_motion
+                and (np.any(accel) or np.any(angular))
+            ):
                 lease = min(
                     lease,
                     route.frame.source_time_s
@@ -516,32 +721,47 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                 resilience=guidance.report,
                 last_decision_source_time_s=observation["time_s"],
                 last_decision_accel_body_mps2=np.asarray(accel).tolist(),
+                last_decision_duration_wall_s=time.monotonic() - decision_started,
+                decision_schedule="fresh_decision_after_observing_no_other_active_leader",
             )
-            primary_or_other_leader = (
-                authority["status"] == "active" and authority["controller_id"] != identity
-            )
+            calculation_done_wall = time.monotonic()
+            active["last_calculation_work_wall_s"] = calculation_done_wall - decision_started
             report["state"] = (
-                "following"
-                if primary_or_other_leader
-                else "leading"
-                if authority["status"] == "active"
-                else "awaiting_native_claim"
+                "leading" if authority["status"] == "active" else "awaiting_native_claim"
             )
             channel.offer(report)
-            if (
-                primary_or_other_leader
-                or time.monotonic() < active["next_decision"]
-                or active["decision_time"] == observation["time_s"]
-                or (awaiting_play and not runtime["running"])
-            ):
-                if awaiting_play and time.monotonic() >= play_deadline:
-                    release = True
-                    report.update(state="error", error="Checked Play did not start in time")
-                    break
-                stop.wait(1 / poll_hz)
-                continue
-            # A late planner result never gets attached to this newer source clock.
-            current = read_public_snapshot(sim, stop)
+            # Only an existing leader can skip the redundant read. Native
+            # atomically validates its original context, sensor revision, source
+            # deadline and actual fence when installing the renewal. The source
+            # deadline must also precede the original run's accepted duration.
+            # Claims and near-limit decisions retain the later validation read.
+            atomic_renewal = (
+                authority["status"] == "active"
+                and fence is not None
+                and controller_fence(snapshot) == fence
+                and controller_lease_within_run(active, observation["time_s"], lease)
+            )
+            validation_started_wall = poll_started if atomic_renewal else time.monotonic()
+            if atomic_renewal:
+                report["control_phase"] = "renewing_through_atomic_native_validation"
+                current = snapshot
+            else:
+                report["control_phase"] = "validating_current_native_context"
+                try:
+                    current = read_public_snapshot(
+                        sim,
+                        stop,
+                        deadline_wall_s=time.monotonic() + min(0.1, 1 / active["cadence"]),
+                    )
+                except LocalApiError as error:
+                    if not known_busy(error):
+                        raise
+                    report["command_rejection"] = "known_busy_during_precommand_read"
+                    channel.offer(report)
+                    wait_for_controller_poll(
+                        stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                    )
+                    continue
             if stop.is_set():
                 break
             report.update(
@@ -552,6 +772,24 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                 report["state"] = "yielded"
                 break
             current_authority = control_authority(current)
+            source_age = current["observation"]["time_s"] - observation["time_s"]
+            report.update(
+                last_precommand_observation_time_s=current["observation"]["time_s"],
+                last_precommand_validation_kind=(
+                    "original_public_source_then_atomic_native_validation"
+                    if atomic_renewal
+                    else "later_public_read_then_atomic_native_validation"
+                ),
+                last_precommand_source_age_sim_s=None if atomic_renewal else source_age,
+                last_precommand_source_slack_sim_s=None if atomic_renewal else lease - source_age,
+                last_precommand_authority_status=current_authority["status"],
+                last_precommand_authority_term=current_authority["term"],
+                last_precommand_authority_slack_sim_s=(
+                    current_authority["expires_at_sim_time_s"] - current["observation"]["time_s"]
+                    if current_authority["status"] == "active"
+                    else None
+                ),
+            )
             if (
                 current["observation"]["time_s"] - active["origin"] >= active["duration"]
                 or time.monotonic() >= active["deadline"]
@@ -564,13 +802,37 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                 and current_authority["controller_id"] != identity
             ):
                 continue
-            if (
-                _guidance_key(current["observation"], data["policy_revision"])[:-1]
-                != _guidance_key(observation, data["policy_revision"])[:-1]
-                or current["observation"]["time_s"] >= observation["time_s"] + lease
+            if _decision_key(
+                current["observation"],
+                data["policy_revision"],
+                local_motion=guidance.uses_local_motion,
+            ) != _decision_key(
+                observation, data["policy_revision"], local_motion=guidance.uses_local_motion
             ):
                 route, previous_plan = None, None
                 continue
+            if current["observation"]["time_s"] >= observation["time_s"] + lease:
+                report.update(
+                    expired_decision_count=report["expired_decision_count"] + 1,
+                    command_rejection="original_source_expired_before_dispatch",
+                )
+                channel.offer(report)
+                wait_for_controller_poll(
+                    stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                )
+                continue
+            budget = controller_source_budget(
+                active,
+                current,
+                poll_started_wall_s=validation_started_wall,
+                now_wall_s=time.monotonic(),
+                lease_sim_s=lease,
+                decision_source_time_s=observation["time_s"],
+                work_reserve_wall_s=active.get("last_send_work_wall_s", 0.0),
+            )
+            report["dispatch_budget"] = budget
+            # A projection only decides whether to hold, not whether an immediate
+            # native renewal is allowed. Another read cannot extend the old fence.
             try:
                 grant = current
                 if current_authority["status"] != "active":
@@ -592,25 +854,55 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                     raise ValueError("Native claim did not grant this peer authority")
                 if stop.is_set():
                     break
-                sim.set_leased_command(
-                    accel, angular, snapshot, lease_sim_s=lease, controller_fence=fence
-                )
+                try:
+                    report["control_phase"] = "applying_fenced_command"
+                    command_sent_wall = time.monotonic()
+                    sim.set_leased_command(
+                        accel, angular, snapshot, lease_sim_s=lease, controller_fence=fence
+                    )
+                except LocalApiError as error:
+                    if not known_busy(error):
+                        raise
+                    # Only this direct pre-dispatch command rejection has a
+                    # known outcome. Never retry the same calculated vectors.
+                    report["command_rejection"] = "known_busy_before_command_dispatch"
+                    channel.offer(report)
+                    wait_for_controller_poll(
+                        stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                    )
+                    continue
                 if not current["runtime"]["running"]:
                     sim.play_checked(grant)
                     awaiting_play = True
+                    active["awaiting_play"] = True
                     play_deadline = min(active["deadline"], time.monotonic() + 10)
-            except (StaleContextError, CommandExpiredError):
+            except (StaleContextError, CommandExpiredError) as error:
                 # Native rejection proves no mutation. Recompute from a later read,
                 # never retry this decision or adopt a new consent epoch.
                 route, previous_plan = None, None
-                stop.wait(1 / poll_hz)
+                report["command_rejection"] = (
+                    "native_command_expired"
+                    if isinstance(error, CommandExpiredError)
+                    else "native_stale_context"
+                )
+                if isinstance(error, CommandExpiredError):
+                    report["expired_decision_count"] += 1
+                channel.offer(report)
+                wait_for_controller_poll(
+                    stop, controller_poll_delay(active, poll_hz, time.monotonic())
+                )
                 continue
-            tick = time.monotonic()
             active.update(
                 decision_time=observation["time_s"],
-                last_decision_wall=tick,
-                next_decision=tick + 1 / active["cadence"],
+                last_time=current["observation"]["time_s"],
+                command_pending_read=True,
             )
+            # Admission is not an actuator result. The original public snapshot
+            # remains the last observation until a genuine subsequent read.
+            acknowledged_wall = time.monotonic()
+            active["last_precommand_work_wall_s"] = acknowledged_wall - calculation_done_wall
+            active["last_send_work_wall_s"] = acknowledged_wall - command_sent_wall
+            previous_ack = report.get("last_command_ack_wall_s")
             report.update(
                 control_authority=control_authority(grant),
                 authority_source_time_s=grant["observation"]["time_s"],
@@ -618,31 +910,70 @@ def _serve_standby(connection, active, identity, data, poll_hz, replan_s, stop, 
                 last_command_fence=fence,
                 last_command_policy_revision=data["policy_revision"],
                 last_command_context=control_context(snapshot),
+                command_count=report["command_count"] + 1,
+                nonzero_command_count=report["nonzero_command_count"]
+                + int(np.any(accel) or np.any(angular)),
+                command_rejection=None,
+                last_command_ack_wall_s=acknowledged_wall,
+                last_command_ack_interval_wall_s=(
+                    acknowledged_wall - previous_ack if previous_ack is not None else None
+                ),
+                last_command_validation_age_sim_s=(
+                    None
+                    if atomic_renewal
+                    else current["observation"]["time_s"] - observation["time_s"]
+                ),
+                last_command_validation_kind=(
+                    "original_public_source_then_atomic_native_validation"
+                    if atomic_renewal
+                    else "later_public_read_then_atomic_native_validation"
+                ),
                 state="leading",
             )
             # Only this actual leader publishes its own route. No parent route
             # is relabelled as a standby decision.
-            packet = None
-            if route is not None:
-                packet = route.to_preview()
-                packet["execution"] = {
-                    "state": "running",
-                    "controller": _preview_controller("resilient_waypoint_pd"),
-                    "source_time_s": observation["time_s"],
-                    "source_seed": observation["seed"],
-                    "trial_revision": observation["trial_revision"],
-                    "tuning_revision": observation["tuning_revision"],
-                    "next_waypoint_world_m": guidance.report.get("next_waypoint_world_m"),
-                }
-            try:
-                sim.preview(packet)
-            except StaleContextError:
-                route, previous_plan = None, None
-            except LocalApiError as error:
-                if not known_busy(error):
-                    raise
+            now_wall = time.monotonic()
+            publication_slack = active["next_poll"] - now_wall >= max(
+                0.025, last_publication_duration_wall
+            )
+            if (
+                not guidance.uses_local_motion
+                and now_wall - last_publication_wall >= 1.0
+                and publication_slack
+            ):
+                publication_started = time.monotonic()
+                packet = None
+                if route is not None:
+                    packet = route.to_preview()
+                if packet is not None:
+                    packet["execution"] = {
+                        "state": "running",
+                        "controller": _preview_controller("resilient_waypoint_pd"),
+                        "source_time_s": observation["time_s"],
+                        "source_seed": observation["seed"],
+                        "trial_revision": observation["trial_revision"],
+                        "tuning_revision": observation["tuning_revision"],
+                        "next_waypoint_world_m": guidance.report.get("next_waypoint_world_m"),
+                    }
+                try:
+                    sim.preview(packet)
+                except StaleContextError:
+                    route, previous_plan = None, None
+                except LocalApiError as error:
+                    if not known_busy(error):
+                        raise
+                last_publication_wall = time.monotonic()
+                last_publication_duration_wall = last_publication_wall - publication_started
+            now_wall = time.monotonic()
+            report.update(
+                control_phase="waiting_for_next_public_acquisition",
+                last_tick_work_wall_s=now_wall - poll_started,
+                last_poll_slack_wall_s=active["next_poll"] - now_wall,
+                next_poll_wall_s=active["next_poll"],
+                next_decision_wall_s=active["next_decision"],
+            )
             channel.offer(report)
-            stop.wait(1 / poll_hz)
+            wait_for_controller_poll(stop, controller_poll_delay(active, poll_hz, time.monotonic()))
     except BaseException as error:
         # Never revoke a healthy primary because this peer failed. Unknown
         # actuation outcomes are not retried; the native watchdog bounds them.

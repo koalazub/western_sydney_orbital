@@ -11,7 +11,7 @@ const events = new Set<string>(["call_received", "call_dispatched", "call_finish
 const assets = new Set(["index", "app", "styles", "engine_manifest", "engine_glue", "engine_wasm", "local_bootstrap", "local_client"]);
 const methods = new Set(["snapshot", "command", "capture", "preview", "raycast", "pan_tilt"]);
 const operations = new Set(["pause", "play", "step", "reset", "set_command", "set_leased_command", "claim_control",
-  "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright",
+  "renew_control", "release_control", "set_sensor_fault", "clear_sensor_faults", "stop", "view", "debug_upright",
   "configure_experiment", "configure_flight", "place_lander", "move_launchpad", "tune_ship", "tune_debris_flow"]);
 const codes = new Set(["local_busy", "page_mismatch", "stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 const reasons = new Set(["owner_conflict", "no_owner", "in_flight", "invalid_request", "client_disconnected",

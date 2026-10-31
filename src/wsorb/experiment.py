@@ -40,6 +40,7 @@ from .local_api import (
     LocalSimulation,
     StaleContextError,
     control_context,
+    ownership_renewal_supported,
     validate_position,
 )
 from .standby import (
@@ -393,18 +394,24 @@ def guidance_due(
     observation: Mapping[str, Any],
     policy_revision: int,
     interval_s: float = 0.5,
+    *,
+    local_motion: bool = False,
+    requires_replan: bool = False,
 ) -> bool:
     """Simulation-time scheduling, with one fresh plan after edits or discontinuities.
 
     A held clock is not a new planning tick. Missed intervals produce one plan,
     never a catch-up burst. Tuning and manual changes also invalidate a route.
+    Timed local guidance checks fresh occupancy at every command; its nonroute
+    preview needs rebuilding only on invalidation, not on every command clock.
     """
     current = _guidance_key(observation, policy_revision)
     return (
         previous is None
         or current[:-1] != previous[:-1]
         or current[-1] < previous[-1]
-        or current[-1] - previous[-1] >= interval_s
+        or requires_replan
+        or (not local_motion and current[-1] - previous[-1] >= interval_s)
     )
 
 
@@ -428,6 +435,20 @@ def _guidance_key(observation: Mapping[str, Any], revision: int) -> tuple[Any, .
         revision,
         observation["time_s"],
     )
+
+
+def _decision_key(observation, revision, *, local_motion=False):
+    """Separate expected mission progress from a change of native command context.
+
+    A timed decision models motion across its original lease. Moving from on-pad
+    to ascending or transit is not a new trial, sensor revision or consent epoch.
+    Terminal/unknown phases still invalidate it. The native context, sensor
+    revision, source timestamp and controller fence are supplied unchanged.
+    """
+    key = _guidance_key(observation, revision)[:-1]
+    if local_motion and key[8] == "running" and key[9] in ("on_pad", "ascending", "transit"):
+        return (*key[:9], "running_motion", *key[10:])
+    return key
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +491,9 @@ def retime_run(
             if last_decision is None
             else max(now, _number(last_decision, "last_decision_wall") + 1 / limits.cadence_hz)
         )
+        if "next_poll" in active:
+            lead = min(active.get("input_prepare_wall_s", 0.0), 1 / limits.cadence_hz)
+            updated["next_poll"] = max(now, updated["next_decision"] - lead)
     return updated
 
 
@@ -479,6 +503,213 @@ def run_limit_notice(active: Mapping[str, Any]) -> str | None:
     if elapsed >= active["duration"]:
         return f"Observed run duration {elapsed:.3f} s reached the {active['duration']:g} s limit."
     return None
+
+
+def controller_poll_delay(active, poll_hz, now_wall_s, *, can_decide=True):
+    """Pace observations separately from the strict command-calculation ceiling.
+
+    A running timed leader waits for its calculation slot by acquiring public
+    sources, not by parking one source across a wall-clock timer. At 5x, a
+    100 ms calculation interval leaves only 50 ms of the 0.75 simulation-second lease
+    for acquisition, computation and delivery. Timer wakeups cannot spend that
+    margin before acquisition has even started. Each read remains serialized;
+    followers, paused clocks and watch-only workers keep their polling interval.
+    """
+    period = 1.0 / poll_hz
+    if active is None or not can_decide or active.get("awaiting_play"):
+        return period
+    if active.get("continuous_source_reads"):
+        return 0.0
+    remaining = active.get("next_poll", active["next_decision"]) - now_wall_s
+    if remaining > 0.0:
+        return min(period, remaining)
+    # A pre-command snapshot cannot justify a full extra sleep after I/O.
+    # Back off only after the requested deadline on a genuinely held read.
+    if not active.get("command_pending_read", False) and (
+        active.get("decision_time") == active.get("last_time")
+    ):
+        return period
+    return 0.0
+
+
+def advance_controller_tick(
+    active, poll_started_wall_s, decision_started_wall_s, *, prepared_wall_s=None
+):
+    """Separate measured input work from the strict calculation interval.
+
+    Acquisition starts before the next calculation deadline, not after it.
+    A short cadence hold is excluded from preparation cost. Late calculations
+    set a new minimum interval; no missed calculation is caught up in a burst.
+    """
+    period = 1 / active["cadence"]
+    prepared = decision_started_wall_s if prepared_wall_s is None else prepared_wall_s
+    preparation = max(0.0, prepared - poll_started_wall_s)
+    next_decision = decision_started_wall_s + period
+    previous_decision = active.get("last_decision_wall")
+    active.update(
+        last_tick_wall=decision_started_wall_s,
+        last_poll_wall=poll_started_wall_s,
+        input_prepare_wall_s=preparation,
+        last_decision_wall=decision_started_wall_s,
+        last_decision_interval_wall_s=(
+            decision_started_wall_s - previous_decision if previous_decision is not None else None
+        ),
+        next_poll=next_decision - min(period, preparation),
+        next_decision=next_decision,
+    )
+
+
+def controller_source_budget(
+    active,
+    snapshot,
+    *,
+    poll_started_wall_s,
+    now_wall_s,
+    lease_sim_s,
+    wait_wall_s=0.0,
+    decision_source_time_s=None,
+    work_reserve_wall_s=None,
+):
+    """Conservatively budget a hold; never turn wall time into a sensor sample.
+
+    The actual reported rate projects only how much budget a wait could consume.
+    Native validation still checks the original source time and actual fence.
+    Request-start time overcounts local source age rather than extending validity.
+    These projections decide whether to hold an input. They cannot reject an
+    immediate native renewal in favour of a read: no read renews installed
+    authority, and its remaining budget only decreases while reading again.
+    """
+    runtime, observation = snapshot["runtime"], snapshot["observation"]
+    rate = _finite(runtime.get("rate"))
+    elapsed = max(0.0, now_wall_s - poll_started_wall_s)
+    work = (
+        active.get("last_calculation_work_wall_s", 0.0)
+        + active.get("last_precommand_work_wall_s", 0.0)
+        if work_reserve_wall_s is None
+        else work_reserve_wall_s
+    )
+    source_time = (
+        observation["time_s"] if decision_source_time_s is None else decision_source_time_s
+    )
+    source_expiry = source_time + lease_sim_s
+    authority = control_authority(snapshot)
+    renewal = active.get("ownership_renewal_receipt")
+    renewed_expiry = None
+    if (
+        authority["status"] == "active"
+        and renewal is not None
+        and controller_fence({"observation": renewal}) == controller_fence(snapshot)
+    ):
+        renewed_expiry = renewal["control_authority"]["expires_at_sim_time_s"]
+    budget = {
+        "acquisition_elapsed_wall_s": elapsed,
+        "cadence_hold_wall_s": max(0.0, wait_wall_s),
+        "measured_work_reserve_wall_s": work,
+        "source_time_s": source_time,
+        "observation_time_s": observation["time_s"],
+        "observed_source_age_sim_s": observation["time_s"] - source_time,
+        "source_expires_at_sim_time_s": source_expiry,
+        "reported_rate": rate,
+        "reported_running": runtime["running"],
+        "installed_authority_status": authority["status"],
+        "installed_authority_term": authority["term"],
+        "installed_authority_expires_at_sim_time_s": authority["expires_at_sim_time_s"],
+        "acknowledged_ownership_expires_at_sim_time_s": renewed_expiry,
+        "source_slack_wall_s": None,
+        "authority_slack_wall_s": None,
+    }
+    if rate is None or rate <= 0:
+        return budget
+    # Native authority has both simulation and runtime expiry. A paused clock
+    # cannot grant more wall-time ownership than the original source lease.
+    clock_rate = max(1.0, rate) if runtime["running"] else 1.0
+    spent = elapsed + max(0.0, wait_wall_s) + work
+    budget["source_slack_wall_s"] = (source_expiry - observation["time_s"]) / clock_rate - spent
+    if authority["status"] == "active":
+        remaining = (
+            max(authority["expires_at_sim_time_s"], renewed_expiry or 0.0) - observation["time_s"]
+        )
+        budget["authority_slack_wall_s"] = max(0.0, remaining) / clock_rate - spent
+    return budget
+
+
+def controller_source_can_wait(budget):
+    """Permit only a voluntary hold, never grant or veto a native fenced write."""
+    source_slack = budget["source_slack_wall_s"]
+    authority_slack = budget["authority_slack_wall_s"]
+    return (
+        source_slack is not None
+        and source_slack > 0.0
+        and (authority_slack is None or authority_slack > 0.0)
+    )
+
+
+def controller_lease_within_run(active, source_time_s, lease_sim_s):
+    """Prove that native source expiry precedes the accepted run-duration limit.
+
+    Native admits the original source only strictly before source plus lease.
+    If that deadline is before this run's end, a second public read is not
+    needed to enforce elapsed duration at dispatch. Near the limit, retain
+    the later read. This neither grants authority nor changes any timestamp.
+    """
+    source_deadline = source_time_s + lease_sim_s
+    run_deadline = active["origin"] + active["duration"]
+    return (
+        math.isfinite(source_deadline)
+        and math.isfinite(run_deadline)
+        and source_deadline < run_deadline
+    )
+
+
+def controller_ownership_renewal_lease(active, snapshot, fence, lease_sim_s):
+    """Admit a supported live owner's source-bound renewal within original consent.
+
+    Older loaded engines keep their direct atomic actuator path. A held source,
+    follower, expired owner or near-limit calculation cannot mint a heartbeat.
+    Native still validates every field atomically when the renewal is invoked.
+    """
+    if (
+        not ownership_renewal_supported(snapshot)
+        or not snapshot["runtime"]["running"]
+        or fence is None
+        or fence["epoch"] != active["consent_epoch"]
+        or fence["run_id"] != active["run_id"]
+    ):
+        return None
+    authority = control_authority(snapshot)
+    lease = min(0.75, lease_sim_s)
+    source = snapshot["observation"]["time_s"]
+    if (
+        authority["status"] != "active"
+        or controller_fence(snapshot) != fence
+        or source + lease <= authority["expires_at_sim_time_s"]
+        or not controller_lease_within_run(active, source, lease)
+    ):
+        return None
+    return lease
+
+
+def request_fresh_controller_source(active, now_wall_s):
+    """Retire this input without advancing its timestamp or calculation slot."""
+    preparation = min(active.get("input_prepare_wall_s", 0.0), 1 / active["cadence"])
+    active["next_poll"] = max(now_wall_s, active["next_decision"] - preparation)
+
+
+def wait_for_controller_poll(signal, seconds, *, stop=None):
+    """Wait on the real monotonic clock without one long condition-variable timer.
+
+    Active-control traces recorded event-wait wakeups 120 ms after their deadline.
+    Short sleeping intervals keep stop/edit signalling bounded and avoid carrying
+    one coalescible wait across the entire 150 ms lease budget at 5x playback.
+    This never advances an engine clock, samples sensors or calculates a command.
+    """
+    deadline = time.monotonic() + max(0.0, seconds)
+    while not signal.is_set() and (stop is None or not stop.is_set()):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.005, remaining))
+    return True
 
 
 def terminal_mission_notice(observation: Mapping[str, Any] | None) -> str | None:
@@ -577,6 +808,37 @@ def _preview_controller(controller: str) -> str:
     return "planned_waypoint_pd" if controller == "resilient_waypoint_pd" else controller
 
 
+def _nonroute_preview(observation, settings, *, status, detail):
+    """Serialize public goal/config data without claiming a search or obstacle model.
+
+    Zero used obstacles and expansions are algorithm counters, not empty sensor
+    readings. No forecast was calculated, so measurement times remain unavailable.
+    """
+    geometry = observation["geometry"]
+    radius = _number(geometry["arrival_radius_m"], "arrival_radius_m")
+    if radius <= 0:
+        raise ValueError("No public goal region")
+    return {
+        "source_seed": observation["seed"],
+        "source_time_s": observation["time_s"],
+        "status": status,
+        "detail": detail[:240],
+        "points_world_m": [],
+        "goal_center_m": _world_vector(
+            observation["target"]["position"], "target.position"
+        ).tolist(),
+        "goal_radius_m": radius,
+        "measured_obstacles": 0,
+        "unmodelled_obstacles_lower_bound": geometry["debris_count"],
+        "forecast_horizon_s": settings.forecast_horizon_s,
+        "max_measurement_age_s": settings.max_measurement_age_s,
+        "oldest_measurement_time_s": None,
+        "newest_measurement_time_s": None,
+        "assumed_tangential_speed_allowance_mps": settings.unknown_tangential_speed_mps,
+        "expanded_nodes": 0,
+    }
+
+
 def flight_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     """Separate confirmed calibration, requested commands and reported physics.
 
@@ -663,8 +925,10 @@ class LivePolicy:
     """The current editable Python functions and settings, accepted by one worker.
 
     The notebook replaces this bundle after an edit. Resilient mode uses the
-    persistent Python guidance module for decisions and still uses the editable
-    prediction/search callbacks. No callback receives a client or debug ray report.
+    persistent Python guidance module for decisions. Editable prediction/search
+    callbacks serve route previews and route-based control. Timed local watches
+    publish a nonroute notice; their commands do not wait on global geometric
+    previews. No callback receives a client or debug ray report.
     A process standby uses only checked-in prediction/search and the data settings.
     """
 
@@ -857,6 +1121,34 @@ class ExperimentRunner:
                 last_command_time_s=None,
                 last_command_policy_revision=None,
                 last_command_context=None,
+                command_count=0,
+                nonzero_command_count=0,
+                expired_decision_count=0,
+                command_rejection=None,
+                ownership_renewal_count=0,
+                last_ownership_renewal=None,
+                last_ownership_renewal_ack_wall_s=None,
+                ownership_renewal_rejection=None,
+                last_decision_duration_wall_s=None,
+                last_decision_interval_wall_s=None,
+                last_command_validation_age_sim_s=None,
+                last_command_validation_kind=None,
+                last_precommand_observation_time_s=None,
+                last_precommand_validation_kind=None,
+                acquisition_schedule=None,
+                planning_schedule=None,
+                control_phase=None,
+                control_phase_started_wall_s=None,
+                control_phase_history=[],
+                last_poll_started_wall_s=None,
+                last_poll_duration_wall_s=None,
+                last_tick_work_wall_s=None,
+                last_poll_slack_wall_s=None,
+                last_command_ack_wall_s=None,
+                last_command_ack_interval_wall_s=None,
+                command_discard_count=0,
+                preview_request_count=0,
+                advisory_schedule=None,
                 stale_context_count=0,
                 requested_run_limits_revision=self._run_limits_revision,
                 accepted_run_limits_revision=None,
@@ -1140,6 +1432,10 @@ class ExperimentRunner:
         with self._lock:
             report = deepcopy(self._report)
             if self._standby is not None:
+                # A cohort needs this receipt when leader-facing fields switch
+                # to its peer. An idle runner has no receipt to report at all.
+                report["primary_last_command_time_s"] = report.get("last_command_time_s")
+                report["primary_last_command_fence"] = deepcopy(report.get("last_command_fence"))
                 peer = self._standby.status()
                 report["standby"] = peer
                 observation = (report.get("latest") or {}).get("observation", {})
@@ -1498,9 +1794,38 @@ class ExperimentRunner:
         revision = 0
         fatal: str | None = None
         last_publication_wall = 0.0
+        last_publication_duration_wall = 0.0
         guidance: ResilientGuidance | None = None
         guidance_config: ResilienceConfig | None = None
         readiness = None
+        phase_history: deque[dict[str, Any]] = deque(maxlen=32)
+
+        def wait_for_poll(seconds: float) -> None:
+            if active is not None:
+                wait_for_controller_poll(self._wake, seconds, stop=self._stop)
+            else:
+                self._wake.wait(seconds)
+            self._wake.clear()
+
+        def mark_phase(name: str) -> None:
+            nonlocal phase
+            phase = name
+            now = time.monotonic()
+            source = snapshot.get("observation", {}) if snapshot is not None else {}
+            entry = {
+                "phase": name,
+                "started_wall_s": now,
+                "last_observed_sim_time_s": source.get("time_s"),
+                "next_poll_wall_s": active.get("next_poll") if active else None,
+                "next_decision_wall_s": active.get("next_decision") if active else None,
+            }
+            phase_history.append(entry)
+            with self._lock:
+                self._report.update(
+                    control_phase=name,
+                    control_phase_started_wall_s=now,
+                    control_phase_history=list(phase_history),
+                )
 
         def refresh_guidance(result: Mapping[str, Any]) -> None:
             nonlocal guidance, guidance_config, readiness, route, preview, previous_plan
@@ -1522,17 +1847,28 @@ class ExperimentRunner:
             )
             if readiness.requires_replan:
                 route, preview, previous_plan = None, None, None
+            report = guidance.report
             with self._lock:
-                self._report.update(
-                    resilience=deepcopy(guidance.report),
-                    primary_resilience=deepcopy(guidance.report),
-                )
+                self._report.update(resilience=report, primary_resilience=report)
 
-        def read(*, check_owner: bool = True) -> dict:
+        def read(
+            *,
+            check_owner: bool = True,
+            update_guidance: bool = True,
+            receipt: dict | None = None,
+        ) -> dict:
             nonlocal phase, owned, active, route, preview, previous_plan
-            phase = "Reading public snapshot"
+            mark_phase("Reading public snapshot")
             with sim.control_transaction():
-                result = read_public_snapshot(sim, self._stop)
+                result = receipt
+                if result is None:
+                    result = read_public_snapshot(
+                        sim,
+                        self._stop,
+                        deadline_wall_s=time.monotonic() + min(0.1, 1 / active["cadence"])
+                        if active is not None
+                        else None,
+                    )
                 self.record_snapshot(result, source="guidance_worker")
             observation, runtime = result.get("observation"), result.get("runtime")
             if not isinstance(observation, dict) or not isinstance(runtime, dict):
@@ -1579,7 +1915,10 @@ class ExperimentRunner:
                     completed = terminal_mission_notice(observation) is not None
                     elapsed = now - active["origin"] if seed == active["seed"] else None
                     owned, active = False, None
-                    if self._standby is not None:
+                    # A terminal peer observes the same native outcome and exits
+                    # without a release racing that final observation. Explicit
+                    # Stop still signals both workers and performs guarded release.
+                    if self._standby is not None and not completed:
                         self._standby.request_stop()
                     route, preview, previous_plan = None, None, None
                     with self._lock:
@@ -1595,6 +1934,7 @@ class ExperimentRunner:
                         if elapsed is not None and elapsed >= 0:
                             self._report["elapsed_sim_s"] = elapsed
                 else:
+                    active["command_pending_read"] = False
                     if "consent_epoch" in active:
                         authority = control_authority(result)
                         owned = (
@@ -1634,7 +1974,8 @@ class ExperimentRunner:
                         self._report.update(
                             notice=None, notice_source=None, run_request_state="idle"
                         )
-            refresh_guidance(result)
+            if update_guidance:
+                refresh_guidance(result)
             return result
 
         def accept_limits(observation: Mapping[str, Any]) -> tuple[RunLimits, int]:
@@ -1678,7 +2019,10 @@ class ExperimentRunner:
                     owned = previous_owned
                 # A command/Play rejected in the previous context cannot require
                 # the paused simulation clock to advance before a fresh decision.
-                active.update(decision_time=None, next_decision=time.monotonic())
+                active.update(
+                    decision_time=None,
+                    next_decision=max(time.monotonic(), active["next_decision"]),
+                )
             with self._lock:
                 self._report.update(
                     flight_owned=owned,
@@ -1797,38 +2141,22 @@ class ExperimentRunner:
             return message
 
         def empty_preview(observation: dict, detail: str) -> dict:
-            # No search succeeded. Zero used obstacles/expansions are algorithm
-            # counters, not invented sensor readings or a candidate path.
-            geometry = observation["geometry"]
-            radius = _number(geometry["arrival_radius_m"], "arrival_radius_m")
-            if radius <= 0 or policy is None:
+            if policy is None:
                 raise ValueError("No public goal region")
-            return {
-                "source_seed": observation["seed"],
-                "source_time_s": observation["time_s"],
-                "status": "invalid_input",
-                "detail": detail[:240],
-                "points_world_m": [],
-                "goal_center_m": _world_vector(
-                    observation["target"]["position"], "target.position"
-                ).tolist(),
-                "goal_radius_m": radius,
-                "measured_obstacles": 0,
-                "unmodelled_obstacles_lower_bound": geometry["debris_count"],
-                "forecast_horizon_s": policy.settings.forecast_horizon_s,
-                "max_measurement_age_s": policy.settings.max_measurement_age_s,
-                "oldest_measurement_time_s": None,
-                "newest_measurement_time_s": None,
-                "assumed_tangential_speed_allowance_mps": (
-                    policy.settings.unknown_tangential_speed_mps
-                ),
-                "expanded_nodes": 0,
-            }
+            return _nonroute_preview(
+                observation, policy.settings, status="invalid_input", detail=detail
+            )
 
         def publish(state: str, *, failure: str | None = None, query: bool = False) -> bool:
-            nonlocal phase, last_publication_wall, route, preview, previous_plan
+            nonlocal phase, last_publication_wall, last_publication_duration_wall
+            nonlocal route, preview, previous_plan
             if snapshot is None or policy is None:
                 return False
+            if active is not None and guidance is not None and guidance.uses_local_motion:
+                # No advisory HTTP shares a timed controller's 150 ms budget at
+                # 5x. Its live native authority/vectors and runner IPC remain
+                # available. Watch, stopped and terminal publications are separate.
+                return True
             if active is not None and "consent_epoch" in active:
                 authority = control_authority(snapshot)
                 if (
@@ -1840,11 +2168,22 @@ class ExperimentRunner:
                     return True
             observation = snapshot["observation"]
             packet = deepcopy(preview)
+            if guidance is not None and guidance.uses_local_motion and failure is None:
+                packet = _nonroute_preview(
+                    observation,
+                    policy.settings,
+                    status="no_candidate",
+                    detail=(
+                        "Timed local control is checked per command; no complete route is claimed"
+                    ),
+                )
             if failure is not None or packet is None:
                 try:
                     packet = empty_preview(observation, failure or "Python guidance has no route")
                 except (KeyError, TypeError, ValueError, AttributeError):
                     phase = "Clearing Python preview"
+                    with self._lock:
+                        self._report["preview_request_count"] += 1
                     sim.preview(None)
                     last_publication_wall = time.monotonic()
                     return True
@@ -1868,8 +2207,11 @@ class ExperimentRunner:
             }
             if observation.get("trial_revision") is not None:
                 packet["execution"]["trial_revision"] = observation["trial_revision"]
-            phase = "Publishing Python guidance"
+            mark_phase("Publishing Python guidance")
+            publication_started = time.monotonic()
             try:
+                with self._lock:
+                    self._report["preview_request_count"] += 1
                 sim.preview(packet)
             except StaleContextError:
                 recover_stale(path=True)
@@ -1879,6 +2221,7 @@ class ExperimentRunner:
                     raise
                 return True
             last_publication_wall = time.monotonic()
+            last_publication_duration_wall = last_publication_wall - publication_started
             if query and guidance is None and not self._stop.is_set():
                 # Debug truth is deliberately kept out of observation, prediction
                 # and control. The query itself publishes the real native trace.
@@ -1918,13 +2261,18 @@ class ExperimentRunner:
 
         try:
             while not self._stop.is_set():
+                poll_started = time.monotonic()
+                with self._lock:
+                    self._report["last_poll_started_wall_s"] = poll_started
                 try:
-                    snapshot = read()
+                    # Accept the current policy before consuming this sample once.
+                    # Repeating estimator updates on the same snapshot adds work,
+                    # not sensor history or extra command validity.
+                    snapshot = read(update_guidance=False)
                 except LocalApiError as error:
                     if not known_busy(error):
                         raise
-                    self._wake.wait(1 / poll_hz)
-                    self._wake.clear()
+                    wait_for_poll(min(0.025, 1 / poll_hz))
                     continue
                 except _RunError as error:
                     if active is None:
@@ -1934,13 +2282,14 @@ class ExperimentRunner:
                     publish("error", failure=reason)
                     if self._stop.is_set():
                         break
-                    self._wake.wait(1 / poll_hz)
-                    self._wake.clear()
+                    wait_for_poll(1 / poll_hz)
                     continue
                 if self._stop.is_set():
                     break
                 observation = snapshot["observation"]
+                mark_phase("Accepting current policy and limits")
                 policy, revision = self._accept_policy(observation)
+                mark_phase("Updating public sensor history")
                 refresh_guidance(snapshot)
                 limits, limits_revision = accept_limits(observation)
                 if active is not None and ("consent_epoch" in active) != (
@@ -2007,8 +2356,11 @@ class ExperimentRunner:
                                 "limits_revision": limits_revision,
                                 "deadline": wall_origin + 5 * limits.duration_s + 15,
                                 "next_decision": 0.0,
+                                "next_poll": 0.0,
+                                "last_tick_wall": None,
                                 "last_decision_wall": None,
                                 "decision_time": None,
+                                "command_pending_read": False,
                                 "expect_running": snapshot["runtime"]["running"],
                                 "awaiting_play": False,
                                 "play_deadline": None,
@@ -2029,6 +2381,23 @@ class ExperimentRunner:
                                 notice=None,
                                 notice_source=None,
                                 error=None,
+                                command_count=0,
+                                nonzero_command_count=0,
+                                expired_decision_count=0,
+                                command_rejection=None,
+                                command_discard_count=0,
+                                ownership_renewal_count=0,
+                                last_ownership_renewal=None,
+                                last_ownership_renewal_ack_wall_s=None,
+                                ownership_renewal_rejection=None,
+                                last_command_ack_wall_s=None,
+                                last_command_ack_interval_wall_s=None,
+                                last_decision_interval_wall_s=None,
+                                last_command_validation_kind=None,
+                                last_precommand_observation_time_s=None,
+                                last_precommand_validation_kind=None,
+                                source_hold_budget=None,
+                                dispatch_budget=None,
                             )
                             self._configuration_changes.append(
                                 {
@@ -2049,7 +2418,7 @@ class ExperimentRunner:
                     # estimator until this new explicit Run consent.
                     guidance, guidance_config = None, None
                     refresh_guidance(snapshot)
-                    phase = "Claiming native controller authority"
+                    mark_phase("Claiming native controller authority")
                     try:
                         grant = sim.claim_control(
                             active["run_id"],
@@ -2088,10 +2457,13 @@ class ExperimentRunner:
                         controller_fence=fence,
                     )
                     owned = True
-                    snapshot = read()
+                    # claim_control already returned an actual native snapshot.
+                    # Validate and consume that receipt rather than adding a
+                    # second identical round trip before the first command.
+                    snapshot = read(receipt=grant)
                     if active is None or self._stop.is_set():
                         continue
-                    phase = "Starting warm standby process"
+                    mark_phase("Starting warm standby process")
                     peer = StandbyCohort(
                         sim,
                         active,
@@ -2106,18 +2478,70 @@ class ExperimentRunner:
                         self._update_standby()
                         if self._stop.is_set():
                             peer.request_stop()
+                    # Process startup is not acquisition cost for a command.
+                    # Consume a genuine post-startup source before timing the
+                    # first calculation or learning the next acquisition lead.
+                    poll_started = time.monotonic()
+                    snapshot = read()
+                    if active is None or self._stop.is_set():
+                        continue
+                    with self._lock:
+                        self._report["last_poll_started_wall_s"] = poll_started
                     observation = snapshot["observation"]
 
                 if active is not None and run_limit_notice(active):
                     reason = finish_run(notice=run_limit_notice(active))
                     publish("error" if reason else "watching", failure=reason)
                     observation = snapshot["observation"]
-                if guidance_due(previous_plan, observation, revision, replan_s):
+                timed_guidance = guidance is not None and guidance.uses_local_motion
+                timed_control = active is not None and timed_guidance
+                if active is not None:
+                    active["continuous_source_reads"] = (
+                        timed_control
+                        and snapshot["runtime"]["running"]
+                        and primary_can_decide(snapshot)
+                    )
+                terminal = terminal_mission_notice(snapshot["observation"]) is not None
+                if timed_guidance:
+                    route, preview, previous_plan = None, None, None
+                with self._lock:
+                    self._report["planning_schedule"] = (
+                        "timed_command_without_global_preview"
+                        if timed_control
+                        else "timed_watch_without_global_preview"
+                        if timed_guidance and not terminal
+                        else "terminal_no_planning"
+                        if terminal
+                        else "watch_or_route_based_callbacks"
+                    )
+                    self._report["advisory_schedule"] = (
+                        "no_advisory_http_during_timed_control"
+                        if timed_control
+                        else "watch_route_or_end_publication"
+                    )
+                    self._report["acquisition_schedule"] = (
+                        "fresh_public_reads_between_strict_calculations"
+                        if active is not None and active["continuous_source_reads"]
+                        else "polling_without_continuous_control_acquisition"
+                    )
+                if (
+                    not timed_guidance
+                    and not terminal
+                    and (active is None or primary_can_decide(snapshot))
+                    and guidance_due(
+                        previous_plan,
+                        observation,
+                        revision,
+                        replan_s,
+                        local_motion=guidance is not None and guidance.uses_local_motion,
+                        requires_replan=guidance is not None and readiness.requires_replan,
+                    )
+                ):
                     if self._stop.is_set():
                         break
                     planning_key = _guidance_key(observation, revision)
                     previous_plan = planning_key
-                    phase = "Python prediction and A*"
+                    mark_phase("Python prediction and A*")
                     guidance_error = None
                     try:
                         if guidance is not None and not readiness.can_command:
@@ -2137,7 +2561,12 @@ class ExperimentRunner:
                         break
                     # A long search must not publish across a reset, intervention
                     # or a policy edit, nor write from the old observation.
-                    after = read()
+                    try:
+                        after = read()
+                    except LocalApiError as error:
+                        if not known_busy(error):
+                            raise
+                        continue
                     current = after["observation"]
                     changed = _guidance_key(current, revision)[:-1] != planning_key[:-1]
                     changed |= current["time_s"] < observation["time_s"]
@@ -2159,8 +2588,11 @@ class ExperimentRunner:
                             plan_count=self._report["plan_count"] + 1,
                             error=guidance_error,
                         )
-                    if not publish(
-                        "running" if owned else "error" if guidance_error else "watching",
+                    # Flight commands take priority over advisory HTTP work. A
+                    # watch publishes immediately; an active run publishes its
+                    # latest plan on the bounded heartbeat after command work.
+                    if active is None and not publish(
+                        "error" if guidance_error else "watching",
                         failure=guidance_error,
                         query=True,
                     ):
@@ -2170,6 +2602,69 @@ class ExperimentRunner:
                         if self._report["state"] == "connecting":
                             self._report["state"] = "watching"
 
+                prepared_wall = time.monotonic()
+                if active is not None:
+                    active["input_prepare_wall_s"] = max(0.0, prepared_wall - poll_started)
+                with self._lock:
+                    self._report["last_poll_duration_wall_s"] = prepared_wall - poll_started
+                input_due = active is not None and (
+                    active["continuous_source_reads"] or poll_started >= active["next_poll"]
+                )
+                if (
+                    input_due
+                    and guidance is not None
+                    and not active["awaiting_play"]
+                    and primary_can_decide(snapshot)
+                    and active["decision_time"] != active["last_time"]
+                ):
+                    lease = readiness.lease_sim_s or policy.resilience.lease_sim_s
+                    now_wall = time.monotonic()
+                    wait_s = max(0.0, active["next_decision"] - now_wall)
+                    budget = controller_source_budget(
+                        active,
+                        snapshot,
+                        poll_started_wall_s=poll_started,
+                        now_wall_s=now_wall,
+                        lease_sim_s=lease,
+                        wait_wall_s=0.0 if active["continuous_source_reads"] else wait_s,
+                    )
+                    with self._lock:
+                        self._report["source_hold_budget"] = budget
+                    if (
+                        not active["continuous_source_reads"]
+                        and wait_s > 0.0
+                        and not controller_source_can_wait(budget)
+                    ):
+                        request_fresh_controller_source(active, now_wall)
+                        with self._lock:
+                            self._report["command_rejection"] = (
+                                "source_or_authority_budget_requires_fresh_read"
+                            )
+                        wait_for_poll(controller_poll_delay(active, poll_hz, time.monotonic()))
+                        continue
+                    if wait_s > 0 and not active["continuous_source_reads"]:
+                        mark_phase("Waiting within original source and authority leases")
+                        wait_for_poll(wait_s)
+                        if self._stop.is_set():
+                            break
+                        if policy_changed() or time.monotonic() < active["next_decision"]:
+                            continue
+                        budget = controller_source_budget(
+                            active,
+                            snapshot,
+                            poll_started_wall_s=poll_started,
+                            now_wall_s=time.monotonic(),
+                            lease_sim_s=lease,
+                        )
+                        with self._lock:
+                            self._report["source_hold_budget"] = budget
+                        if not controller_source_can_wait(budget):
+                            request_fresh_controller_source(active, time.monotonic())
+                            with self._lock:
+                                self._report["command_rejection"] = (
+                                    "source_or_authority_budget_expired_during_hold"
+                                )
+                            continue
                 if self._stop.is_set():
                     break
                 if active is not None:
@@ -2188,17 +2683,100 @@ class ExperimentRunner:
                             )
                             publish("error", failure=self.status()["error"])
                     elif (
-                        primary_can_decide(snapshot)
+                        input_due
+                        and not policy_changed()
+                        and primary_can_decide(snapshot)
                         and time.monotonic() >= active["next_decision"]
                         and (
                             active["decision_time"] is None
                             or active["last_time"] > active["decision_time"]
                         )
                     ):
-                        phase = "Python controller"
+                        if guidance is not None:
+                            with sim.control_transaction():
+                                accept_limits(snapshot["observation"])
+                                if time.monotonic() < active["next_decision"]:
+                                    continue
+                                if run_limit_notice(active):
+                                    reason = finish_run(notice=run_limit_notice(active))
+                                    publish("error" if reason else "watching", failure=reason)
+                                    continue
+                                renewal_lease = controller_ownership_renewal_lease(
+                                    active,
+                                    snapshot,
+                                    active.get("controller_fence"),
+                                    policy.resilience.lease_sim_s,
+                                )
+                                if (
+                                    renewal_lease is not None
+                                    and not self._stop.is_set()
+                                    and not policy_changed()
+                                    and primary_can_decide(snapshot)
+                                    and time.monotonic() < active["deadline"]
+                                    and run_limit_notice(active) is None
+                                ):
+                                    mark_phase("Renewing ownership without actuator changes")
+                                    try:
+                                        receipt = sim.renew_control(
+                                            snapshot,
+                                            controller_fence=active["controller_fence"],
+                                            lease_sim_s=renewal_lease,
+                                        )
+                                    except (StaleContextError, CommandExpiredError) as error:
+                                        with self._lock:
+                                            self._report["ownership_renewal_rejection"] = (
+                                                "native_ownership_source_expired"
+                                                if isinstance(error, CommandExpiredError)
+                                                else "native_ownership_stale_context"
+                                            )
+                                        recover_stale()
+                                        continue
+                                    except LocalApiError as error:
+                                        if not known_busy(error):
+                                            raise
+                                        with self._lock:
+                                            self._report["ownership_renewal_rejection"] = (
+                                                "known_busy_before_ownership_renewal"
+                                            )
+                                        continue
+                                    active["ownership_renewal_receipt"] = receipt
+                                    with self._lock:
+                                        self._report.update(
+                                            ownership_renewal_count=self._report[
+                                                "ownership_renewal_count"
+                                            ]
+                                            + 1,
+                                            last_ownership_renewal=deepcopy(receipt),
+                                            last_ownership_renewal_ack_wall_s=time.monotonic(),
+                                            ownership_renewal_rejection=None,
+                                        )
+                        if self._stop.is_set():
+                            break
+                        if policy_changed():
+                            continue
+                        mark_phase("Python controller")
                         tick_started = time.monotonic()
-                        decision_source = deepcopy(snapshot)
-                        decision_context = _guidance_key(decision_source["observation"], revision)
+                        with self._lock:
+                            self._report["last_decision_started_wall_s"] = tick_started
+                        # Every attempted calculation consumes a cadence slot,
+                        # including one later rejected by the native engine.
+                        advance_controller_tick(
+                            active,
+                            poll_started,
+                            tick_started,
+                            prepared_wall_s=prepared_wall,
+                        )
+                        with self._lock:
+                            self._report["last_decision_interval_wall_s"] = active[
+                                "last_decision_interval_wall_s"
+                            ]
+                        decision_source = snapshot
+                        decision_limits_revision = active["limits_revision"]
+                        decision_context = _decision_key(
+                            decision_source["observation"],
+                            revision,
+                            local_motion=guidance is not None and guidance.uses_local_motion,
+                        )
                         decision_lease = readiness.lease_sim_s if guidance is not None else None
                         try:
                             decision_observation = (
@@ -2217,8 +2795,10 @@ class ExperimentRunner:
                                     # sensor samples recover.
                                     decision = Decision(np.zeros(3), np.zeros(3))
                                     decision_lease = policy.resilience.lease_sim_s
-                                if route is not None and (
-                                    np.any(decision.accel) or np.any(decision.angular_accel)
+                                if (
+                                    route is not None
+                                    and not (guidance is not None and guidance.uses_local_motion)
+                                    and (np.any(decision.accel) or np.any(decision.angular_accel))
                                 ):
                                     remaining_horizon = (
                                         route.frame.source_time_s
@@ -2229,32 +2809,127 @@ class ExperimentRunner:
                                     if not math.isfinite(decision_lease) or decision_lease < 0.05:
                                         decision = Decision(np.zeros(3), np.zeros(3))
                                         decision_lease = 0.05
+                                report = guidance.report
                                 with self._lock:
                                     self._report.update(
-                                        resilience=deepcopy(guidance.report),
-                                        primary_resilience=deepcopy(guidance.report),
+                                        resilience=report, primary_resilience=report
                                     )
                         except BaseException as error:
                             reason = finish_run(_failure("Python controller", error))
                             route, preview = None, None
                             publish("error", failure=reason)
                             continue
+                        calculation_done_wall = time.monotonic()
+                        active["last_calculation_work_wall_s"] = (
+                            calculation_done_wall - tick_started
+                        )
+                        with self._lock:
+                            self._report["last_decision_duration_wall_s"] = active[
+                                "last_calculation_work_wall_s"
+                            ]
                         if self._stop.is_set():
                             break
                         with sim.control_transaction():
-                            snapshot = read()
+                            # Accept hot limits before proving that native source
+                            # expiry also enforces this run's duration. An edit
+                            # after this boundary is accepted on the next tick.
+                            accept_limits(decision_source["observation"])
+                            # An existing leader renews in the atomic native
+                            # call. A second HTTP snapshot cannot validate a later
+                            # mutation or extend the old fence. It only consumes
+                            # the old lease before the renewal can be dispatched.
+                            # Native still checks the original context, sensor
+                            # revision, source deadline and actual four-field fence.
+                            # Claims and near-limit decisions retain the later read.
+                            atomic_renewal = (
+                                guidance is not None
+                                and control_authority(decision_source)["status"] == "active"
+                                and controller_fence(decision_source)
+                                == active.get("controller_fence")
+                                and controller_lease_within_run(
+                                    active,
+                                    decision_source["observation"]["time_s"],
+                                    decision_lease,
+                                )
+                            )
+                            validation_started_wall = (
+                                poll_started if atomic_renewal else time.monotonic()
+                            )
+                            if atomic_renewal:
+                                mark_phase("Renewing through atomic native validation")
+                            else:
+                                try:
+                                    snapshot = read(update_guidance=False)
+                                except LocalApiError as error:
+                                    if not known_busy(error):
+                                        raise
+                                    with self._lock:
+                                        self._report["command_rejection"] = (
+                                            "known_busy_during_precommand_read"
+                                        )
+                                    continue
+                            validation_kind = (
+                                "original_public_source_then_atomic_native_validation"
+                                if atomic_renewal
+                                else "later_public_read_then_atomic_native_validation"
+                            )
+                            if guidance is not None:
+                                current_authority = control_authority(snapshot)
+                                source_age = (
+                                    snapshot["observation"]["time_s"]
+                                    - decision_source["observation"]["time_s"]
+                                )
+                                with self._lock:
+                                    self._report.update(
+                                        last_precommand_observation_time_s=(
+                                            snapshot["observation"]["time_s"]
+                                        ),
+                                        last_precommand_validation_kind=validation_kind,
+                                        last_precommand_source_age_sim_s=(
+                                            None if atomic_renewal else source_age
+                                        ),
+                                        last_precommand_source_slack_sim_s=(
+                                            None if atomic_renewal else decision_lease - source_age
+                                        ),
+                                        last_precommand_authority_status=(
+                                            current_authority["status"]
+                                        ),
+                                        last_precommand_authority_term=(current_authority["term"]),
+                                        last_precommand_authority_slack_sim_s=(
+                                            current_authority["expires_at_sim_time_s"]
+                                            - snapshot["observation"]["time_s"]
+                                            if current_authority["status"] == "active"
+                                            else None
+                                        ),
+                                    )
                             if (
                                 self._stop.is_set()
                                 or active is None
                                 or policy_changed()
                                 or not primary_can_decide(snapshot)
                             ):
+                                with self._lock:
+                                    self._report["command_discard_count"] += 1
+                                    self._report["command_rejection"] = (
+                                        "stop_policy_or_native_leader_changed_before_command"
+                                    )
                                 continue
-                            accept_limits(snapshot["observation"])
+                            if not atomic_renewal:
+                                accept_limits(snapshot["observation"])
                             if (
-                                _guidance_key(snapshot["observation"], revision)[:-1]
-                                != decision_context[:-1]
+                                _decision_key(
+                                    snapshot["observation"],
+                                    revision,
+                                    local_motion=guidance is not None
+                                    and guidance.uses_local_motion,
+                                )
+                                != decision_context
                             ):
+                                with self._lock:
+                                    self._report["command_discard_count"] += 1
+                                    self._report["command_rejection"] = (
+                                        "source_context_changed_before_command"
+                                    )
                                 route, preview, previous_plan = None, None, None
                                 continue
                             if time.monotonic() >= active["deadline"]:
@@ -2269,7 +2944,10 @@ class ExperimentRunner:
                                 reason = finish_run(notice=run_limit_notice(active))
                                 publish("error" if reason else "watching", failure=reason)
                                 continue
-                            if time.monotonic() < active["next_decision"]:
+                            if (
+                                active["limits_revision"] != decision_limits_revision
+                                and time.monotonic() < active["next_decision"]
+                            ):
                                 continue
                             if (
                                 guidance is not None
@@ -2284,15 +2962,37 @@ class ExperimentRunner:
                             ):
                                 # This computed decision is already expired. Do
                                 # not attach it to the newer snapshot's clock.
-                                active["next_decision"] = time.monotonic() + 1 / active["cadence"]
+                                with self._lock:
+                                    self._report["expired_decision_count"] += 1
+                                    self._report["command_rejection"] = (
+                                        "original_source_expired_before_dispatch"
+                                    )
                                 continue
+                            if guidance is not None:
+                                budget = controller_source_budget(
+                                    active,
+                                    snapshot,
+                                    poll_started_wall_s=validation_started_wall,
+                                    now_wall_s=time.monotonic(),
+                                    lease_sim_s=decision_lease,
+                                    decision_source_time_s=(
+                                        decision_source["observation"]["time_s"]
+                                    ),
+                                    work_reserve_wall_s=active.get("last_send_work_wall_s", 0.0),
+                                )
+                                with self._lock:
+                                    self._report["dispatch_budget"] = budget
+                                # This is immediate dispatch, not permission to
+                                # hold. A fresh read cannot rescue a tight old
+                                # authority deadline. Only the native fenced
+                                # renewal can extend it, or reject without mutation.
                             source = decision_source if guidance is not None else snapshot
                             expected = control_context(source)
                             previous_owned = owned
                             owned = True  # An uncertain transport response requires cleanup.
                             with self._lock:
                                 self._report["flight_owned"] = True
-                            phase = "Applying body-frame command"
+                            mark_phase("Applying body-frame command")
                             try:
                                 if guidance is not None:
                                     grant = snapshot
@@ -2322,14 +3022,30 @@ class ExperimentRunner:
                                     active["controller_fence"] = fence
                                     if self._stop.is_set() or not primary_can_decide(snapshot):
                                         continue
-                                    sim.set_leased_command(
-                                        decision.accel,
-                                        decision.angular_accel,
-                                        source,
-                                        lease_sim_s=decision_lease,
-                                        controller_fence=fence,
-                                    )
+                                    try:
+                                        command_sent_wall = time.monotonic()
+                                        sim.set_leased_command(
+                                            decision.accel,
+                                            decision.angular_accel,
+                                            source,
+                                            lease_sim_s=decision_lease,
+                                            controller_fence=fence,
+                                        )
+                                    except LocalApiError as error:
+                                        if not known_busy(error):
+                                            raise
+                                        # This direct command was rejected before
+                                        # dispatch. Do not retry its old vectors.
+                                        # A claim/readback failure is deliberately
+                                        # outside this known-outcome handler.
+                                        owned = previous_owned
+                                        with self._lock:
+                                            self._report["command_rejection"] = (
+                                                "known_busy_before_command_dispatch"
+                                            )
+                                        continue
                                 else:
+                                    command_sent_wall = time.monotonic()
                                     sim.set_command_checked(
                                         decision.accel, decision.angular_accel, snapshot
                                     )
@@ -2338,7 +3054,9 @@ class ExperimentRunner:
                                 # installed. Existing leases are never renewed
                                 # by a read, preview or failed decision.
                                 owned = previous_owned
-                                active["next_decision"] = time.monotonic() + 1 / active["cadence"]
+                                with self._lock:
+                                    self._report["expired_decision_count"] += 1
+                                    self._report["command_rejection"] = "native_command_expired"
                                 continue
                             except StaleContextError:
                                 # The engine guarantees that this command did not
@@ -2347,9 +3065,17 @@ class ExperimentRunner:
                                 recover_stale()
                                 continue
                             active["decision_time"] = source["observation"]["time_s"]
-                            active["last_decision_wall"] = tick_started
-                            active["next_decision"] = tick_started + 1 / active["cadence"]
+                            active["command_pending_read"] = True
+                            # The ACK confirms native admission, not force application
+                            # or a post-command watchdog/authority observation. Keep
+                            # the public snapshot unchanged until the next real read.
+                            acknowledged_wall = time.monotonic()
+                            active["last_precommand_work_wall_s"] = (
+                                acknowledged_wall - calculation_done_wall
+                            )
+                            active["last_send_work_wall_s"] = acknowledged_wall - command_sent_wall
                             with self._lock:
+                                previous_ack = self._report["last_command_ack_wall_s"]
                                 self._report.update(
                                     state="running"
                                     if snapshot["runtime"]["running"]
@@ -2361,9 +3087,26 @@ class ExperimentRunner:
                                     last_command_policy_revision=revision,
                                     last_command_context=expected,
                                     last_command_fence=deepcopy(active.get("controller_fence")),
+                                    command_count=self._report["command_count"] + 1,
+                                    nonzero_command_count=self._report["nonzero_command_count"]
+                                    + int(np.any(decision.accel) or np.any(decision.angular_accel)),
+                                    command_rejection=None,
+                                    last_command_ack_wall_s=acknowledged_wall,
+                                    last_command_ack_interval_wall_s=(
+                                        acknowledged_wall - previous_ack
+                                        if previous_ack is not None
+                                        else None
+                                    ),
+                                    last_command_validation_age_sim_s=(
+                                        None
+                                        if atomic_renewal
+                                        else snapshot["observation"]["time_s"]
+                                        - source["observation"]["time_s"]
+                                    ),
+                                    last_command_validation_kind=validation_kind,
                                 )
                             if not snapshot["runtime"]["running"]:
-                                phase = "Starting real-time playback"
+                                mark_phase("Starting real-time playback")
                                 try:
                                     if guidance is not None:
                                         sim.play_checked(grant)
@@ -2376,14 +3119,42 @@ class ExperimentRunner:
                                     awaiting_play=True,
                                     play_deadline=min(active["deadline"], time.monotonic() + 10),
                                 )
-                        publish("running")
-                if not self._stop.is_set() and time.monotonic() - last_publication_wall >= 1.0:
+                now_wall = time.monotonic()
+                publication_due = now_wall - last_publication_wall >= 1.0
+                advisory_allowed = (
+                    active is None or guidance is None or not guidance.uses_local_motion
+                )
+                publication_slack = active is None or (
+                    active["next_poll"] - now_wall >= max(0.025, last_publication_duration_wall)
+                )
+                if (
+                    not self._stop.is_set()
+                    and advisory_allowed
+                    and publication_due
+                    and publication_slack
+                ):
                     # A connection heartbeat holds the original plan/source time.
                     # It does not rerun A*, fabricate readings or query cameras.
-                    error = self.status()["error"]
+                    with self._lock:
+                        error = self._report["error"]
                     publish("running" if owned else "error" if error else "watching", failure=error)
-                self._wake.wait(1 / poll_hz)
-                self._wake.clear()
+                now_wall = time.monotonic()
+                with self._lock:
+                    self._report.update(
+                        last_tick_work_wall_s=now_wall - poll_started,
+                        last_poll_slack_wall_s=(
+                            active["next_poll"] - now_wall if active is not None else None
+                        ),
+                    )
+                mark_phase("Waiting for next public acquisition")
+                wait_for_poll(
+                    controller_poll_delay(
+                        active,
+                        poll_hz,
+                        time.monotonic(),
+                        can_decide=active is not None and primary_can_decide(snapshot),
+                    )
+                )
         except BaseException as error:
             fatal = _failure(phase, error)
         finally:
