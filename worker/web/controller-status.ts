@@ -169,7 +169,7 @@ function nativeStatus(observation: unknown, runtime: unknown, authority: Authori
   switch (watchdog.status) {
     case "active": {
       const source = watchdog.source_time_s, deadline = watchdog.expires_at_sim_time_s;
-      if (source === null || deadline === null || source > time || time >= deadline || expiry !== deadline) return claimedStatus(authority);
+      if (source === null || deadline === null || source > time || time >= deadline || expiry === null || expiry < deadline) return claimedStatus(authority);
       return presentation(running ? "running" : "paused", running ? "Controller running" : "Controller owns control · flight paused",
         `Latest accepted command: T+${timestamp(source)} s. Command expiry: T+${timestamp(deadline)} s. Verified ${identity(authority)}.`);
     }

@@ -83,8 +83,23 @@ class ControllerStatusSourceContracts(unittest.TestCase):
                 self.assertIn(f"pub {field}:", AVIONICS)
                 self.assertIn(field, SOURCE)
         self.assertIn('report["control_authority"] = json!(self.control_authority())', RESILIENCE)
+        native_guard = RESILIENCE.split("if let Some(fence) = &watchdog.controller_fence", 1)[1]
+        native_guard = native_guard.split(
+            "match (watchdog.source_time_s, watchdog.expires_at_sim_time_s)", 1
+        )[0]
+        # cargo fmt may split the chain. Native ownership may outlast its
+        # command, but neither a mismatched fence nor a shorter owner lease is valid.
+        compact_guard = "".join(native_guard.split())
+        self.assertIn("watchdog.status==CommandWatchdogStatus::Active&&(", compact_guard)
+        self.assertIn("authority.status!=ControlAuthorityStatus::Active", compact_guard)
+        self.assertIn("authority.fence().as_ref()!=Some(fence)", compact_guard)
         self.assertIn(
-            "authority.expires_at_sim_time_s != watchdog.expires_at_sim_time_s", RESILIENCE
+            "authority.expires_at_sim_time_s.zip(watchdog.expires_at_sim_time_s)"
+            ".is_none_or(|(owner,command)|owner<command)",
+            compact_guard,
+        )
+        self.assertIn(
+            'return Err("Invalid archived controller command fence.".into())', native_guard
         )
         self.assertIn("pub fn valid_control_id", AVIONICS)
         for native_status in (
@@ -157,9 +172,10 @@ class ControllerStatusSourceContracts(unittest.TestCase):
         self.assertIn("!matches(authority, watchdog.controller_fence)", native)
         self.assertIn(
             "source === null || deadline === null || source > time || "
-            "time >= deadline || expiry !== deadline",
+            "time >= deadline || expiry === null || expiry < deadline",
             native,
         )
+        self.assertNotIn("expiry !== deadline", native)
         self.assertIn('presentation(running ? "running" : "paused"', native)
         self.assertIn(
             'running ? "Controller running" : "Controller owns control · flight paused"', native
