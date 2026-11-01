@@ -103,6 +103,10 @@ unit-check suite="all":
 python-test:
     devenv shell uv run --locked --extra lab pytest
 
+# Explicit stress mode, not competition arrival. The assertions are unchanged.
+transit-stress:
+    WSORB_TRANSIT_STRESS=1 devenv shell uv run --locked --extra lab pytest -m transit_stress
+
 python-format:
     devenv shell uv run --locked ruff format .
 
@@ -343,6 +347,9 @@ flight-notebook:
 
 task-create title description parent assignee:
     bd create {{quote(title)}} --description {{quote(description)}} --parent {{quote(parent)}} --assignee {{quote(assignee)}} --type task --priority 0 --status open --silent --sandbox
+
+epic-create title description assignee:
+    bd create {{quote(title)}} --description {{quote(description)}} --assignee {{quote(assignee)}} --type epic --priority 0 --status open --silent --sandbox
 
 task-assign id assignee:
     bd update {{quote(id)}} --assignee {{quote(assignee)}} --status in_progress --sandbox

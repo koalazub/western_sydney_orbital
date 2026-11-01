@@ -38,6 +38,9 @@ module-name = "wsorb"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    "transit_stress: custom 20 m/s transit stress field, not the competition mission",
+]
 pythonpath = ["src"]
 filterwarnings = ["error"]
 
