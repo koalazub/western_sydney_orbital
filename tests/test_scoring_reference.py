@@ -104,6 +104,7 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
         "local_receipt_formula_id",
         "sources",
         "constants",
+        "current_main",
         "algebra",
         "documented_model",
         "terminal_conditions",
@@ -142,8 +143,14 @@ def test_reference_constants_match_the_existing_versioned_scenario(reference):
     }
     assert reference["constants"] == expected
     assert all(type(value) is float for value in reference["constants"].values())
-    for name in (*REFERENCE_FIELDS, "arrival_radius_m", "score_offset"):
+    for name in ("nominal_time_s", "impact_threshold_j", "arrival_radius_m", "score_offset"):
         assert reference["constants"][name] == scenario["mission"][name]
+    # The pinned 29 October review keeps 1.15 kg. The current official main and the
+    # versioned competition_reference scenario use 75.0 kg.
+    assert reference["constants"]["nominal_fuel_kg"] == 1.15
+    assert reference["current_main"]["nominal_fuel_kg"] == scenario["mission"]["nominal_fuel_kg"]
+    assert reference["current_main"]["nominal_fuel_kg"] == 75.0
+    assert reference["current_main"]["fuel_penalty"] == "max(F / F_nom, 0)"
     fuel = reference["counter_semantics"]["fuel"]
     for name in ("specific_impulse_s", "standard_gravity_mps2"):
         assert fuel[name] == scenario["lander"][name]

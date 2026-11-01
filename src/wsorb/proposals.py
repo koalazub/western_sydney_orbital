@@ -153,14 +153,19 @@ def _settings_shape(settings: Any) -> dict[str, Any]:
             debris["distribution"], path, frozenset({"kind"}), frozenset({"settings"})
         )
         kind = distribution["kind"]
-        if isinstance(kind, str) and kind in ("directed_stream", "transit_stream"):
+        if isinstance(kind, str) and kind in (
+            "directed_stream",
+            "transit_stream",
+            "official_cloud",
+        ):
             _require_fields(distribution, path, frozenset({"kind"}))
         elif kind == "impact_ejecta":
             _require_fields(distribution, path, frozenset({"kind", "settings"}))
             _require_fields(distribution["settings"], f"{path}.settings", _EJECTA_FIELDS)
         else:
             raise ValueError(
-                f"{path}.kind must be directed_stream, transit_stream or impact_ejecta"
+                f"{path}.kind must be directed_stream, transit_stream, official_cloud "
+                "or impact_ejecta"
             )
     return settings
 

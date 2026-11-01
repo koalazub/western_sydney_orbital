@@ -13,6 +13,7 @@ from importlib.resources import files
 from typing import Any
 
 FORMULA = "practice_normalized_time_damage_fuel_v1"
+COMPETITION_FORMULA = "official_time_damage_fuel_v1"
 POINT_FIELDS = (
     "progress_points",
     "collision_penalty_points",
@@ -34,14 +35,14 @@ def native_score_breakdown(value: Any, *, score: float | None) -> dict[str, Any]
     if (
         not isinstance(value, Mapping)
         or set(value) != {"formula", "progress_basis", *POINT_FIELDS, *REFERENCE_FIELDS}
-        or value["formula"] != FORMULA
+        or value["formula"] not in (FORMULA, COMPETITION_FORMULA)
         or value["progress_basis"] not in ("time_ratio", "remaining_distance_ratio")
         or score is None
         or isinstance(score, bool)
         or not isinstance(score, (int, float))
     ):
         return None
-    result = {"formula": FORMULA, "progress_basis": value["progress_basis"]}
+    result = {"formula": value["formula"], "progress_basis": value["progress_basis"]}
     for field in (*POINT_FIELDS, *REFERENCE_FIELDS):
         number = value[field]
         if isinstance(number, bool) or not isinstance(number, (int, float)):

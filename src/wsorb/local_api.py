@@ -44,7 +44,12 @@ MAX_DEBRIS_COUNT = 100_000
 WORLD_POSITION_LIMIT_M = 10_000_000.0  # Versioned local scenario transport bound.
 WORLD_CALL_TIMEOUT_S = 180.0
 WORLD_OPERATIONS = frozenset({"configure_experiment", "configure_flight", "reset"})
-FLIGHT_PRESETS = ("mars_facing_l1", "far_side_l2")
+FLIGHT_PRESETS = ("mars_facing_l1", "far_side_l2", "competition_reference")
+TARGET_REGIONS = {
+    "mars_facing_l1": "L1",
+    "far_side_l2": "L2",
+    "competition_reference": "local_up",
+}
 COMMANDS = frozenset(
     {
         "pause",
@@ -255,13 +260,14 @@ def _distribution(value: Any) -> dict[str, Any]:
     kind = value.get("kind")
     if (
         isinstance(kind, str)
-        and kind in ("directed_stream", "transit_stream")
+        and kind in ("directed_stream", "transit_stream", "official_cloud")
         and set(value) == {"kind"}
     ):
         return {"kind": kind}
     if kind != "impact_ejecta" or set(value) != {"kind", "settings"}:
         raise ValueError(
-            "Debris distribution must be directed_stream, transit_stream or impact_ejecta"
+            "Debris distribution must be directed_stream, transit_stream, official_cloud "
+            "or impact_ejecta"
         )
     settings = value["settings"]
     fields = {
@@ -1445,7 +1451,7 @@ class LocalSimulation:
         """
         parsed = validate_experiment_settings(settings)
         if not isinstance(preset, str) or preset not in FLIGHT_PRESETS:
-            raise ValueError("Flight preset must be mars_facing_l1 or far_side_l2")
+            raise ValueError(f"Flight preset must be one of {', '.join(FLIGHT_PRESETS)}")
         if seed is not None:
             seed = _integer(seed, "seed", 0xFFFFFFFF)
         with self.control_transaction():
@@ -1478,8 +1484,7 @@ class LocalSimulation:
                     and type(mass) in (int, float)
                     and math.isfinite(mass)
                     and math.isclose(mass, parsed["ship"]["mass_kg"], rel_tol=1e-6, abs_tol=1e-5)
-                    and observation["mission"]["target_region"]
-                    == ("L1" if preset == "mars_facing_l1" else "L2")
+                    and observation["mission"]["target_region"] == TARGET_REGIONS[preset]
                 )
 
             return self._wait_for_receipt(

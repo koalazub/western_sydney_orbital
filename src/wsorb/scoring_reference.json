@@ -89,6 +89,15 @@
     "points_scale": 100.0,
     "zero_time_bonus": 0.0
   },
+  "current_main": {
+    "reviewed_on": "2026-11-02",
+    "source_commit": "c010564824c48488104e648781d5e987b402e47a",
+    "source_file": "Systems/Scoring.py",
+    "formula_id": "official_time_damage_fuel_v1",
+    "nominal_fuel_kg": 75.0,
+    "fuel_penalty": "max(F / F_nom, 0)",
+    "note": "Current STU4-Sim main replaced the pinned 1.15 kg nominal fuel and the max(F/F_nom - 1, 0) term. The pinned review above is preserved; the local competition_reference preset carries 75.0 kg. Local counters are still not official STP counters."
+  },
   "algebra": {
     "time_bonus": "T_nom / T if T != 0 else 0",
     "damage_penalty": "2 * D / D_max",
