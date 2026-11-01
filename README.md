@@ -4,11 +4,30 @@ Our team's flight lab for **Escape from Phobos**, the Fall 2026 Space Teams PRO 
 
 This is a practice simulator. It does not reproduce Space Teams PRO exactly, so test promising controllers in the licensed competition simulator.
 
+- [Official competition reference](#official-competition-reference)
 - [Start locally](#start-locally)
 - [Fly manually](#fly-manually)
 - [Run a controller](#run-a-controller)
 - [Experiment and compare](#experiment-and-compare)
 - [Get help and competition references](#help-and-competition)
+
+## Official competition reference
+
+The **Competition reference · 1.31 km hop** preset and **Official debris cloud** mode port the Fall 2026 Escape from Phobos geometry. They are a local implementation, not an STP-certified reproduction.
+
+| Official value | STU4 source |
+| --- | --- |
+| 500 debris bodies in a ±300 m × ±300 m × ±500 m cloud, centred 500 m above the lander along local up; seed 100 | [`SpawnDebris.py`][spawn], [`COMPETITION_SIM.simconf`][simconf] |
+| 0.40–0.80 m/s tangential drift (0.05–0.10 of orbital speed) | [`SpawnDebris.py`][spawn] |
+| Rock weights 45/35/15/5% for Rock1/Rock2/Rock3/ExplodedTank; radii 0.2–20 m; mass scales with size³ | [`Rock1`][rock1], [`Rock2`][rock2], [`Rock3`][rock3], [`ExplodedTank`][tank] |
+| 1305.8 m shuttle-to-target route; 50 m keep-out | [`COMPETITION_SIM.simconf`][simconf] |
+| 209,200 J damage threshold; 75.0 kg nominal fuel; 120 s nominal time | [`Scoring.py`][scoring], [`COMPETITION_SIM.simconf`][simconf] |
+| 0.5 m/s² and 0.05 rad/s² command caps; radar 200 of 500 bodies with 2 m position, 0.02 m/s range-rate and 5% diameter noise | [`COMPETITION_SIM.simconf`][simconf], [`Radar.py`][radar] |
+| Successful-run score = 100 × (120 / T − 2D / 209200 − max(F / 75.0, 0) + 0.5) | [`Scoring.py`][scoring] |
+
+`T` is completion time, `D` is the official accumulated damage counter and `F` is the official fuel counter. The official example controller is a 10 m/s beeline with attitude alignment: [`BasicController.py`][controller].
+
+The 20 m/s **Transit traffic** mode is a custom stress field, not the competition field. Local terrain, launch-site radius, absolute frame, fuel and damage counters still differ from the official mission; local fuel and damage are not official STP counters. No local result is an STP score. See [official reference and local differences](docs/competition-reference.md) before treating a local run as competition evidence.
 
 ## Start locally
 
@@ -53,7 +72,7 @@ Increasing thrust strength does not fire an engine. Check the clock and last-app
 
 ## Run a controller
 
-**Automatic flight is not reliable in the new traffic yet.** With seed 100 and attraction off, default A* guidance failed after 54.75 s and Bui's adapter after 44 s, both from collision damage. The older successful flights below used a different debris field.
+**Automatic flight is not reliable in the 20 m/s transit stress field yet.** With seed 100 and attraction off, default A* guidance failed after 54.75 s and Bui's adapter after 44 s, both from collision damage. Those are stress-field failures, not official-cloud arrival evidence. The older successful flights below used a different debris field.
 
 ### From the notebook
 
@@ -73,7 +92,7 @@ Open **Controller profiles** or press **Shift+C** with the scene focused. Choose
 just controllers serve --connection-file .devenv/wsorb-local.json --run
 ```
 
-Choose **Run fresh test** and confirm replacement of this tab's flight. Fresh tests use L2, seed 100 and 500 debris bodies. Use **Stop** to end the test. Changing profile requests Stop first; it does not start the next profile automatically.
+Choose **Run fresh test** and confirm replacement of this tab's flight. Fresh tests use the far-side L2 practice world, the 20 m/s transit stress field, seed 100 and 500 debris bodies; they are not official competition flights. Use **Stop** to end the test. Changing profile requests Stop first; it does not start the next profile automatically. For the official geometry, choose **Competition reference · 1.31 km hop** and **Official debris cloud** in the notebook's **Launch** and **Debris** controls.
 
 Check **Controller running**, not just **API connected**. The game must have accepted the controller's command and be running physics. The status panel shows the command time and expiry. Start and Stop have both been tested locally.
 
@@ -83,7 +102,7 @@ For run budgets, sensor failures, standby takeover and isolated CLI runs, use th
 
 ## Experiment and compare
 
-New worlds default to **Far-side L2** with **Transit traffic**, a continuing flow of 500 physical debris bodies along the station route. **Broad shell stream** keeps the earlier surrounding-Phobos field; **Impact ejecta** starts a cloud with an initial velocity kick.
+New worlds still default to the **Far-side L2** practice world with **Transit traffic**, the 20 m/s stress field and a continuing flow of 500 physical debris bodies along the station route. For the competition geometry, choose **Competition reference · 1.31 km hop** with **Official debris cloud** in the new-world controls. **Broad shell stream** keeps the earlier surrounding-Phobos field; **Impact ejecta** starts a cloud with an initial velocity kick.
 
 **Light attraction is off by default.** Small impulses adapted from the published debris routine turn rocks toward the lander only beyond 100 m. To try it, use **Launch → New world → Light lander attraction → Light attraction**, then create and confirm a paused world. Selecting a draft does not change an existing flight. See [debris settings and model limits](docs/flight-lab.md#debris-settings-and-model-limits).
 
@@ -98,7 +117,7 @@ Notebook edits and supported live settings do not need a rebuild. If you change 
 
 The game's **Details → Export** downloads full world state, including debris the ship may not have observed. Do not feed that hidden state to a competition policy.
 
-These **30 trials used an older broad-stream build**, before transit traffic and optional attraction. They are not results for the new default field. All 30 reached the station region with zero measured damage, but the repeated seeds do not establish collision-avoidance robustness.
+These **30 trials used an older broad-stream build**, before transit traffic and optional attraction. They are not results for the transit stress field or the official cloud. All 30 reached the station region with zero measured damage, but the repeated seeds do not establish collision-avoidance robustness.
 
 <!-- BEGIN GENERATED TEAMMATE ANALYTICS -->
 ### Recorded teammate flights
@@ -156,3 +175,13 @@ Use the repository's Just/Jujutsu workflow for changes and review. `just check` 
 - [Competition simulation](https://github.com/SimDynamX/STU4-Sim)
 - [Controller starter and mission API](https://github.com/SimDynamX/STU4-Solution/wiki)
 - [Space Teams PRO documentation](https://github.com/SimDynamX/SpaceTeamsPRO/wiki) and [Python API](https://simdynamx.github.io/stp-python-api-docs/)
+
+[spawn]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/SpawnDebris.py
+[simconf]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Sims/COMPETITION_SIM.simconf
+[rock1]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/Rock1.enconf
+[rock2]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/Rock2.enconf
+[rock3]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/Rock3.enconf
+[tank]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/ExplodedTank.enconf
+[scoring]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py
+[radar]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Radar.py
+[controller]: https://github.com/SimDynamX/STU4-Solution/blob/8545c085426a71c39cbe1d544a844b3edb757007/BasicController.py

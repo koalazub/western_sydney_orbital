@@ -273,6 +273,20 @@ def test_new_world_and_placement_controls_stay_behind_closed_native_disclosures(
         ), (tab, name)
 
 
+def test_new_world_selectors_expose_the_official_preset_and_stress_labels(lab_defs, lab_panels):
+    presets = lab_defs["flight_preset"].options
+    assert presets["Competition reference · 1.31 km hop"] == "competition_reference"
+    assert presets["Far-side -X / L2 practice target"] == "far_side_l2"
+    assert presets["Mars-facing +X / L1 practice target"] == "mars_facing_l1"
+    modes = lab_defs["debris_mode"].options
+    assert modes["Official debris cloud · 500 bodies"] == "official_cloud"
+    assert modes["Transit traffic · 20 m/s stress mode"] == "transit_stream"
+    assert modes["Broad shell stream"] == "directed_stream"
+    assert modes["Impact ejecta"] == "impact_ejecta"
+    assert "not the competition field" in lab_panels["Debris"].text
+    assert "local port, not an STP-certified mission" in lab_panels["Launch"].text
+
+
 def test_launch_copy_separates_native_pad_movement_from_advanced_lander_xyz(lab_defs, lab_panels):
     launch = lab_panels["Launch"].text
     assert "select Place lander, then drag the launchpad on Phobos." in launch

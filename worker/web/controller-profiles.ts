@@ -25,7 +25,7 @@ type Options = {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const number = (value: unknown, places = 2) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(places) : "n/a";
-const practiceScoreLabel = "STP's documented success formula";
+const practiceScoreLabel = "STP's published success formula · local counters, no STP points";
 const numericScore = (result: Record<string, unknown>) => {
   if (result.world_metadata_unchanged === false) return null;
   const score = record(result.measurement) ? result.measurement.score : null;
@@ -113,7 +113,7 @@ async function freshTrial(api: RoomEngine) {
 
 function confirmFreshTrial(profileLabel: string): Promise<boolean> {
   const dialog = byId<HTMLDialogElement>("controller-fresh-confirm");
-  byId("controller-fresh-chosen").textContent = `Replace this tab's flight and run ${profileLabel}? The new test uses transit traffic with light attraction off, seed 100 and 500 debris bodies. The current flight cannot be recovered here.`;
+  byId("controller-fresh-chosen").textContent = `Replace this tab's flight and run ${profileLabel}? The new test uses the far-side L2 practice world, the 20 m/s transit stress field with light attraction off, seed 100 and 500 debris bodies. It is not an official competition flight. The current flight cannot be recovered here.`;
   // window.confirm blocks the bridge's page-lease polling. A native HTML dialog
   // keeps that authenticated connection alive while the person decides.
   dialog.returnValue = "cancel";

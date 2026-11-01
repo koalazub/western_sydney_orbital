@@ -50,13 +50,13 @@ For building or using the private Python lab and control APIs, run the backend i
 
 The initial Overview shows Phobos and Mars at their actual modelled sizes and separation. Press **F** for a close view of the lander. Use **Views** to change the camera, lighting, stars or guide visibility.
 
-The two launch setups let us compare departures on opposite sides of Phobos:
+The two practice launch setups let us compare departures on opposite sides of Phobos:
 
 ```text
 Mars -------- L1 -------- Phobos -------- L2
 ```
 
-This diagram is not to scale. **Mars-facing L1** launches toward the region between Phobos and Mars. **Far-side L2** launches away from Mars toward the outer region. L2 is not on the Mars-facing side. The return ship is held near the selected region as a repeatable target.
+This diagram is not to scale. **Mars-facing L1** launches toward the region between Phobos and Mars. **Far-side L2** launches away from Mars toward the outer region. L2 is not on the Mars-facing side. The return ship is held near the selected region as a repeatable target. The **Competition reference · 1.31 km hop** preset uses the official 1305.8 m shuttle-to-target geometry and 50 m keep-out. It is a local port, not an STP-certified mission.
 
 Both setups include Mars's gravity. From the close far-side launch view, Phobos can block Mars from sight; that does not remove its gravitational effect.
 
@@ -85,13 +85,13 @@ Open **Launch** and select **Place lander**. This pauses flight and frames the c
 
 To place without dragging, select **Place lander**, then click a surface point or use the directional buttons or arrow keys to adjust the preview. Select **Apply** to use that site. You do not need to enter XYZ coordinates.
 
-Moving the launchpad keeps the debris field, simulation time, hardware, fuel, damage and mission outcome. It clears the lander's thrust and motion and records a local test intervention. The selected L1 or L2 target does not move with the pad. A blocked or cancelled placement leaves the existing site unchanged.
+Moving the launchpad keeps the debris field, simulation time, hardware, fuel, damage and mission outcome. It clears the lander's thrust and motion and records a local test intervention. The selected L1, L2 or competition-reference target does not move with the pad. A blocked or cancelled placement leaves the existing site unchanged.
 
 Reset flight returns to the chosen custom launch site. Creating a new world returns to that preset's starting site.
 
 ### Choose a target setup or place the lander separately
 
-In **Launch**, expand the new-world setup to choose **Mars-facing L1** or **Far-side L2**. **Create paused world** opens a replacement confirmation; **Replace run at time zero** applies it. Expand **Size, shell and ejection inputs** for advanced settings. The default remains the far-side L2 setup with 500 debris bodies. Choosing a draft does not replace an ongoing flight or limit where you can drag the current pad.
+In **Launch**, expand the new-world setup to choose **Competition reference · 1.31 km hop**, **Far-side L2** or **Mars-facing L1**. Choose **Official debris cloud** or a practice debris mode in **Debris**. **Create paused world** opens a replacement confirmation; **Replace run at time zero** applies it. Expand **Size, shell and ejection inputs** for advanced settings. The default remains the far-side L2 practice setup with the 20 m/s transit stress field and 500 debris bodies. Choosing a draft does not replace an ongoing flight or limit where you can drag the current pad.
 
 The advanced lander-only placement controls are a different tool. Enter world X, Y and Z coordinates and select **Apply XYZ position** to move the lander without moving its pad. **Reload current XYZ** fills the fields from the current lander position. Placement pauses flight, aligns the lander away from Phobos, stops its motion and clears thrust. Placement inside another body or outside the supported world is rejected.
 
@@ -105,7 +105,8 @@ Positive X points toward Mars; negative X points away. These are world coordinat
 
 Debris bodies have mass, velocity and spin. Gravity changes their paths, and physical collisions can change their motion. They do not move merely because the renderer advances a decorative animation.
 
-- **Transit traffic** fills the launch-to-station route with a continuing mean-direction flow. It is the new-flight default, with 500 physical bodies. Mean speed, axis, sign and birth spread remain editable in **Debris**.
+- **Official debris cloud** is the 500-body competition distribution: a compact cloud offset 500 m toward the target, 0.40–0.80 m/s drift, weighted rock classes and radii up to 20 m. Its fixed count, sizes and extents are not edited by the practice sliders.
+- **Transit traffic** is a custom 20 m/s stress mode, not the competition field. It fills the launch-to-station route with a continuing mean-direction flow and 500 physical bodies. Mean speed, axis, sign and birth spread remain editable in **Debris**.
 - **Broad shell stream** preserves the earlier surrounding-Phobos stream. New rocks enter through the upstream side as others leave its bounded area.
 - **Impact ejecta** starts a debris cloud with an adjustable velocity kick and direction. Gravity and collisions then determine its paths. Some rocks can remain bound, some fall back and some escape. A circular belt is not guaranteed.
 
@@ -115,7 +116,7 @@ To try light attraction, use **Launch → New world → Light lander attraction 
 
 The [published debris script](https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/SpawnDebris.py) contains this routine with `doTrajectoryAdjustment = False`. Its optional update is a 0.02 m/s impulse to one body per overall 60 Hz iteration, not to every body at 60 Hz. Our scheduler uses simulation time for repeatable local trials. The route traffic volume and coherent mean direction are requested practice settings, not a claim about the official random-tangent initialization or asynchronous timing.
 
-The new traffic field is not arrival-validated. With attraction off and seed 100, default A* guidance failed on impact at 54.75 s and Bui's adapter at 44 s. The default arrival test remains failing until guidance is adapted and an actual arrival is demonstrated. Verified Start/Stop behaviour and older broad-stream arrivals do not establish safe navigation through this field.
+The 20 m/s transit stress field is not arrival-validated. With attraction off and seed 100, default A* guidance failed on impact at 54.75 s and Bui's adapter at 44 s. Those failures do not establish the official-cloud result. Verified Start/Stop behaviour and older broad-stream arrivals do not establish safe navigation through either field.
 
 Gravity remains active for the lander and every asteroid. The local model includes Phobos gravity, differential Mars gravity and the rotating-frame Coriolis and centrifugal terms. It is a circular point-mass approximation, not STP's SPICE ephemeris runtime. Mean-flow inputs do not overwrite the gravitational or collision response every frame.
 
@@ -188,7 +189,7 @@ For loading problems, `just local-check live` reads the connected game's status 
 
 ## Notebook policies and failures
 
-The [README's controller steps](../README.md#run-a-controller) cover connecting, running and stopping. Connected notebook functions and supported live controls can update the existing worker without restarting the flight. The default A* route remains advisory until a controller sends commands, and has not yet demonstrated arrival through the new traffic field.
+The [README's controller steps](../README.md#run-a-controller) cover connecting, running and stopping. Connected notebook functions and supported live controls can update the existing worker without restarting the flight. The default A* route remains advisory until a controller sends commands, and has not yet demonstrated arrival through the 20 m/s transit stress field.
 
 Resilient Stop requests a guarded native release without clearing a newer manual command. If release cannot be confirmed, native expiry still bounds the old command. Use **P** or **Pause physics** to pause, and confirm that the clock has stopped. Select **Connect / Refresh** for read-only guidance again.
 
@@ -196,7 +197,7 @@ For teammate profiles, Harry's choices are the shared PD and coast baselines use
 
 `just controllers list` lists profile names and adaptations. `just controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `just controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
 
-The connection badge distinguishes API transport from execution. **Controller running** needs matching native ownership, an accepted command that has not expired and running physics. Details show the command's simulation timestamp and expiry, plus idle, claimed, paused, expired and released transitions. Credentials are not logged. Native receipts have verified both local startup and Stop, not arrival through the new field.
+The connection badge distinguishes API transport from execution. **Controller running** needs matching native ownership, an accepted command that has not expired and running physics. Details show the command's simulation timestamp and expiry, plus idle, claimed, paused, expired and released transitions. Credentials are not logged. Native receipts have verified both local startup and Stop, not arrival through the transit stress field or the official cloud.
 
 | Notebook tab | Use it for |
 | --- | --- |
@@ -239,7 +240,7 @@ An explicit resilient Run starts a separate Python standby process. Native epoch
 
 Loss of usable data requests zero thrust. Recovery needs advancing authentic samples and a new checked route; polling a held sample cannot count as recovery. The native watchdog independently expires autonomous commands if Python blocks, exits or loses its connection. The default lease is 0.75 simulation seconds, with a native maximum of one second, anchored to the original decision input rather than network arrival. Controller authority also expires on the actual runtime clock, including paused frames. Reads and preview heartbeats never renew it. Use a controller cadence faster than its lease interval. Slow computation or higher playback rates can cause expiry rather than prolonged stale thrust.
 
-Zero thrust means coasting, not braking, hovering or a guaranteed collision-free orbit. The current radar covers a bounded sampled subset of the debris field, not every body in a large world. These controls exercise failure handling in the local model; they do not establish competition-runtime parity or complete hardware redundancy.
+Zero thrust means coasting, not braking, hovering or a guaranteed collision-free orbit. The current radar covers a bounded sampled subset of the debris field, not every body in a large world. Official-cloud mode samples 200 of the 500 bodies with the official noise magnitudes; transit keeps its nearest-200 mode. These controls exercise failure handling in the local model; they do not establish competition-runtime parity or complete hardware redundancy.
 
 ## Cameras
 
@@ -251,7 +252,7 @@ Phobos and Mars use [credited spacecraft surface maps](../worker/web/assets/ATTR
 
 ## Reading the comparison
 
-The [README's recorded comparison](../README.md#recorded-teammate-flights) covers 30 older broad-stream trials, not the new transit-traffic field. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
+The [README's recorded comparison](../README.md#recorded-teammate-flights) covers 30 older broad-stream trials, not the transit stress field or the official cloud. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
 
 Only the connected target-seeking profiles enter this comparison. Coast, body-Z templates and WSO's separate checkpoint profiles remain selectable, but are not mixed into its medians. Harry's profile is a shared baseline selected by his workflow, not a claim that he authored it.
 
@@ -308,7 +309,7 @@ Add the setup, reason for the experiment, result and next question to our [share
 
 ## What local practice does not prove
 
-Our practice world uses simplified gravity, terrain, contact, fuel and damage models. A local success does not establish equivalent behaviour in Space Teams PRO. New local runs return no score; historical local scores are not STP points.
+Our practice world uses simplified gravity, terrain, contact, fuel and damage models. A local success does not establish equivalent behaviour in Space Teams PRO. New local runs return no score; historical local scores are not STP points. The `competition_reference` preset ports the 1305.8 m route and 50 m keep-out, and `official_cloud` ports the 500-body distribution, but terrain, absolute frame and counters still differ. See [official reference and local differences](competition-reference.md).
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 

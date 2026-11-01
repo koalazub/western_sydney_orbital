@@ -25,19 +25,19 @@ export function mountDashboard(panel: HTMLDialogElement) {
         <section id="lab-view-compare" class="lab-view" aria-label="Controller comparison">
           <div class="lab-section-heading"><div><h3>Performance overview</h3><p>Recorded flight performance, side by side.</p></div><span id="lab-cohort-label" class="lab-badge">Matched trials</span></div>
           <fieldset class="lab-measurement-view"><legend>Measurement view</legend><button type="button" data-measurement-view="aggregate" aria-pressed="true">Aggregate</button><button type="button" data-measurement-view="run" aria-pressed="false">Single run</button></fieldset>
-          <div class="lab-toolbar"><div id="lab-comparison-filters" class="lab-filter-group"></div><div class="lab-toolbar__note">L2 station <span>·</span> 500 debris bodies</div></div>
+          <div class="lab-toolbar"><div id="lab-comparison-filters" class="lab-filter-group"></div><div class="lab-toolbar__note">L2 practice station <span>·</span> 500 debris bodies</div></div>
           <label id="overview-run-field" class="lab-run-selector" for="overview-run" hidden>Recorded flight<select id="overview-run" aria-describedby="overview-selection-status" disabled></select></label>
           <p id="overview-selection-status" class="lab-selection-status" role="status">Aggregate summaries use all recorded seeds and repetitions.</p>
           <div id="lab-publication-status"></div>
-          <div class="lab-score-notice"><div><strong>STP raw score: n/a <span aria-hidden="true">·</span> Final points: n/a</strong><span>STP points unavailable. Local fuel uses a different counter.</span></div><button type="button" class="lab-text-button" data-lab-view="data">View scoring formula</button></div>
+          <div class="lab-score-notice"><div><strong>STP raw score: n/a <span aria-hidden="true">·</span> Final points: n/a</strong><span>STP points unavailable. Local fuel and damage use different counters.</span></div><button type="button" class="lab-text-button" data-lab-view="data">View scoring formula</button></div>
           <div id="dashboard-overview"><div class="lab-loading"><span class="lab-loading__bar"></span><h4>Loading measured flights</h4><p>The scoreboard and charts will appear here.</p></div></div>
           <details class="lab-disclosure" id="lab-custom-chart"><summary>Explore another metric</summary><div id="lab-custom-chart-content"></div></details>
           <p class="lab-footnote">Fuel and damage are local estimates. Burn and turn metrics explain controller activity; they are not extra score terms. <button type="button" class="lab-text-button" data-lab-view="data">Model notes</button></p>
         </section>
         <section id="lab-view-run" class="lab-view" aria-label="Run a controller" hidden>
-          <div class="lab-section-heading"><div><h3>Put a controller in charge</h3><p>Choose the teammate, profile and flight budget.</p></div><span class="lab-badge">Seed 100 · L2</span></div>
+          <div class="lab-section-heading"><div><h3>Put a controller in charge</h3><p>Choose the teammate, profile and flight budget.</p></div><span class="lab-badge">Seed 100 · L2 practice</span></div>
           <div class="lab-native-status"><p id="controller-native-status" role="status">Waiting for native controller evidence.</p><p id="controller-native-evidence"></p></div>
-          <div class="lab-run-grid"><section id="lab-run-controls" class="lab-surface" aria-label="Flight controls"></section><section class="lab-surface lab-run-context"><p class="lab-eyebrow">Matched test conditions</p><h4>A fresh, reproducible flight</h4><dl><div><dt>Debris bodies</dt><dd>500</dd></div><div><dt>Linear limit</dt><dd>0.5 m/s²</dd></div><div><dt>Angular limit</dt><dd>0.05 rad/s²</dd></div><div><dt>Target</dt><dd>L2 station region</dd></div></dl><p>Transit traffic, light attraction off. Run fresh replaces this tab's flight only after confirmation. Changing a controller requests Stop first.</p></section></div>
+          <div class="lab-run-grid"><section id="lab-run-controls" class="lab-surface" aria-label="Flight controls"></section><section class="lab-surface lab-run-context"><p class="lab-eyebrow">Matched test conditions</p><h4>A fresh, reproducible flight</h4><dl><div><dt>Debris bodies</dt><dd>500</dd></div><div><dt>Linear limit</dt><dd>0.5 m/s²</dd></div><div><dt>Angular limit</dt><dd>0.05 rad/s²</dd></div><div><dt>Target</dt><dd>L2 practice station region</dd></div></dl><p>Transit traffic (20 m/s stress mode), light attraction off. Run fresh replaces this tab's flight only after confirmation and is not an official competition flight. Changing a controller requests Stop first.</p></section></div>
           <div class="lab-section-heading lab-recent-heading"><div><h3>Your recent flights</h3><p>Results from this connection, separate from the published comparison.</p></div></div>
           <div id="lab-room-empty" class="lab-empty"><span aria-hidden="true">⌁</span><h4>No flight recorded yet</h4><p>Select a controller above to start a fresh test. Its measured charts will appear here after the run.</p></div>
           <div id="dashboard-room-overview" hidden></div>
@@ -67,7 +67,7 @@ export function mountDashboard(panel: HTMLDialogElement) {
   const summary = document.createElement("summary"); summary.textContent = "About this profile";
   controllerNotes.append(summary, byId("controller-description"));
   run.append(controllerNotes, byId("controller-setup"));
-  byId("controller-fresh-warning").textContent = "A fresh test replaces this tab's flight. You will be asked to confirm.";
+  byId("controller-fresh-warning").textContent = "A fresh test replaces this tab's flight. You will be asked to confirm. This panel always uses the L2 practice stress world; choose Competition reference · 1.31 km hop and Official debris cloud · 500 bodies in the notebook for the official geometry.";
 
   const notes = byId("lab-data-notes");
   for (const id of ["controller-score-label", "controller-score-detail", "controller-score-sources", "controller-score-comparison", "fuel-model-notes"]) notes.append(byId(id));

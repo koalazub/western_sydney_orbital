@@ -1460,8 +1460,9 @@ def _(
         )
         _distribution_kind = (_context.get("debris_distribution") or {}).get("kind")
         _mode_label = {
+            "official_cloud": "Official debris cloud",
             "directed_stream": "Directed stream",
-            "transit_stream": "Transit traffic",
+            "transit_stream": "Transit traffic · 20 m/s stress mode",
             "impact_ejecta": "Impact ejecta",
         }.get(_distribution_kind, "Unavailable")
         _direction_label = {-1: "negative", 1: "positive"}.get(
@@ -1865,25 +1866,30 @@ def _(
     _impact = _distribution.get("settings", impact_defaults)
     flight_preset = mo.ui.dropdown(
         options={
-            "Mars-facing +X / L1 target": "mars_facing_l1",
-            "Far-side -X / L2 target": "far_side_l2",
+            "Competition reference · 1.31 km hop": "competition_reference",
+            "Far-side -X / L2 practice target": "far_side_l2",
+            "Mars-facing +X / L1 practice target": "mars_facing_l1",
         },
-        value="Mars-facing +X / L1 target"
-        if _setup.get("flight_preset") == "mars_facing_l1"
-        else "Far-side -X / L2 target",
+        value={
+            "competition_reference": "Competition reference · 1.31 km hop",
+            "mars_facing_l1": "Mars-facing +X / L1 practice target",
+        }.get(_setup.get("flight_preset"), "Far-side -X / L2 practice target"),
         allow_select_none=False,
         label="Target preset for new world",
         full_width=True,
     )
     debris_mode = mo.ui.dropdown(
         options={
-            "Transit traffic": "transit_stream",
+            "Official debris cloud · 500 bodies": "official_cloud",
+            "Transit traffic · 20 m/s stress mode": "transit_stream",
             "Broad shell stream": "directed_stream",
             "Impact ejecta": "impact_ejecta",
         },
-        value={"transit_stream": "Transit traffic", "impact_ejecta": "Impact ejecta"}.get(
-            _distribution["kind"], "Broad shell stream"
-        ),
+        value={
+            "official_cloud": "Official debris cloud · 500 bodies",
+            "transit_stream": "Transit traffic · 20 m/s stress mode",
+            "impact_ejecta": "Impact ejecta",
+        }.get(_distribution["kind"], "Broad shell stream"),
         allow_select_none=False,
         label="Debris mode for new world",
         full_width=True,
@@ -1919,14 +1925,14 @@ def _(
                 49990,
                 10,
                 _debris["shell_inner_m"],
-                "Shell inner offset, m; inactive for transit",
+                "Shell inner offset, m; inactive for transit or official cloud",
             ),
             "shell_outer_m": lab_slider(
                 10,
                 50000,
                 10,
                 _debris["shell_outer_m"],
-                "Shell outer offset, m; inactive for transit",
+                "Shell outer offset, m; inactive for transit or official cloud",
             ),
         }
     )
@@ -2497,10 +2503,17 @@ def _(
                                     debris_mode,
                                     trajectory_adjustment,
                                     mo.md(
-                                        "Transit traffic spans the station route. "
-                                        "Light attraction is off by default. Its "
+                                        "Official debris cloud is the 500-body "
+                                        "competition distribution: a compact cloud "
+                                        "offset 500 m toward the target, 0.40–0.80 m/s "
+                                        "drift and radii up to 20 m. Count, radius and "
+                                        "shell inputs below describe practice streams; "
+                                        "the official cloud keeps its fixed competition "
+                                        "distribution. Transit traffic is the 20 m/s "
+                                        "stress mode, not the competition field. Light "
+                                        "attraction is off by default. Its "
                                         "small source-derived impulses apply only "
-                                        "beyond 100 m. Both are new-world settings. "
+                                        "beyond 100 m. These are new-world settings. "
                                         "Gravity and contacts remain active."
                                     ),
                                     structure_controls.vstack(),
@@ -2596,9 +2609,12 @@ def _(
                                     ),
                                     flight_preset,
                                     mo.md(
-                                        "L1/L2 presets select a target and default launch side. "
-                                        "They are not the only launch sites. Moving the pad "
-                                        "does not move the target."
+                                        "Competition reference is the official 1.31 km hop "
+                                        "with a 50 m keep-out. It is a local port, not an "
+                                        "STP-certified mission. L1/L2 are practice targets "
+                                        "and select a default launch side. They are not the "
+                                        "only launch sites. Moving the pad does not move the "
+                                        "target."
                                     ),
                                     regenerate_world,
                                     mo.accordion(

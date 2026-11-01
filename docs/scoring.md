@@ -8,6 +8,13 @@ For the competition, use the actual official run's score, counters, video and
 logs. For local comparisons, keep historical practice receipts as diagnostics only.
 Do not reconstruct missing scores from a plot or an archived partial flight.
 
+> **Revision note (2 November 2026).** Current `STU4-Sim` main sets
+> `NominalFuel_kg = 75.0` and uses `max(F / 75.0, 0)`. This page preserves the
+> 29 October review of pinned revision `c1e3fc8f`, which used `1.15` and
+> `max(F / 1.15 - 1, 0)`; the worked examples below are for that revision.
+> See [the official reference](competition-reference.md) for current-main values.
+> Local fuel and damage counters remain non-comparable under either revision.
+
 ## The documented formula requested for the dashboard
 
 The [scoring wiki][wiki] defines the successful-run equation as:
