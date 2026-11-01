@@ -881,6 +881,18 @@ def test_broad_stream_controller_reaches_checkpoint_over_real_headless_transport
     assert final["renderer"]["started"] is False
 
 
+# The 20 m/s transit field is a custom stress mode, not the competition
+# mission. Keep the start/arrival assertions unchanged and exercise them only
+# with `just transit-stress`.
+TRANSIT_STRESS = os.environ.get("WSORB_TRANSIT_STRESS") == "1"
+transit_stress = pytest.mark.skipif(
+    not TRANSIT_STRESS,
+    reason="Custom 20 m/s transit stress field; run `just transit-stress` to exercise it",
+)
+
+
+@pytest.mark.transit_stress
+@transit_stress
 def test_transit_primary_reaches_its_first_native_decision_without_standby_masking(
     headless, primary
 ):
@@ -1005,6 +1017,8 @@ def test_transit_primary_reaches_its_first_native_decision_without_standby_maski
     assert "no complete route is claimed" in published["detail"]
 
 
+@pytest.mark.transit_stress
+@transit_stress
 @pytest.mark.parametrize(
     "trajectory_adjustment",
     ["off", "toward_lander"],

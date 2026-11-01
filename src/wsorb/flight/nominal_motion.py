@@ -776,9 +776,12 @@ def search_nominal_motion(
             seeded = None
             if seed_plan is not None:
                 seeded = next((node for node in roots if node.root == seed_control_index), None)
-                if seeded is not None and root_is_admissible is not None:
-                    if not root_is_admissible(seeded.root):
-                        seeded = None
+                if (
+                    seeded is not None
+                    and root_is_admissible is not None
+                    and not root_is_admissible(seeded.root)
+                ):
+                    seeded = None
             work.peak_beam = len(nodes)
             if not nodes:
                 return result(

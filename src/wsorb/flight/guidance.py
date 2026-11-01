@@ -23,6 +23,7 @@ from .control import _bounded, coast_command, reference_to_body
 from .estimation import NavigationSample, StateEstimate, StateEstimator
 from .geometry import Capsule, CollisionIndex, segment_clear
 from .local_motion import LocalMotionPlanner, transit_motion
+from .official_profile import official_profile
 from .planning import MAX_PREVIEW_POINTS, RoutePlan
 from .prediction import PlanningFrame, predict_obstacles, radar_rows
 
@@ -264,9 +265,14 @@ class ResilientGuidance:
         return deepcopy(self._report)
 
     @property
+    def uses_official_profile(self) -> bool:
+        """Whether the new competition preset selects the official beeline path."""
+        return official_profile(self._observation)
+
+    @property
     def uses_local_motion(self) -> bool:
         """Whether this source selects fresh timed motion instead of a global route."""
-        return transit_motion(self._observation)
+        return transit_motion(self._observation) or self.uses_official_profile
 
     def _invalidate(self) -> None:
         self._generation += 1
@@ -399,13 +405,24 @@ class ResilientGuidance:
             radar_model="anonymous_sample_envelopes_no_tracks_or_tangential_velocity_estimates",
             navigation_redundancy="none",
             camera_navigation="not_implemented",
-            guidance_strategy="time_indexed_local_motion"
-            if self.uses_local_motion
-            else "frozen_capsule_waypoint_route",
+            guidance_strategy=(
+                "time_indexed_local_motion"
+                if transit_motion(self._observation)
+                else (
+                    "official_competition_beeline"
+                    if self.uses_official_profile
+                    else "frozen_capsule_waypoint_route"
+                )
+            ),
             command_gate=(
                 "Sensor readiness also requires current timed motion and a modeled stop"
-                if self.uses_local_motion
-                else "Sensor readiness also requires a current checked route at command time"
+                if transit_motion(self._observation)
+                else (
+                    "Sensor readiness also requires a fresh rolling-radar publication and a "
+                    "current-lease sweep; no stopping certificate is claimed"
+                    if self.uses_official_profile
+                    else "Sensor readiness also requires a current checked route at command time"
+                )
             ),
         )
         self.result = GuidanceUpdate(
@@ -479,12 +496,20 @@ class ResilientGuidance:
             # Both fields are part of v1. Missing metadata is never legacy fallback.
             for name in _RADARS.values():
                 field(observation, name)
+            official_rolling = self.uses_official_profile and not transit_motion(self._observation)
             usable, rows_by_channel, assessments = {}, {}, {}
             for identity, name in _RADARS.items():
                 unit = units[identity]
                 try:
                     rows = radar_rows(observation[name])
-                    if len(rows) and np.any(rows[:, 2, 0] != unit.sample_time_s):
+                    if len(rows) and official_rolling:
+                        # The official rolling scan publishes rows acquired at
+                        # different 120 Hz iterations. Each row must be at or
+                        # before the publication clock; its own age remains in
+                        # the temporal obstacle allowance.
+                        if np.any(rows[:, 2, 0] > unit.sample_time_s):
+                            raise ValueError("Rolling radar row is newer than its publication")
+                    elif len(rows) and np.any(rows[:, 2, 0] != unit.sample_time_s):
                         raise ValueError("Radar rows and sample metadata disagree")
                     if self.config.planner.sigma_multiplier * unit.noise[2] >= 1.0:
                         raise ValueError("Diameter uncertainty cannot be represented")
@@ -583,7 +608,11 @@ class ResilientGuidance:
                 self._recovering = False
                 self._invalidate()
             rows = rows_by_channel[selected]
-            self._lease = self._available_lease(float(min(rows[:, 2, 0])), navigation.sample_time_s)
+            official_rolling = self.uses_official_profile and not transit_motion(self._observation)
+            radar_reference = (
+                float(np.max(rows[:, 2, 0])) if official_rolling else float(np.min(rows[:, 2, 0]))
+            )
+            self._lease = self._available_lease(radar_reference, navigation.sample_time_s)
             if self._lease == 0.0:
                 self._report["reason"] = (
                     "No minimum-length lease fits sample freshness and model uncertainty"
@@ -597,15 +626,33 @@ class ResilientGuidance:
                 # first command can perform its fresh independent motion check.
                 self._need_plan = not self._local_preview_requested
                 self._local_preview_requested = True
+            elif self.uses_official_profile:
+                # The official beeline needs fresh radar and a current lease,
+                # not an A* route or the 40 s transit beam.
+                self._need_plan = False
+                self._local_preview_requested = True
             elif not self._frames or self._frames[-1].expires_at_s < now + self._lease:
                 self._need_plan = True
+            if selected == "radar_backup":
+                reason = (
+                    "Independent backup selected; the official competition beeline "
+                    "uses a current observed-radar lease sweep"
+                    if self.uses_official_profile
+                    else "Independent backup selected; a checked route is required"
+                )
+            else:
+                reason = (
+                    "Primary radar and direct navigation are eligible; the official "
+                    "competition beeline uses a current observed-radar lease sweep"
+                    if self.uses_official_profile
+                    else (
+                        "Primary radar and direct navigation are eligible; "
+                        "a checked route is required"
+                    )
+                )
             self._report.update(
                 mode="degraded" if selected == "radar_backup" else "nominal",
-                reason="Independent backup selected; a checked route is required"
-                if selected == "radar_backup"
-                else (
-                    "Primary radar and direct navigation are eligible; a checked route is required"
-                ),
+                reason=reason,
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             self._enter_loss()
@@ -905,6 +952,8 @@ class ResilientGuidance:
                 return self._coast("Decision input is not the exact latest public source context")
             if transit_motion(self._observation):
                 return self._local_command(route, gains)
+            if self.uses_official_profile:
+                return self._local_command(route, gains)
             if not isinstance(route, RoutePlan):
                 return self._coast("No current checked Python route")
             checked = next((item for item in self._frames if item.frame is route.frame), None)
@@ -1168,11 +1217,11 @@ class ResilientGuidance:
             if checked is not None and checked.generation == self._generation:
                 advisory = route
         angular = np.zeros(3, dtype=np.float64)
+        angular_limit = min(
+            0.05,
+            scalar(self._observation["max_angular_accel_rad_s2"], "max_angular_accel_rad_s2"),
+        )
         if self._estimate.angular_velocity_rad_s is not None:
-            angular_limit = min(
-                0.05,
-                scalar(self._observation["max_angular_accel_rad_s2"], "max_angular_accel_rad_s2"),
-            )
             angular = _bounded(
                 reference_to_body(
                     -np.asarray(self._estimate.angular_velocity_rad_s) * 0.5,
@@ -1191,17 +1240,36 @@ class ResilientGuidance:
             route=advisory,
         )
         self._report.update(decision.report)
+        official = decision.report.get("guidance_strategy") == "official_competition_beeline"
+        if decision.angular_acceleration_rad_s2 is not None:
+            angular = _bounded(
+                reference_to_body(
+                    decision.angular_acceleration_rad_s2,
+                    self._estimate.rotation_xyzw,
+                    "active_xyzw",
+                ),
+                angular_limit,
+            )
         if not decision.report.get("admissible_local_candidates"):
             linear, _ = self._coast(decision.report["reason"], replan=False)
             if np.any(angular):
-                self._decision = "bounded_angular_rate_damping_without_translation_clearance"
+                self._decision = (
+                    "official_attitude_alignment_without_translation_clearance"
+                    if official
+                    else "bounded_angular_rate_damping_without_translation_clearance"
+                )
                 self._report.update(
                     can_command=True,
                     mode="degraded" if self._selected == "radar_backup" else "nominal",
                     decision=self._decision,
                     command_gate=(
-                        "Eligible navigation permits bounded rate damping; "
-                        "linear clearance is not granted"
+                        "Official attitude alignment is permitted; no linear clearance, "
+                        "future clearance or stopping certificate is claimed"
+                        if official
+                        else (
+                            "Eligible navigation permits bounded rate damping; "
+                            "linear clearance is not granted"
+                        )
                     ),
                     angular_accel_limit_rad_s2=angular_limit,
                 )
@@ -1216,7 +1284,11 @@ class ResilientGuidance:
         self._need_plan = False
         self._waypoint = self._local_motion.waypoint
         self._next_waypoint = point(decision.report["next_waypoint_world_m"], "local waypoint")
-        self._decision = "bounded_time_indexed_motion_with_modeled_stop"
+        self._decision = (
+            "official_competition_beeline_current_lease_gate"
+            if official
+            else "bounded_time_indexed_motion_with_modeled_stop"
+        )
         self._decision_time = self._now
         self._report.update(
             mode="degraded" if self._selected == "radar_backup" else "nominal",
@@ -1225,6 +1297,9 @@ class ResilientGuidance:
             decision=self._decision,
             decision_source_time_s=self._now,
             decision_kind="calculated_only_not_applied_or_acknowledged",
-            command_gate="Current public occupancy and a modeled stop are checked per command",
+            command_gate=decision.report.get(
+                "command_gate",
+                "Current public occupancy and a modeled stop are checked per command",
+            ),
         )
         return body, angular

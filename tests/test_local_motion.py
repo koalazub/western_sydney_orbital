@@ -25,6 +25,10 @@ from wsorb.flight.local_motion import (
     stopping_motion,
     temporal_obstacles,
 )
+from wsorb.flight.official_profile import (
+    OFFICIAL_BEELINE_SPEED_MPS,
+    official_profile,
+)
 from wsorb.flight.prediction import predict_obstacles
 from wsorb.flight.temporal import TemporalObstacles, motion_clear
 
@@ -37,6 +41,18 @@ def transit_numeric_input(time_s=10.0, sequence=100):
     observation["mission"]["status"] = "running"
     observation["shuttle"]["position"] = [2000.0, 0.0, 0.0]
     observation["target"]["position"] = [10000.0, 0.0, 0.0]
+    observation["radar"] = numeric_rows(1, time_s)
+    observation["radar_backup"] = numeric_rows(2, time_s)
+    return observation
+
+
+def official_numeric_input(time_s=10.0, sequence=100):
+    """Constructed official-profile inputs; not the real competition cloud."""
+    observation = transit_numeric_input(time_s, sequence)
+    observation["flight_preset"] = "competition_reference"
+    observation["debris_distribution"] = {"kind": "official_cloud"}
+    observation["shuttle"]["position"] = [2000.0, 0.0, 0.0]
+    observation["target"]["position"] = [3305.8, 0.0, 0.0]
     observation["radar"] = numeric_rows(1, time_s)
     observation["radar_backup"] = numeric_rows(2, time_s)
     return observation
@@ -255,6 +271,128 @@ def test_only_explicit_public_transit_distribution_allows_commands_without_a_rou
     else:
         assert_coast(command)
     assert observation == before
+
+
+def test_official_preset_selects_the_official_profile_while_transit_keeps_its_stop_gate():
+    official = official_numeric_input()
+    assert official_profile(official)
+    assert not official_profile(transit_numeric_input())
+    transit_on_official_world = official_numeric_input()
+    transit_on_official_world["debris_distribution"] = {"kind": "transit_stream"}
+    guidance = ResilientGuidance()
+    receipt = guidance.update(transit_on_official_world, wall_time_s=0.0, running=False)
+    assert receipt.can_command
+    assert guidance.report["guidance_strategy"] == "time_indexed_local_motion"
+    assert "modeled stop" in guidance.report["command_gate"]
+    assert guidance.report.get("official_stop_required") is None
+
+
+def test_official_profile_commands_the_published_ten_metre_per_second_beeline():
+    observation = official_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command and receipt.lease_sim_s == 0.75
+    acceleration, angular = guidance.command(observation, None, {})
+    report = guidance.report
+    assert report["guidance_strategy"] == "official_competition_beeline"
+    assert report["official_stop_required"] is False
+    assert report["official_stop_certificate"] is False
+    assert (
+        report["command_gate"]
+        == "fresh_rolling_radar_publication_current_lease_sweep_without_stop_certificate"
+    )
+    assert report["official_beeline_speed_mps"] == OFFICIAL_BEELINE_SPEED_MPS
+    assert report["desired_speed_mps"] == pytest.approx(OFFICIAL_BEELINE_SPEED_MPS)
+    assert report["nominal_motion_used"] is False
+    assert report["nominal_motion_pair_intervals"] == 0
+    assert 0.499 < math.hypot(*acceleration) <= 0.5
+    assert acceleration[0] > 0.0
+    np.testing.assert_array_equal(angular, ZERO)
+
+
+def test_official_profile_uses_genuine_radar_for_lateral_avoidance():
+    observation = official_numeric_input()
+    observation["radar"] = [[[100.0, 0.0, 0.0], [99.0, 0.0, 10.0], [10.0, 0.0, 0.0]]]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command
+    acceleration, _ = guidance.command(observation, None, {})
+    assert guidance.report["avoidance_rows"] == 1
+    assert guidance.report["avoidance_risk"] > 0.0
+    assert abs(acceleration[2]) > 0.1
+    assert math.hypot(*acceleration) <= 0.5
+
+
+def test_official_profile_coasts_when_no_current_lease_radar_clear_command_exists():
+    observation = official_numeric_input()
+    observation["radar"] = [[[1.0, 0.0, 0.0], [0.5, 0.0, 10.0], [10.0, 0.0, 0.0]]]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command
+    acceleration, angular = guidance.command(observation, None, {})
+    np.testing.assert_array_equal(acceleration, ZERO)
+    np.testing.assert_array_equal(angular, ZERO)
+    assert guidance.report["current_lease_clear"] is False
+    assert guidance.report["admissible_local_candidates"] == 0
+    assert guidance.report["official_stop_required"] is False
+    assert "No official command is clear" in guidance.report["reason"]
+
+
+def test_official_profile_aligns_body_plus_x_with_bounded_angular_acceleration():
+    observation = official_numeric_input()
+    observation["shuttle"]["rotation"] = [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)]
+    observation["shuttle"]["angular_velocity_rad_s"] = [0.0, 0.0, 0.0]
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command
+    acceleration, angular = guidance.command(observation, None, {})
+    assert guidance.report["desired_velocity_world_mps"][0] > 0.0
+    assert math.hypot(*acceleration) <= 0.5
+    assert angular[2] < 0.0
+    assert math.hypot(*angular) <= 0.05
+    assert guidance.report["attitude_model"].startswith("shortest_arc_body_plus_x")
+
+
+def test_official_rolling_radar_accepts_per_row_times_without_relaxing_transit_freshness():
+    observation = official_numeric_input()
+    observation["radar"] = numeric_rows(3, 10.0)
+    observation["radar"][0][2][0] = 8.8
+    observation["radar"][1][2][0] = 9.4
+    observation["radar"][2][2][0] = 10.0
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command and receipt.lease_sim_s == 0.75
+    acceleration, _ = guidance.command(observation, None, {})
+    assert math.hypot(*acceleration) > 0.0
+    assert guidance.report["radar_model"].startswith("genuine_rolling_observed_rows")
+    assert guidance.report["checked_radar_rows"] == 3
+    transit = copy.deepcopy(observation)
+    transit["debris_distribution"] = {"kind": "transit_stream"}
+    transit["radar_backup"] = copy.deepcopy(transit["radar"])
+    receipt = ResilientGuidance().update(transit, wall_time_s=0.0, running=False)
+    assert not receipt.can_command and receipt.lease_sim_s == 0.0
+
+
+def test_official_profile_keeps_freshness_consent_and_lease_gates():
+    observation = official_numeric_input()
+    guidance = ResilientGuidance()
+    receipt = guidance.update(observation, wall_time_s=0.0, running=False)
+    assert receipt.can_command and receipt.lease_sim_s == 0.75
+    assert math.hypot(*guidance.command(observation, None, {})[0]) > 0.0
+    changed = copy.deepcopy(observation)
+    changed["time_s"] += 0.1
+    assert_coast(guidance.command(changed, None, {}))
+    assert "latest public source context" in guidance.report["reason"]
+    manual = copy.deepcopy(observation)
+    manual["manual_interventions"] = 1
+    receipt = guidance.update(manual, wall_time_s=0.1, running=False)
+    assert not receipt.can_command and receipt.report["requires_consent"]
+    assert_coast(guidance.command(manual, None, {}))
+    failed = copy.deepcopy(observation)
+    failed["sensor_health"]["revision"] += 1
+    numeric_unit(failed, "radar_primary")["active_faults"] = ["radar_bus"]
+    receipt = ResilientGuidance().update(failed, wall_time_s=0.0, running=False)
+    assert not receipt.can_command and receipt.lease_sim_s == 0.0
 
 
 def test_default_local_gains_remain_point0012_and_point07():

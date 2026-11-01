@@ -8,6 +8,7 @@ These tests do not verify GPU rendering or the licensed STP runtime.
 from __future__ import annotations
 
 import json
+import os
 import selectors
 import shutil
 import subprocess
@@ -382,8 +383,22 @@ def test_transit_guidance_damps_genuine_native_spin_with_the_existing_angular_ca
     assert after["trial_revision"] == initial["trial_revision"]
 
 
-def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine, tmp_path):
-    """Fly the real stock trial, not a preview or asynchronous-runner substitute."""
+# The 20 m/s transit field is an explicit stress mode. These tests must never be
+# cited as competition-profile arrival evidence; the official_cloud regression is
+# separate and uses the bounded official beeline policy. The stress assertions
+# stay unchanged and run only on request with `just transit-stress`, because the
+# custom corridor is not the competition mission.
+TRANSIT_STRESS = os.environ.get("WSORB_TRANSIT_STRESS") == "1"
+transit_stress = pytest.mark.skipif(
+    not TRANSIT_STRESS,
+    reason="Custom 20 m/s transit stress field; run `just transit-stress` to exercise it",
+)
+
+
+@pytest.mark.transit_stress
+@transit_stress
+def test_transit_stress_arrival_with_default_resilient_guidance_on_stock_wasm(engine, tmp_path):
+    """Known 20 m/s transit stress field; not competition arrival evidence."""
     _fly_checkpoint(
         engine,
         seed=100,
@@ -392,14 +407,17 @@ def test_checkpoint_arrival_with_default_resilient_guidance_on_stock_wasm(engine
     )
 
 
+@pytest.mark.transit_stress
+@transit_stress
 @pytest.mark.parametrize(
     "seed, trajectory_adjustment",
     [(101, "off"), (102, "off"), (100, "toward_lander")],
     ids=["seed_101", "seed_102", "attraction_on"],
 )
-def test_transit_checkpoint_arrival_retains_real_physics_across_seeds_and_attraction(
+def test_transit_stress_checkpoint_arrival_retains_real_physics_across_seeds_and_attraction(
     engine, seed, trajectory_adjustment, tmp_path
 ):
+    """The 20 m/s transit field is an explicit stress mode, not the competition field."""
     settings = deepcopy(engine.baseline_settings)
     if trajectory_adjustment == "off":
         settings["debris"].pop("trajectory_adjustment", None)
@@ -411,19 +429,81 @@ def test_transit_checkpoint_arrival_retains_real_physics_across_seeds_and_attrac
     )
 
 
-def _fly_checkpoint(engine, *, seed, settings, trace_path):
+def test_official_competition_reference_arrival_on_stock_wasm(engine, tmp_path):
+    """Fly the real official profile through the same public WASM harness.
+
+    The saved trace is the complete public decision record for this one physical
+    trial. This test is not a licensed STP runtime, video or leaderboard result.
+    """
+    settings = deepcopy(engine.baseline_settings)
+    settings["debris"]["count"] = 500
+    settings["debris"]["distribution"] = {"kind": "official_cloud"}
+    assert settings["debris"]["count"] == 500
+    assert settings["debris"]["distribution"] == {"kind": "official_cloud"}
+    engine.command(
+        op="configure_flight",
+        settings=settings,
+        seed=100,
+        preset="competition_reference",
+    )
+    _fly_checkpoint(
+        engine,
+        seed=100,
+        settings=settings,
+        trace_path=tmp_path / "official-public-flight.json",
+        preset="competition_reference",
+        debris_distribution={"kind": "official_cloud"},
+        debris_speed_mps=None,
+        debris_speed_spread_mps=None,
+        target_distance_m=1305.8,
+        require_zero_initial_interventions=True,
+        use_route_planner=False,
+        expected_strategy="official_competition_beeline",
+        expected_max_lease_s=0.75,
+    )
+
+
+def _fly_checkpoint(
+    engine,
+    *,
+    seed,
+    settings,
+    trace_path,
+    preset="far_side_l2",
+    debris_distribution=None,
+    debris_speed_mps=20.0,
+    debris_speed_spread_mps=4.0,
+    target_distance_m=None,
+    require_zero_initial_interventions=False,
+    use_route_planner=True,
+    expected_strategy=None,
+    expected_max_lease_s=None,
+):
     """Run the unchanged native arrival assertions for one owned physical trial."""
     initial = engine.query("observation")
     assert initial["seed"] == seed
-    assert initial["flight_preset"] == "far_side_l2"
+    assert initial["flight_preset"] == preset
     assert initial["experiment_settings"] == settings
+    assert settings["debris"]["count"] == 500
     assert initial["geometry"]["debris_count"] == 500
-    assert initial["debris_distribution"] == {"kind": "transit_stream"}
-    assert initial["experiment_settings"]["debris"]["speed_mps"] == 20.0
-    assert initial["experiment_settings"]["debris"]["speed_spread_mps"] == 4.0
+    expected_distribution = (
+        {"kind": "transit_stream"} if debris_distribution is None else debris_distribution
+    )
+    assert initial["debris_distribution"] == expected_distribution
+    if debris_speed_mps is not None:
+        assert initial["experiment_settings"]["debris"]["speed_mps"] == debris_speed_mps
+    if debris_speed_spread_mps is not None:
+        assert (
+            initial["experiment_settings"]["debris"]["speed_spread_mps"] == debris_speed_spread_mps
+        )
+    if target_distance_m is not None:
+        assert initial["mission"]["target_distance_m"] == pytest.approx(target_distance_m, abs=1e-6)
+    if require_zero_initial_interventions:
+        assert initial["manual_interventions"] == 0
     assert initial["max_accel_mps2"] == 0.5
     assert initial["max_angular_accel_rad_s2"] == 0.05
     assert initial["geometry"]["arrival_radius_m"] == 50.0
+    assert initial["radar"] and initial["radar_backup"]
     guidance = ResilientGuidance()
     config = guidance.config.planner
     route = None
@@ -439,6 +519,7 @@ def _fly_checkpoint(engine, *, seed, settings, trace_path):
     last_thrust_time = initial["time_s"]
     commands = 0
     plans = 0
+    max_lease = 0.0
     progress_times = deque((30.0, 300.0))
     stop_reason = "simulation budget exhausted"
     public_trace = []
@@ -493,10 +574,15 @@ def _fly_checkpoint(engine, *, seed, settings, trace_path):
             observation, wall_time_s=time.monotonic(), running=runtime["running"]
         )
         gates[readiness.report["reason"]] += 1
+        if expected_strategy is not None and readiness.can_command:
+            assert readiness.report["guidance_strategy"] == expected_strategy
+        if expected_max_lease_s is not None and readiness.can_command:
+            assert readiness.lease_sim_s <= expected_max_lease_s + 1e-12
+            max_lease = max(max_lease, readiness.lease_sim_s)
         planning_error = None
         if readiness.requires_replan:
             route = None
-        if readiness.can_command and route is None:
+        if readiness.can_command and route is None and use_route_planner:
             try:
                 frame = guidance.frame_for_planning(
                     predict_obstacles(readiness.observation, config)
@@ -589,6 +675,14 @@ def _fly_checkpoint(engine, *, seed, settings, trace_path):
     public_trace.append({"observation": observation, "guidance": guidance.report})
     trace_path.write_text(json.dumps(public_trace, allow_nan=False), encoding="utf-8")
     print("checkpoint result " + json.dumps(result, sort_keys=True), flush=True)
+    if require_zero_initial_interventions:
+        assert observation["manual_interventions"] == 0, result
+    if not use_route_planner:
+        assert plans == 0, result
+    if expected_strategy is not None:
+        assert commands > 0, result
+    if expected_max_lease_s is not None:
+        assert max_lease == pytest.approx(expected_max_lease_s), result
     assert observation["mission"]["status"] == "success", json.dumps(result, sort_keys=True)
     assert result["range_m"] <= 50.0, result
     assert observation["mission"]["target_distance_m"] <= 50.0, result

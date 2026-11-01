@@ -22,8 +22,9 @@ from .estimation import StateEstimator
 from .geometry import Capsule, CollisionIndex
 from .nominal_motion import search_nominal_motion
 from .nominal_route import NominalRouteAdviser, nominal_escape_waypoint
+from .official_profile import official_command, official_profile
 from .planning import RoutePlan
-from .prediction import _goal_approach, _noise_assumptions, checked_radar
+from .prediction import _goal_approach, _noise_assumptions, checked_radar, radar_rows
 from .temporal import MotionSegment, TemporalObstacles, motion_clear
 
 _DIRECTIONS = tuple(
@@ -37,6 +38,7 @@ _DIRECTIONS = tuple(
 class LocalDecision:
     acceleration_mps2: tuple[float, float, float]
     report: dict
+    angular_acceleration_rad_s2: tuple[float, float, float] | None = None
 
 
 def transit_motion(observation) -> bool:
@@ -44,8 +46,18 @@ def transit_motion(observation) -> bool:
     return isinstance(distribution, dict) and distribution.get("kind") == "transit_stream"
 
 
-def temporal_obstacles(observation, estimator: StateEstimator, config: ResilienceConfig):
-    """The original radial model and additive margins, evaluated at future time t."""
+def temporal_obstacles(
+    observation, estimator: StateEstimator, config: ResilienceConfig, *, rolling_radar=False
+):
+    """The original radial model and additive margins, evaluated at future time t.
+
+    ``rolling_radar`` is used only by the official profile. Its radar publishes a
+    rolling 200-row scan: each row keeps its own acquisition timestamp, and the
+    oldest row may be one scan older than the newest while the publication itself
+    remains fresh. Require the newest row to satisfy the existing radar-age gate;
+    every older row's actual age still enters the same radius and growth terms.
+    The default path keeps the original all-row freshness check unchanged.
+    """
     now = scalar(field(observation, "time_s"), "time_s")
     ship = mapping(field(observation, "shuttle"), "shuttle")
     target = mapping(field(observation, "target"), "target")
@@ -75,9 +87,18 @@ def temporal_obstacles(observation, estimator: StateEstimator, config: Resilienc
         )
         + clearance
     )
-    rows = checked_radar(observation, config.radar_age_s)
-    if not len(rows):
-        raise ValueError("No eligible radar occupancy")
+    if rolling_radar:
+        rows = radar_rows(field(observation, "radar"))
+        if not len(rows):
+            raise ValueError("No eligible radar occupancy")
+        if np.any(rows[:, 2, 0] > now):
+            raise ValueError("Future-dated rolling radar row")
+        if now - float(np.max(rows[:, 2, 0])) > config.radar_age_s:
+            raise ValueError("Rolling radar publication exceeds the radar-age limit")
+    else:
+        rows = checked_radar(observation, config.radar_age_s)
+        if not len(rows):
+            raise ValueError("No eligible radar occupancy")
     range_noise, rate_noise, diameter_fraction = _noise_assumptions(observation, config.planner)
     ages = now - rows[:, 2, 0]
     relative = rows[:, 0, :]
@@ -971,7 +992,51 @@ class LocalMotionPlanner:
     def has_advisory(self):
         return self.advisory is not None
 
+    def _official_command(self, observation, estimator, config, lease, gains, *, degraded):
+        """Official competition beeline; no transit stop search is run."""
+        now = scalar(field(observation, "time_s"), "time_s")
+        if observation.get("mission", {}).get("status") != "running":
+            return LocalDecision(
+                (0.0, 0.0, 0.0),
+                {
+                    "guidance_strategy": "official_competition_beeline",
+                    "reason": "Native mission is not running",
+                    "source_time_s": now,
+                    "official_stop_required": False,
+                },
+                (0.0, 0.0, 0.0),
+            )
+        estimate = estimator.estimate(now)
+        obstacles = temporal_obstacles(observation, estimator, config, rolling_radar=True)
+        motion = official_command(
+            observation,
+            estimate,
+            obstacles,
+            config,
+            lease,
+            gains,
+            degraded=degraded,
+        )
+        self.previous_acceleration = np.asarray(motion.acceleration_mps2)
+        # The official profile never seeds or consumes the transit beam search.
+        self.nominal_motion_plan = None
+        self.nominal_motion_source_s = None
+        return LocalDecision(
+            motion.acceleration_mps2,
+            motion.report,
+            motion.angular_acceleration_rad_s2,
+        )
+
     def command(self, observation, estimator, config, lease, gains, *, degraded, route=None):
+        if official_profile(observation) and not transit_motion(observation):
+            return self._official_command(
+                observation,
+                estimator,
+                config,
+                lease,
+                gains,
+                degraded=degraded,
+            )
         now = scalar(field(observation, "time_s"), "time_s")
         estimate = estimator.estimate(now)
         position = np.asarray(estimate.position_m)
