@@ -87,6 +87,8 @@ Keep one controller in charge. Manual thrust, pause, placement or reset can end 
 
 ### Choose a teammate profile
 
+The source entrypoint for each person is indexed in [examples/README.md](examples/README.md).
+
 Open **Controller profiles** or press **Shift+C** with the scene focused. Choose Tom, Harry, Bui or a WSO baseline, then a profile. Start the private runner for this local game:
 
 ```sh

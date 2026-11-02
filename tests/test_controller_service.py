@@ -95,7 +95,7 @@ def test_jobs_are_exact_bounded_metadata_not_arbitrary_python_or_commands():
     assert job.expected_context["trial_revision"] == 2
     assert parse_job(_job_metadata(created_at=1000)).profile_id == "baseline"
     for changes in (
-        {"profile_id": "examples/tom-mvp/Controller.py"},
+        {"profile_id": "examples/tom/Controller.py"},
         {"profile_id": "Tom"},  # Friendly names belong at the CLI, never in jobs.
         {"profile_id": {"script": "print('no')"}},
         {"id": "not-a-uuid"},

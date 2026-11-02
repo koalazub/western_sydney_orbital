@@ -96,8 +96,8 @@ def saved_sweep(tmp_path):
             "analytics_definitions": DEFINITIONS,
             "uv_lock_sha256": "c" * 64,
             "reviewed_example_hashes": {
-                "examples/mvp/guidance.py": "a" * 64,
-                "examples/tom-mvp/avoidance.py": "b" * 64,
+                "examples/bui/mvp/guidance.py": "a" * 64,
+                "examples/tom/avoidance.py": "b" * 64,
             },
             "package_sources": {
                 "src/wsorb/flight/control.py": {
@@ -423,7 +423,7 @@ def test_publication_refuses_excess_source_hashes_instead_of_dropping_provenance
     path = saved_sweep / "python.json"
     evidence = json.loads(path.read_text())
     evidence["reviewed_example_hashes"] = {
-        f"examples/mvp/fixture_{index}.py": "a" * 64 for index in range(129)
+        f"examples/bui/mvp/fixture_{index}.py": "a" * 64 for index in range(129)
     }
     write_json(path, evidence)
     with pytest.raises(ValueError, match="128 source hashes"):
@@ -489,8 +489,8 @@ def test_actual_engine_definition_and_hash_are_used_without_current_file_depende
         bundle["comparison"]["source_hashes"]["simulation/scenarios/flight_analytics.json"]
         == "f" * 64
     )
-    assert "examples/mvp/guidance.py" in bundle["comparison"]["source_hashes"]
-    assert "examples/tom-mvp/avoidance.py" in bundle["comparison"]["source_hashes"]
+    assert "examples/bui/mvp/guidance.py" in bundle["comparison"]["source_hashes"]
+    assert "examples/tom/avoidance.py" in bundle["comparison"]["source_hashes"]
 
 
 def test_new_output_is_deterministic_private_safe_and_has_actual_artifact_digests(

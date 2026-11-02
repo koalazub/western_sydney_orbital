@@ -315,11 +315,11 @@ Our practice world uses simplified gravity, terrain, contact, fuel and damage mo
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 
-Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [controller example](../examples/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
+Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [WSO controller entrypoint](../examples/wso/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
 
 ## Send a controller to a colleague
 
-Send `examples/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
+Send `examples/wso/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
 
 Keep the server's existing ControllerSystem launch arguments unchanged. Start with no policy configuration, or this disabled configuration selected by `WSORB_STP_POLICY_JSON`:
 

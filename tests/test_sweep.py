@@ -146,8 +146,8 @@ def test_pure_schedule_keeps_fresh_repetitions_consecutive_and_snapshots_peer_ha
     assert all(row["sample_count"] == 0 for row in summaries)
     evidence = json.loads((output / "python.json").read_text())
     hashes = evidence["reviewed_example_hashes"]
-    assert "examples/mvp/guidance.py" in hashes
-    assert "examples/tom-mvp/avoidance.py" in hashes
+    assert "examples/bui/mvp/guidance.py" in hashes
+    assert "examples/tom/avoidance.py" in hashes
     assert all(len(value) == 64 for value in hashes.values())
 
 

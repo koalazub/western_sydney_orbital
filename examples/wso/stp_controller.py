@@ -1,7 +1,7 @@
 """ControllerSystem entry point for a licensed Space Teams Pro simulation.
 
 Point the competition's ControllerSystem at this file using its existing
-runtime configuration. Keep ../src/wsorb/{stp_api,stp_policy,control_contract,
+runtime configuration. Keep ../../src/wsorb/{stp_api,stp_policy,control_contract,
 maneuvers,tracking}.py available, or place those five siblings beside this file.
 This portable subset targets Python 3.10+ syntax and needs compatible NumPy and
 the real bundled spaceteams SDK. Actual SDK/interpreter support must be checked
@@ -67,7 +67,7 @@ def main() -> None:
     adapter_directory = (
         entry.parent
         if (entry.parent / "stp_api.py").is_file()
-        else entry.parents[1] / "src" / "wsorb"
+        else entry.parents[2] / "src" / "wsorb"
     )
     sys.path.insert(0, str(adapter_directory))
     from stp_api import connect_from_argv

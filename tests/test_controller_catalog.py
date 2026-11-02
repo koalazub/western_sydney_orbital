@@ -678,9 +678,9 @@ def test_catalog_import_is_lightweight_and_factory_has_no_arbitrary_script_setti
         )
     for controller_id in IDS:
         with pytest.raises(ValueError, match="Unsupported settings"):
-            create_controller(controller_id, {"script": "examples/tom-mvp/Controller.py"})
+            create_controller(controller_id, {"script": "examples/tom/Controller.py"})
     with pytest.raises(ValueError, match="Unknown reviewed"):
-        create_controller("examples/tom-mvp/Controller.py")
+        create_controller("examples/tom/Controller.py")
     with pytest.raises(ValueError):
         create_controller("basic_pd_radar", {"velocity_gain_s": True})
 

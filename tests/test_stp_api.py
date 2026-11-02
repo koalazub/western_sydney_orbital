@@ -1077,7 +1077,7 @@ HANDOFF_FILES = [
         "maneuvers.py",
         "tracking.py",
     )
-] + [ROOT / "examples/stp_controller.py"]
+] + [ROOT / "examples/wso/stp_controller.py"]
 
 
 @pytest.mark.parametrize("path", HANDOFF_FILES, ids=lambda path: path.name)
@@ -1168,7 +1168,7 @@ def test_source_contract_keeps_pinned_bootstrap_frames_units_and_authentic_write
 
 
 def test_example_probe_returns_before_enabled_finally_and_rechecks_real_clock_after_compute():
-    tree = ast.parse((ROOT / "examples/stp_controller.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "examples/wso/stp_controller.py").read_text(encoding="utf-8"))
     main = _method_ast(tree, "main")
     context = next(node for node in main.body if isinstance(node, ast.With))
     disabled = context.body[0]

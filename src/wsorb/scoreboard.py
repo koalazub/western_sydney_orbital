@@ -36,7 +36,7 @@ _EXECUTION = "owned_native_manual_step"
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_PATH = re.compile(
     r"(?:src/wsorb/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.py"
-    r"|examples/(?:mvp|tom-mvp)/[A-Za-z0-9_]+\.py)\Z"
+    r"|examples/(?:mvp|tom-mvp|bui/mvp|tom)/[A-Za-z0-9_]+\.py)\Z"
 )
 _DATA_PATHS = {
     "uv.lock",

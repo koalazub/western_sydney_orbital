@@ -15,7 +15,7 @@ _LOCK = RLock()
 _LOADED: dict[str, dict[str, ModuleType]] = {}
 _MODULES = {
     "bui": (
-        "mvp",
+        "bui/mvp",
         (
             "config",
             "accel_controller",
@@ -26,15 +26,13 @@ _MODULES = {
             "guidance",
         ),
     ),
-    "tom": ("tom-mvp", ("debris_tracker", "avoidance")),
+    "tom": ("tom", ("debris_tracker", "avoidance")),
 }
 
 
 def require_template_source() -> None:
-    if not (ROOT / "examples/tom-mvp/UserAPI.py").is_file():
-        raise ValueError(
-            "Body +Z template requires the source checkout: examples/tom-mvp/UserAPI.py"
-        )
+    if not (ROOT / "examples/tom/UserAPI.py").is_file():
+        raise ValueError("Body +Z template requires the source checkout: examples/tom/UserAPI.py")
 
 
 def load_math(profile: str) -> dict[str, ModuleType]:

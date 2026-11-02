@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def mvp_math(monkeypatch):
     # Import the actual adjacent namespace package, not an SDK/engine substitute.
-    monkeypatch.syspath_prepend(str(ROOT / "examples"))
+    monkeypatch.syspath_prepend(str(ROOT / "examples" / "bui"))
     before = {name for name in sys.modules if name.split(".")[0] in {"spaceteams", "cv2"}}
     modules = tuple(
         importlib.import_module(f"mvp.{name}")
@@ -28,12 +28,15 @@ def mvp_math(monkeypatch):
 
 
 def test_peer_sources_compile_without_connecting_or_entering_the_control_loop():
-    for path in [ROOT / "examples/Controller.py", *sorted((ROOT / "examples/mvp").glob("*.py"))]:
+    for path in [
+        ROOT / "examples/bui/Controller.py",
+        *sorted((ROOT / "examples/bui/mvp").glob("*.py")),
+    ]:
         compile(path.read_text(), str(path), "exec")
 
 
 def test_licensed_entrypoint_keeps_the_original_argv_bootstrap():
-    tree = ast.parse((ROOT / "examples/Controller.py").read_text())
+    tree = ast.parse((ROOT / "examples/bui/Controller.py").read_text())
     calls = [
         node
         for node in ast.walk(tree)
