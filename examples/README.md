@@ -6,7 +6,7 @@ runtime profile registry is `src/wsorb/controllers/catalog.json`.
 
 | Person | STP entrypoint | Local profile IDs | Implementation | Notes |
 | --- | --- | --- | --- | --- |
-| Ali | [`ali/official_profile.py`](ali/official_profile.py) | `ali_official_profile` (sweep; `wso_official_profile` alias) | `src/wsorb/controllers/official_profile.py`, `src/wsorb/flight/official_profile.py` | The 6/6 official-profile controller. Local-only; not yet STP-portable. |
+| Ali | [`ali/official_profile.py`](ali/official_profile.py) local; [`ali/stp_official_profile.py`](ali/stp_official_profile.py) STP source port | `ali_official_profile` (sweep; `wso_official_profile` alias) | `src/wsorb/controllers/official_profile.py`, `src/wsorb/flight/official_profile.py`, `src/wsorb/stp_official.py` | The 6/6 official-profile controller. The STP source port still needs the real probe and flight. |
 | WSO | [`wso/stp_controller.py`](wso/stp_controller.py) | `baseline`, `body-axis` | `src/wsorb/stp_policy.py` | The portable checkpoint controller and STP handoff. |
 | Bui | [`bui/Controller.py`](bui/Controller.py) | `bui_alpha_beta_mvp` | `bui/mvp/`, `src/wsorb/controllers/_bui.py` | The `mvp/` folder must stay beside `Controller.py`. |
 | Tom | [`tom/Controller.py`](tom/Controller.py) | `tom_kalman_velocity_mvp` | `tom/`, `src/wsorb/controllers/_tom.py` | `tom/UserAPI.py` is the body +Z template, not the target-seeking controller. |

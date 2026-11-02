@@ -331,6 +331,13 @@ That runs a read-only SDK probe. It reports actual versions, resolved handles, f
 
 For an enabled checkpoint attempt, select `policy: "checkpoint_velocity"` in the reviewed configuration. Set an independently established `radar_clock_offset_s`, verify `checkpoint_radius_m` against the server's Scoring `KeepOutRadius_m`, and ensure this is the only jet-command writer. Select `body_axis_preference` explicitly for the candidate policy. Do not infer the radar offset from one reading or pass our policy options as SDK bootstrap arguments. The legacy PD/radar policy remains available for comparison.
 
+Ali's official-profile source port is
+[`examples/ali/stp_official_profile.py`](../examples/ali/stp_official_profile.py).
+Configure it with `WSORB_STP_OFFICIAL_FILE` or `WSORB_STP_OFFICIAL_JSON`; a
+missing configuration never connects or writes. Start with the read-only
+`{"schema":"wsorb.stp_official","schema_version":1,"enabled":false,"probe":true}`
+document. It is a source port, not licensed-runtime evidence.
+
 The portable controller uses named reference frames, original measurement times and bounded P velocity control. It does not add unreviewed integral/derivative gains or initial attitude changes from the meeting discussion. Anonymous radar tracks carry covariance and tentative/confirmed/coasting states, but their IDs are hypotheses and their uncertainty models are not calibrated probabilities. Tracking cannot remove raw obstacle envelopes or certify clearance. Body-command L1 is an allocation proxy, not measured fuel or proof of the minutes' diagonal-fuel claim; the local centre-of-mass actuator charges resultant L2 force.
 
 SDK state/radar reads and the two command writes are sequential. The script rechecks the actual clock after computation, but STP has no native decision lease here. Cleanup attempts real zeros only after explicit enabled control; it cannot guarantee a stop after process death, blocked calls or failed writes. A configured-radius observation is not an official scoring result or a physics freeze. Authentic licensed-server execution is still required. Missing SDK access fails clearly rather than returning substitute results.
