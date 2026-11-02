@@ -1,0 +1,43 @@
+{
+  "schema": "wsorb.official_comparison.artifacts",
+  "schema_version": 1,
+  "preset": "competition_reference",
+  "debris_distribution": {
+    "kind": "official_cloud"
+  },
+  "seeds": [
+    100,
+    101,
+    102
+  ],
+  "repetitions": 2,
+  "duration_s": 300.0,
+  "step_s": 0.5,
+  "engine_build": {
+    "bytes": 22755883,
+    "sha256": "56a23e50707880a0e9e18ce9ed308db548abe100c4f6d925419ac195be1db4c0"
+  },
+  "interactive_report": "not published; regenerate with just flight-analyze",
+  "artifacts": [
+    {
+      "path": "summary.csv",
+      "bytes": 1816,
+      "sha256": "82dcd0c1be16be6fbd6161a9ca053a88cebf20bbc8e8a204ba317988403cf109"
+    },
+    {
+      "path": "runs.csv",
+      "bytes": 4550,
+      "sha256": "b211155957763b34321d0f31e07e88a875b34730f213a6d6980b20e0b2f05a4e"
+    },
+    {
+      "path": "configuration.json",
+      "bytes": 914,
+      "sha256": "79939cfc05454ca405698ce2b8354d339a1b15e784ca2c5407b0b47905aa612b"
+    },
+    {
+      "path": "policies.json",
+      "bytes": 97357,
+      "sha256": "809468f08432102b8b09b69c50ae890c5954d8d2507a7e2bc11f9b910c7fc67b"
+    }
+  ]
+}

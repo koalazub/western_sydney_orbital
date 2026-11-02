@@ -1,0 +1,31 @@
+algorithm,seed,repetition,debris_count,outcome,error,sample_count,elapsed_sim_s,final_phase,final_score,score_formula,score_progress_points,score_collision_penalty_points,score_fuel_penalty_points,score_offset_points,analytics_available,analytics_definition_id,burn_count,angular_burn_count,turn_count,observed_sim_s,burn_duration_s,longest_burn_s,angular_burn_duration_s,longest_angular_burn_s,turn_duration_s,longest_turn_s,total_turn_angle_rad,peak_angular_speed_rad_s,propellant_impulse_ns,angular_impulse_nms,current_burn_s,current_angular_burn_s,current_turn_s,final_target_range_m,final_relative_speed_mps,closest_sampled_target_range_m,min_sampled_terrain_center_clearance_m,fuel_used_kg_estimate,max_damage_j_estimate,first_damage_after_s,first_damage_by_s,first_damage_phase,min_observed_radar_range_m,max_radar_age_s,future_radar_rows,median_policy_wall_s,max_policy_wall_s,policy_calls_over_step_budget,trial_directory
+official_basic_beeline,100,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00000
+official_basic_beeline,100,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00001
+wso_official_profile,100,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00002
+wso_official_profile,100,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00003
+baseline,100,1,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00004
+baseline,100,2,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00005
+body-axis,100,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00006
+body-axis,100,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00007
+basic_pd_radar,100,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00008
+basic_pd_radar,100,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00009
+official_basic_beeline,101,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00010
+official_basic_beeline,101,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00011
+wso_official_profile,101,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00012
+wso_official_profile,101,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00013
+baseline,101,1,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00014
+baseline,101,2,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00015
+body-axis,101,1,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00016
+body-axis,101,2,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00017
+basic_pd_radar,101,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00018
+basic_pd_radar,101,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00019
+official_basic_beeline,102,1,500,failed_damage,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00020
+official_basic_beeline,102,2,500,failed_damage,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00021
+wso_official_profile,102,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00022
+wso_official_profile,102,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00023
+baseline,102,1,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00024
+baseline,102,2,500,policy_error,ValueError: The selected controller has no eligible decision for this sample,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00025
+body-axis,102,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00026
+body-axis,102,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00027
+basic_pd_radar,102,1,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00028
+basic_pd_radar,102,2,500,success,,0,,,,,,,,,False,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,0,,,0,trial-00029

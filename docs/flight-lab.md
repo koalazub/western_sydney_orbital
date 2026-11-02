@@ -254,6 +254,8 @@ Phobos and Mars use [credited spacecraft surface maps](../worker/web/assets/ATTR
 
 The [README's recorded comparison](../README.md#recorded-teammate-flights) covers 30 older broad-stream trials, not the transit stress field or the official cloud. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
 
+The separate [official-profile comparison](official-comparison.md) uses `competition_reference` with `official_cloud`, three seeds, two consecutive attempts and the same 500-body population. It includes the published `BasicController.py` baseline, WSO's official-profile policy, WSO's checkpoint profiles and the older basic PD reference. It does not replace this historical broad-stream comparison.
+
 Only the connected target-seeking profiles enter this comparison. Coast, body-Z templates and WSO's separate checkpoint profiles remain selectable, but are not mixed into its medians. Harry's profile is a shared baseline selected by his workflow, not a claim that he authored it.
 
 All 30 trials arrived with zero measured damage. Headline measurements were identical across the five seeds and deterministic repeats. These are five matched seeds, not ten independent seed draws per profile; the counts are descriptive, not proof of robustness. No confidence interval is claimed. Arrival is entry to the station region, not a low-speed rendezvous or docking check.

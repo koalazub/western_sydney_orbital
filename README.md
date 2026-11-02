@@ -5,6 +5,7 @@ Our team's flight lab for **Escape from Phobos**, the Fall 2026 Space Teams PRO 
 This is a practice simulator. It does not reproduce Space Teams PRO exactly, so test promising controllers in the licensed competition simulator.
 
 - [Official competition reference](#official-competition-reference)
+- [Official-profile comparison](#official-profile-comparison)
 - [Start locally](#start-locally)
 - [Fly manually](#fly-manually)
 - [Run a controller](#run-a-controller)
@@ -146,6 +147,12 @@ Native burn and turn measurements cover 30/30 physical results. Fuel and turning
 <!-- END GENERATED TEAMMATE ANALYTICS -->
 
 Bui used slightly less estimated fuel than Tom; Tom arrived sooner. Bui also turned while coasting. Harry's row uses the shared PD baseline from his sweep workflow. The local angular-control fuel model differs from STP jet allocation, so these results do not identify a competition winner.
+
+## Official-profile comparison
+
+A separate matched comparison uses the official **1.31 km hop** and the fixed **500-body official cloud**. It includes the published `BasicController.py` beeline, WSO's official-profile policy, WSO's existing checkpoint profiles and the older basic PD/radar reference. The published baseline has no debris avoidance, so an arrival is not a safety claim. Local fuel and damage are not STP counters.
+
+See the [official-profile comparison](docs/official-comparison.md) for conditions, results and limits.
 
 In **Controller profiles**, use **Compare** for charts, **Run flight** for controller selection and **Recorded data** for counters and downloads. Published trials and current-connection flights stay separate. Local dashboard changes do not mean the [hosted player](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) has been updated.
 

@@ -18,6 +18,9 @@ build/
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
 
+# Local sweep outputs (raw traces stay local)
+runs/
+
 # Test and lint caches
 .pytest_cache/
 .ruff_cache/

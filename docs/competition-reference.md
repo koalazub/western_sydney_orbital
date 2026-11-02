@@ -117,6 +117,10 @@ This repository does not claim one-to-one parity with the official mission.
 - **Arrival meaning.** Local success means entry to the station region. It is
   not docking, a low-speed rendezvous or an official terminal score.
 
+A separate local [official-profile comparison](official-comparison.md) runs the
+published `BasicController.py` baseline and the WSO controllers on this preset.
+It is a matched practice experiment, not STP evidence.
+
 The existing `far_side_l2` practice world, the 20 m/s transit stress mode and
 the 30-trial publication remain unchanged. Those records are local evidence,
 not official results.
