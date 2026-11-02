@@ -271,7 +271,7 @@ hosted-artifact-check:
     assert.equal(bytes.length,expected.bytes);
     assert.equal(sha256,expected.sha256);
     const web_assets=[];
-    for(const name of ['index.html','styles.css','app.js']) {
+    for(const name of ['index.html','styles.css','app.js','compare.html','comparison.js','analytics/paths-official.json','analytics/paths-team.json','analytics/paths-official-trials.csv','analytics/paths-manifest.json','analytics/python-flight-theory.txt']) {
       const asset=await request(name==='index.html'?'':name);
       assert.equal(asset.status,200);
       const actual=Buffer.from(await asset.arrayBuffer());
@@ -280,7 +280,7 @@ hosted-artifact-check:
       assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
       web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
     }
-    for(const name of ['analytics/official-comparison.svg']) {
+    for(const name of ['analytics/official-comparison.svg','analytics/score-components.svg']) {
       const asset=await request(name);
       assert.equal(asset.status,200,`Hosted ${name} is unavailable`);
       assert.match(asset.headers.get('content-type'),/^image\/svg\+xml(?:;|$)/);
@@ -349,12 +349,38 @@ scoreboard-refresh input output:
 flight-sweep config="examples/flight_sweep.json" output="":
     devenv shell uv run --locked --extra lab python examples/flight_sweep.py --config {{quote(config)}} --output {{quote(output)}}
 
-flight-analyze output:
-    devenv shell uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output {{quote(output)}}
+flight-analyze output trial="" report="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--analyze-only --output {{quote(output)}})
+    if [[ -n {{quote(trial)}} ]]; then args+=(--trial {{quote(trial)}}); fi
+    if [[ -n {{quote(report)}} ]]; then args+=(--report-file {{quote(report)}}); fi
+    devenv shell uv run --locked --extra lab python examples/flight_sweep.py "${args[@]}"
 
 # Render the committed official-profile SVG from its published summary.
 official-chart:
     devenv shell uv run --locked python -m wsorb.official_comparison_chart --summary docs/analytics/official-comparison/summary.csv --output docs/analytics/official-comparison/performance.svg --manifest docs/analytics/official-comparison/manifest.json
+
+# Re-publish ownship paths from a saved matched sweep, without flying again.
+path-comparison input id diagnose="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--input {{quote(input)}} --id {{quote(id)}} --output "docs/analytics/path-comparison/{{id}}.json" --manifest docs/analytics/path-comparison/manifest.json)
+    if [[ {{quote(diagnose)}} == true ]]; then args+=(--diagnose); fi
+    devenv shell uv run --locked python -m wsorb.path_comparison "${args[@]}"
+
+# Inspect only a saved observation's public world receipt, never radar or secrets.
+flight-source input trial="trial-00000":
+    devenv shell jq -n 'input.observation | {flight_preset,experiment_settings,debris_distribution,seed,geometry:(.geometry | {arrival_radius_m,debris_count})}' {{quote(input + "/" + trial + "/trace.jsonl")}}
+
+# Render the actual read-only comparison in Chrome at desktop and narrow widths.
+# Evidence stays in the approved session temporary directory, not the repository.
+comparison-review output report="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--output {{quote(output)}})
+    if [[ -n {{quote(report)}} ]]; then args+=(--report-file {{quote(report)}}); fi
+    nix shell --impure .#game --command node worker/scripts/review-comparison.mjs "${args[@]}"
 
 flight-notebook:
     devenv shell uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py

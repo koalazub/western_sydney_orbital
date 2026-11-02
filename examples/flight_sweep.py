@@ -23,6 +23,10 @@ In your own notebook, the essential calls are:
     # Pick any saved trial for a detailed, paired comparison:
     report = write_report("runs/my-first-sweep", trial="trial-00002")
 
+To inspect saved data without running physics, use ``--analyze-only --output
+runs/my-first-sweep --trial trial-00002``. Other repetitions are not joined to
+the chosen trial. Opening this file with run_path does not start a sweep.
+
 Edit the functions below, or import your own algorithm. Factories reset memory
 between trials. Observations contain public radar, not hidden rock positions.
 The baseline is deliberately simple, not a promised successful flight policy.
@@ -78,12 +82,23 @@ def main():
     parser.add_argument(
         "--analyze-only", action="store_true", help="Rebuild a saved sweep's HTML report"
     )
+    parser.add_argument("--trial", help="Saved trial directory for detail; requires --analyze-only")
+    parser.add_argument(
+        "--report-file", type=Path, help="New HTML file, leaving any saved report unchanged"
+    )
     args = parser.parse_args()
     if args.analyze_only:
         if not args.output:
             parser.error("--analyze-only requires --output pointing at a saved sweep")
-        print(write_report(args.output))
+        if args.report_file is not None:
+            print(write_report(args.output, trial=args.trial, report_file=args.report_file))
+        else:
+            print(write_report(args.output, trial=args.trial))
         return
+    if args.trial is not None:
+        parser.error("--trial requires --analyze-only; no simulator was started")
+    if args.report_file is not None:
+        parser.error("--report-file requires --analyze-only; no simulator was started")
     config = json.loads(args.config.read_text())
     output = (
         Path(args.output)

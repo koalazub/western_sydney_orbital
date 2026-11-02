@@ -5,6 +5,7 @@ import scenario from "../../simulation/scenarios/phobos_escape.json";
 import { CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
 import { installFlightAnalytics } from "./flight-analytics.ts";
 import { mountDashboard } from "./dashboard-shell.ts";
+import { installPathComparison } from "./path-comparison.ts";
 import type { RoomEngine } from "./room-control.ts";
 
 type Connection = { origin: string; id: string; key: string };
@@ -136,6 +137,7 @@ export function installControllerProfiles(options: Options) {
   const error = byId("controller-error");
   const table = byId<HTMLTableElement>("controller-results-table");
   const analytics = installFlightAnalytics();
+  const paths = installPathComparison(byId("dashboard-path-comparison"));
   let view: View | undefined;
   let busy = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -280,6 +282,7 @@ export function installControllerProfiles(options: Options) {
       panel.showModal();
       panel.querySelector<HTMLButtonElement>('.lab-navigation [data-lab-view="compare"]')?.focus();
       analytics.openPublished();
+      paths.open();
       void refresh(); void schedule();
     }
   };

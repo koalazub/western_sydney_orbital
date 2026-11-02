@@ -603,7 +603,8 @@ def _draw_svg(title: str, description: str, panels: list[dict], profiles: list[d
         text(x + 21, y + 1, f"{index + 1}. {profile['owner']} / {profile['label']}")
     for index, panel in enumerate(panels):
         bx, by = 16 + index % 2 * 543, start + index // 2 * 270
-        left, right, top, bottom = bx + 76, bx + 510, by + 63, by + 200
+        # Negative scientific-notation tick labels need room to the axis's left.
+        left, right, top, bottom = bx + 112, bx + 510, by + 63, by + 200
         text(bx + 9, by + 16, panel["title"], css="panel")
         values = panel.get("values")
         series = panel.get("series", [])

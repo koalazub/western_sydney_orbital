@@ -394,6 +394,9 @@ def test_chart_uses_actual_samples_and_keeps_null_gaps_and_full_precision():
     assert "for (const row of run.analytics!.samples)" in graph
     assert 'svgNode("circle"' in graph
     assert "String(index + 1)" in graph
+    assert "ownerStyle[owner]" in graph
+    assert "index % 7" not in graph
+    assert 'selectedSeeds.join(", ")' in graph
     assert 'svgNode("title"' in graph and 'svgNode("desc"' in graph
     assert "No recorded samples for this selection." in graph
     plot = section("function installPlot(", "function renderPublication(")
@@ -437,11 +440,16 @@ def test_download_links_use_only_the_fixed_public_asset_contract(page):
         "/analytics/fuel-burns.svg",
         "/analytics/turns.svg",
         "/analytics/efficiency.svg",
+        "/analytics/official-comparison.svg",
     }
     for link in links:
-        assert "download" in link["attrs"]
         assert link["attrs"]["referrerpolicy"] == "no-referrer"
-        assert page.ids["published-analytics-content"] in link["parents"]
+        if "download" in link["attrs"]:
+            assert page.ids["published-analytics-content"] in link["parents"]
+        else:
+            assert link["attrs"]["href"] == "/analytics/official-comparison.svg"
+            assert link["attrs"]["target"] == "_blank"
+            assert set(link["attrs"]["rel"].split()) == {"noopener", "noreferrer"}
         assert "?" not in link["attrs"]["href"] and "#" not in link["attrs"]["href"]
 
 

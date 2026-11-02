@@ -368,7 +368,8 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
   }
   const points = selected.flatMap(run => run.analytics!.samples.filter(row => row[metric.column] !== null));
   const [xmin, xmax] = extent(points.map(row => row[0]!)), [ymin, ymax] = extent(points.map(row => row[metric.column]!));
-  svg.querySelector("desc")!.textContent = `${selected.length} recorded runs at seed ${selected[0].seed}. ${description} Trace numbers identify runs in the legend. Coincident repetitions can overlap.`;
+  const selectedSeeds = [...new Set(selected.map(run => run.seed))];
+  svg.querySelector("desc")!.textContent = `${selected.length} recorded runs across seeds ${selectedSeeds.join(", ")}. ${description} Trace numbers identify runs in the legend. Coincident repetitions can overlap; they are never joined into one trajectory.`;
   const x = (value: number) => 88 + (value - xmin) / (xmax - xmin) * 608;
   const y = (value: number) => 260 - (value - ymin) / (ymax - ymin) * 220;
   for (let i = 0; i <= 4; i++) {
@@ -382,7 +383,10 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
     svgNode("text", { x: "392", y: "314", "text-anchor": "middle", class: "analytics-axis-label" }, "Simulation time, s"));
   const inspection: ChartInspectionPoint[] = [];
   selected.forEach((run, index) => {
-    const style = `analytics-series-${index % 7}`;
+    // A filter must not silently give a teammate another teammate's colour.
+    const owner = profiles.find(profile => profile.id === run.profileId)?.owner ?? "WSO";
+    const ownerStyle: Record<string, number> = { Bui: 0, Tom: 1, Harry: 2, WSO: 3 };
+    const style = `analytics-series-${ownerStyle[owner] ?? 3}`;
     const entry = document.createElement("li");
     entry.className = style;
     const swatch = document.createElement("span"); swatch.className = "analytics-swatch"; swatch.setAttribute("aria-hidden", "true");

@@ -608,6 +608,13 @@ def test_finite_extreme_plot_values_do_not_overflow_svg_coordinates():
             raw = element.attrib.get(key)
             if raw is not None and not raw.endswith("%"):
                 assert abs(float(raw)) < 2000
+    ticks = [
+        element
+        for element in root.iter()
+        if element.attrib.get("text-anchor") == "end" and (element.text or "").startswith("-")
+    ]
+    assert ticks
+    assert all(float(element.attrib["x"]) >= 120 for element in ticks)
 
 
 def test_chart_text_and_profile_strokes_have_measured_contrast_on_white():

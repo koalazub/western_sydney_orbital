@@ -99,6 +99,12 @@ The requirements matrix is in
 
 ## STP boundary
 
+The [Python theory review](../../docs/python-flight-theory.md) maps the sweep
+script to the actual flight loop, reviews the reference modules, and explains
+why the STP source port is not equivalent to the local avoidance/braking path.
+Use the [recorded path comparison](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html)
+to inspect a matched seed and repetition without changing a flight.
+
 The 6/6 comparison is local evidence. A source port now exists in
 [`stp_official_profile.py`](stp_official_profile.py), but it has not been
 executed against the licensed runtime. The portable checkpoint handoff remains

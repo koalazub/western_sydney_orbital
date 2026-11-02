@@ -175,7 +175,7 @@ def _outcome_bar(row: SummaryRow, x: float, y: float, width: float) -> str:
         if segment >= 45:
             parts.append(
                 f'<text x="{offset + segment / 2:.1f}" y="{y + 12:.1f}" '
-                f'text-anchor="middle" fill="white" font-size="11">{count}</text>'
+                f'text-anchor="middle" class="outcome-count" font-size="13">{count}</text>'
             )
         offset += segment
     return "".join(parts)
@@ -202,12 +202,12 @@ def _legend(y: float) -> str:
 
 def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
     rows = tuple(rows)
-    width, height = 1200, 1120
+    width, height = 1200, 1260
     labels_x = 28.0
     bar_x = 250.0
     bar_width = 800.0
     value_x = 1070.0
-    row_height = 30.0
+    row_height = 32.0
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'role="img" aria-labelledby="title" aria-describedby="description" '
@@ -221,7 +221,8 @@ def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
         "<style>text{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;fill:#172033}"
         ".title{font-size:26px;font-weight:650}.sub{font-size:15px}.caveat{font-size:13px;fill:#475569}"
         ".panel{font-size:16px;font-weight:650}.row{font-size:14px}.value{font-size:14px;font-weight:600}"
-        ".tick{font-size:12px;fill:#64748b}</style>",
+        ".tick{font-size:13px;fill:#475569}.outcome-count{fill:#fff}"
+        "text{font-variant-numeric:tabular-nums}</style>",
         '<text x="28" y="38" class="title">'
         "Official-profile comparison: outcomes and metrics"
         "</text>",
@@ -240,8 +241,14 @@ def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
             f'<text x="{value_x}" y="{y + 12}" class="value">'
             f"{row.outcomes.get('success', 0)}/{row.runs} success</text>"
         )
-        y += row_height
-    y += 10.0
+        outcome_text = ", ".join(
+            f"{name.replace('_', ' ')}: {count}" for name, count in sorted(row.outcomes.items())
+        )
+        parts.append(
+            f'<text x="{bar_x}" y="{y + 32:.1f}" class="tick">{escape(outcome_text)}</text>'
+        )
+        y += row_height + 20
+    y += 14.0
 
     def panel(
         title: str,
@@ -278,7 +285,7 @@ def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
         y += 14.0
 
     panel(
-        "Median arrival time",
+        "Median arrival time · successful runs only",
         lambda row: row.median_success_time_s,
         200.0,
         1,
@@ -286,7 +293,7 @@ def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
         "#075985",
     )
     panel(
-        "Median entry speed",
+        "Median final speed · physical outcomes, including failures",
         lambda row: row.median_final_relative_speed_mps,
         10.0,
         2,
@@ -294,7 +301,7 @@ def render_svg(rows: Iterable[SummaryRow], *, source_sha256: str) -> str:
         "#c2410c",
     )
     panel(
-        "Median local fuel estimate",
+        "Median local fuel estimate · physical outcomes, including failures",
         lambda row: row.median_fuel_used_kg_estimate,
         160.0,
         1,

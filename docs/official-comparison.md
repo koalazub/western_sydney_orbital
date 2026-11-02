@@ -49,6 +49,9 @@ population draws.
 The per-trial records and summary are the published result:
 
 - [Metric dashboard](analytics/official-comparison/performance.svg)
+- [Interactive paths and time graphs](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html)
+- [Curated ownship paths](analytics/path-comparison/official.json)
+- [Trace-derived per-trial metrics CSV](analytics/path-comparison/official-trials.csv)
 - [Per-trial CSV](analytics/official-comparison/runs.csv)
 - [Summary CSV](analytics/official-comparison/summary.csv)
 - [Configuration](analytics/official-comparison/configuration.json)
@@ -58,6 +61,12 @@ The per-trial records and summary are the published result:
 The full interactive report is not committed because it embeds raw public
 observation traces. Regenerate it locally with `just flight-analyze` from a
 saved run.
+
+The archived `runs.csv` has zero sample counts and blank per-trial metrics even
+though the saved traces contain real observations. It remains unchanged for
+provenance. Use the separate trace-derived CSV for per-trial measurements. The
+path publication recomputes finals from the saved observations and checks the
+group metrics against the original summary. Blank archive cells are not zeros.
 
 Across six attempts per policy (three seeds, two consecutive attempts each):
 
@@ -69,7 +78,12 @@ Across six attempts per policy (three seeds, two consecutive attempts each):
 | WSO checkpoint `body-axis` | 4/6 | 4 success, 2 policy-ineligible | 186.9 | 2.20 | 75.0 | 2/6 |
 | Basic PD/radar | 6/6 | 6 success | 160.4 | 1.36 | 146.4 | 0/6 |
 
-![Outcomes, arrival time, entry speed, local fuel and damage counts for the five policies](analytics/official-comparison/performance.svg)
+![Outcomes, arrival time, final speed, local fuel and damage counts for the five policies](analytics/official-comparison/performance.svg)
+
+Arrival-time medians use successful runs only. Final-speed and fuel medians use
+physical outcomes, including damage failures. They are separate distributions,
+not measurements from one representative flight. The interactive view instead
+compares the actual flights at one seed and repetition.
 
 The published baseline is the fastest, but it enters the arrival region at about
 10 m/s and both seed-102 attempts failed the 209,200 J damage threshold
@@ -108,6 +122,62 @@ regenerate the HTML from saved trials, run:
 ```sh
 just flight-analyze runs/official-comparison-new
 ```
+
+To inspect a specific repetition without replacing its saved report, provide a
+new HTML file as the third argument:
+
+```sh
+just flight-analyze runs/official-comparison-2026-11-02 trial-00012 runs/seed-101-review.html
+```
+
+The new report reads existing traces only. It refuses an existing output file.
+Its path coordinates use the same fixed basis as the hosted comparison, and its
+command segments retain their actual preceding intervals.
+
+## Inspect a path adjustment
+
+Open [the read-only comparison](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html).
+It also appears first in **Controller profiles → Compare**, without starting a
+flight. The standalone page does not load the game engine or need WebGPU.
+
+1. Choose the competition hop or historical L2 world, then a seed and repetition.
+   The two worlds never share a metric comparison.
+2. Use the numbered legend to show the controllers you want. Their colours and
+   line patterns stay fixed across every plot.
+3. Move the time control, select a graph, or select a damage interval. Both path
+   projections, all time graphs and the exact-value table inspect that timestamp.
+4. Read the path with range, speed, requested acceleration, local fuel and damage.
+   Expand the signed body-axis requests to inspect reversals. Radar range is a
+   noisy observation, not hull clearance or a collider identity.
+5. Switch to equal map scales before judging a manoeuvre's angle. The expanded
+   cross-track view makes small detours visible but distorts angles.
+
+The maps use a fixed basis from the first launch position to the first target
+position. Lateral and normal are two perpendicular offsets, not altitude or
+ship axes. No raw radar, images, private descriptors or unobserved debris states
+are published. Downloads include source hashes and actual timestamps. Missing
+samples stay missing; a stopped trace is never extended to the cursor time.
+
+The old sweep records a command with the observation **after** applying it.
+Command row `t` therefore describes the preceding interval, not a request that
+starts at `t`. Damage brackets also describe sampled intervals, not exact contact
+times. These plots support an optimisation hypothesis, not collision replay.
+
+To publish paths from saved evidence without flying again:
+
+```sh
+just path-comparison runs/official-comparison-2026-11-02 official
+just path-comparison runs/teammate-analytics-69 team
+```
+
+Historical summaries and original publications remain unchanged. The curated
+trajectory files form a separate, checksummed publication. The [Python theory
+review](python-flight-theory.md) maps the script to the actual controller and
+explains PID, filtering, forecasting and local/STP differences.
+
+The hosted copy of the historical legacy-score SVG has a wider viewport so its
+long negative tick label is visible. Its values and the archived source SVG stay
+unchanged. New SVG generation reserves more label space at the axis.
 
 ## Limits
 

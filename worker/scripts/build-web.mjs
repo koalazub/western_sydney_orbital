@@ -15,6 +15,7 @@ await rm(resolve(output, "python-worker.js"), { force: true });
 await Promise.all([
   copyFile(resolve(source, "index.html"), resolve(output, "index.html")),
   copyFile(resolve(source, "notebook.html"), resolve(output, "notebook.html")),
+  copyFile(resolve(source, "compare.html"), resolve(output, "compare.html")),
   copyFile(resolve(source, "styles.css"), resolve(output, "styles.css")),
   copyFile(resolve(source, ".assetsignore"), resolve(output, ".assetsignore")),
 ]);
@@ -89,7 +90,16 @@ if (publishedAnalytics) {
         || !parser.validatePublication(data)) throw new Error("Unsupported curated analytics dataset");
     }
     const targetName = name === "dataset.json" ? "team-comparison.json" : name === "aggregate.csv" ? "summary.csv" : name;
-    await writeFile(resolve(analyticsOutput, targetName), bytes);
+    let displayBytes = bytes;
+    if (name === "score-components.svg") {
+      // Keep the historical publication intact. Its longest negative tick is
+      // outside the old viewport; pad only this served presentation copy.
+      const svg = bytes.toString("utf8");
+      if (!/viewBox="0 0 1100 \d+"/.test(svg)) throw new Error("Unknown archived score chart geometry");
+      displayBytes = Buffer.from(svg.replace(/viewBox="0 0 1100 (\d+)"/,
+        'style="background:#fff" viewBox="-32 0 1164 $1"'));
+    }
+    await writeFile(resolve(analyticsOutput, targetName), displayBytes);
   }
 }
 // The official comparison dashboard is generated from the committed metrics.
@@ -106,6 +116,43 @@ if (officialBytes.subarray(0, 4).toString("utf8") !== "<svg") {
 }
 await mkdir(dirname(officialTarget), { recursive: true });
 await writeFile(officialTarget, officialBytes);
+
+// Curated trajectories are a separate publication. Never ship a raw sweep or
+// infer a new cohort from the older summary. Check byte identity and the same
+// strict parser the browser uses before publishing either fixed public URL.
+const pathsSource = resolve(root, "..", "docs", "analytics", "path-comparison");
+const pathsManifest = JSON.parse(await readFile(resolve(pathsSource, "manifest.json"), "utf8"));
+const pathParserBundle = await build({
+  entryPoints: [resolve(source, "path-comparison-data.ts")], bundle: true, write: false,
+  format: "esm", platform: "neutral", target: "es2022", minify: true,
+});
+const pathParser = await import(`data:text/javascript;base64,${Buffer.from(pathParserBundle.outputFiles[0].contents).toString("base64")}`);
+for (const id of ["official", "team"]) {
+  const name = `${id}.json`, path = resolve(pathsSource, name);
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 4 * 1024 * 1024) throw new Error("Invalid path publication asset");
+  const bytes = await readFile(path);
+  const entry = pathsManifest.artifacts.find(item => item.path === name);
+  if (!entry || entry.bytes !== bytes.length || entry.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new Error(`Path publication hash mismatch: ${id}`);
+  const data = pathParser.validatePathComparison(JSON.parse(bytes.toString("utf8")));
+  if (!data || data.id !== id) throw new Error(`Unsupported path comparison: ${id}`);
+  await writeFile(resolve(output, "analytics", `paths-${id}.json`), bytes);
+}
+const correctedTrialsPath = resolve(pathsSource, "official-trials.csv");
+const correctedTrialsInfo = await lstat(correctedTrialsPath);
+if (!correctedTrialsInfo.isFile() || correctedTrialsInfo.isSymbolicLink() || correctedTrialsInfo.size > 128 * 1024) throw new Error("Invalid corrected trial table");
+const correctedTrials = await readFile(correctedTrialsPath);
+const correctedEntry = pathsManifest.artifacts.find(item => item.path === "official-trials.csv");
+if (!correctedEntry || correctedEntry.bytes !== correctedTrials.length
+  || correctedEntry.sha256 !== createHash("sha256").update(correctedTrials).digest("hex")) throw new Error("Corrected trial table hash mismatch");
+await writeFile(resolve(output, "analytics", "paths-official-trials.csv"), correctedTrials);
+await copyFile(resolve(root, "..", "docs", "python-flight-theory.md"), resolve(output, "analytics", "python-flight-theory.txt"));
+await copyFile(resolve(pathsSource, "manifest.json"), resolve(output, "analytics", "paths-manifest.json"));
+
+await build({
+  entryPoints: [resolve(source, "comparison.ts")], outfile: resolve(output, "comparison.js"),
+  bundle: true, format: "esm", target: "es2022", minify: true,
+});
 
 await build({
   entryPoints: [resolve(source, "app.ts")],

@@ -154,13 +154,15 @@ Bui used slightly less estimated fuel than Tom; Tom arrived sooner. Bui also tur
 
 A separate matched comparison uses the official **1.31 km hop** and the fixed **500-body official cloud**. It includes the published `BasicController.py` beeline, Ali's official-profile policy, WSO's existing checkpoint profiles and the older basic PD/radar reference. The published baseline has no debris avoidance, so an arrival is not a safety claim. Local fuel and damage are not STP counters.
 
-![Official-profile outcomes, arrival time, entry speed, local fuel and damage](docs/analytics/official-comparison/performance.svg)
+![Official-profile outcomes, arrival time, final speed, local fuel and damage](docs/analytics/official-comparison/performance.svg)
 
 See the [official-profile comparison](docs/official-comparison.md) for conditions, results and limits.
 
-In **Controller profiles**, use **Compare** for charts, **Run flight** for controller selection and **Recorded data** for counters and downloads. Published trials and current-connection flights stay separate. Local dashboard changes do not mean the [hosted player](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) has been updated.
+Open the [recorded path comparison](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html) without loading the game. It overlays the controllers' actual paths and time graphs for one world, seed and repetition. A shared time control links positions, speed, requests, fuel and damage, with explainers and exact-value downloads.
 
-In the app, hover over a line or bar to inspect its recorded values. You can also focus a chart and use the arrow keys. Each chart explains what to aim for and points out trade-offs, such as using less thrust time without necessarily using less fuel.
+In **Controller profiles**, **Compare** opens the same path view first. The older L2 aggregate charts remain in **Historical L2 aggregate metrics and individual runs**. **Run flight** selects controllers; **Recorded data** holds counters and downloads. Published trials and current-connection flights stay separate.
+
+Focus a path graph and use the arrow keys, or select a time on a graph, to inspect saved measurements together. Expanded cross-track maps distort angles; switch to equal scales before judging path geometry. The [Python theory review](docs/python-flight-theory.md) explains what is actually in the flight loop and what remains reference math.
 
 To run a matched sweep or inspect saved trials, follow [repeat and publish a comparison](docs/flight-lab.md#repeat-and-publish-a-comparison).
 

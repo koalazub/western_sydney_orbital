@@ -23,6 +23,8 @@ export function mountDashboard(panel: HTMLDialogElement) {
       <header class="lab-header"><div><p class="lab-eyebrow">Western Sydney Orbital</p><h2 id="lab-title">Controller comparison</h2></div><div class="lab-header__actions"><span class="lab-badge">Local estimates</span><div id="lab-close-slot"></div></div></header>
       <div class="lab-scroll">
         <section id="lab-view-compare" class="lab-view" aria-label="Controller comparison">
+          <section id="dashboard-path-comparison"><p>Open this panel to load paired path measurements.</p></section>
+          <details class="lab-disclosure" id="historical-overview"><summary>Historical L2 aggregate metrics and individual runs</summary>
           <div class="lab-section-heading"><div><h3>Performance overview</h3><p>Recorded flight performance, side by side.</p></div><span id="lab-cohort-label" class="lab-badge">Matched trials</span></div>
           <fieldset class="lab-measurement-view"><legend>Measurement view</legend><button type="button" data-measurement-view="aggregate" aria-pressed="true">Aggregate</button><button type="button" data-measurement-view="run" aria-pressed="false">Single run</button></fieldset>
           <div class="lab-toolbar"><div id="lab-comparison-filters" class="lab-filter-group"></div><div class="lab-toolbar__note">L2 practice station <span>·</span> 500 debris bodies</div></div>
@@ -33,6 +35,7 @@ export function mountDashboard(panel: HTMLDialogElement) {
           <div id="dashboard-overview"><div class="lab-loading"><span class="lab-loading__bar"></span><h4>Loading measured flights</h4><p>The scoreboard and charts will appear here.</p></div></div>
           <details class="lab-disclosure" id="lab-custom-chart"><summary>Explore another metric</summary><div id="lab-custom-chart-content"></div></details>
           <p class="lab-footnote">Fuel and damage are local estimates. Burn and turn metrics explain controller activity; they are not extra score terms. <button type="button" class="lab-text-button" data-lab-view="data">Model notes</button></p>
+          </details>
         </section>
         <section id="lab-view-run" class="lab-view" aria-label="Run a controller" hidden>
           <div class="lab-section-heading"><div><h3>Put a controller in charge</h3><p>Choose the teammate, profile and flight budget.</p></div><span class="lab-badge">Seed 100 · L2 practice</span></div>

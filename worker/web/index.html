@@ -42,6 +42,7 @@
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
     </div>
     <footer class="simulation-tools" aria-label="Python flight tools">
+      <a class="comparison-link" href="/compare.html" target="_blank" rel="noopener noreferrer">Compare recorded flight paths, opens in a new tab</a>
       <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-keyshortcuts="Shift+C" hidden>Controller profiles</button>
       <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
         <p id="local-python-status" role="status"></p>
@@ -211,13 +212,8 @@
         <section aria-labelledby="official-comparison-heading">
           <h3 id="official-comparison-heading">Official-profile comparison</h3>
           <p>Five local policies on the 1.31 km competition reference and the 500-body official cloud: the published BasicController beeline, Ali's official-profile controller, WSO's checkpoint profiles and the basic PD/radar reference. Three seeds with two consecutive attempts each.</p>
-          <figure class="analytics-figure">
-            <figcaption>Outcomes, median arrival time, entry speed, local fuel estimate and observed damage counts. The chart is generated from the published summary CSV; it is not an STP score, a docking claim or a hosted flight result.</figcaption>
-            <div class="analytics-chart-scroll" tabindex="0" role="region" aria-label="Official-profile comparison dashboard, scroll horizontally">
-              <img class="analytics-static-image" src="/analytics/official-comparison.svg" alt="Bar dashboard: Ali's official profile arrived 6 of 6 at 153.2 seconds and 1.20 metres per second; the published baseline arrived 4 of 6 with two damage failures; WSO checkpoint baseline arrived 0 of 6; WSO body-axis arrived 4 of 6; basic PD arrived 6 of 6." width="1200" height="1120" loading="lazy">
-            </div>
-          </figure>
-          <p>Local fuel and damage are not STP counters. The full evidence and limitations are in the repository's official comparison page.</p>
+          <p><a href="/compare.html" target="_blank" rel="noopener noreferrer">Compare paired flight paths and time graphs, opens in a new tab</a>. Use the same seed and repetition to inspect recorded positions, requests, speed, fuel and damage together. The <a href="/analytics/official-comparison.svg" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">cohort summary chart, opens in a new tab</a> remains available for aggregate results.</p>
+          <p>Local fuel and damage are not STP counters. Arrival time uses successful runs only; the summary's final-speed and fuel medians include physical failures. They do not describe one median flight.</p>
         </section>
         <section aria-labelledby="room-analytics-heading">
           <h3 id="room-analytics-heading">Current connection job analytics</h3>

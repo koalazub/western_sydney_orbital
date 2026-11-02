@@ -46,6 +46,22 @@ def test_summary_and_svg_use_the_same_published_values() -> None:
     assert "Local practice evidence" in text
 
 
+def test_committed_svg_and_manifest_match_the_current_renderer() -> None:
+    publication = SUMMARY.parent
+    rendered = render_svg(
+        load_summary(SUMMARY), source_sha256=hashlib.sha256(SUMMARY.read_bytes()).hexdigest()
+    )
+    assert (publication / "performance.svg").read_text() == rendered
+    manifest = json.loads(MANIFEST.read_text())
+    for entry in manifest["artifacts"]:
+        data = (publication / entry["path"]).read_bytes()
+        assert entry["bytes"] == len(data)
+        assert entry["sha256"] == hashlib.sha256(data).hexdigest()
+    assert "successful runs only" in rendered
+    assert "including failures" in rendered
+    assert 'class="outcome-count"' in rendered
+
+
 def test_missing_algorithm_is_rejected(tmp_path) -> None:
     source = SUMMARY.read_text().splitlines()
     header, body = source[0], source[1:]

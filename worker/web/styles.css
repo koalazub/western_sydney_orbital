@@ -34,12 +34,15 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #python-permission h2 { margin-top: 0; font-size: 1.25rem; }
 #python-permission form { display: flex; flex-wrap: wrap; gap: 12px; }
 .controller-toggle { flex: none; max-width: 100%; min-height: 42px; padding: 10px 16px; font: 600 .875rem/1.4 system-ui, sans-serif; color: #edf1f7; background: #171c24; border: 1px solid #78869b; border-radius: 8px; cursor: pointer; }
-#controller-panel {
+#controller-panel, .comparison-page {
   --lab-bg: #101319; --lab-surface: #171c24; --lab-raised: #1c2330; --lab-border: #303846;
   --lab-input-border: #78869b; --lab-text: #edf1f7; --lab-muted: #9ba7ba; --lab-accent: #92afff;
   --team-bui: #4dd6c1; --team-tom: #8aa7ff; --team-harry: #ffb477; --team-wso: #b8adff;
+  --team-ali: #f2d477; --team-reference: #c9d3e2;
   --analytics-series-0: var(--team-bui); --analytics-series-1: var(--team-tom); --analytics-series-2: var(--team-harry);
   --analytics-series-3: #d9b5ff; --analytics-series-4: #ffb5aa; --analytics-series-5: #e8edf3; --analytics-series-6: #a8ccff;
+}
+#controller-panel {
   width: min(1440px, calc(100% - 40px)); height: min(1020px, calc(100dvh - 40px)); max-width: none; max-height: none;
   margin: auto; padding: 0; border: 1px solid var(--lab-border); border-radius: 16px; color: var(--lab-text); background: var(--lab-bg);
   font: 400 .875rem/1.5 system-ui, sans-serif; overflow: hidden; overscroll-behavior: contain;
@@ -234,6 +237,64 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .analytics-chart-scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--lab-border); border-radius: 8px; background: var(--lab-surface); }
 .analytics-plot { display: block; width: 100%; min-width: 40rem; height: auto; font: inherit; font-variant-numeric: tabular-nums; }
 .analytics-static-image { display: block; width: 100%; max-width: 1200px; height: auto; background: #fff; }
+.comparison-document { height: auto; min-height: 100%; overflow: auto; color: #edf1f7; background: #101319; }
+.comparison-page { width: min(90rem, 100%); min-width: 0; margin-inline: auto; padding: clamp(1rem, 4vw, 3rem); color: var(--lab-text); }
+.comparison-page-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; margin-block-end: 1.5rem; }
+.comparison-page-header p { margin: 0; color: var(--lab-muted); }
+.comparison-page-header h1 { margin-block: .25rem; font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.25; text-wrap: balance; }
+.comparison-page a { color: var(--lab-accent); text-underline-offset: .2em; }
+.comparison-link { align-self: center; padding: .5rem; color: #a9c8ff; font-size: .875rem; text-underline-offset: .2em; }
+.path-comparison { min-width: 0; margin-block: 1rem 2.5rem; color: var(--lab-text); font-size: .875rem; line-height: 1.6; }
+.path-comparison :is(h3, h4) { color: var(--lab-text); line-height: 1.3; text-wrap: balance; }
+.path-comparison h3 { font-size: 1.25rem !important; margin-block: 0 .75rem; }
+.path-comparison h4 { font-size: 1rem; margin-block: 0 .75rem; }
+.path-comparison p { max-width: 75ch; margin-block: .5rem 1rem; overflow-wrap: break-word; }
+.path-intro, .path-status, .path-scope, .path-note { color: var(--lab-muted); }
+.path-note { font-size: .8125rem; line-height: 1.6; }
+.path-controls { display: flex; flex-wrap: wrap; gap: 1rem; margin-block: 1.5rem; }
+.path-controls label { display: grid; gap: .375rem; flex: 1 1 10rem; min-width: 0; }
+.path-comparison :is(select, button) { min-height: 2.5rem; max-width: 100%; padding: .5rem .75rem; font: inherit !important; border: 1px solid var(--lab-input-border); border-radius: 7px; color: var(--lab-text); background: var(--lab-surface); }
+.path-comparison select { width: 100%; }
+.path-comparison button { cursor: pointer; white-space: normal; text-align: start; }
+.path-comparison button:disabled { opacity: .5; cursor: default; }
+.path-profiles { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; min-width: 0; margin: 0 0 1.5rem; padding: 0; border: 0; }
+.path-profiles legend { padding: 0; margin-block-end: .75rem; color: var(--lab-muted); }
+.path-profiles label { display: flex; align-items: center; gap: .5rem; min-height: 2rem; max-width: 100%; }
+.path-profiles input { width: 1.125rem; height: 1.125rem; flex: none; accent-color: var(--lab-accent); }
+.path-swatch { width: 2rem; height: .75rem; flex: none; }
+.path-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: .75rem; margin-block-end: 1.5rem; }
+.path-card { min-width: 0; padding: 1rem; border: 1px solid var(--lab-border); border-block-start: 3px solid var(--trace-color); border-radius: 7px; background: var(--lab-surface); }
+.path-card h4 { color: var(--trace-color); font-size: .875rem; }
+.path-card p { margin-block: .5rem 0; }
+.path-card-values, .path-cursor, .path-table { font-variant-numeric: tabular-nums; }
+.path-cursor { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-block: 1.5rem .75rem; }
+.path-cursor label { font-weight: 600; }
+.path-cursor output { margin-inline-start: auto; }
+.path-cursor input { flex-basis: 100%; min-width: 0; width: 100%; height: 2rem; margin: 0; accent-color: var(--lab-accent); }
+.path-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr)); gap: 1.5rem; margin-block: 1.5rem; }
+.path-chart { min-width: 0; margin: 0; padding: 1rem; background: var(--lab-surface); border: 1px solid var(--lab-border); border-radius: 8px; }
+.path-chart h4 { font-size: .9375rem; }
+.path-chart figcaption { margin-block-start: .75rem; max-width: 75ch; color: var(--lab-muted); font-size: .8125rem; line-height: 1.6; }
+.path-scroll { max-width: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain; }
+.path-plot { display: block; width: 100%; min-width: 35rem; height: auto; font-family: inherit; font-variant-numeric: tabular-nums; cursor: crosshair; }
+.path-table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: .8125rem; text-align: start; }
+.path-table caption { max-width: min(70ch, 80vw); text-align: start; color: var(--lab-muted); padding-block: .5rem; white-space: normal; }
+.path-table :is(th, td) { padding: .75rem; border-block-end: 1px solid var(--lab-border); white-space: nowrap; }
+.path-events { margin-block: 2rem; }
+.path-events ul { display: flex; flex-wrap: wrap; gap: .75rem; list-style: none; padding: 0; }
+.path-events li { max-width: 100%; }
+.path-events button { font-size: .8125rem !important; }
+.path-observations { padding: 1rem; margin-block: 1.5rem; background: var(--lab-surface); border-inline-start: 2px solid var(--lab-accent); border-radius: 4px; }
+.path-observations ul, .path-provenance ul { padding-inline-start: 1.25rem; }
+.path-observations li, .path-provenance li { max-width: 75ch; margin-block: .5rem; overflow-wrap: break-word; }
+.path-provenance { overflow-wrap: anywhere; }
+.path-explainers { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 27rem), 1fr)); gap: 1.5rem; }
+.path-explainers p { margin-block-end: 0; }
+.path-comparison summary { min-height: 2.5rem; cursor: pointer; }
+.path-comparison :is(button, select, input, summary, a, svg, [tabindex="0"]):focus-visible, .comparison-page-header a:focus-visible, .comparison-link:focus-visible { outline: 2px solid #a9c8ff; outline-offset: 3px; }
+@media (max-width: 560px) { .path-comparison select { font-size: 1rem !important; } .path-chart { padding: .75rem; } .path-cursor button { flex: 1 1 8rem; } }
+@media (hover: hover) { .path-comparison button:not(:disabled):hover { background: var(--lab-raised); } }
+@media (forced-colors: active) { .path-comparison, .comparison-page { --lab-bg: Canvas; --lab-surface: Canvas; --lab-raised: Canvas; --lab-border: CanvasText; --lab-input-border: CanvasText; --lab-text: CanvasText; --lab-muted: CanvasText; --lab-accent: LinkText; --team-ali: CanvasText; --team-reference: CanvasText; --team-wso: CanvasText; --team-bui: CanvasText; --team-harry: CanvasText; --team-tom: CanvasText; } }
 .analytics-grid { stroke: var(--lab-border); stroke-width: 1; }
 .analytics-axis { fill: none; stroke: var(--lab-muted); stroke-width: 1.5; }
 .analytics-tick { fill: var(--lab-muted); font-size: 14px; }
