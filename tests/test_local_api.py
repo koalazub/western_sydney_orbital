@@ -869,6 +869,23 @@ def test_headless_new_world_reads_actual_debris_modes_without_starting_flight(
     assert client.snapshot()["observation"]["time_s"] == 0
 
 
+def test_headless_competition_reference_accepts_the_official_cloud(
+    headless_server, parser_setup_settings
+):
+    client = headless_server
+    settings = deepcopy(parser_setup_settings)
+    settings["debris"]["count"] = 500
+    settings["debris"]["distribution"] = {"kind": "official_cloud"}
+    after = client.configure_flight(settings, "competition_reference", seed=100)
+    observation = after["observation"]
+    assert observation["flight_preset"] == "competition_reference"
+    assert observation["mission"]["target_region"] == "local_up"
+    assert observation["experiment_settings"]["debris"]["distribution"] == {
+        "kind": "official_cloud"
+    }
+    assert observation["geometry"]["debris_count"] == 500
+
+
 def test_headless_real_timer_advances_playback_and_pause_is_applied_natively(headless_server):
     client = headless_server
     before = client.snapshot()

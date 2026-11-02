@@ -20,6 +20,8 @@ SOURCE_KINDS = frozenset(
 MAX_REPORT_AGE_S = 1.0
 MAX_RADAR_AGE_S = 2.5
 RADAR_CLOCK = "simulation_elapsed_seconds"
+ROLLING_SELECTION = "official_first_200_rolling"
+_TIME_TOLERANCE_S = 1.0e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,7 @@ class _PublicSample(ControlSample):
 
     radar_clock: str
     radar_sample_time_s: float
+    radar_rolling: bool
     public_context: tuple[int, ...]
     navigation_sequence: int
     radar_sequence: int
@@ -51,6 +54,7 @@ def sample_from_observation(observation: Mapping[str, Any], *, source_kind: str)
     These native sources declare an elapsed-seconds radar clock with offset zero.
     Empty ready radar is valid, but missing, frozen or unavailable radar is not.
     Mixed row epochs stay unchanged and must belong to the reported publication.
+    The official rolling scan ages each row from its own acquisition time.
     This validates numeric inputs, not SDK equivalence or command authority.
     """
     if not isinstance(source_kind, str) or source_kind not in SOURCE_KINDS:
@@ -96,16 +100,32 @@ def sample_from_observation(observation: Mapping[str, Any], *, source_kind: str)
             raise ValueError("Navigation source clocks disagree")
         if not 0 <= now - elapsed <= MAX_REPORT_AGE_S:
             raise ValueError("Future or stale actual navigation")
-        if not 0 <= now - radar_time <= MAX_RADAR_AGE_S:
+        radar_age = now - radar_time
+        if radar_age < -_TIME_TOLERANCE_S or radar_age > MAX_RADAR_AGE_S + _TIME_TOLERANCE_S:
             raise ValueError("Future or stale actual radar publication")
         rows = radar_rows(observation["radar"])
         times = rows[:, 2, 0]
-        if len(rows) and (
-            np.max(times) != radar_time
-            or np.any(times > now)
-            or np.any(now - times > MAX_RADAR_AGE_S)
-        ):
-            raise ValueError("Radar row epochs disagree with actual publication clocks")
+        selection = observation.get("radar_selection")
+        rolling = isinstance(selection, Mapping) and selection.get("selection") == ROLLING_SELECTION
+        if len(rows):
+            if rolling:
+                # The official scan updates one row per 120 Hz iteration and
+                # publishes every 50 rows. Each row keeps its own acquisition
+                # time at or before the publication time; the oldest row can be
+                # one scan older than the newest, so age each row separately.
+                invalid = (
+                    np.any(times > now + _TIME_TOLERANCE_S)
+                    or np.any(now - times > MAX_RADAR_AGE_S + _TIME_TOLERANCE_S)
+                    or np.any(times > radar_time + _TIME_TOLERANCE_S)
+                )
+            else:
+                invalid = (
+                    np.max(times) != radar_time
+                    or np.any(times > now)
+                    or np.any(now - times > MAX_RADAR_AGE_S)
+                )
+            if invalid:
+                raise ValueError("Radar row epochs disagree with actual publication clocks")
         ship = _mapping(observation["shuttle"], "shuttle navigation")
         target = _mapping(observation["target"], "target navigation")
         mission = _mapping(observation["mission"], "mission navigation")
@@ -139,6 +159,7 @@ def sample_from_observation(observation: Mapping[str, Any], *, source_kind: str)
                 source_kind=source_kind,
                 radar_clock=RADAR_CLOCK,
                 radar_sample_time_s=radar_time,
+                radar_rolling=rolling,
                 public_context=(*context, revision),
                 navigation_sequence=units["navigation"]["sequence"],
                 radar_sequence=units["radar_primary"]["sequence"],

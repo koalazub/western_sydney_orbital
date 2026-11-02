@@ -68,6 +68,7 @@ CONFIG_SCHEMA_VERSION = 1
 CONFIG_FILE_ENV = "WSORB_STP_POLICY_FILE"
 CONFIG_JSON_ENV = "WSORB_STP_POLICY_JSON"
 MAX_CONFIG_BYTES = 16 * 1024
+_TIME_TOLERANCE_S = 1.0e-12  # Absorbs only fixed-step summation noise, never a sensor offset.
 _AXIS_MIN_PROGRESS_FRACTION = 0.9  # Chosen guard, not a calibrated meeting parameter.
 _NORM_HEADROOM_REL = 8.0 * np.finfo(np.float64).eps
 # Live diagnostic budgets, not a change to raw-radar control coverage. Association
@@ -350,8 +351,9 @@ def decide_command(
     A fresh, separately read adapter elapsed clock is required. Any invalid
     state, missing/empty/malformed radar, stale sample/report, future timestamp
     or unrepresentable calculation returns two actual zero vectors. Radar must
-    not be future-dated even relative to the earlier state report clock. No
-    future tolerance, timestamp clipping, inferred offset or backdating is used.
+    not be future-dated even relative to the earlier state report clock. Only a
+    1e-12 s float-accumulation tolerance is used; no timestamp clipping, inferred
+    offset or backdating is used.
     These checks are data checks, not independent sensor-health evidence or
     proof that the public radar covers every hazard.
     """
@@ -376,9 +378,9 @@ def decide_command(
         if (
             not np.isfinite(times).all()
             or not np.isfinite(ages).all()
-            or np.any(times < 0.0)
-            or np.any(times > elapsed)
-            or np.any(ages > config.max_radar_age_s)
+            or np.any(times < -_TIME_TOLERANCE_S)
+            or np.any(times > elapsed + _TIME_TOLERANCE_S)
+            or np.any(ages > config.max_radar_age_s + _TIME_TOLERANCE_S)
         ):
             raise ValueError("Radar timestamps are invalid, future or stale after declared offset")
         with np.errstate(over="ignore", invalid="ignore"):
@@ -444,9 +446,9 @@ def _fresh_radar(
         observed_max_radar_age_s=float(np.max(ages)),
         measurement_time_spread_s=float(np.max(times) - np.min(times)),
     )
-    if np.any(times < 0.0) or np.any(times > elapsed):
+    if np.any(times < -_TIME_TOLERANCE_S) or np.any(times > elapsed + _TIME_TOLERANCE_S):
         raise ValueError("Radar timestamps are negative or future after the declared offset")
-    if np.any(ages > config.max_radar_age_s):
+    if np.any(ages > config.max_radar_age_s + _TIME_TOLERANCE_S):
         raise ValueError("Stale radar exceeds configured max_radar_age_s")
     return rows, ages
 

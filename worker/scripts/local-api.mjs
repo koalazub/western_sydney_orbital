@@ -20,6 +20,7 @@ const INVALID_CONTROL_ID = /[^A-Za-z0-9_-]/;
 const CAMERA_MODES = new Set([
   "orbit", "mission", "first_person", "third_person", "follow", "free", "overview", "top", "ship_top", "ship_bottom",
 ]);
+const FLIGHT_PRESETS = new Set(["mars_facing_l1", "far_side_l2", "competition_reference"]);
 const WORLD_COMMANDS = new Set(["configure_experiment", "configure_flight", "reset"]);
 const ERROR_CODES = new Set(["stale_context", "command_expired", "sensor_unavailable", "sensor_no_sample"]);
 const worldSetup = call => call.method === "command" && WORLD_COMMANDS.has(call.command?.op);
@@ -136,7 +137,7 @@ function validateCall(value) {
     case "configure_experiment":
     case "configure_flight":
       shape(command, command.op === "configure_flight" ? ["op", "settings", "preset"] : ["op", "settings"], ["seed"]);
-      if (command.op === "configure_flight" && !["mars_facing_l1", "far_side_l2"].includes(command.preset)) invalid("Choose a Mars-facing L1 or far-side L2 launch setup");
+      if (command.op === "configure_flight" && !FLIGHT_PRESETS.has(command.preset)) invalid("Choose a Mars-facing L1, far-side L2 or competition reference launch setup");
       if (!record(command.settings)) invalid("Experiment settings must be an object");
       finiteJson(command.settings);
       if (command.seed != null && (!Number.isInteger(command.seed) || !finiteBetween(command.seed, 0, 4294967295))) {

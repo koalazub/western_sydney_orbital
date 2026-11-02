@@ -180,7 +180,7 @@ export function validatePublication(value: unknown): Publication | null {
     || (value.schema_version === 2 && !Object.hasOwn(comparison, "score_compatibility"))
     || (Object.hasOwn(comparison, "score_compatibility") && (!shape(comparison.score_compatibility, Object.keys(SCORE_COMPATIBILITY))
       || Object.entries(SCORE_COMPATIBILITY).some(([key, expected]) => (comparison.score_compatibility as Record<string, unknown>)[key] !== expected)))
-    || !["far_side_l2", "mars_facing_l1"].includes(comparison.preset as string)
+    || !["far_side_l2", "mars_facing_l1", "competition_reference"].includes(comparison.preset as string)
     || !Array.isArray(comparison.seeds) || !comparison.seeds.length || comparison.seeds.length > 64
     || comparison.seeds.some(seed => !integer(seed, 0xffffffff)) || new Set(comparison.seeds).size !== comparison.seeds.length || comparison.repetitions !== 2
     || !integer(comparison.debris_count, 100000) || !nonnegative(comparison.duration_limit_s) || comparison.duration_limit_s === 0

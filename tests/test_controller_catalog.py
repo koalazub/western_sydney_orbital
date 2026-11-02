@@ -258,6 +258,28 @@ def test_producer_rejects_future_and_stale_actual_navigation_and_radar(data):
         sample(data)
 
 
+def test_rolling_radar_accepts_per_row_epochs_at_or_before_publication():
+    data = observation(10.0, rows=[row(9.5), row(9.8)])
+    data["sensor_health"]["units"][1]["sample_time_s"] = 10.0
+    data["radar_selection"] = {
+        "schema_version": 1,
+        "selection": "official_first_200_rolling",
+        "sample_limit": 200,
+    }
+    produced = sample(data)
+    assert produced.radar_rolling is True
+    # A fixed-step sum can land one ulp above the publication clock.
+    data["radar"][-1][2][0] = float(np.nextafter(10.0, np.inf))
+    sample(data)
+
+
+def test_non_rolling_radar_still_requires_newest_row_to_match_publication():
+    data = observation(10.0, rows=[row(9.5), row(9.8)])
+    data["sensor_health"]["units"][1]["sample_time_s"] = 10.0
+    with pytest.raises(ValueError, match="Radar row epochs"):
+        sample(data)
+
+
 @pytest.mark.parametrize("controller_id", GENERIC_IDS)
 def test_generic_lease_uses_original_sample_and_radar_epochs_not_command_now(controller_id):
     controller = create_controller(controller_id)

@@ -26,6 +26,7 @@ from .config import PlannerConfig
 from .geometry import Capsule, CollisionIndex, segment_clear
 
 MAX_RADAR_ROWS = 4096
+_TIME_TOLERANCE_S = 1.0e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +91,11 @@ def radar_rows(value: Any) -> npt.NDArray[np.float64]:
 def checked_radar(observation: Mapping[str, Any], max_age_s: float) -> npt.NDArray[np.float64]:
     now = scalar(field(observation, "time_s"), "time_s")
     rows = radar_rows(field(observation, "radar"))
-    if np.any(rows[:, 2, 0] > now):
+    if np.any(rows[:, 2, 0] > now + _TIME_TOLERANCE_S):
         raise ValueError(
             "Future-dated radar; time_s and measurement times must share one clock origin"
         )
-    if np.any(now - rows[:, 2, 0] > max_age_s):
+    if np.any(now - rows[:, 2, 0] > max_age_s + _TIME_TOLERANCE_S):
         raise ValueError("Stale radar exceeds max_measurement_age_s; request fresh measurements")
     return rows
 

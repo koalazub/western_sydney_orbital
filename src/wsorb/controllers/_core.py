@@ -19,6 +19,8 @@ from ..control_contract import (
 )
 from .observation import MAX_RADAR_AGE_S, MAX_REPORT_AGE_S, RADAR_CLOCK, SOURCE_KINDS
 
+_TIME_TOLERANCE_S = 1.0e-12
+
 
 class _Rejected(ValueError):
     pass
@@ -163,13 +165,31 @@ class ExperimentalController:
         if not 0 <= now - elapsed <= MAX_REPORT_AGE_S:
             raise _Rejected("Future or stale navigation sample")
         rows = radar_rows(debris)
-        if np.any(rows[:, 2, 0] > now) or np.any(now - rows[:, 2, 0] > MAX_RADAR_AGE_S):
-            raise _Rejected("Future or stale radar row epoch")
         radar_time = getattr(sample, "radar_sample_time_s", None)
-        if radar_time is not None and not 0 <= now - radar_time <= MAX_RADAR_AGE_S:
-            raise _Rejected("Future or stale radar publication")
-        if len(rows) and radar_time is not None and np.max(rows[:, 2, 0]) != radar_time:
-            raise _Rejected("Radar rows do not match the actual publication epoch")
+        rolling = bool(getattr(sample, "radar_rolling", False))
+        if len(rows):
+            if rolling:
+                # The official rolling scan stamps each row at its 120 Hz
+                # acquisition time; the publication time is at or after the
+                # newest row. Age every row from its own epoch.
+                bad = (
+                    np.any(rows[:, 2, 0] > now + _TIME_TOLERANCE_S)
+                    or np.any(now - rows[:, 2, 0] > MAX_RADAR_AGE_S + _TIME_TOLERANCE_S)
+                    or (
+                        radar_time is not None
+                        and np.any(rows[:, 2, 0] > radar_time + _TIME_TOLERANCE_S)
+                    )
+                )
+            else:
+                bad = np.any(rows[:, 2, 0] > now) or np.any(now - rows[:, 2, 0] > MAX_RADAR_AGE_S)
+                if radar_time is not None:
+                    bad = bad or np.max(rows[:, 2, 0]) != radar_time
+            if bad:
+                raise _Rejected("Future or stale radar row epoch")
+        if radar_time is not None:
+            age = now - radar_time
+            if age < -_TIME_TOLERANCE_S or age > MAX_RADAR_AGE_S + _TIME_TOLERANCE_S:
+                raise _Rejected("Future or stale radar publication")
         newest_row = float(np.max(rows[:, 2, 0])) if len(rows) else None
         if (
             newest_row is not None
