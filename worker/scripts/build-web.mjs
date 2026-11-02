@@ -92,6 +92,21 @@ if (publishedAnalytics) {
     await writeFile(resolve(analyticsOutput, targetName), bytes);
   }
 }
+// The official comparison dashboard is generated from the committed metrics.
+// Publish the validated SVG beside the existing curated analytics assets.
+const officialSource = resolve(root, "..", "docs", "analytics", "official-comparison", "performance.svg");
+const officialTarget = resolve(output, "analytics", "official-comparison.svg");
+const officialInfo = await lstat(officialSource);
+if (!officialInfo.isFile() || officialInfo.isSymbolicLink() || officialInfo.size > 2 * 1024 * 1024) {
+  throw new Error("Invalid official comparison dashboard");
+}
+const officialBytes = await readFile(officialSource);
+if (officialBytes.subarray(0, 4).toString("utf8") !== "<svg") {
+  throw new Error("Official comparison dashboard is not SVG");
+}
+await mkdir(dirname(officialTarget), { recursive: true });
+await writeFile(officialTarget, officialBytes);
+
 await build({
   entryPoints: [resolve(source, "app.ts")],
   outfile: resolve(output, "app.js"),

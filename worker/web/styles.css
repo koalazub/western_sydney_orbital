@@ -233,6 +233,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .analytics-figure figcaption { color: var(--lab-muted); font-size: .75rem; margin-block-end: 12px; }
 .analytics-chart-scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--lab-border); border-radius: 8px; background: var(--lab-surface); }
 .analytics-plot { display: block; width: 100%; min-width: 40rem; height: auto; font: inherit; font-variant-numeric: tabular-nums; }
+.analytics-static-image { display: block; width: 100%; max-width: 1200px; height: auto; background: #fff; }
 .analytics-grid { stroke: var(--lab-border); stroke-width: 1; }
 .analytics-axis { fill: none; stroke: var(--lab-muted); stroke-width: 1.5; }
 .analytics-tick { fill: var(--lab-muted); font-size: 14px; }

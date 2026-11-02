@@ -280,6 +280,16 @@ hosted-artifact-check:
       assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
       web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
     }
+    for(const name of ['analytics/official-comparison.svg']) {
+      const asset=await request(name);
+      assert.equal(asset.status,200,`Hosted ${name} is unavailable`);
+      assert.match(asset.headers.get('content-type'),/^image\/svg\+xml(?:;|$)/);
+      const actual=Buffer.from(await asset.arrayBuffer());
+      const local=await readFile(`worker/public/${name}`);
+      const digest=value=>createHash('sha256').update(value).digest('hex');
+      assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
+      web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
+    }
     console.log(JSON.stringify({url:base,bytes:bytes.length,sha256,web_assets,result:'PASS'},null,2));
     JS
 
