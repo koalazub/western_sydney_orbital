@@ -38,6 +38,11 @@
       "path": "policies.json",
       "bytes": 97357,
       "sha256": "809468f08432102b8b09b69c50ae890c5954d8d2507a7e2bc11f9b910c7fc67b"
+    },
+    {
+      "path": "performance.svg",
+      "bytes": 10749,
+      "sha256": "58abb2dc4d3413300f8ad4748837b64d7c54bbd2b637e9e3bc14f43590c5b940"
     }
   ]
 }

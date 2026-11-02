@@ -154,6 +154,8 @@ Bui used slightly less estimated fuel than Tom; Tom arrived sooner. Bui also tur
 
 A separate matched comparison uses the official **1.31 km hop** and the fixed **500-body official cloud**. It includes the published `BasicController.py` beeline, Ali's official-profile policy, WSO's existing checkpoint profiles and the older basic PD/radar reference. The published baseline has no debris avoidance, so an arrival is not a safety claim. Local fuel and damage are not STP counters.
 
+![Official-profile outcomes, arrival time, entry speed, local fuel and damage](docs/analytics/official-comparison/performance.svg)
+
 See the [official-profile comparison](docs/official-comparison.md) for conditions, results and limits.
 
 In **Controller profiles**, use **Compare** for charts, **Run flight** for controller selection and **Recorded data** for counters and downloads. Published trials and current-connection flights stay separate. Local dashboard changes do not mean the [hosted player](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev) has been updated.

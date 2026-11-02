@@ -48,6 +48,7 @@ population draws.
 
 The per-trial records and summary are the published result:
 
+- [Metric dashboard](analytics/official-comparison/performance.svg)
 - [Per-trial CSV](analytics/official-comparison/runs.csv)
 - [Summary CSV](analytics/official-comparison/summary.csv)
 - [Configuration](analytics/official-comparison/configuration.json)
@@ -67,6 +68,8 @@ Across six attempts per policy (three seeds, two consecutive attempts each):
 | WSO checkpoint `baseline` | 0/6 | 6 policy-ineligible | — | — | — | 2/6 |
 | WSO checkpoint `body-axis` | 4/6 | 4 success, 2 policy-ineligible | 186.9 | 2.20 | 75.0 | 2/6 |
 | Basic PD/radar | 6/6 | 6 success | 160.4 | 1.36 | 146.4 | 0/6 |
+
+![Outcomes, arrival time, entry speed, local fuel and damage counts for the five policies](analytics/official-comparison/performance.svg)
 
 The published baseline is the fastest, but it enters the arrival region at about
 10 m/s and both seed-102 attempts failed the 209,200 J damage threshold
@@ -92,7 +95,11 @@ displayed score is a local diagnostic and not STP points.
 ```sh
 just build
 just flight-sweep examples/official_comparison.json runs/official-comparison-new
+just official-chart
 ```
+
+`just official-chart` regenerates the SVG from the committed `summary.csv` and
+updates its hash in the artifact manifest.
 
 The output directory must be new. The sweep records the engine build, public
 policy sources, configuration and every trial trace in that directory. To

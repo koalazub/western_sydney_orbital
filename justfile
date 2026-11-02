@@ -342,6 +342,10 @@ flight-sweep config="examples/flight_sweep.json" output="":
 flight-analyze output:
     devenv shell uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output {{quote(output)}}
 
+# Render the committed official-profile SVG from its published summary.
+official-chart:
+    devenv shell uv run --locked python -m wsorb.official_comparison_chart --summary docs/analytics/official-comparison/summary.csv --output docs/analytics/official-comparison/performance.svg --manifest docs/analytics/official-comparison/manifest.json
+
 flight-notebook:
     devenv shell uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py
 
