@@ -82,11 +82,20 @@ def test_official_comparison_config_is_a_valid_competition_sweep():
     assert validated["repetitions"] == 2
     assert set(validated["algorithms"]) == {
         "official_basic_beeline",
-        "wso_official_profile",
+        "ali_official_profile",
         "baseline",
         "body-axis",
         "basic_pd_radar",
     }
+
+
+def test_ali_official_profile_alias_is_registered_for_published_configs():
+    from runpy import run_path
+
+    policies = run_path(str(ROOT / "examples/flight_sweep.py"))["POLICIES"]
+    assert "ali_official_profile" in policies
+    assert "wso_official_profile" in policies
+    assert policies["ali_official_profile"] is policies["wso_official_profile"]
 
 
 @pytest.mark.parametrize("override", ["root", "node"])

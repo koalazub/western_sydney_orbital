@@ -36,26 +36,23 @@ Set it with `WSORB_STP_POLICY_JSON`, or use a file through
 
 `radar_clock_offset_s` must be independently established. `checkpoint_radius_m`
 must match the server's Scoring `KeepOutRadius_m` (50 m in the official
-reference). This is the portable checkpoint controller; it is not the
-`wso_official_profile` policy that scored 6/6 in the local comparison. The
-official-profile policy has not been ported to the STP SDK.
+reference). This is the portable checkpoint controller; it is not Ali's
+official-profile policy that scored 6/6 in the local comparison. Ali's policy
+has not been ported to the STP SDK.
 
 The implementation is [`src/wsorb/stp_policy.py`](../../src/wsorb/stp_policy.py)
 and the transport is [`src/wsorb/stp_api.py`](../../src/wsorb/stp_api.py). See
 [Send a controller to a colleague](../../docs/flight-lab.md#send-a-controller-to-a-colleague)
 for the full handoff, clock and single-writer requirements.
 
-## Local official-profile comparison
+## Ali's official-profile controller
 
-The local policy that produced the 6/6 official-profile result is
-[`src/wsorb/flight/official_profile.py`](../../src/wsorb/flight/official_profile.py).
-It is selected as `wso_official_profile` by
-[`../flight_sweep.py`](../flight_sweep.py), not by the controller-profiles
-catalog. The matched comparison is:
-
-```sh
-just flight-sweep examples/official_comparison.json runs/official-comparison-new
-```
+The local policy that produced the 6/6 official-profile result is owned by Ali
+and lives in [`../ali/`](../ali/). It uses
+`src/wsorb/flight/official_profile.py` and is selected as
+`ali_official_profile` by [`../flight_sweep.py`](../flight_sweep.py), not by
+the controller-profiles catalog. The old `wso_official_profile` key is a
+backward-compatible alias for the published comparison.
 
 The local result is practice-model evidence, not an STP score. The local
 checkpoint profiles `baseline` and `body-axis` still come from

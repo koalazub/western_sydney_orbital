@@ -35,12 +35,9 @@ import json
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from time import monotonic
-
-import numpy as np
 
 from wsorb.controllers import PROFILE_IDS, policy_factory
-from wsorb.flight import ResilientGuidance
+from wsorb.controllers.official_profile import official_profile_policy
 from wsorb.flight.official_profile import official_basic_command
 from wsorb.sweep import run_sweep
 from wsorb.sweep_analysis import write_report
@@ -59,25 +56,6 @@ def official_basic_policy(settings):
     return official_basic_command
 
 
-def official_profile_policy(settings):
-    """WSO's official-profile beeline with fresh-radar avoidance."""
-    if settings:
-        raise ValueError("The official profile takes no settings")
-    guidance = ResilientGuidance()
-
-    def decide(observation):
-        readiness = guidance.update(
-            observation,
-            wall_time_s=monotonic(),
-            running=True,
-        )
-        if not readiness.can_command:
-            return np.zeros(3), np.zeros(3)
-        return guidance.command(readiness.observation, None, {})
-
-    return decide
-
-
 def coast_policy(settings):
     """Zero thrust gives a useful control trial; it does not stop momentum."""
     return policy_factory("coast", settings)
@@ -88,6 +66,7 @@ POLICIES.update(
     basic_pd_radar=basic_policy,
     coast=coast_policy,
     official_basic_beeline=official_basic_policy,
+    ali_official_profile=official_profile_policy,
     wso_official_profile=official_profile_policy,
 )
 

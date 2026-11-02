@@ -152,7 +152,7 @@ Bui used slightly less estimated fuel than Tom; Tom arrived sooner. Bui also tur
 
 ## Official-profile comparison
 
-A separate matched comparison uses the official **1.31 km hop** and the fixed **500-body official cloud**. It includes the published `BasicController.py` beeline, WSO's official-profile policy, WSO's existing checkpoint profiles and the older basic PD/radar reference. The published baseline has no debris avoidance, so an arrival is not a safety claim. Local fuel and damage are not STP counters.
+A separate matched comparison uses the official **1.31 km hop** and the fixed **500-body official cloud**. It includes the published `BasicController.py` beeline, Ali's official-profile policy, WSO's existing checkpoint profiles and the older basic PD/radar reference. The published baseline has no debris avoidance, so an arrival is not a safety claim. Local fuel and damage are not STP counters.
 
 See the [official-profile comparison](docs/official-comparison.md) for conditions, results and limits.
 

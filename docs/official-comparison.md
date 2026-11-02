@@ -8,12 +8,17 @@ The historical [teammate comparison](../README.md#recorded-teammate-flights) is
 separate: it used the older broad-stream world. This page covers the official
 geometry, the fixed 500-body cloud and the published example controller.
 
+The published run predates the owner designation and labels the same policy
+`wso_official_profile`. The current entrypoint is
+[`ali_official_profile`](../examples/ali/official_profile.py); the old sweep key
+remains an alias so the published configuration still reproduces.
+
 ## Policies
 
 | Policy | What it is | Source |
 | --- | --- | --- |
 | `official_basic_beeline` | The published `BasicController.py` behaviour: 10 m/s goal velocity, unity translation gain, body +X alignment, no debris avoidance | [`BasicController.py`](https://github.com/SimDynamX/STU4-Solution/blob/8545c085426a71c39cbe1d544a844b3edb757007/BasicController.py) |
-| `wso_official_profile` | WSO's official-profile beeline with fresh-radar potential avoidance and a current-lease sweep. This is the policy used by the official-profile arrival regression | `src/wsorb/flight/official_profile.py` |
+| `ali_official_profile` (published as `wso_official_profile`) | Ali's official-profile beeline with fresh-radar potential avoidance and a current-lease sweep. This is the policy used by the official-profile arrival regression | `src/wsorb/controllers/official_profile.py`, `src/wsorb/flight/official_profile.py` |
 | `baseline` | WSO's existing portable checkpoint controller | `src/wsorb/stp_policy.py` |
 | `body-axis` | The same checkpoint controller with body-axis candidate preference | `src/wsorb/stp_policy.py` |
 | `basic_pd_radar` | The older simple position/velocity PD with short-range radar repulsion, used as a local reference | `src/wsorb/flight/control.py` |
@@ -58,14 +63,14 @@ Across six attempts per policy (three seeds, two consecutive attempts each):
 | Policy | Arrivals | Outcomes | Median arrival, s | Median final speed, m/s | Median local fuel, kg | Runs with damage |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | Published `BasicController` baseline | 4/6 | 4 success, 2 damage failures | 138.9 | 10.00 | 46.0 | 4/6 |
-| WSO official profile | 6/6 | 6 success | 153.2 | 1.20 | 109.0 | 2/6 |
+| Ali official profile (published as `wso_official_profile`) | 6/6 | 6 success | 153.2 | 1.20 | 109.0 | 2/6 |
 | WSO checkpoint `baseline` | 0/6 | 6 policy-ineligible | — | — | — | 2/6 |
 | WSO checkpoint `body-axis` | 4/6 | 4 success, 2 policy-ineligible | 186.9 | 2.20 | 75.0 | 2/6 |
 | Basic PD/radar | 6/6 | 6 success | 160.4 | 1.36 | 146.4 | 0/6 |
 
 The published baseline is the fastest, but it enters the arrival region at about
 10 m/s and both seed-102 attempts failed the 209,200 J damage threshold
-(209,326 J). WSO's official profile arrived on every attempt and entered at
+(209,326 J). Ali's official profile arrived on every attempt and entered at
 about 1.2 m/s; it observed 49,464 J on seed 101 but stayed below the threshold,
 and used more fuel than the baseline. Basic PD also arrived on every attempt, but
 later and with more local fuel. The checkpoint profiles were less reliable on
@@ -103,10 +108,10 @@ just flight-analyze runs/official-comparison-new
   the licensed mission. The preset ports the relative 1,305.8 m geometry onto
   the local far-side site.
 - The official baseline's attitude command is represented by the same bounded
-  shortest-arc law used by the WSO official profile, so this comparison isolates
+  shortest-arc law used by Ali's official profile, so this comparison isolates
   translation and avoidance rather than claiming a line-by-line port of the
   example's torque loop.
 - The checkpoint profiles are older WSO controllers. Their behaviour here does
-  not describe the WSO official-profile policy or the official baseline.
+  not describe Ali's official-profile policy or the official baseline.
 - No result on this page is a competition score, a safety certificate or an STP
   leaderboard position.
