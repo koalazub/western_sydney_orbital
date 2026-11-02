@@ -10,14 +10,16 @@ Limits that apply to every result:
 
 - The PID plant is an ideal three-axis double integrator. There are no actuator
   dynamics, delays, gravity, drag or disturbance terms.
-- Tracker measurements are exact position samples of a constant-acceleration
-  target at a fixed step. There is no measurement noise, missed detection,
-  association ambiguity or manoeuvre.
+- Tracker truth is the analytical constant-acceleration trajectory. Filtering
+  receives exact positions at every step; the separate forecast APIs condition
+  only through their cutoff and then accept no measurements. Neither study
+  includes noise, association ambiguity or manoeuvres.
 - The fixed step is explicit: ``horizon_s`` must be an integer multiple of
   ``dt_s`` within floating-point tolerance, and an excessive step count is
   rejected rather than silently shortened.
-- The tracker horizon is capped at 300 s. That cap bounds this synthetic study;
-  it says nothing about a validated forecast horizon for a real asteroid.
+- Each conditioning or prediction horizon is capped at 300 s, and combined
+  forecast work at 100,000 steps. These are synthetic study bounds, not a
+  validated forecast horizon for a real asteroid.
 - Nothing in this module uses engine state, the SDK, file I/O, threads,
   randomness or wall-clock timing.
 """
@@ -43,6 +45,27 @@ _SATURATION_TOLERANCE = 1.0e-9
 def _finite_vec3(value: npt.ArrayLike, name: str) -> Vec3:
     array = vector(value, name)
     return float(array[0]), float(array[1]), float(array[2])
+
+
+def _require_finite(*arrays: npt.NDArray[np.float64], name: str) -> None:
+    if not all(np.isfinite(array).all() for array in arrays):
+        raise ValueError(f"{name} is not representable")
+
+
+def _row_norms(array: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Euclidean norms without overflowing intermediate component squares."""
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        norms = np.hypot.reduce(array, axis=1)
+    _require_finite(array, norms, name="synthetic vector norm")
+    return norms
+
+
+def _root_mean_square(norms: npt.NDArray[np.float64]) -> float:
+    scale = float(np.max(norms))
+    if scale == 0.0:
+        return 0.0
+    with np.errstate(under="ignore"):
+        return scale * float(np.sqrt(np.mean((norms / scale) ** 2)))
 
 
 def _checked_timing(
@@ -121,7 +144,7 @@ class PIDStepCase:
 
     def __post_init__(self) -> None:
         config = _checked_pid_config(self.config)
-        _checked_timing(self.dt_s, self.horizon_s, name="PIDStepCase")
+        dt, horizon, _steps = _checked_timing(self.dt_s, self.horizon_s, name="PIDStepCase")
         target = _finite_vec3(self.target_velocity_mps, "PIDStepCase.target_velocity_mps")
         position = _finite_vec3(self.initial_position_m, "PIDStepCase.initial_position_m")
         velocity = _finite_vec3(self.initial_velocity_mps, "PIDStepCase.initial_velocity_mps")
@@ -132,10 +155,14 @@ class PIDStepCase:
         )
         if band >= 1.0:
             raise ValueError("PIDStepCase.settle_band_fraction must be < 1")
-        step = np.asarray(target) - np.asarray(velocity)
+        with np.errstate(over="ignore", invalid="ignore"):
+            step = np.asarray(target) - np.asarray(velocity)
+        _require_finite(step, name="PID velocity step")
         if not np.any(step):
             raise ValueError("PIDStepCase target and initial velocity must differ")
         object.__setattr__(self, "config", config)
+        object.__setattr__(self, "dt_s", dt)
+        object.__setattr__(self, "horizon_s", horizon)
         object.__setattr__(self, "target_velocity_mps", target)
         object.__setattr__(self, "initial_position_m", position)
         object.__setattr__(self, "initial_velocity_mps", velocity)
@@ -155,7 +182,8 @@ class PIDStepMetrics:
     step. Settling time is sampled: the first time after the last sample outside
     the band from which every later sample stays inside. Saturation is the
     fraction of commands whose norm reaches the configured acceleration cap
-    within a 1e-9 relative tolerance.
+    within a 1e-9 relative tolerance. ``steady_state_error_mps`` is the final
+    sampled error, not an established asymptotic value.
     """
 
     rise_time_s: float | None
@@ -205,8 +233,10 @@ def validate_pid_step(case: PIDStepCase) -> PIDStepResult:
     for index in range(steps):
         command = controller.update(target, velocity, dt)
         commands[index] = command
-        position = position + velocity * dt + 0.5 * command * dt * dt
-        velocity = velocity + command * dt
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            position = position + velocity * dt + 0.5 * command * dt * dt
+            velocity = velocity + command * dt
+        _require_finite(position, velocity, name="synthetic PID response")
         time[index + 1] = (index + 1) * dt
         positions[index + 1] = position
         velocities[index + 1] = velocity
@@ -219,11 +249,18 @@ def validate_pid_step(case: PIDStepCase) -> PIDStepResult:
     ):
         raise ValueError("synthetic PID response is not finite")
 
-    step = target - initial_velocity
-    step_norm = float(np.linalg.norm(step))
+    with np.errstate(over="ignore", invalid="ignore"):
+        step = target - initial_velocity
+    step_norm = math.hypot(*step)
+    if not math.isfinite(step_norm) or step_norm == 0.0:
+        raise ValueError("PID velocity step norm is not representable and positive")
     axis = step / step_norm
-    progress = (velocities - initial_velocity) @ axis / step_norm
-    error_fraction = np.linalg.norm(velocities - target, axis=1) / step_norm
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        progress = ((velocities - initial_velocity) / step_norm) @ axis
+        velocity_errors = velocities - target
+        relative_errors = velocity_errors / step_norm
+    _require_finite(progress, velocity_errors, relative_errors, name="synthetic PID errors")
+    error_fraction = _row_norms(relative_errors)
 
     ten_percent = np.flatnonzero(progress >= 0.1)
     ninety_percent = np.flatnonzero(progress >= 0.9)
@@ -239,7 +276,7 @@ def validate_pid_step(case: PIDStepCase) -> PIDStepResult:
     else:
         settling_time = float(time[outside[-1] + 1])
 
-    command_norms = np.linalg.norm(commands, axis=1)
+    command_norms = _row_norms(commands)
     saturation_threshold = case.config.accel_limit_mps2 * (1.0 - _SATURATION_TOLERANCE)
     saturation_fraction = float(np.count_nonzero(command_norms >= saturation_threshold)) / steps
     metrics = PIDStepMetrics(
@@ -247,8 +284,8 @@ def validate_pid_step(case: PIDStepCase) -> PIDStepResult:
         settling_time_s=settling_time,
         overshoot_fraction=max(0.0, float(np.max(progress)) - 1.0),
         saturation_fraction=saturation_fraction,
-        peak_velocity_mps=float(np.linalg.norm(velocities, axis=1).max()),
-        steady_state_error_mps=float(np.linalg.norm(velocities[-1] - target)),
+        peak_velocity_mps=float(_row_norms(velocities).max()),
+        steady_state_error_mps=float(_row_norms(velocity_errors)[-1]),
         max_command_norm_mps2=float(np.max(command_norms)),
         sample_count=steps,
     )
@@ -265,12 +302,13 @@ def validate_pid_step(case: PIDStepCase) -> PIDStepResult:
 class TrackerScenario:
     """Synthetic constant-acceleration target and filter initial estimate.
 
-    The truth is advanced at a fixed ``dt_s`` with
-    ``p += v * dt + 0.5 * a * dt²`` and ``v += a * dt`` for a constant ``a``.
+    Analytical truth is ``p(t) = p0 + v0*t + 0.5*a*t²`` and ``v(t) = v0 + a*t``.
     Measurements are exact truth positions, sampled at every step. The initial
     estimate defaults to the truth when omitted. Gains are caller-supplied test
     inputs, not tuned values. ``horizon_s`` is limited to 300 s as a synthetic
-    study bound, not as a validated asteroid forecast horizon.
+    study bound, not as a validated asteroid forecast horizon. In the forecast
+    APIs this horizon is the conditioning duration and measurement cutoff.
+    Truth-valued initial estimates are conveniences, not learned sensor state.
     """
 
     dt_s: float
@@ -284,7 +322,7 @@ class TrackerScenario:
     initial_acceleration_mps2: npt.ArrayLike | None = None
 
     def __post_init__(self) -> None:
-        _checked_timing(self.dt_s, self.horizon_s, name="TrackerScenario")
+        dt, horizon, _steps = _checked_timing(self.dt_s, self.horizon_s, name="TrackerScenario")
         gains = _checked_gains(self.gains)
         true_position = _finite_vec3(self.true_position_m, "TrackerScenario.true_position_m")
         true_velocity = _finite_vec3(self.true_velocity_mps, "TrackerScenario.true_velocity_mps")
@@ -311,6 +349,8 @@ class TrackerScenario:
             )
         )
         object.__setattr__(self, "gains", gains)
+        object.__setattr__(self, "dt_s", dt)
+        object.__setattr__(self, "horizon_s", horizon)
         object.__setattr__(self, "true_position_m", true_position)
         object.__setattr__(self, "true_velocity_mps", true_velocity)
         object.__setattr__(self, "true_acceleration_mps2", true_acceleration)
@@ -325,8 +365,11 @@ class TrackerScenario:
 
 @dataclass(frozen=True, slots=True)
 class TrackerErrorMetrics:
-    """Errors over the sampled horizon, including the initial sample.
+    """Errors over the sampled horizon.
 
+    Filtering includes the initial sample; forecast metrics exclude the cutoff
+    sample and score only positive prediction times. ``sample_count`` counts
+    fixed intervals, so filtering RMSE uses one more state than that count.
     RMSE is the root mean square of the Euclidean vector-error norm, not a
     component-wise RMS. Final errors use the last sampled estimate. Alpha-beta
     has no acceleration state, so its reported acceleration estimate is zero and
@@ -363,21 +406,41 @@ def _tracker_metrics(
     position_error: npt.NDArray[np.float64],
     velocity_error: npt.NDArray[np.float64],
     acceleration_error: npt.NDArray[np.float64],
+    *,
+    exclude_initial: bool = False,
 ) -> TrackerErrorMetrics:
-    position_norm = np.linalg.norm(position_error, axis=1)
-    velocity_norm = np.linalg.norm(velocity_error, axis=1)
-    acceleration_norm = np.linalg.norm(acceleration_error, axis=1)
+    _require_finite(time, position_error, velocity_error, acceleration_error, name="tracker errors")
+    start = 1 if exclude_initial else 0
+    position_norm = _row_norms(position_error[start:])
+    velocity_norm = _row_norms(velocity_error[start:])
+    acceleration_norm = _row_norms(acceleration_error[start:])
     return TrackerErrorMetrics(
-        position_rmse_m=float(np.sqrt(np.mean(position_norm * position_norm))),
+        position_rmse_m=_root_mean_square(position_norm),
         position_max_error_m=float(np.max(position_norm)),
         final_position_error_m=float(position_norm[-1]),
-        velocity_rmse_mps=float(np.sqrt(np.mean(velocity_norm * velocity_norm))),
+        velocity_rmse_mps=_root_mean_square(velocity_norm),
         final_velocity_error_mps=float(velocity_norm[-1]),
-        acceleration_rmse_mps2=float(np.sqrt(np.mean(acceleration_norm * acceleration_norm))),
+        acceleration_rmse_mps2=_root_mean_square(acceleration_norm),
         final_acceleration_error_mps2=float(acceleration_norm[-1]),
         sample_count=int(time.size - 1),
         horizon_s=float(time[-1]),
     )
+
+
+def _tracker_truth(
+    scenario: TrackerScenario,
+    time: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Evaluate truth independently of the estimator's recursive integration."""
+    t = time[:, None]
+    position = np.asarray(scenario.true_position_m, dtype=np.float64)
+    velocity = np.asarray(scenario.true_velocity_mps, dtype=np.float64)
+    acceleration = np.asarray(scenario.true_acceleration_mps2, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        positions = position + velocity * t + 0.5 * acceleration * t * t
+        velocities = velocity + acceleration * t
+    _require_finite(positions, velocities, name="synthetic tracker truth")
+    return positions, velocities
 
 
 def _run_tracker(
@@ -387,8 +450,6 @@ def _run_tracker(
 ) -> TrackerValidationResult:
     dt = scenario.dt_s
     steps = scenario.sample_count
-    true_position = np.asarray(scenario.true_position_m, dtype=np.float64)
-    true_velocity = np.asarray(scenario.true_velocity_mps, dtype=np.float64)
     true_acceleration = np.asarray(scenario.true_acceleration_mps2, dtype=np.float64)
 
     if use_gamma:
@@ -405,7 +466,8 @@ def _run_tracker(
             scenario.gains,
         )
 
-    time = np.empty(steps + 1, dtype=np.float64)
+    time = np.arange(steps + 1, dtype=np.float64) * dt
+    true_positions, true_velocities = _tracker_truth(scenario, time)
     estimated_positions = np.empty((steps + 1, 3), dtype=np.float64)
     estimated_velocities = np.empty((steps + 1, 3), dtype=np.float64)
     estimated_accelerations = np.empty((steps + 1, 3), dtype=np.float64)
@@ -413,7 +475,6 @@ def _run_tracker(
     velocity_errors = np.empty((steps + 1, 3), dtype=np.float64)
     acceleration_errors = np.empty((steps + 1, 3), dtype=np.float64)
 
-    time[0] = 0.0
     estimate_position = np.asarray(estimator.position_m, dtype=np.float64)
     estimate_velocity = np.asarray(estimator.velocity_mps, dtype=np.float64)
     if use_gamma:
@@ -424,30 +485,26 @@ def _run_tracker(
     estimated_positions[0] = estimate_position
     estimated_velocities[0] = estimate_velocity
     estimated_accelerations[0] = estimate_acceleration
-    position_errors[0] = estimate_position - true_position
-    velocity_errors[0] = estimate_velocity - true_velocity
-    acceleration_errors[0] = estimate_acceleration - true_acceleration
 
     for index in range(steps):
-        true_position = true_position + true_velocity * dt + 0.5 * true_acceleration * dt * dt
-        true_velocity = true_velocity + true_acceleration * dt
         if use_gamma:
             assert isinstance(estimator, AlphaBetaGammaTracker)
             estimate_position, estimate_velocity, estimate_acceleration = estimator.update(
-                true_position,
+                true_positions[index + 1],
                 dt,
             )
         else:
             assert isinstance(estimator, AlphaBetaTracker)
-            estimate_position, estimate_velocity = estimator.update(true_position, dt)
+            estimate_position, estimate_velocity = estimator.update(true_positions[index + 1], dt)
             estimate_acceleration = np.zeros(3, dtype=np.float64)
-        time[index + 1] = (index + 1) * dt
         estimated_positions[index + 1] = estimate_position
         estimated_velocities[index + 1] = estimate_velocity
         estimated_accelerations[index + 1] = estimate_acceleration
-        position_errors[index + 1] = estimate_position - true_position
-        velocity_errors[index + 1] = estimate_velocity - true_velocity
-        acceleration_errors[index + 1] = estimate_acceleration - true_acceleration
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        position_errors[:] = estimated_positions - true_positions
+        velocity_errors[:] = estimated_velocities - true_velocities
+        acceleration_errors[:] = estimated_accelerations - true_acceleration
 
     if not (
         np.isfinite(estimated_positions).all()
@@ -476,7 +533,8 @@ def _run_tracker(
 def validate_alpha_beta(scenario: TrackerScenario) -> TrackerValidationResult:
     """Track synthetic constant-acceleration truth with the alpha-beta filter.
 
-    This is a deterministic reference comparison, not a real asteroid forecast.
+    Every step receives a measurement. The horizon is a filtering study duration,
+    not a prediction horizon. This is not a real asteroid forecast.
     Alpha-beta has no acceleration state; its acceleration error is reported
     against the synthetic truth for comparison with the gamma extension.
     """
@@ -495,6 +553,107 @@ def validate_alpha_beta_gamma(scenario: TrackerScenario) -> TrackerValidationRes
     if not isinstance(scenario, TrackerScenario):
         raise ValueError("scenario must be a TrackerScenario")
     return _run_tracker(scenario, use_gamma=True)
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerForecastResult:
+    """Conditioned state followed by a measurement-free synthetic forecast.
+
+    ``cutoff_s`` is the last measurement time since the scenario's origin.
+    Forecast times are offsets from that cutoff and include the origin for
+    plotting. Forecast metrics exclude that origin and score only positive
+    prediction times. The conditioning metrics include their initial sample.
+    """
+
+    cutoff_s: float
+    prediction_horizon_s: float
+    conditioning: TrackerValidationResult
+    forecast: TrackerValidationResult
+
+
+def _run_tracker_forecast(
+    conditioning: TrackerScenario,
+    prediction_horizon_s: float,
+    *,
+    use_gamma: bool,
+) -> TrackerForecastResult:
+    if not isinstance(conditioning, TrackerScenario):
+        raise ValueError("conditioning must be a TrackerScenario")
+    dt, _horizon, steps = _checked_timing(
+        conditioning.dt_s,
+        prediction_horizon_s,
+        name="tracker forecast",
+    )
+    if conditioning.sample_count + steps > MAX_SAMPLE_COUNT:
+        raise ValueError(f"conditioning plus forecast cannot exceed {MAX_SAMPLE_COUNT} fixed steps")
+    filtered = _run_tracker(conditioning, use_gamma=use_gamma)
+    cutoff = float(filtered.time_s[-1])
+    time = np.arange(steps + 1, dtype=np.float64) * dt
+    t = time[:, None]
+    position = filtered.estimated_position_m[-1]
+    velocity = filtered.estimated_velocity_mps[-1]
+    acceleration = filtered.estimated_acceleration_mps2[-1]
+    # Freeze the cutoff state. No update or measurement access occurs here.
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        positions = position + velocity * t + 0.5 * acceleration * t * t
+        velocities = velocity + acceleration * t
+        accelerations = np.broadcast_to(acceleration, positions.shape).copy()
+    true_positions, true_velocities = _tracker_truth(conditioning, cutoff + time)
+    with np.errstate(over="ignore", invalid="ignore"):
+        position_errors = positions - true_positions
+        velocity_errors = velocities - true_velocities
+        acceleration_errors = accelerations - np.asarray(conditioning.true_acceleration_mps2)
+    _require_finite(positions, velocities, accelerations, name="synthetic tracker forecast")
+    forecast = TrackerValidationResult(
+        time_s=_read_only(time),
+        estimated_position_m=_read_only(positions),
+        estimated_velocity_mps=_read_only(velocities),
+        estimated_acceleration_mps2=_read_only(accelerations),
+        position_error_m=_read_only(position_errors),
+        velocity_error_mps=_read_only(velocity_errors),
+        acceleration_error_mps2=_read_only(acceleration_errors),
+        metrics=_tracker_metrics(
+            time,
+            position_errors,
+            velocity_errors,
+            acceleration_errors,
+            exclude_initial=True,
+        ),
+    )
+    return TrackerForecastResult(
+        cutoff_s=cutoff,
+        prediction_horizon_s=float(time[-1]),
+        conditioning=filtered,
+        forecast=forecast,
+    )
+
+
+def validate_alpha_beta_forecast(
+    conditioning: TrackerScenario,
+    *,
+    prediction_horizon_s: float,
+) -> TrackerForecastResult:
+    """Condition a CV filter through ``conditioning.horizon_s``, then hold out.
+
+    The caller supplies all gains and initial/truth states. The extra prediction
+    horizon is positive, at most 300 s and on the same fixed grid. Conditioning
+    plus prediction cannot exceed 100,000 steps. Truth after the cutoff is used
+    only for scoring, never for correcting or fitting the frozen cutoff state.
+    """
+    return _run_tracker_forecast(conditioning, prediction_horizon_s, use_gamma=False)
+
+
+def validate_alpha_beta_gamma_forecast(
+    conditioning: TrackerScenario,
+    *,
+    prediction_horizon_s: float,
+) -> TrackerForecastResult:
+    """Condition the CA filter, then forecast without post-cutoff measurements.
+
+    Timing, work bounds and scoring match ``validate_alpha_beta_forecast``.
+    Even an exact synthetic CA result does not validate real asteroid dynamics.
+    """
+    return _run_tracker_forecast(conditioning, prediction_horizon_s, use_gamma=True)
 
 
 @dataclass(frozen=True, slots=True)

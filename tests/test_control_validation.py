@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from wsorb.flight.control_validation import (
@@ -18,12 +19,14 @@ from wsorb.flight.control_validation import (
     TrackerScenario,
     compare_gamma_effect,
     validate_alpha_beta,
+    validate_alpha_beta_forecast,
     validate_alpha_beta_gamma,
+    validate_alpha_beta_gamma_forecast,
     validate_pid_step,
     validate_zero_gamma_reduction,
 )
 from wsorb.flight.pid import PIDConfig
-from wsorb.flight.tracking_filter import AlphaBetaGains
+from wsorb.flight.tracking_filter import AlphaBetaGains, AlphaBetaGammaTracker, AlphaBetaTracker
 
 
 def test_pid_proportional_step_matches_the_analytical_first_order_response() -> None:
@@ -353,3 +356,193 @@ def test_gamma_effect_requires_a_positive_gamma() -> None:
     )
     with pytest.raises(ValueError):
         compare_gamma_effect(scenario)
+
+
+@pytest.mark.parametrize("kp", [0.5, 1.5, 2.0, 2.5])
+def test_unsaturated_p_velocity_loop_has_the_discrete_step_multiplier(kp) -> None:
+    case = PIDStepCase(PIDConfig(kp=kp), 1.0, 3.0, (0.001, 0.0, 0.0))
+    result = validate_pid_step(case)
+    expected_error = 0.001 * (1.0 - kp * case.dt_s) ** np.arange(4)
+    np.testing.assert_allclose(0.001 - result.velocity_mps[:, 0], expected_error)
+    assert result.metrics.saturation_fraction == 0.0
+    if kp < 2.0:
+        assert abs(expected_error[-1]) < abs(expected_error[0])
+    elif kp == 2.0:
+        assert abs(expected_error[-1]) == abs(expected_error[0])
+    else:
+        assert abs(expected_error[-1]) > abs(expected_error[0])
+
+
+def test_filtered_position_rmse_is_not_the_measurement_free_forecast_error() -> None:
+    # Alpha=1 can copy every exact measured position while learning no velocity.
+    scenario = TrackerScenario(
+        dt_s=1.0,
+        horizon_s=1.0,
+        gains=AlphaBetaGains(alpha=1.0, beta=0.0),
+        true_position_m=(0.0, 0.0, 0.0),
+        true_velocity_mps=(0.0, 0.0, 0.0),
+        true_acceleration_mps2=(1.0, 0.0, 0.0),
+    )
+    result = validate_alpha_beta_forecast(scenario, prediction_horizon_s=2.0)
+    assert result.conditioning.metrics.position_rmse_m == 0.0
+    assert result.cutoff_s == 1.0
+    assert result.prediction_horizon_s == 2.0
+    np.testing.assert_array_equal(result.forecast.time_s, [0.0, 1.0, 2.0])
+    np.testing.assert_array_equal(result.forecast.estimated_position_m[:, 0], [0.5, 0.5, 0.5])
+    np.testing.assert_array_equal(result.forecast.position_error_m[:, 0], [0.0, -1.5, -4.0])
+    # The cutoff sample is present for plotting but excluded from holdout RMSE.
+    assert result.forecast.metrics.position_rmse_m == pytest.approx(math.sqrt(9.125))
+    assert result.forecast.metrics.final_position_error_m == 4.0
+    assert result.forecast.metrics.sample_count == 2
+    assert result.forecast.metrics.horizon_s == 2.0
+
+
+@pytest.mark.parametrize("use_gamma", [False, True])
+def test_forecast_only_updates_from_measurements_through_the_cutoff(monkeypatch, use_gamma) -> None:
+    scenario = TrackerScenario(
+        dt_s=0.5,
+        horizon_s=2.0,
+        gains=AlphaBetaGains(alpha=0.5, beta=0.25, gamma=0.125),
+        true_position_m=(10.0, -2.0, 3.0),
+        true_velocity_mps=(0.5, 0.25, -0.125),
+        true_acceleration_mps2=(0.0, 0.0, 0.0),
+    )
+    tracker_class = AlphaBetaGammaTracker if use_gamma else AlphaBetaTracker
+    validate = validate_alpha_beta_gamma_forecast if use_gamma else validate_alpha_beta_forecast
+    update = tracker_class.update
+    received = []
+
+    def record_update(self, measurement, dt_s):
+        received.append(np.array(measurement))
+        return update(self, measurement, dt_s)
+
+    monkeypatch.setattr(tracker_class, "update", record_update)
+    result = validate(scenario, prediction_horizon_s=3.0)
+    assert len(received) == 4
+    np.testing.assert_array_equal(received[-1], [11.0, -1.5, 2.75])
+    np.testing.assert_array_equal(result.forecast.estimated_position_m[-1], [12.5, -0.75, 2.375])
+    assert result.forecast.metrics.position_rmse_m == 0.0
+    assert result.forecast.metrics.velocity_rmse_mps == 0.0
+    assert result.cutoff_s == 2.0
+    assert result.prediction_horizon_s == 3.0
+    assert not result.forecast.position_error_m.flags.writeable
+    assert not result.conditioning.estimated_position_m.flags.writeable
+
+
+def test_ca_holdout_matches_analytical_truth_for_a_full_300_second_prediction() -> None:
+    scenario = TrackerScenario(
+        dt_s=1.0,
+        horizon_s=2.0,
+        gains=AlphaBetaGains(alpha=0.5, beta=0.25, gamma=0.125),
+        true_position_m=(3.0, -4.0, 2.0),
+        true_velocity_mps=(0.5, -0.25, 0.125),
+        true_acceleration_mps2=(0.25, -0.125, 0.0625),
+    )
+    result = validate_alpha_beta_gamma_forecast(scenario, prediction_horizon_s=300.0)
+    absolute_time = result.cutoff_s + result.forecast.time_s[:, None]
+    expected = (
+        np.asarray(scenario.true_position_m)
+        + np.asarray(scenario.true_velocity_mps) * absolute_time
+        + 0.5 * np.asarray(scenario.true_acceleration_mps2) * absolute_time**2
+    )
+    np.testing.assert_array_equal(result.forecast.estimated_position_m, expected)
+    assert result.forecast.metrics.position_rmse_m == 0.0
+    assert result.forecast.metrics.velocity_rmse_mps == 0.0
+    assert result.forecast.metrics.acceleration_rmse_mps2 == 0.0
+    assert result.cutoff_s == 2.0
+    assert result.prediction_horizon_s == 300.0
+    assert result.forecast.metrics.sample_count == 300
+
+
+@pytest.mark.parametrize(
+    "prediction_horizon_s", [0.0, -1.0, math.nan, math.inf, 0.75, MAX_HORIZON_S + 1.0]
+)
+def test_forecast_rejects_invalid_prediction_horizons(prediction_horizon_s) -> None:
+    scenario = TrackerScenario(0.5, 1.0, AlphaBetaGains(0.5, 0.25), [0.0] * 3, [0.0] * 3, [0.0] * 3)
+    for validate in (validate_alpha_beta_forecast, validate_alpha_beta_gamma_forecast):
+        with pytest.raises(ValueError):
+            validate(scenario, prediction_horizon_s=prediction_horizon_s)
+
+
+def test_forecast_checks_combined_work_before_running_conditioning(monkeypatch) -> None:
+    scenario = TrackerScenario(
+        0.001, 60.0, AlphaBetaGains(0.5, 0.25), [0.0] * 3, [0.0] * 3, [0.0] * 3
+    )
+
+    def unexpected_update(*_args):
+        raise AssertionError("Budget validation must precede any conditioning update")
+
+    monkeypatch.setattr(AlphaBetaTracker, "update", unexpected_update)
+    with pytest.raises(ValueError, match="conditioning plus forecast"):
+        validate_alpha_beta_forecast(scenario, prediction_horizon_s=60.0)
+    with pytest.raises(ValueError, match="conditioning must be"):
+        validate_alpha_beta_forecast(object(), prediction_horizon_s=1.0)
+
+
+def test_large_finite_errors_have_finite_norms_and_rmse() -> None:
+    scenario = TrackerScenario(
+        1.0,
+        1.0,
+        AlphaBetaGains(alpha=0.0, beta=0.0),
+        (1.0e200, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        initial_position_m=(0.0, 0.0, 0.0),
+    )
+    metrics = validate_alpha_beta(scenario).metrics
+    assert math.isfinite(metrics.position_rmse_m)
+    assert metrics.position_rmse_m == pytest.approx(1.0e200)
+    assert metrics.position_max_error_m == pytest.approx(1.0e200)
+    pid = validate_pid_step(PIDStepCase(PIDConfig(kp=1.0), 1.0, 1.0, (1.0e200, 0.0, 0.0)))
+    assert math.isfinite(pid.metrics.steady_state_error_mps)
+    assert pid.metrics.steady_state_error_mps == pytest.approx(1.0e200)
+    assert pid.metrics.settling_time_s is None
+
+
+def test_validation_rejects_overflowing_truth_errors_and_step_differences() -> None:
+    with pytest.raises(ValueError, match="PID velocity step"):
+        PIDStepCase(
+            PIDConfig(kp=1.0),
+            1.0,
+            1.0,
+            (1.0e308, 0.0, 0.0),
+            initial_velocity_mps=(-1.0e308, 0.0, 0.0),
+        )
+    overflowing_truth = TrackerScenario(
+        1.0,
+        2.0,
+        AlphaBetaGains(0.0, 0.0),
+        (1.0e308, 0.0, 0.0),
+        (1.0e308, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+    )
+    with pytest.raises(ValueError, match="tracker truth"):
+        validate_alpha_beta(overflowing_truth)
+    overflowing_error = TrackerScenario(
+        1.0,
+        1.0,
+        AlphaBetaGains(0.0, 0.0),
+        (1.0e308, 0.0, 0.0),
+        (-1.0e308, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        initial_position_m=(-1.0e308, 0.0, 0.0),
+        initial_velocity_mps=(1.0e308, 0.0, 0.0),
+    )
+    with pytest.raises(ValueError, match="tracker errors"):
+        validate_alpha_beta(overflowing_error)
+
+
+def test_forecast_rejects_overflow_after_finite_conditioning() -> None:
+    conditioning = TrackerScenario(
+        1.0,
+        1.0,
+        AlphaBetaGains(0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        initial_position_m=(8.0e307, 0.0, 0.0),
+        initial_velocity_mps=(2.0e307, 0.0, 0.0),
+    )
+    for validate in (validate_alpha_beta_forecast, validate_alpha_beta_gamma_forecast):
+        with pytest.raises(ValueError, match="tracker forecast"):
+            validate(conditioning, prediction_horizon_s=10.0)

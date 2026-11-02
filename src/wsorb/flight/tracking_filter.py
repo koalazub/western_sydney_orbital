@@ -20,7 +20,10 @@ from ._validation import scalar, vector
 
 @dataclass(frozen=True, slots=True)
 class AlphaBetaGains:
-    """Caller-supplied fixed gains; not tuned competition values."""
+    """Caller-supplied dimensionless gains; not tuned competition values.
+
+    The component bounds alone do not guarantee a stable gamma filter.
+    """
 
     alpha: float
     beta: float
@@ -54,12 +57,19 @@ class AlphaBetaTracker:
         measured_position_m: npt.ArrayLike,
         dt_s: float,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Correct a CV prediction; rejected arithmetic leaves both states unchanged."""
         measurement = vector(measured_position_m, "measured_position_m")
         dt = scalar(dt_s, "dt_s", positive=True)
-        predicted = self.position_m + self.velocity_mps * dt
-        residual = measurement - predicted
-        self.position_m = predicted + self.gains.alpha * residual
-        self.velocity_mps = self.velocity_mps + self.gains.beta * residual / dt
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+            predicted = vector(self.position_m + self.velocity_mps * dt, "predicted position")
+            residual = vector(measurement - predicted, "position residual")
+            position = vector(predicted + self.gains.alpha * residual, "corrected position")
+            velocity = vector(
+                self.velocity_mps + self.gains.beta * residual / dt,
+                "corrected velocity",
+            )
+        self.position_m = position
+        self.velocity_mps = velocity
         return self.position_m.copy(), self.velocity_mps.copy()
 
 
@@ -68,8 +78,9 @@ class AlphaBetaGammaTracker:
 
     This uses the common convention ``a += 2 * gamma * residual / dt²``. The
     factor is part of this reference convention, not a validated derivation from
-    the meeting transcript. With ``gamma == 0`` the update is exactly the
-    alpha-beta update.
+    the meeting transcript. With ``gamma == 0`` acceleration stays at its initial
+    value. This reduces to alpha-beta only when that initial value is zero.
+    A nonzero frozen acceleration still gives a constant-acceleration predictor.
     """
 
     def __init__(
@@ -95,18 +106,37 @@ class AlphaBetaGammaTracker:
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
     ]:
+        """Correct a CA prediction; rejected arithmetic leaves all states unchanged."""
         measurement = vector(measured_position_m, "measured_position_m")
         dt = scalar(dt_s, "dt_s", positive=True)
-        predicted = (
-            self.position_m + self.velocity_mps * dt + 0.5 * self.acceleration_mps2 * dt * dt
-        )
-        predicted_velocity = self.velocity_mps + self.acceleration_mps2 * dt
-        residual = measurement - predicted
-        self.position_m = predicted + self.gains.alpha * residual
-        self.velocity_mps = predicted_velocity + self.gains.beta * residual / dt
-        self.acceleration_mps2 = self.acceleration_mps2 + 2.0 * self.gains.gamma * residual / (
-            dt * dt
-        )
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+            predicted = vector(
+                self.position_m + self.velocity_mps * dt + 0.5 * self.acceleration_mps2 * dt * dt,
+                "predicted position",
+            )
+            predicted_velocity = vector(
+                self.velocity_mps + self.acceleration_mps2 * dt,
+                "predicted velocity",
+            )
+            residual = vector(measurement - predicted, "position residual")
+            position = vector(predicted + self.gains.alpha * residual, "corrected position")
+            velocity = vector(
+                predicted_velocity + self.gains.beta * residual / dt,
+                "corrected velocity",
+            )
+            # Do not form dt²: it can underflow to zero for a valid tiny step.
+            # Gamma zero must leave even a nonzero acceleration exactly frozen.
+            acceleration = (
+                self.acceleration_mps2.copy()
+                if self.gains.gamma == 0.0
+                else vector(
+                    self.acceleration_mps2 + 2.0 * (self.gains.gamma * residual / dt) / dt,
+                    "corrected acceleration",
+                )
+            )
+        self.position_m = position
+        self.velocity_mps = velocity
+        self.acceleration_mps2 = acceleration
         return (
             self.position_m.copy(),
             self.velocity_mps.copy(),

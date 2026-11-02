@@ -20,7 +20,13 @@ from .control import _bounded
 
 @dataclass(frozen=True, slots=True)
 class PIDConfig:
-    """Explicit gains and limits; no values here are competition recommendations."""
+    """Explicit gains and limits; no values here are competition recommendations.
+
+    Velocity error is in m/s, its integral in m and derivative in m/s². Thus
+    ``kp`` has units 1/s, ``ki`` has units 1/s² and ``kd`` is dimensionless.
+    ``integral_limit`` clamps each integral component in metres. This is not
+    saturation-aware back-calculation or conditional integration.
+    """
 
     kp: float
     ki: float = 0.0
@@ -71,28 +77,47 @@ class PIDVelocityController:
         velocity_mps: npt.ArrayLike,
         dt_s: float,
     ) -> npt.NDArray[np.float64]:
-        """Return a bounded body-frame acceleration request.
+        """Return bounded acceleration in the common input velocity frame.
 
+        Keep that frame fixed across updates. This loop does not rotate stored
+        integral or derivative state when the vehicle turns. A flight adapter
+        must convert the returned reference-frame vector to body coordinates.
         ``dt_s`` is the actual control interval. A nonpositive or nonfinite
         interval is rejected rather than silently reusing an old derivative.
+        Unrepresentable arithmetic raises ValueError without changing state.
         """
         desired = vector(desired_velocity_mps, "desired_velocity_mps")
         velocity = vector(velocity_mps, "velocity_mps")
         dt = scalar(dt_s, "dt_s", positive=True)
-        error = desired - velocity
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+            error = vector(desired - velocity, "PID velocity error")
+            accumulated = vector(self._integral + error * dt, "PID integral")
+            raw_derivative = (
+                np.zeros(3, dtype=np.float64)
+                if self._previous_error is None
+                else vector((error - self._previous_error) / dt, "PID raw derivative")
+            )
         integral = np.clip(
-            self._integral + error * dt,
+            accumulated,
             -self.config.integral_limit,
             self.config.integral_limit,
         )
-        if self._previous_error is None:
-            raw_derivative = np.zeros(3, dtype=np.float64)
+        # Equivalent to dt / (tau + dt), without overflowing that sum.
+        if dt <= self.config.derivative_tau_s:
+            ratio = dt / self.config.derivative_tau_s
+            alpha = ratio / (1.0 + ratio)
         else:
-            raw_derivative = (error - self._previous_error) / dt
-        alpha = dt / (self.config.derivative_tau_s + dt)
-        derivative = self._derivative + alpha * (raw_derivative - self._derivative)
-        request = self.config.kp * error + self.config.ki * integral + self.config.kd * derivative
+            alpha = 1.0 / (1.0 + self.config.derivative_tau_s / dt)
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            derivative = vector(
+                self._derivative + alpha * (raw_derivative - self._derivative),
+                "PID filtered derivative",
+            )
+            request = (
+                self.config.kp * error + self.config.ki * integral + self.config.kd * derivative
+            )
+        command = _bounded(request, self.config.accel_limit_mps2)
         self._integral = integral
         self._derivative = derivative
         self._previous_error = error
-        return _bounded(request, self.config.accel_limit_mps2)
+        return command

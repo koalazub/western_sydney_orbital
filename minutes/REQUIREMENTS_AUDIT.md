@@ -111,7 +111,8 @@ The new reference modules are pure and small:
 - `pid.py` is O(1) per update and allocates fixed 3-vectors.
 - `tracking_filter.py` is O(1) per target update and allocates no covariance.
 - `calibration.py` is vectorized over samples and rejects singular systems.
-- `association.py` is O(N·M) with a hard candidate cap and vectorized distances.
+- `association.py` uses O(N·M) vectorized distances plus O(P log P) sorting of
+  the gated candidate pairs, with a hard pair cap.
 - `event_camera.py` is vectorized over pixels/events with hard event and cluster caps.
 - `control_validation.py` is a synthetic deterministic harness; it is not on the
   flight hot path.
