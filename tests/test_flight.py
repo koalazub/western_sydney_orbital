@@ -29,6 +29,7 @@ from wsorb.flight import (
 from wsorb.flight.control import _bounded, reference_to_body
 from wsorb.flight.estimation import NavigationSample, StateEstimator
 from wsorb.flight.geometry import Capsule, CollisionIndex, segment_clear
+from wsorb.flight.official_profile import official_basic_command
 from wsorb.flight.planning import MAX_PREVIEW_POINTS, _Corridor, search_route
 
 
@@ -651,6 +652,25 @@ def test_basic_command_ports_position_velocity_control_and_goal_override() -> No
     accel, _ = basic_command(observation, goal_world_m=[0.0, 100.0, 0.0])
     np.testing.assert_allclose(accel, [-0.07, -0.02, 0.0], atol=1e-15)
     assert observation == before
+
+
+def test_official_basic_command_is_the_capped_10_mps_beeline_without_radar() -> None:
+    observation = public_input()
+    observation["shuttle"].update(
+        position=[0.0, 0.0, 0.0], velocity=[1.0, 2.0, 0.0], rotation=[0.0, 0.0, 0.0, 1.0]
+    )
+    observation["target"]["position"] = [100.0, 0.0, 0.0]
+    del observation["radar"]
+    before = copy.deepcopy(observation)
+    accel, angular = official_basic_command(observation)
+    expected = np.array([9.0, -2.0, 0.0])
+    expected *= 0.5 / math.hypot(*expected)
+    np.testing.assert_allclose(accel, expected, atol=1e-15)
+    np.testing.assert_array_equal(angular, np.zeros(3))
+    assert observation == before
+
+    observation["shuttle"]["velocity"] = [10.0, 0.0, 0.0]
+    np.testing.assert_allclose(official_basic_command(observation)[0], np.zeros(3), atol=1e-15)
 
 
 def test_basic_radar_repulsion_and_only_first_24_readings() -> None:

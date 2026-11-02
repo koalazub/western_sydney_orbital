@@ -173,7 +173,7 @@ def analyze_run(run: Mapping[str, Any]) -> dict[str, Any]:
         "first_damage_phase": first_damage_phase,
         "min_observed_radar_range_m": _minimum(radar_ranges),
         "max_radar_age_s": _maximum(radar_ages),
-        "future_radar_rows": sum(age < 0 for age in radar_ages),
+        "future_radar_rows": sum(age < -1.0e-12 for age in radar_ages),
         "median_policy_wall_s": _median(policy_times),
         "max_policy_wall_s": _maximum(policy_times),
         "policy_calls_over_step_budget": sum(

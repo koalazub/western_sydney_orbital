@@ -24,9 +24,14 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from ._validation import count, field, mapping, point, scalar
+from ._validation import count, field, mapping, point, scalar, vector
 from .config import ResilienceConfig
-from .control import _bounded
+from .control import (
+    MAX_ACCEL_MPS2,
+    MAX_ANGULAR_ACCEL_RAD_S2,
+    _bounded,
+    reference_to_body,
+)
 from .estimation import StateEstimate
 from .temporal import MotionSegment, TemporalObstacles, motion_clear
 
@@ -35,6 +40,7 @@ __all__ = [
     "OFFICIAL_FLIGHT_PRESET",
     "OfficialMotion",
     "official_attitude_command",
+    "official_basic_command",
     "official_command",
     "official_profile",
 ]
@@ -58,6 +64,80 @@ def official_profile(observation: Mapping[str, Any]) -> bool:
     return isinstance(observation, Mapping) and (
         observation.get("flight_preset") == OFFICIAL_FLIGHT_PRESET
     )
+
+
+def official_basic_command(
+    observation: Mapping[str, Any],
+    *,
+    lease_s: float = 0.75,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Port the published BasicController beeline without debris avoidance.
+
+    The published example commands a 10 m/s goal velocity with unity gain, then
+    rotates that acceleration into the shuttle frame. This function keeps that
+    translation exactly and applies the observed acceleration cap. Attitude uses
+    the same bounded shortest-arc law as the official profile, so a comparison
+    isolates guidance and avoidance rather than a second attitude controller.
+    No radar row is read. This is a baseline, not a safe flight policy.
+    """
+    observation = mapping(observation, "observation")
+    ship = mapping(field(observation, "shuttle"), "shuttle")
+    position = np.asarray(point(field(ship, "position"), "shuttle.position"))
+    velocity = np.asarray(point(field(ship, "velocity"), "shuttle.velocity"))
+    rotation = vector(field(ship, "rotation"), "shuttle.rotation", length=4)
+    target = mapping(field(observation, "target"), "target")
+    goal = np.asarray(point(field(target, "position"), "target.position"))
+    maximum = min(
+        MAX_ACCEL_MPS2,
+        scalar(field(observation, "max_accel_mps2"), "max_accel_mps2"),
+    )
+    angular_limit = min(
+        MAX_ANGULAR_ACCEL_RAD_S2,
+        scalar(
+            field(observation, "max_angular_accel_rad_s2"),
+            "max_angular_accel_rad_s2",
+        ),
+    )
+    delta = goal - position
+    distance = math.hypot(*delta)
+    if distance <= _EPSILON:
+        return np.zeros(3, dtype=np.float64), np.zeros(3, dtype=np.float64)
+    goal_velocity = OFFICIAL_BEELINE_SPEED_MPS * delta / distance
+    acceleration = _bounded(goal_velocity - velocity, maximum)
+    body = reference_to_body(
+        acceleration,
+        rotation,
+        field(observation, "rotation_convention"),
+    )
+    time_s = scalar(field(observation, "time_s"), "time_s")
+    source_time_s = scalar(
+        observation.get("navigation_sample_time_s", time_s),
+        "navigation_sample_time_s",
+    )
+    angular_velocity = ship.get("angular_velocity_rad_s")
+    estimate = StateEstimate(
+        time_s=time_s,
+        source_time_s=source_time_s,
+        position_m=tuple(float(value) for value in position),
+        velocity_mps=tuple(float(value) for value in velocity),
+        rotation_xyzw=tuple(float(value) for value in rotation),
+        position_uncertainty_m=0.25,
+        velocity_uncertainty_mps=0.05,
+        angular_velocity_rad_s=(
+            None
+            if angular_velocity is None
+            else tuple(
+                float(value)
+                for value in vector(
+                    angular_velocity,
+                    "shuttle.angular_velocity_rad_s",
+                    length=3,
+                )
+            )
+        ),
+    )
+    angular = official_attitude_command(estimate, delta, lease_s, angular_limit)
+    return np.asarray(_bounded(body, maximum)), np.asarray(angular)
 
 
 def _normalize(value: npt.ArrayLike) -> np.ndarray | None:

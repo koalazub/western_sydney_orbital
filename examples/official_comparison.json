@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "preset": "competition_reference",
+  "seeds": [100, 101, 102],
+  "repetitions": 2,
+  "debris_counts": [500],
+  "duration_s": 300.0,
+  "step_s": 0.5,
+  "settings": {
+    "debris": {
+      "distribution": {
+        "kind": "official_cloud"
+      }
+    }
+  },
+  "algorithms": {
+    "official_basic_beeline": {},
+    "wso_official_profile": {},
+    "baseline": {},
+    "body-axis": {},
+    "basic_pd_radar": {
+      "position_gain_s2": 0.0012,
+      "velocity_gain_s": 0.07,
+      "avoidance_range_m": 70.0,
+      "avoidance_accel_mps2": 0.7
+    }
+  }
+}

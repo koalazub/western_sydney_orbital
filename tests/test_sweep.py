@@ -72,6 +72,23 @@ def test_invalid_design_rejected_before_creating_output(tmp_path, monkeypatch, f
     assert not output.exists()
 
 
+def test_official_comparison_config_is_a_valid_competition_sweep():
+    config = json.loads((ROOT / "examples/official_comparison.json").read_text())
+    policies = {name: coast_factory for name in config["algorithms"]}
+    validated = _configuration(config, SCENARIO, policies)
+    assert validated["preset"] == "competition_reference"
+    assert validated["settings"]["debris"]["distribution"] == {"kind": "official_cloud"}
+    assert validated["settings"]["debris"]["count"] == 500
+    assert validated["repetitions"] == 2
+    assert set(validated["algorithms"]) == {
+        "official_basic_beeline",
+        "wso_official_profile",
+        "baseline",
+        "body-axis",
+        "basic_pd_radar",
+    }
+
+
 @pytest.mark.parametrize("override", ["root", "node"])
 def test_unsupported_launcher_override_rejected_before_output(tmp_path, monkeypatch, override):
     def unexpected_launch():

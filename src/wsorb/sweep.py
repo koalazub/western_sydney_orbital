@@ -116,7 +116,7 @@ def _configuration(config: Mapping, scenario: dict, policies: Mapping) -> dict:
             raise ValueError(f"{key} must contain unique integers between 0 and {maximum}")
         result[key] = list(values)
     if result.get("preset") not in FLIGHT_PRESETS:
-        raise ValueError("Choose preset mars_facing_l1 or far_side_l2")
+        raise ValueError(f"Choose preset from {', '.join(FLIGHT_PRESETS)}")
     fixed = scenario["integration"]["fixed_step_s"]
     for key in ("duration_s", "step_s"):
         value = result.get(key)
