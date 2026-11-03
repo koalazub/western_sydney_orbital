@@ -486,9 +486,9 @@ def test_stream_fields_use_real_dictionary_lenses_and_leave_other_fields_unchang
 
 def test_stream_sign_conversion_uses_the_real_dropdown_frontend_key(lab_defs):
     controls = lab_defs["flow_controls"]
-    controls._update({"stream_sign": ["Negative direction"]})
-    assert controls.value["stream_sign"] == -1
-    assert controls.value["stream_axis"] == "x"
+    controls._update({"stream_sign": ["Positive direction"]})
+    assert controls.value["stream_sign"] == 1
+    assert controls.value["stream_axis"] == "y"
 
 
 def test_confirmed_tuning_state_restores_actual_receipts_instead_of_echoing_requests(lab_defs):

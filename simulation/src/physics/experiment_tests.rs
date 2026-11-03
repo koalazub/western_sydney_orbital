@@ -161,6 +161,8 @@ fn interior_debris_motion_is_integrated_by_rapier_without_reapplying_the_stream_
     let mut config = ExperimentSettings::default();
     config.debris.count = 17;
     config.debris.speed_spread_mps = 0.0;
+    config.debris.stream_axis = StreamAxis::X;
+    config.debris.stream_sign = 1;
     let mut sim = Simulation::with_experiment(31, config).unwrap();
     let id = EntityId::Debris(1);
     for asteroid in sim

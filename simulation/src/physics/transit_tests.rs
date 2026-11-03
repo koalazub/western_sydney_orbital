@@ -18,16 +18,21 @@ fn actual(sim: &Simulation, id: EntityId) -> &RigidBody {
 }
 
 #[test]
-fn new_default_populates_the_whole_canonical_route_and_real_cohorts_keep_moving_toward_launch() {
+fn new_default_populates_the_whole_canonical_route_and_real_cohorts_move_across_it() {
     let mut sim = Simulation::new_default();
     let config = sim.state.experiment_settings.unwrap();
+    assert_eq!(sim.flight_preset(), FlightPreset::FarSideL2);
     assert_eq!(
         config.debris.distribution,
         DebrisDistribution::TransitStream
     );
     assert_eq!(config.debris.count, 500);
-    assert_eq!(config.debris.stream_axis, StreamAxis::X);
-    assert_eq!(config.debris.stream_sign, 1);
+    assert_eq!(config.debris.stream_axis, StreamAxis::Y);
+    assert_eq!(config.debris.stream_sign, -1);
+    assert_eq!(config.debris.speed_mps, 20.0);
+    assert_eq!(config.debris.speed_spread_mps, 4.0);
+    assert_eq!(config.debris.radius_min_m, 0.4);
+    assert_eq!(config.debris.radius_max_m, 40.4);
     assert!(config.debris.trajectory_adjustment.is_off());
     let volume = TransitVolume::for_preset(FlightPreset::FarSideL2);
     let length = volume.maximum[0] - settings().transit_stream.target_lead_m;
@@ -42,7 +47,8 @@ fn new_default_populates_the_whole_canonical_route_and_real_cohorts_keep_moving_
         .filter(|rock| rock.kind == EntityKind::Debris)
     {
         assert!(!volume.has_exited(rock.position, rock.radius_m));
-        let along = volume.coordinates(rock.position)[0];
+        let coordinates = volume.coordinates(rock.position);
+        let along = coordinates[0];
         let bin = ((along.max(0.0) / length * 4.0) as usize).min(3);
         bins[bin] += 1;
         let radial = norm(rock.position);
@@ -59,12 +65,18 @@ fn new_default_populates_the_whole_canonical_route_and_real_cohorts_keep_moving_
             BIRTH_CLEARANCE_M,
             Some(rock.id)
         ));
-        if along > length * 0.4 && along < length * 0.8 {
-            cohort.push((
-                rock.id,
-                actual(&sim, rock.id).translation(),
-                *actual(&sim, rock.id).rotation(),
-            ));
+        let body = actual(&sim, rock.id);
+        assert!(body.is_dynamic() && body.is_ccd_enabled());
+        // Keep this cohort away from every exit, especially the -Y outflow.
+        // A replenished rock must never count as ordinary crossflow motion.
+        if along > length * 0.2
+            && along < length * 0.8
+            && coordinates[1] > volume.minimum[1] + 200.0
+            && coordinates[1] < volume.maximum[1] - 50.0
+            && coordinates[2] > volume.minimum[2] + 50.0
+            && coordinates[2] < volume.maximum[2] - 50.0
+        {
+            cohort.push((rock.id, rock.radius_m, body.translation(), *body.rotation()));
         }
     }
     assert!(
@@ -77,28 +89,35 @@ fn new_default_populates_the_whole_canonical_route_and_real_cohorts_keep_moving_
     );
     assert!(cohort.len() > 100);
     let report = sim.debris_dynamics().unwrap();
-    assert!(report.mean_velocity_world_mps[0] > 19.0);
-    assert!(Vector::from_array(report.mean_velocity_world_mps).dot(volume.basis[0]) < -19.0);
+    assert_eq!(report.physical_count, 500);
+    assert!(report.mean_velocity_world_mps[1] < -19.0);
+    let mean = Vector::from_array(report.mean_velocity_world_mps);
+    assert!(mean.dot(volume.basis[1]) < -19.0);
+    assert!(mean.dot(volume.basis[0]).abs() < 1.0);
     let handles = sim.handles.clone();
+    let colliders = sim.collider_ids.clone();
+    let mut previous: Vec<_> = cohort.iter().map(|(_, _, position, _)| *position).collect();
     let dt = settings().integration.fixed_step_s;
     for _ in 0..100 {
         sim.advance(dt);
+        for ((id, radius, _, _), previous_position) in cohort.iter().zip(&mut previous) {
+            let position = actual(&sim, *id).translation();
+            assert!(
+                (position - *previous_position).length() < 5.0,
+                "cohort rock {id:?} must move continuously, not recycle"
+            );
+            assert!(!volume.has_exited(position.to_array(), *radius));
+            *previous_position = position;
+        }
     }
     assert!((sim.state.time_s - 5.0).abs() < 1e-10);
     let moved = cohort
         .iter()
-        .filter(|(id, position, rotation)| {
+        .filter(|(id, _, position, rotation)| {
             let body = actual(&sim, *id);
-            body.translation().x > position.x + 65.0
-                && !volume.has_exited(
-                    body.translation().to_array(),
-                    sim.state
-                        .assets
-                        .iter()
-                        .find(|e| e.id == *id)
-                        .unwrap()
-                        .radius_m,
-                )
+            let displacement = body.translation() - *position;
+            displacement.y < -65.0
+                && displacement.dot(volume.basis[0]).abs() < 25.0
                 && *body.rotation() != *rotation
         })
         .count();
@@ -108,9 +127,36 @@ fn new_default_populates_the_whole_canonical_route_and_real_cohorts_keep_moving_
         cohort.len()
     );
     assert_eq!(sim.handles, handles);
+    assert_eq!(sim.collider_ids, colliders);
+    assert_eq!(sim.state.assets.len(), 503);
+    assert_eq!(sim.bodies.len(), 504);
+    assert_eq!(sim.colliders.len(), 504);
     assert_eq!(sim.debris_dynamics().unwrap().physical_count, 500);
-    assert!(sim.debris_dynamics().unwrap().mean_velocity_world_mps[0] > 15.0);
+    assert!(sim.debris_dynamics().unwrap().mean_velocity_world_mps[1] < -15.0);
     validate(&sim.snapshot()).unwrap();
+    let archive = serde_json::to_value(sim.snapshot()).unwrap();
+    let mut restored = Simulation::new_default();
+    restored
+        .execute(PhysicsCommand::Restore {
+            state: Box::new(serde_json::from_value(archive.clone()).unwrap()),
+        })
+        .unwrap();
+    assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), archive);
+    assert_eq!(restored.rng, sim.rng);
+    assert_eq!(restored.debris_dynamics().unwrap().physical_count, 500);
+    for rock in sim
+        .state
+        .assets
+        .iter()
+        .filter(|rock| rock.kind == EntityKind::Debris)
+    {
+        let original = actual(&sim, rock.id);
+        let after = actual(&restored, rock.id);
+        assert_eq!(after.translation(), original.translation());
+        assert_eq!(after.linvel(), original.linvel());
+        assert_eq!(after.angvel(), original.angvel());
+        assert!((*after.rotation() - *original.rotation()).length() < 1e-12);
+    }
 }
 
 #[test]
@@ -188,6 +234,7 @@ fn both_presets_and_every_axis_keep_route_volume_births_and_declared_world_flow(
 fn natural_transverse_outflow_recycles_only_after_complete_exit_and_keeps_safe_real_ids() {
     let mut config = config(9);
     config.debris.stream_axis = StreamAxis::Y;
+    config.debris.stream_sign = 1;
     config.debris.speed_mps = 200.0;
     config.debris.speed_spread_mps = 0.0;
     let mut sim = Simulation::with_experiment(100, config).unwrap();

@@ -18,8 +18,13 @@ fn actual_phobos_debris_contact(sim: &Simulation) -> Option<EntityId> {
 
 #[test]
 fn archived_directed_default_hits_real_phobos_without_injected_motion_or_contact_results() {
-    let mut experiment = ExperimentSettings::default();
-    experiment.debris.distribution = DebrisDistribution::DirectedStream;
+    let experiment: ExperimentSettings = serde_json::from_value(json!({
+        "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
+        "debris": {"count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4,
+            "speed_mps": 20.0, "speed_spread_mps": 4.0, "shell_inner_m": 60.0,
+            "shell_outer_m": 700.0, "stream_axis": "x", "stream_sign": 1}
+    }))
+    .unwrap();
     let mut sim = Simulation::with_experiment(settings().default_seed, experiment).unwrap();
     let config = sim.state.experiment_settings.unwrap();
     assert_eq!(config.debris.count, 500);
@@ -63,7 +68,7 @@ fn archived_directed_default_hits_real_phobos_without_injected_motion_or_contact
     }
     assert!(
         collision.is_some(),
-        "fresh default must produce a genuine debris/Phobos impulse within 15 s"
+        "archived +X directed stream must produce a genuine debris/Phobos impulse within 15 s"
     );
     assert!(sim.state.collisions > initial.collisions);
     assert!(sim.state.time_s > 0.0 && sim.state.time_s <= 15.0 + dt);
@@ -142,58 +147,73 @@ fn archived_directed_default_hits_real_phobos_without_injected_motion_or_contact
 }
 
 #[test]
-fn previous_some_default_archive_keeps_its_base_label_seeded_world_rng_and_future_physics() {
-    let old: ExperimentSettings = serde_json::from_value(json!({
-        "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
-        "debris": {"count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4,
-            "speed_mps": 20.0, "speed_spread_mps": 5.0, "shell_inner_m": 200.0,
-            "shell_outer_m": 3000.0, "stream_axis": "y", "stream_sign": -1}
-    }))
-    .unwrap();
-    assert_ne!(old, ExperimentSettings::default());
-    let old_model = "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.";
-    let mut original = Simulation::with_experiment(100, old).unwrap();
-    // This is the exact descriptive label in genuine pre-default-change exports.
-    // Physics, observations and RNG still come from the full real seeded world.
-    original.state.model = old_model.into();
-    let exported = serde_json::to_value(original.snapshot()).unwrap();
-    let mut restored = Simulation::new_default();
-    restored
-        .execute(PhysicsCommand::Restore {
-            state: Box::new(serde_json::from_value(exported.clone()).unwrap()),
-        })
-        .unwrap();
-    assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
-    assert_eq!(restored.state.experiment_settings, Some(old));
-    assert_eq!(restored.state.model, old_model);
-    assert_eq!(restored.rng, original.rng);
-    for _ in 0..3 {
-        original.advance(settings().integration.fixed_step_s);
-        restored.advance(settings().integration.fixed_step_s);
-        assert_eq!(
-            serde_json::to_value(restored.snapshot()).unwrap(),
-            serde_json::to_value(original.snapshot()).unwrap()
-        );
-    }
-    restored.reset(100).unwrap();
-    assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
-    let mut bad_radius = restored.snapshot();
-    bad_radius.assets.last_mut().unwrap().radius_m += 0.1;
-    let mut bad_mass = restored.snapshot();
-    bad_mass.assets[0].mass_kg += 1.0;
-    let mut bad_frame = restored.snapshot();
-    bad_frame.frame = "unrecognised world frame".into();
-    let mut bad_model = restored.snapshot();
-    bad_model.model = "unrecognised physics model".into();
-    for invalid in [bad_radius, bad_mass, bad_frame, bad_model] {
-        assert!(
-            restored
-                .execute(PhysicsCommand::Restore {
-                    state: Box::new(invalid)
-                })
-                .is_err()
-        );
+fn previous_shell_and_transit_defaults_keep_stored_labels_rng_and_future_physics() {
+    for (parameters, old_model) in [
+        (
+            json!({
+                "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
+                "debris": {"count": 500, "radius_min_m": 0.4, "radius_max_m": 40.4,
+                    "speed_mps": 20.0, "speed_spread_mps": 5.0, "shell_inner_m": 200.0,
+                    "shell_outer_m": 3000.0, "stream_axis": "y", "stream_sign": -1}
+            }),
+            "local_experiment_v1: Phobos surface launch through a broad-shell directional asteroid stream to a kinematic Mars-Phobos L2 return ship. Real rigid-body contacts, circular point-mass CR3BP, synthetic terrain and estimated fuel; not STP parity.",
+        ),
+        (
+            json!({
+                "ship": {"mass_kg": 3388.7, "inertia_scale": 1.0},
+                "debris": {"count": 500, "distribution": {"kind": "transit_stream"},
+                    "radius_min_m": 0.4, "radius_max_m": 40.4,
+                    "speed_mps": 20.0, "speed_spread_mps": 4.0, "shell_inner_m": 60.0,
+                    "shell_outer_m": 700.0, "stream_axis": "x", "stream_sign": 1}
+            }),
+            "local_experiment_v1: Far-side launch to L2; canonical launch-to-target transit stream, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP parity.",
+        ),
+    ] {
+        let old: ExperimentSettings = serde_json::from_value(parameters).unwrap();
+        assert_ne!(old, ExperimentSettings::default());
+        let mut original = Simulation::with_experiment(100, old).unwrap();
+        // Keep the exact descriptive labels used before each default changed.
+        // This exercises real local physics, not replay of an old engine binary.
+        original.state.model = old_model.into();
+        let exported = serde_json::to_value(original.snapshot()).unwrap();
+        let mut restored = Simulation::new_default();
+        restored
+            .execute(PhysicsCommand::Restore {
+                state: Box::new(serde_json::from_value(exported.clone()).unwrap()),
+            })
+            .unwrap();
         assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
+        assert_eq!(restored.state.experiment_settings, Some(old));
+        assert_eq!(restored.state.model, old_model);
+        assert_eq!(restored.rng, original.rng);
+        for _ in 0..3 {
+            original.advance(settings().integration.fixed_step_s);
+            restored.advance(settings().integration.fixed_step_s);
+            assert_eq!(
+                serde_json::to_value(restored.snapshot()).unwrap(),
+                serde_json::to_value(original.snapshot()).unwrap()
+            );
+        }
+        restored.reset(100).unwrap();
+        assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
+        let mut bad_radius = restored.snapshot();
+        bad_radius.assets.last_mut().unwrap().radius_m += 0.1;
+        let mut bad_mass = restored.snapshot();
+        bad_mass.assets[0].mass_kg += 1.0;
+        let mut bad_frame = restored.snapshot();
+        bad_frame.frame = "unrecognised world frame".into();
+        let mut bad_model = restored.snapshot();
+        bad_model.model = "unrecognised physics model".into();
+        for invalid in [bad_radius, bad_mass, bad_frame, bad_model] {
+            assert!(
+                restored
+                    .execute(PhysicsCommand::Restore {
+                        state: Box::new(invalid)
+                    })
+                    .is_err()
+            );
+            assert_eq!(serde_json::to_value(restored.snapshot()).unwrap(), exported);
+        }
     }
 }
 
@@ -204,7 +224,7 @@ fn custom_labels_survive_default_changes_and_none_keeps_the_frozen_calibration_r
     custom.debris.count = 3;
     for config in [custom, ExperimentSettings::default()] {
         let mut source = Simulation::with_experiment(42, config).unwrap();
-        source.state.model = format!("{} [custom settings]", settings().experiment_description);
+        source.state.model = "local_experiment_v1: Far-side launch to L2; canonical launch-to-target transit stream, circular point-mass CR3BP and real rigid-body contacts, estimated fuel; not STP parity. [custom settings]".into();
         let exported = serde_json::to_value(source.snapshot()).unwrap();
         let mut restored = Simulation::new_default();
         restored

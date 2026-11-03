@@ -366,7 +366,7 @@ mod tests {
                 "radius_min_m": 0.4, "radius_max_m": 40.4,
                 "speed_mps": 20.0, "speed_spread_mps": 4.0,
                 "shell_inner_m": 60.0, "shell_outer_m": 700.0,
-                "stream_axis": "x", "stream_sign": 1
+                "stream_axis": "y", "stream_sign": -1
             }
         });
         assert_eq!(serde_json::to_value(settings).unwrap(), value);

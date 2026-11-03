@@ -1019,7 +1019,8 @@ def test_reported_distribution_does_not_rewrite_the_separate_baseline_or_invent_
     assert observed_setup({})["debris_distribution"] is None
 
 
-def test_sweep_default_merge_keeps_saved_explicit_legacy_distribution():
+@pytest.mark.parametrize("kind", ["directed_stream", "transit_stream"])
+def test_sweep_default_merge_keeps_saved_explicit_stream_settings(kind):
     """Configuration parsing only. No sweep, engine, replay or policy is executed."""
     root = Path(__file__).resolve().parents[1]
     scenario = json.loads((root / "simulation/scenarios/phobos_escape.json").read_text("utf-8"))
@@ -1035,11 +1036,13 @@ def test_sweep_default_merge_keeps_saved_explicit_legacy_distribution():
     policies = {"coast": coast_command}
     current = _configuration(config, scenario, policies)
     assert current["settings"]["debris"]["distribution"] == {"kind": "transit_stream"}
+    assert current["settings"]["debris"]["stream_axis"] == "y"
+    assert current["settings"]["debris"]["stream_sign"] == -1
     saved = deepcopy(current)
-    saved["settings"]["debris"]["distribution"] = {"kind": "directed_stream"}
+    saved["settings"]["debris"].update(distribution={"kind": kind}, stream_axis="x", stream_sign=1)
     loaded = json.loads(json.dumps(saved))
     merged = _configuration(loaded, scenario, policies)
-    assert merged["settings"]["debris"]["distribution"] == {"kind": "directed_stream"}
+    assert merged["settings"] == saved["settings"]
     assert "trajectory_adjustment" not in merged["settings"]["debris"]
     assert loaded == saved
     assert scenario["experiment_settings"]["debris"]["distribution"] == {"kind": "transit_stream"}
