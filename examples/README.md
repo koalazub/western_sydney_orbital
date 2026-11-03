@@ -6,7 +6,7 @@ runtime profile registry is `src/wsorb/controllers/catalog.json`.
 
 | Person | STP entrypoint | Local profile IDs | Implementation | Notes |
 | --- | --- | --- | --- | --- |
-| Ali | [`ali/official_profile.py`](ali/official_profile.py) local; [`ali/stp_official_profile.py`](ali/stp_official_profile.py) STP source port | `ali_official_profile` (sweep; `wso_official_profile` alias) | `src/wsorb/controllers/official_profile.py`, `src/wsorb/flight/official_profile.py`, `src/wsorb/stp_official.py` | The 6/6 official-profile controller. The STP source port still needs the real probe and flight. |
+| Ali | [`ali/official_profile.py`](ali/official_profile.py) local; [`ali/stp_official_profile.py`](ali/stp_official_profile.py) STP source port | `ali_official_profile` (catalog and sweep; `wso_official_profile` sweep alias) | `src/wsorb/controllers/official_profile.py`, `src/wsorb/flight/official_profile.py`, `src/wsorb/stp_official.py` | The 6/6 official-profile controller. The STP source port still needs the real probe and flight. |
 | WSO | [`wso/stp_controller.py`](wso/stp_controller.py) | `baseline`, `body-axis` | `src/wsorb/stp_policy.py` | The portable checkpoint controller and STP handoff. |
 | Bui | [`bui/Controller.py`](bui/Controller.py) | `bui_alpha_beta_mvp` | `bui/mvp/`, `src/wsorb/controllers/_bui.py` | The `mvp/` folder must stay beside `Controller.py`. |
 | Tom | [`tom/Controller.py`](tom/Controller.py) | `tom_kalman_velocity_mvp` | `tom/`, `src/wsorb/controllers/_tom.py` | `tom/UserAPI.py` is the body +Z template, not the target-seeking controller. |
@@ -14,20 +14,44 @@ runtime profile registry is `src/wsorb/controllers/catalog.json`.
 
 ## Switch between them
 
-In the local game, open **Controller profiles** or press **Shift+C**. The
-catalog presents the reviewed profile IDs above. Start the private runner once:
+Python runs on a teammate's machine, not on the hosted site. Hosting stays on
+Cloudflare Free. Run these commands from the repository root inside `devenv shell`.
+After `just setup` and `just build`, start the local game:
 
 ```sh
-just controllers serve --connection-file .devenv/wsorb-local.json --run
+WSORB_LAB=1 just local
 ```
 
-Then choose a profile and **Run fresh test**. The runner does not auto-start
-another profile; each Run replaces the current trial flight.
+In a second terminal, enter `devenv shell` in the same checkout and start the
+private runner once:
 
-`ali_official_profile` is a matched-sweep policy, not a catalog profile. It is
-launched by [`flight_sweep.py`](flight_sweep.py) and documented in
+```sh
+uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run
+```
+
+Open **Test profiles** or press **Shift+C**. Choose a teammate, profile, world,
+whole-number seed from 0 to 4294967295 and time budget, then check the connection. **Run flight** requires
+a ready game and an online, idle Python service. It starts directly in a fresh
+tab and asks before replacing a flight that has already started. The camera
+follows the lander, with live metrics and **Stop controller** below the scene.
+Changing a selection requests Stop; it does not start another profile.
+
+For the hosted game, create a room and run the same Python service on your machine:
+
+```sh
+uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
+uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run
+```
+
+Open the printed private game link and allow Python before using **Run flight**.
+The [hosted connection guide](../docs/flight-lab.md#hosted-python-connection)
+also explains how to connect an already-open comparison selection without
+losing its settings. Room creation never starts Python. Keep its link and file private.
+
+`ali_official_profile` is available in the catalog and the matched sweep run by
+[`flight_sweep.py`](flight_sweep.py). See
 [`../docs/official-comparison.md`](../docs/official-comparison.md). The old
-`wso_official_profile` key remains an alias so earlier configs still run.
+`wso_official_profile` sweep key remains an alias so earlier configs still run.
 
 ## Keep the boundary clear
 

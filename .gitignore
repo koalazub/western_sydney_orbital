@@ -18,7 +18,7 @@ build/
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
 
-# Local sweep outputs (raw traces stay local)
+# Local sweep outputs and raw evidence. Curated results live in docs/analytics.
 runs/
 
 # Test and lint caches
@@ -55,12 +55,6 @@ node_modules/
 worker/worker-configuration.d.ts
 /worker/public/
 /simulation/target/
-
-# Keep generated runs, but not scratch output.
-runs/scratch/
-runs/**/raw/
-# Keep this full sensor/source evidence local; only its curated analytics ship.
-/runs/teammate-analytics-69/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

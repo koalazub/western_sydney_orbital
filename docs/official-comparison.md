@@ -4,7 +4,7 @@ This comparison runs on the local **Competition reference · 1.31 km hop** prese
 with the **Official debris cloud**. It is a local practice comparison, not an STP
 submission, leaderboard result or licensed-runtime measurement.
 
-The historical [teammate comparison](../README.md#recorded-teammate-flights) is
+The historical [teammate comparison](flight-lab.md#recorded-teammate-flights) is
 separate: it used the older broad-stream world. This page covers the official
 relative geometry, a local cloud with a fixed 500-body count and the published
 example controller.
@@ -63,7 +63,7 @@ The per-trial records and summary are the published result:
 - [Artifact checksums](analytics/official-comparison/manifest.json)
 
 The full interactive report is not committed because it embeds raw public
-observation traces. Regenerate it locally with `just flight-analyze` from a
+observation traces. Regenerate it locally with `examples/flight_sweep.py --analyze-only` from a
 saved run.
 
 The archived `runs.csv` has zero sample counts and blank per-trial metrics even
@@ -125,13 +125,21 @@ The archived score fields, physical measurements and artifact checksums stay unc
 
 ## Repeat it
 
+For one watched flight, choose **Fly this code** on a hosted comparison row. The game opens with that profile, world, seed and time budget selected, but it does not start Python. Python runs on your machine. The hosted site stays on Cloudflare Free and uses the existing authenticated room relay.
+
+Follow the [private-room setup](flight-lab.md#hosted-python-connection): inside `devenv shell`, create a room with `uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json`, append its private fragment to the selected game's address, allow Python, and start `uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run` on your machine. Keep the query parameters so the profile, world, seed and time budget stay selected. Keep the room link and file private. You can also use the [local game and runner](flight-lab.md#choose-a-teammate-profile).
+
+**Run flight** becomes available after the game is ready and Python confirms it is online and idle. It queues the selected Python code and opens the lander view. Historical `wso_official_profile` links explicitly select `ali_official_profile`. This is a new live run on the current local engine, so asynchronous control timing can produce a different result from the saved fixed-step sweep.
+
+For a new matched sweep, run these from the repository root inside `devenv shell`:
+
 ```sh
 just build
-just flight-sweep examples/official_comparison.json runs/official-comparison-new
-just official-chart
+uv run --locked --extra lab python examples/flight_sweep.py --config examples/official_comparison.json --output runs/official-comparison-new
+uv run --locked python -m wsorb.official_comparison_chart --summary docs/analytics/official-comparison/summary.csv --output docs/analytics/official-comparison/performance.svg --manifest docs/analytics/official-comparison/manifest.json
 ```
 
-`just official-chart` regenerates the SVG from the committed `summary.csv` and
+`wsorb.official_comparison_chart` regenerates the SVG from the committed `summary.csv` and
 updates its hash in the artifact manifest.
 
 The output directory must be new. The sweep records the engine build, public
@@ -139,14 +147,14 @@ policy sources, configuration and every trial trace in that directory. To
 regenerate the HTML from saved trials, run:
 
 ```sh
-just flight-analyze runs/official-comparison-new
+uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output runs/official-comparison-new
 ```
 
 To inspect a specific repetition without replacing its saved report, provide a
-new HTML file as the third argument:
+new HTML file with `--report-file`:
 
 ```sh
-just flight-analyze runs/official-comparison-2026-11-02 trial-00012 runs/seed-101-review.html
+uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output runs/official-comparison-2026-11-02 --trial trial-00012 --report-file runs/seed-101-review.html
 ```
 
 The new report reads existing traces only. It refuses an existing output file.
@@ -161,7 +169,7 @@ flights. It does not start a flight, load the game engine or need WebGPU.
 
 ### Use the hosted workspace
 
-The controls described here were deployed on 3 November 2026. Archived flight measurements remain unchanged.
+Archived flight measurements remain unchanged when the comparison controls change.
 
 Choose a world above the Summary matrix. **Filters** contains outcome, inspected
 seed/repetition, baseline and **Show differences from baseline**. Differences are
@@ -224,19 +232,22 @@ Command row `t` therefore describes the preceding interval, not a request that
 starts at `t`. Damage brackets also describe sampled intervals, not exact contact
 times. These plots support an optimisation hypothesis, not collision replay.
 
-To publish paths from saved evidence without flying again:
+Publishing paths from saved evidence requires the original private sweep
+directories. They are not
+included in a checkout; the committed curated files above remain usable without
+them. Use the output path of a new sweep when publishing a new experiment.
 
 ```sh
-just path-comparison runs/official-comparison-2026-11-02 official
-just path-comparison runs/teammate-analytics-69 team
+uv run --locked python -m wsorb.path_comparison --input runs/official-comparison-2026-11-02 --id official --output docs/analytics/path-comparison/official.json --manifest docs/analytics/path-comparison/manifest.json
+uv run --locked python -m wsorb.path_comparison --input runs/teammate-analytics-69 --id team --output docs/analytics/path-comparison/team.json --manifest docs/analytics/path-comparison/manifest.json
 ```
 
 The hosted metric supplements were generated from saved receipts without
 rerunning flights. To reproduce their publication:
 
 ```sh
-just comparison-metrics runs/official-comparison-2026-11-02 official
-just comparison-metrics runs/teammate-analytics-69 team
+uv run --locked python -m wsorb.comparison_metrics --input runs/official-comparison-2026-11-02 --id official --output docs/analytics/path-metrics/official.json --manifest docs/analytics/path-metrics/manifest.json
+uv run --locked python -m wsorb.comparison_metrics --input runs/teammate-analytics-69 --id team --output docs/analytics/path-metrics/team.json --manifest docs/analytics/path-metrics/manifest.json
 ```
 
 Historical summaries and original publications remain unchanged. The curated

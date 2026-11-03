@@ -5,7 +5,6 @@ created = "2026-10-22T03:31:08+00:00"
 author = "Simulation runner"
 kind = "campaign"
 tags = ["campaign", "lunar_sar"]
-run = "runs/20261022T033108Z-d0f29b3a"
 +++
 
 # Lunar SAR strategy comparison
@@ -24,4 +23,4 @@ Best policy: `sector-baseline` — 24/24 successes, median report 19m 52s, cover
 | 6 | `sweep-relay` | 23/24 | 23m 00s | 2h 09m | 46.9% | 46.0% | 25.0% | 11.03 kWh | 70.8% |
 | 7 | `nearest-baseline` | 23/24 | 1h 29m | 2h 38m | 40.8% | 21.7% | 12.5% | 5.31 kWh | 55.2% |
 
-Raw data: `runs/20261022T033108Z-d0f29b3a/campaign.json`, `runs/20261022T033108Z-d0f29b3a/results.csv`.
+The generated campaign export was removed during repository cleanup on 3 November 2026. The results above remain as the historical record. The original run ID was `20261022T033108Z-d0f29b3a`.

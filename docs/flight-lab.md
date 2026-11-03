@@ -1,9 +1,10 @@
 # Flight lab guide
 
-Start with the [README](../README.md) for a first flight. This guide keeps the less frequent tasks and the limits that matter when interpreting an experiment.
+The [README](../README.md) introduces the competition and the team's work. This guide covers setup, flying, controller experiments and the limits of the local model.
 
-The Across Phobos defaults and score-first profile/comparison controls were deployed on 3 November 2026 as Worker version `3abfa18e-a29c-464d-bdc3-08eb90688f91`. The full code verification passed; visual review is owner-led.
-
+- [Start locally](#start-locally)
+- [Fly manually](#fly-manually)
+- [Run a controller](#run-a-controller)
 - [Other ways to start](#other-ways-to-start)
 - [Inputs and launch placement](#inputs-and-launch-placement)
 - [Debris settings and model limits](#debris-settings-and-model-limits)
@@ -13,11 +14,97 @@ The Across Phobos defaults and score-first profile/comparison controls were depl
 - [Reading the comparison](#reading-the-comparison)
 - [Licensed SDK handoff](#send-a-controller-to-a-colleague)
 
+## Start locally
+
+Install Nix, devenv and Just. Enter the pinned environment from the repository root, then run project commands inside it:
+
+```sh
+devenv shell
+just setup
+just build
+devenv up lab simulation
+```
+
+The first build can take several minutes. Later builds reuse unchanged outputs.
+
+1. Open **http://127.0.0.1:61829/** in a current browser with WebGPU enabled.
+2. Wait for the world to appear. Keep one game tab visible and press **F** to follow the lander.
+3. Select **Notebook** in the bottom toolbar to open the private Python editor. It normally uses port `2718`; open it through the game rather than sharing its access link.
+
+Leave the processes running while you work. `devenv processes down` stops them. Use `devenv up -d lab simulation` for background operation.
+
+For game-only sessions, Windows, headless physics or startup logs, see [other ways to start](#other-ways-to-start). Do not start a second server accidentally.
+
+## Fly manually
+
+The world starts paused. Click the scene, then select **Play** or press **P**. Pausing freezes the lander and debris together.
+
+| Key | Action |
+| --- | --- |
+| P | Play or pause. |
+| Space | A fresh press launches from pause; hold for upward thrust. |
+| E / Q | Thrust up / down. |
+| W / S | Fire front / back nozzle, pushing backward / forward. |
+| A / D | Fire left / right nozzle, pushing right / left. |
+| F / Shift+F | Follow the lander / frame the selected object. |
+| 5 / 6 / 7 | Overview / top ship camera / bottom ship camera. |
+| H | Full controls and key bindings. |
+
+Nozzles belong to the lander, not the screen. Releasing a key stops thrust, not velocity or spin. Use opposite thrust to slow down. Drag, wheel or pinch to adjust the view; hold Alt/Option with movement keys to move only the viewing camera.
+
+Use **Flight** for measurements, **Ship** for live hardware inputs, **Debris** for the debris field and **Launch** for placement or a new world. **Views** changes the camera and lighting.
+
+Increasing thrust strength does not fire an engine. Check the clock and last-applied thrust reading when an edit seems to do nothing. The [input and placement guide](#inputs-and-launch-placement) explains live changes, new-world drafts and moving the launchpad.
+
+## Run a controller
+
+### From the notebook
+
+1. Open **Flight → Connect / Refresh**. This reads the existing flight and draws guidance; it does not fly the lander.
+2. Open **Python policy** to choose a controller and inspect its settings or code.
+3. Select **Run controller** to hand over control. Its first valid command can resume an eligible paused flight.
+4. Watch the native mission status, target range, relative speed, damage and fuel in **Flight** and **History**. A drawn route is not an arrival.
+5. Select **Stop Python control** to end the worker and standby. In resilient mode, Stop releases control without pausing physics. Use **P** or **Pause physics** to pause as well. Older baseline controllers also pause during cleanup.
+
+Keep one controller in charge. Manual thrust, pause, placement or reset can end Python control. Pressing Play again does not restart the controller. Release held movement keys after a handover if the game asks.
+
+### Choose a teammate profile
+
+The source entrypoint for each person is indexed in [examples/README.md](../examples/README.md).
+
+Python runs on a teammate's machine, never on the hosted site. Hosting stays on Cloudflare Free. Use the local game or the [private room relay](#hosted-python-connection) to connect that Python runner to a browser flight.
+
+Open **Test profiles** or press **Shift+C** with the scene focused. Choose a teammate, code profile, world, seed and time budget. **Run flight** stays disabled until the game is ready and the connected Python service confirms it is online and idle. Run queues the selected code on your machine and opens the lander view. **Cancel startup** stops flight preparation before submission; if submission is already confirmed, it requests Stop for that exact job. It does not shut down the Python service.
+
+The launcher offers the competition hop with the official debris cloud, the historical L2 settings from the saved teammate comparison, and the current Across Phobos practice world. Seeds are whole numbers from 0 to 4294967295. A comparison row's **Fly this code** link fills these choices without starting a flight or Python. It still requires a runner on your machine. New runs use the current local engine and live Python timing, so they can differ from saved runs.
+
+For a locally served game, run this from the repository root inside `devenv shell`, after `just setup` and `just build`:
+
+```sh
+WSORB_LAB=1 just local
+```
+
+In a second terminal, enter `devenv shell` in the same checkout and start the private runner:
+
+```sh
+uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run
+```
+
+**Run flight** starts directly in a fresh tab and asks before replacing a flight that has already started. Keep the tab visible while Python flies. Live time, range, speed, fuel and damage stay below the scene beside **Stop controller**. Changing a profile or world requests Stop first. It does not start the next profile automatically.
+
+If `devenv up lab simulation` already serves your local game, leave it running and only start the runner in the second terminal. Do not start another game server.
+
+Check **Controller running**, not just **API connected**. The game must have accepted the controller's command and be running physics. The status panel shows the command time and expiry.
+
+Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
+
+For run budgets, sensor failures, standby takeover and isolated CLI runs, see [notebook policies and failures](#notebook-policies-and-failures).
+
 ## Other ways to start
 
-Run commands from the repository root. The normal game-and-notebook setup is in the [quickstart](../README.md#start-locally).
+Run commands from the repository root inside `devenv shell`. The normal game-and-notebook setup is in [Start locally](#start-locally).
 
-For a game-only session after `just setup`, use `PORT=0 just local` and open the exact address printed in the terminal. `PORT=0 just --no-deps local` serves an existing build without rebuilding it. Choose this or the managed game-and-lab setup, rather than starting both.
+For a game-only session after `just setup` and `just build`, use `PORT=0 just local` and open the exact address printed in the terminal. `just local` serves the existing build. Choose this or the managed game-and-lab setup, rather than starting both.
 
 For background processes, use `devenv up -d lab simulation`. `devenv processes logs lab` shows the editor's startup message. The process named `notebook` is a separate sharing service, not the Marimo flight lab.
 
@@ -144,17 +231,29 @@ The final JSON reports native arrival, range, speed, damage, fuel and source/con
 
 ## Hosted Python connection
 
-Python runs privately on your machine. The Cloudflare room relays authenticated calls to the real WASM engine in your browser; it does not run a Python kernel or publish the controller's source.
+Python runs privately on your machine. The existing Cloudflare Free room relay sends authenticated calls to the real WASM engine in your browser; it does not host Python or publish the controller's source. To watch a hosted flight, keep both your local runner and the browser running.
+
+From the repository root inside `devenv shell`, create a private room:
 
 ```sh
-devenv shell uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
+uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
 ```
 
-Open the private browser link printed by this command in a new tab, then choose **Allow Python connection**. This starts a separate game; leave existing flights open. Keep the new game visible in a separate window. Inspect first, then explicitly start the same portable checkpoint policy:
+Open the private browser link printed by this command in a new tab, then choose **Allow Python connection**. This starts a separate game; leave existing flights open. Keep the new game visible in a separate window. Start the profile runner on your machine:
 
 ```sh
-devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json
-devenv shell uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json --run --progress
+uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run
+```
+
+Then open **Test profiles**, choose the code and world, and use **Check connection**. **Run flight** becomes available only after the game is ready and Python is online and idle. Room creation and connection alone do not start a controller.
+
+If **Fly this code** already opened a game with your choices selected, append the private link's `#room=…&key=…` fragment to that tab's existing address instead of opening another game. Keep its query parameters intact and allow Python. The loaded game accepts this fragment without resetting physics or losing the selected profile, world, seed or time budget.
+
+For the separate portable checkpoint CLI, inspect first, then explicitly start its policy instead of running the profile service against the same flight:
+
+```sh
+uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json
+uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json --run --progress
 ```
 
 Keep the link and connection file private. A room cannot replace an already connected owner. Room calls read fresh public observations, not saved room state or hidden debris truth. Flight control uses the native ownership fence and original-source expiring commands. A disconnect never retries thrust, resets the game or extends a decision's validity. Manual ship input or pausing ends the run. The hosted bridge deliberately excludes reset, tuning, raw latched thrust and private local-lab endpoints. Network latency may exhaust a lease and end an attempt; this connection is not STP runtime validation.
@@ -187,21 +286,21 @@ All logging passes through dedicated helpers. Tokens, capability URLs, raw error
 
 With the local server's `WSORB_DIAGNOSTICS=1` flag, allowlisted startup asset deliveries are logged before a browser claims the API. Fixed asset labels and HTTP statuses distinguish a page that never requested the game from an asset-load failure; they do not claim renderer readiness.
 
-For loading problems, `just local-check live` reads the connected game's status without a flight command. `just local-check load` checks game-code loading and WASM compilation, not browser graphics. Copy startup diagnostics from the game's error screen when WebGPU fails; the app does not silently switch renderers.
+For loading problems, copy startup diagnostics from the game's error screen. `node worker/scripts/platform-probe.mjs` checks the built WASM and physics on this machine; it does not test browser graphics.
 
 ## Notebook policies and failures
 
-The [README's controller steps](../README.md#run-a-controller) cover connecting, running and stopping. Connected notebook functions and supported live controls can update the existing worker without restarting the flight. The default A* route remains advisory until a controller sends commands, and has not yet demonstrated arrival through the 20 m/s transit stress field.
+The [controller steps](#run-a-controller) cover connecting, running and stopping. Connected notebook functions and supported live controls can update the existing worker without restarting the flight. The default A* route remains advisory until a controller sends commands, and has not yet demonstrated arrival through the 20 m/s transit stress field.
 
 Resilient Stop requests a guarded native release without clearing a newer manual command. If release cannot be confirmed, native expiry still bounds the old command. Use **P** or **Pause physics** to pause, and confirm that the clock has stopped. Select **Connect / Refresh** for read-only guidance again.
 
 For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI example is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; their original SDK entrypoints and displays remain in [`examples/`](../examples/).
 
-Select **Test profiles** below the game to open the Python runner directly. Choose Bui, Tom, Harry or another catalog owner and a code profile. **Set up Python runner** gives the local or private-room command; Run stays disabled until the Python service and game are ready. **Run fresh test** asks before replacing this tab's flight with the Across Phobos defaults. It queues the selected Python adapter, not a JavaScript copy. **Watch flight** returns to the native scene; the orange trail with Debug guides enabled records actual lander positions, not predictions. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
+Select **Test profiles** below the game to choose Bui, Tom, Harry or another catalog owner and a code profile. **Set up Python runner** gives the local and private-room commands. Python always runs on your machine; the hosted site never starts it. **Run flight** requires a ready game and an online, idle Python service. It queues the selected Python adapter and opens the native lander view. The orange trail with Debug guides enabled records actual lander positions. **Watch flight** returns to the scene after reopening the panel. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
 
 The profile result puts **Points** before the physical diagnostics and shows the current-formula local breakdown when terminal inputs are available. It is not an official receipt. For a damage failure, initial range must come from the actual time-zero row in the existing bounded native analytics. The job's final measurement alone does not contain that range; if the row is missing, failure points remain unavailable. No preset geometry, current-engine assumption or protocol extension fills the gap. Errors and unfinished attempts remain attempts, not zero-point results.
 
-`just controllers list` lists profile names and adaptations. `just controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `just controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
+`uv run --locked wsorb controllers list` lists profile names and adaptations. `uv run --locked wsorb controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `uv run --locked wsorb controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
 
 The connection badge distinguishes API transport from execution. **Controller running** needs matching native ownership, an accepted command that has not expired and running physics. Details show the command's simulation timestamp and expiry, plus idle, claimed, paused, expired and released transitions. Credentials are not logged. Native receipts have verified both local startup and Stop, not arrival through the transit stress field or the official cloud.
 
@@ -258,7 +357,7 @@ Phobos and Mars use [credited spacecraft surface maps](../worker/web/assets/ATTR
 
 ## Reading the comparison
 
-The [README's recorded comparison](../README.md#recorded-teammate-flights) covers 30 older broad-stream trials, not the transit stress field or the official cloud. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
+The historical teammate comparison covers 30 older broad-stream trials, not the transit stress field or the official cloud. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
 
 The separate [official-profile comparison](official-comparison.md) uses `competition_reference` with `official_cloud`, three seeds, two consecutive attempts and 500 bodies per world. Each requested seed feeds the local generator; matching policies and repeats reuse that seed's deterministic population. This does not make local seed 100 the STP population. The comparison includes the published `BasicController.py` baseline, Ali's official-profile policy, WSO's checkpoint profiles and the older basic PD reference. It does not replace this historical broad-stream comparison.
 
@@ -271,6 +370,34 @@ Medians use available physical results, including damage failures and partial ti
 The [competition rules](https://github.com/SimDynamX/SpaceTeamsPRO/discussions/218) require two consecutive unchanged-code runs in one continuous video and average their scores. This headless comparison mirrors only that pairing. It is not an official submission, video or licensed SDK run. Averaging pair means across seeds is a local choice, not an official aggregate, tie-break rule or rule for mixed outcomes.
 
 Historical local score receipts and pair means remain unchanged in downloads as legacy diagnostics, not official STP points. The revised browser comparison calculates a separate current-formula local estimate from each recorded terminal run's time, damage, fuel and distance inputs. It does not relabel the old totals. The [scoring reference](scoring.md) leads with the current 75 kg formula and a hypothetical 175-point example, then preserves the older wiki's 75-point example and 1.15 kg code conflict. No official 175-point result is claimed.
+
+<!-- BEGIN GENERATED TEAMMATE ANALYTICS -->
+### Recorded teammate flights
+
+Local practice with 500 debris bodies, 5 matched seeds and 2 fresh attempts per seed and profile. Not an official leaderboard.
+
+![Completion fractions, sampled durations, fuel and episode counts](analytics/team-comparison/efficiency.svg)
+
+| Profile | Arrivals / attempts | Median duration, s | Estimated fuel, kg |
+| --- | ---: | ---: | ---: |
+| Harry / Basic PD + radar | 10/10 | 224.4 | 304.6 |
+| Bui / Alpha-beta + sidestep | 10/10 | 239.8 | 83.22 |
+| Tom / Kalman + velocity governor | 10/10 | 222.7 | 85 |
+
+Duration and fuel are medians of available physical results, including failed flights and partial timeouts. Errors count as attempts, not physical measurements. A timeout is not an arrival time. Missing readings stay missing.
+
+5 matched seeds with 2 consecutive repeats are not 10 independent seed draws. Arrival counts are descriptive, not proof of robustness. Arrival means entry to the station region, not safe docking.
+
+STP points are unavailable because local fuel is not STP's fuel counter. The [scoring notes](scoring.md) preserve the wiki/code disagreement; these profiles are unranked.
+
+Native burn and turn measurements cover 30/30 physical results. Fuel and turning measurements describe the local model, not competition efficiency.
+
+[Fuel and burns](analytics/team-comparison/fuel-burns.svg) · [Turns and rotation](analytics/team-comparison/turns.svg) · [How to read and repeat this comparison](#reading-the-comparison)
+
+[Full dataset and build record](analytics/team-comparison/dataset.json) · [Trials CSV](analytics/team-comparison/trials.csv) · [Summary CSV](analytics/team-comparison/aggregate.csv) · [Samples CSV](analytics/team-comparison/samples.csv) · [Artifact checksums](analytics/team-comparison/manifest.json)
+<!-- END GENERATED TEAMMATE ANALYTICS -->
+
+Bui used slightly less estimated fuel than Tom; Tom arrived sooner. Bui also turned while coasting. Harry's row uses the shared PD baseline from his sweep workflow. The local angular-control fuel model differs from STP jet allocation, so these results do not identify a competition winner.
 
 ### Fuel, burns and turns
 
@@ -301,15 +428,17 @@ Both official and historical-team metric supplements are hosted and use existing
 Reproduce the experiment and publish to new directories:
 
 ```sh
-just flight-sweep examples/teammate_comparison.json runs/scratch/teammate-comparison-new
-just scoreboard runs/scratch/teammate-comparison-new docs/analytics/teammate-comparison-new
+uv run --locked --extra lab python examples/flight_sweep.py --config examples/teammate_comparison.json --output runs/scratch/teammate-comparison-new
+uv run --locked wsorb scoreboard --input runs/scratch/teammate-comparison-new --output docs/analytics/teammate-comparison-new
 ```
 
-Both outputs must be new directories. The [publisher](../src/wsorb/scoreboard.py) also provides `render_readme_section` for the README's generated block. Full raw public-observation traces stay local in the ignored run directory.
+Both outputs must be new directories. The [publisher](../src/wsorb/scoreboard.py) also provides `render_comparison_section` for this guide's generated block.
 
-To correct an existing generated publication, `just scoreboard-refresh INPUT OUTPUT` verifies its current artifact digests before replacing generated files. It refuses changed files and leaves other files and raw evidence alone.
+`runs/` is an ignored workspace for raw observations, saved policy sources and local reports. Its contents are not shipped with the game. The current local source evidence for the published comparisons is kept there so paths and metrics can be checked or republished without rerunning flights. Only reviewed datasets and charts under `docs/analytics/` are versioned. A fresh checkout does not include the raw evidence; create a new sweep or obtain the original files privately before using commands that read them.
 
-Use `just flight-analyze RUN_DIRECTORY` to inspect saved sweep trials, or `just flight-notebook` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
+To correct an existing generated publication, `uv run --locked wsorb scoreboard --input INPUT --output OUTPUT --refresh` verifies its current artifact digests before replacing generated files. It refuses changed files and leaves other files and raw evidence alone.
+
+Use `uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output RUN_DIRECTORY` to inspect saved sweep trials, or `uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
 
 ## Save and share runs
 
@@ -384,4 +513,4 @@ Use the repository's Just/Jujutsu recipes for changes, validation and review. Ke
 - [Simulator debugging](https://github.com/SimDynamX/SpaceTeamsPRO/wiki/Python-System-Debugging)
 - [Python API](https://simdynamx.github.io/stp-python-api-docs/)
 
-Rules, announcements and the current challenge links are in the [README](../README.md#help-and-competition).
+Rules, announcements and the current challenge links are in the [README](../README.md#competition-resources).

@@ -15,7 +15,7 @@ and the flight math lives in
 Run the matched comparison:
 
 ```sh
-just flight-sweep examples/official_comparison.json runs/ali-official-new
+uv run --locked --extra lab python examples/flight_sweep.py --config examples/official_comparison.json --output runs/ali-official-new
 ```
 
 Ali is the owner of this profile, not the automatic qualifier submitter. The

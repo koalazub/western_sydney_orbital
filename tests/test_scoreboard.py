@@ -14,7 +14,7 @@ from wsorb.scoreboard import (
     main,
     publish_scoreboard,
     refresh_scoreboard,
-    render_readme_section,
+    render_comparison_section,
 )
 from wsorb.scoring import FORMULA, score_compatibility
 
@@ -346,13 +346,13 @@ def test_primary_mean_uses_only_complete_two_run_pairs_and_preserves_pair_outcom
     assert tom["unscored_runs"] == 4
     assert all(pair["mean_score"] is None for pair in tom["paired_scores"])
     assert "Unranked" in bundle["comparison"]["ranking_method"]
-    section = render_readme_section(bundle)
+    section = render_comparison_section(bundle)
     assert "Harry / Basic PD + radar | 4/4 | 2 |" in section
     assert "Mean two-run score" not in section
     assert "STP points are unavailable" in section
     assert "2 matched seeds with 2 consecutive repeats are not 4 independent" in section
     assert "these profiles are unranked" in section
-    assert "docs/flight-lab.md#reading-the-comparison" in section
+    assert "(#reading-the-comparison)" in section
 
 
 def test_paired_publication_matches_ui_profile_and_retained_sample_contract(paired_sweep):
@@ -635,10 +635,10 @@ def test_chart_text_and_profile_strokes_have_measured_contrast_on_white():
     assert all(contrast_on_white(color) >= 3 for color in _COLORS)
 
 
-def test_readme_renderer_includes_real_table_downloads_and_method_links(saved_sweep):
+def test_comparison_renderer_includes_real_table_downloads_and_method_links(saved_sweep):
     bundle = build_bundle(saved_sweep)
     before = deepcopy(bundle)
-    section = render_readme_section(bundle)
+    section = render_comparison_section(bundle)
     assert "Bui / Alpha-beta + sidestep | 1/2 | 2 | 0.4 |" in section
     assert "Mean two-run score" not in section
     assert "score-components.svg" not in section
@@ -649,18 +649,18 @@ def test_readme_renderer_includes_real_table_downloads_and_method_links(saved_sw
     assert "partial timeout" in section
     assert "official leaderboard" in section
     assert "Native burn and turn measurements cover 5/5 physical results" in section
-    assert "docs/flight-lab.md#reading-the-comparison" in section
-    assert "docs/scoring.md" in section
-    assert "docs/analytics/team-comparison/turns.svg" in section
-    assert "docs/analytics/team-comparison/fuel-burns.svg" in section
+    assert "(#reading-the-comparison)" in section
+    assert "(scoring.md)" in section
+    assert "analytics/team-comparison/turns.svg" in section
+    assert "analytics/team-comparison/fuel-burns.svg" in section
     assert "aggregate.csv" in section
     assert "dataset.json" in section and "manifest.json" in section
     assert BUILD["sha256"] not in section
     assert bundle == before
-    custom = render_readme_section(bundle, asset_prefix="assets/measured")
+    custom = render_comparison_section(bundle, asset_prefix="assets/measured")
     assert "assets/measured/turns.svg" in custom
     with pytest.raises(ValueError, match="local relative"):
-        render_readme_section(bundle, asset_prefix="https://private.invalid")
+        render_comparison_section(bundle, asset_prefix="https://private.invalid")
 
 
 def test_legacy_native_analytics_and_score_terms_stay_unavailable(saved_sweep, tmp_path):
@@ -685,7 +685,7 @@ def test_legacy_native_analytics_and_score_terms_stay_unavailable(saved_sweep, t
     assert all(row["score_breakdown"] is None for row in bundle["trials"])
     assert any(row["score"] == -20 for row in bundle["trials"])
     assert "Unavailable, no recorded values" in (tmp_path / "legacy-public/turns.svg").read_text()
-    assert "No burn or turn history" in render_readme_section(bundle)
+    assert "No burn or turn history" in render_comparison_section(bundle)
 
 
 def test_mixed_legacy_score_evidence_cannot_claim_formula_matched_ranking(saved_sweep):

@@ -937,10 +937,10 @@ def refresh_scoreboard(directory: str | Path, output: str | Path) -> dict:
     return bundle
 
 
-def render_readme_section(
-    bundle: dict, *, asset_prefix: str = "docs/analytics/team-comparison"
+def render_comparison_section(
+    bundle: dict, *, asset_prefix: str = "analytics/team-comparison"
 ) -> str:
-    """Render a short measured comparison with links to the full records."""
+    """Render the flight guide's measured comparison and links to the full records."""
     if (
         not isinstance(asset_prefix, str)
         or not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*", asset_prefix)
@@ -992,7 +992,7 @@ def render_readme_section(
             "Arrival means entry to the station region, not safe docking.",
             "",
             "STP points are unavailable because local fuel is not STP's fuel counter. "
-            "The [scoring notes](docs/scoring.md) preserve the wiki/code disagreement; "
+            "The [scoring notes](scoring.md) preserve the wiki/code disagreement; "
             "these profiles are unranked.",
             "",
         ]
@@ -1020,7 +1020,7 @@ def render_readme_section(
         [
             f"[Fuel and burns]({asset_prefix}/fuel-burns.svg) · "
             f"[Turns and rotation]({asset_prefix}/turns.svg) · "
-            "[How to read and repeat this comparison](docs/flight-lab.md#reading-the-comparison)",
+            "[How to read and repeat this comparison](#reading-the-comparison)",
             "",
             f"[Full dataset and build record]({asset_prefix}/dataset.json) · "
             f"[Trials CSV]({asset_prefix}/trials.csv) · "
