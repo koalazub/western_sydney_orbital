@@ -6,25 +6,23 @@
     "node": "^26.12.1"
   },
   "scripts": {
-    "cf": "node scripts/cloudflare.mjs cf",
-    "wrangler": "node scripts/cloudflare.mjs wrangler",
-    "login:cf": "node scripts/cloudflare.mjs cf auth login --force",
-    "login:wrangler": "node scripts/cloudflare.mjs wrangler login",
-    "account": "node scripts/cloudflare.mjs account",
     "local": "node scripts/local.mjs",
-    "deploy": "npm run account && npm run build && node scripts/cloudflare.mjs wrangler deploy",
-    "types": "node scripts/cloudflare.mjs wrangler types",
+    "deploy": "npm run build && wrangler deploy",
+    "types": "wrangler types",
     "build:web": "node scripts/build-web.mjs",
-    "build:sim": "bash scripts/build-sim.sh",
+    "build:sim": "node scripts/wasm-artifacts.mjs",
     "build:licenses": "node scripts/build-licenses.mjs",
-    "build": "node scripts/build.mjs"
+    "build": "npm run types && npm run build:web && npm run build:licenses && npm run build:sim",
+    "format": "cd .. && nix fmt && uv run --locked ruff format . && cargo fmt --manifest-path simulation/Cargo.toml",
+    "check": "cd .. && uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict --ignore-scripts notebooks && cargo fmt --manifest-path simulation/Cargo.toml -- --check && cargo clippy --manifest-path simulation/Cargo.toml --locked --target wasm32-unknown-unknown --lib -- -D warnings && git diff --check",
+    "test": "cd .. && cargo test --manifest-path simulation/Cargo.toml --locked --lib && WSORB_CHECKPOINT_INTEGRATION=1 WSORB_DIAGNOSTICS_INTEGRATION=1 uv run --locked --extra lab pytest -ra",
+    "test:transit": "cd .. && WSORB_TRANSIT_STRESS=1 uv run --locked --extra lab pytest -m transit_stress",
+    "verify": "result=0; npm run build || result=1; npm run check || result=1; npm test || result=1; (cd .. && nix flake check --all-systems --no-build --impure) || result=1; exit \"$result\""
   },
   "devDependencies": {
     "@types/node": "26.6.5",
     "cf": "1.0.0-beta.20",
     "esbuild": "0.28.2",
-    "jsonc-parser": "3.3.1",
-    "undici": "7.29.1",
     "wrangler": "4.151.3"
   },
   "dependencies": {

@@ -134,12 +134,12 @@ async function main() {
           node: { path: await realpath(process.execPath), version: process.version },
         },
         // Only invocation-local paths are normalized; all transformation flags
-        // and both implementing scripts are part of the cache identity.
+        // and this implementation are part of the cache identity.
         commands: {
           bindgen: [...bindgenFlags, "--out-dir", "<stage>", "<cargo-wasm>"],
           opt: [...optFlags, "<stage>/wsorb_bevy_bg.wasm", "-o", "<stage>/wsorb_bevy_bg.optimized.wasm"],
         },
-        scripts: Object.fromEntries(await Promise.all(["build-sim.sh", "wasm-artifacts.mjs"].map(async name => [name, hash(await readFile(join(scripts, name)))]))),
+        scripts: { "wasm-artifacts.mjs": hash(await readFile(join(scripts, "wasm-artifacts.mjs"))) },
       };
       key = hash(JSON.stringify(input));
       try {

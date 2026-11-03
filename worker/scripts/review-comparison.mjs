@@ -12,7 +12,7 @@ import { formatMetric, getMetric, NATIVE_COLUMNS, NATIVE_COUNTER_KEYS, NATIVE_NU
 import { build } from "esbuild";
 
 const option = process.argv.indexOf("--output");
-if (option < 0 || !process.argv[option + 1]) throw new Error("Use just comparison-review OUTPUT_DIRECTORY");
+if (option < 0 || !process.argv[option + 1]) throw new Error("Use node worker/scripts/review-comparison.mjs --output OUTPUT_DIRECTORY");
 const output = resolve(process.argv[option + 1]);
 const reportOption = process.argv.indexOf("--report-file");
 const reportFile = reportOption >= 0 ? resolve(process.argv[reportOption + 1]) : null;

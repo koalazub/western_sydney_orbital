@@ -2,23 +2,8 @@
 let
   nodejs = import ./nix/nodejs.nix { inherit pkgs; };
   wasmBindgen = import ./nix/wasm-bindgen.nix { inherit pkgs; };
-  workerCli =
-    name: package:
-    pkgs.writeShellScriptBin name ''
-      export PATH="${nodejs}/bin:$PATH"
-
-      root="''${DEVENV_ROOT:-}"
-      if [ -z "$root" ]; then
-        root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-      fi
-
-      if [ -z "$root" ] || [ ! -x "$root/worker/node_modules/.bin/${package}" ]; then
-        printf '%s\n' "${name} is installed with the Worker dependencies. Run: npm ci --prefix <root>/worker" >&2
-        exit 1
-      fi
-
-      exec node "$root/worker/scripts/cloudflare.mjs" "${package}" "$@"
-    '';
+  # Keep wrangler.jsonc JSON-compatible so both CLIs share its account declaration.
+  workerConfig = builtins.fromJSON (builtins.readFile ./worker/wrangler.jsonc);
 in
 {
   languages.rust = {
@@ -46,11 +31,10 @@ in
     binaryen
     pkg-config
     libiconv
-    (workerCli "cf" "cf")
-    (workerCli "wrangler" "wrangler")
   ];
 
   env = {
+    CLOUDFLARE_ACCOUNT_ID = workerConfig.account_id;
     UV_PYTHON = "${pkgs.python313}/bin/python3";
     UV_PYTHON_DOWNLOADS = "never";
     UV_PROJECT_ENVIRONMENT = ".venv";
@@ -59,17 +43,9 @@ in
     );
   };
 
-  tasks = {
-    "wsorb:sync" = {
-      exec = "uv sync --locked --extra lab";
-    };
-    "wsorb:test" = {
-      exec = "uv run --locked --extra lab pytest";
-    };
-    "wsorb:lint" = {
-      exec = "uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict --ignore-scripts notebooks";
-    };
-  };
+  enterShell = ''
+    export PATH="$DEVENV_ROOT/worker/node_modules/.bin:$PATH"
+  '';
 
   processes = {
     notebook.exec = "WSORB_PORT=\"\${WSORB_PORT:-8765}\" bash scripts/serve-tailnet";
