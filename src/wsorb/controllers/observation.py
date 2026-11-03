@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +35,7 @@ class _PublicSample(ControlSample):
     public_context: tuple[int, ...]
     navigation_sequence: int
     radar_sequence: int
+    source_observation: Mapping[str, Any] | None = None
 
 
 def _counter(value: Any, name: str, maximum: int = 0xFFFFFFFF) -> int:
@@ -48,7 +50,9 @@ def _mapping(value: Any, name: str) -> Mapping:
     return value
 
 
-def sample_from_observation(observation: Mapping[str, Any], *, source_kind: str) -> ControlSample:
+def sample_from_observation(
+    observation: Mapping[str, Any], *, source_kind: str, retain_observation: bool = False
+) -> ControlSample:
     """Require ready navigation/radar and their actual clocks and physics context.
 
     These native sources declare an elapsed-seconds radar clock with offset zero.
@@ -163,6 +167,7 @@ def sample_from_observation(observation: Mapping[str, Any], *, source_kind: str)
                 public_context=(*context, revision),
                 navigation_sequence=units["navigation"]["sequence"],
                 radar_sequence=units["radar_primary"]["sequence"],
+                source_observation=deepcopy(dict(observation)) if retain_observation else None,
             )
         )
     except (KeyError, TypeError, OverflowError, np.linalg.LinAlgError) as error:

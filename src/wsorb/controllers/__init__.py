@@ -64,6 +64,10 @@ def create_controller(controller_id: str, settings: dict | None = None):
         from ._tom import TomController
 
         return TomController(metadata)
+    if controller_id in ("ali_official_profile", "official_basic_beeline"):
+        from ._official import OfficialController
+
+        return OfficialController(metadata)
     from ..control_contract import scalar
     from ._simple import SimpleController
 
@@ -76,16 +80,17 @@ def create_controller(controller_id: str, settings: dict | None = None):
     return SimpleController(metadata, settings)
 
 
-def sample_from_observation(observation, *, source_kind):
+def sample_from_observation(observation, *, source_kind, retain_observation=False):
     """Copy actual ready native public samples; see the producer's full contract."""
     from .observation import sample_from_observation as produce
 
-    return produce(observation, source_kind=source_kind)
+    return produce(observation, source_kind=source_kind, retain_observation=retain_observation)
 
 
 class _ObservationPolicy:
     def __init__(self, controller_id, settings):
         self.controller = create_controller(controller_id, settings)
+        self._retain_observation = controller_id == "ali_official_profile"
         self._context = None
         self._last_time = None
         self._last_sample_time = None
@@ -100,7 +105,9 @@ class _ObservationPolicy:
         from ..experiment import Decision
 
         sample = sample_from_observation(
-            observation, source_kind="native_manual_public_observation"
+            observation,
+            source_kind="native_manual_public_observation",
+            retain_observation=self._retain_observation,
         )
         context = (sample.frame, sample.rotation_convention, sample.public_context)
         now = observation["time_s"]

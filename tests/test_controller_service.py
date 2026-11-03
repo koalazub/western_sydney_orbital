@@ -13,10 +13,12 @@ import socket
 import threading
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from urllib.request import ProxyHandler
 
+import numpy as np
 import pytest
 
 from wsorb import cli
@@ -34,6 +36,7 @@ from wsorb.controller_service import (
     _interrupt_stops,
     _job_client,
     _queue_view,
+    _validate_job_snapshot,
     completion_summary,
     execute_job,
     main,
@@ -97,13 +100,19 @@ def test_jobs_are_exact_bounded_metadata_not_arbitrary_python_or_commands():
     for changes in (
         {"profile_id": "examples/tom/Controller.py"},
         {"profile_id": "Tom"},  # Friendly names belong at the CLI, never in jobs.
+        {"profile_id": "wso_official_profile"},  # Comparison aliases resolve at the UI boundary.
         {"profile_id": {"script": "print('no')"}},
         {"id": "not-a-uuid"},
         {"id": str(uuid.UUID(int=0))},
         {"owner_page_id": "../another-page"},
         {"owner_page_id": str(uuid.uuid4()).upper()},
         {"seed": True},
-        {"seed": 101},
+        {"seed": 101},  # A different seed without matching consent is still invalid.
+        {"seed": -1},
+        {"seed": 2**32},
+        {"seed": 100.0},
+        {"world_id": None},
+        {"world_id": "unreviewed"},
         {"duration_s": 1800.001},
         {"duration_s": True},
         {"duration_s": 0},
@@ -126,13 +135,28 @@ def test_jobs_are_exact_bounded_metadata_not_arbitrary_python_or_commands():
             parse_job(_job_metadata(expected_context=context))
 
 
-def test_all_seven_fixed_ids_are_accepted_without_loading_example_scripts():
+def test_all_fixed_ids_are_accepted_without_loading_example_scripts():
     from wsorb.controllers import PROFILE_IDS as catalog_ids
 
-    assert len(PROFILE_IDS) == 7
+    assert len(PROFILE_IDS) == 9
     assert catalog_ids == PROFILE_IDS
     for profile in PROFILE_IDS:
         assert parse_job(_job_metadata(profile_id=profile)).profile_id == profile
+
+
+@pytest.mark.parametrize("seed", [0, 100, 101, 0xFFFFFFFF])
+@pytest.mark.parametrize("world_id", [None, "official", "team", "across_phobos"])
+def test_uint32_seed_and_optional_world_are_explicit_consistent_job_identity(seed, world_id):
+    metadata = _job_metadata(seed=seed)
+    metadata["expected_context"]["seed"] = seed
+    if world_id is not None:
+        metadata["world_id"] = world_id
+    job = parse_job(metadata)
+    assert job.seed == job.expected_context["seed"] == seed
+    assert job.world_id == world_id
+    assert replace(
+        job, world_id="team" if world_id != "team" else "official"
+    ).execution_identity != (job.execution_identity)
 
 
 def test_poll_envelope_requires_real_boolean_stop_and_exact_fields():
@@ -156,6 +180,7 @@ def test_seen_job_ids_are_consumed_before_execution_and_never_replayed():
     assert seen.take(PollReply(job, False)) is None
     assert seen.take(PollReply(replace(job, status="stopping", stop_requested=True), True)) is None
     assert seen.take(PollReply(replace(job, profile_id="coast"), False)) is None
+    assert seen.take(PollReply(replace(job, world_id="official"), False)) is None
     next_job = replace(job, id=str(uuid.uuid4()))
     assert seen.take(PollReply(next_job, False)) is next_job
 
@@ -182,6 +207,7 @@ def test_missing_changed_or_failed_heartbeat_cancels_without_adopting_new_consen
         PollReply(None, False),
         PollReply(replace(job, id=str(uuid.uuid4())), False),
         PollReply(replace(job, duration_s=1), False),
+        PollReply(replace(job, world_id="official"), False),
         PollReply(replace(job, owner_page_id=str(uuid.uuid4())), False),
         PollReply(
             replace(job, expected_context={**job.expected_context, "trial_revision": 3}), False
@@ -215,6 +241,63 @@ def test_the_whole_original_context_and_fresh_paused_time_zero_are_required():
     for time_s in (True, None, -0.1, 0.1, math.nan, math.inf):
         with pytest.raises(ControllerServiceError, match="fresh paused"):
             validate_job_context(job, job.expected_context, time_s=time_s)
+
+
+def test_job_snapshot_rechecks_reviewed_world_and_all_original_claim_consent():
+    from test_checkpoint import _world_receipt
+
+    for world_id in ("official", "team", "across_phobos"):
+        metadata = _job_metadata(seed=101, world_id=world_id)
+        metadata["expected_context"]["seed"] = 101
+        job = parse_job(metadata)
+        _validate_job_snapshot(job, _world_receipt(world_id, 101))
+        for other in ("official", "team", "across_phobos"):
+            if other != world_id:
+                with pytest.raises(CheckpointError) as changed:
+                    _validate_job_snapshot(job, _world_receipt(other, 101))
+                assert changed.value.code == "comparison_mismatch"
+        with pytest.raises(ControllerServiceError, match="context changed"):
+            _validate_job_snapshot(job, _world_receipt(world_id, 100))
+        changed = _world_receipt(world_id, 101)
+        changed["observation"]["control_authority"].update(
+            status="active", run_id="existing", controller_id="existing", expires_at_sim_time_s=0.75
+        )
+        with pytest.raises(ControllerServiceError, match="no takeover"):
+            _validate_job_snapshot(job, changed)
+    legacy = parse_job(_job_metadata())
+    with pytest.raises(CheckpointError) as unchanged_legacy_guard:
+        _validate_job_snapshot(legacy, _world_receipt("official"))
+    assert unchanged_legacy_guard.value.code == "stock_world_required"
+
+
+def test_native_omitted_directed_distribution_is_not_a_different_world_or_seed():
+    from test_checkpoint import _world_receipt
+    from wsorb.controller_worlds import world_matches
+
+    receipt = _world_receipt("team", 0)
+    del receipt["observation"]["experiment_settings"]["debris"]["distribution"]
+    assert world_matches(receipt, "team", 0)
+    assert not world_matches(receipt, "team", 1)
+    assert not world_matches(receipt, "official", 0)
+    assert not world_matches(receipt, "across_phobos", 0)
+    metadata = _job_metadata(seed=0, world_id="team")
+    metadata["expected_context"]["seed"] = 0
+    _validate_job_snapshot(parse_job(metadata), receipt)
+    for field, value in (
+        ("speed_mps", 2.0),
+        ("stream_axis", "y"),
+        ("stream_sign", -1),
+        ("count", 499),
+        ("distribution", None),
+        ("distribution", {"kind": "transit_stream"}),
+        ("trajectory_adjustment", "toward_lander"),
+    ):
+        changed = deepcopy(receipt)
+        changed["observation"]["experiment_settings"]["debris"][field] = value
+        assert not world_matches(changed, "team", 0), field
+    missing_required = deepcopy(receipt)
+    del missing_required["observation"]["experiment_settings"]["debris"]["speed_mps"]
+    assert not world_matches(missing_required, "team", 0)
 
 
 def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credentials():
@@ -467,13 +550,30 @@ def test_queue_view_accepts_legacy_and_scored_history_without_rewriting_either()
         "catalog": catalog(),
         "service": {"online": False, "busy": False},
         "active": None,
-        "results": [legacy, scored],
+        "results": [
+            legacy,
+            scored,
+            {**scored, "id": str(uuid.uuid4()), "seed": 101, "world_id": "team"},
+        ],
     }
     serialized = json.dumps(view, allow_nan=False)
     assert _queue_view(view) == view
     assert json.dumps(view, allow_nan=False) == serialized
     assert "score" not in legacy["measurement"]
     assert scored["measurement"]["score"] == -26000.125
+    assert "world_id" not in legacy
+    assert view["results"][-1]["world_id"] == "team"
+    for invalid_world in (None, "unknown", 1):
+        with pytest.raises(ControllerServiceError):
+            _queue_view({**view, "results": [{**scored, "world_id": invalid_world}]})
+
+
+def test_optional_world_is_retained_in_stopped_failed_and_successful_summaries():
+    for state in ("stopped", "error", "native_terminal"):
+        summary = completion_summary({"state": state, "world_id": "official"})
+        assert summary["world_id"] == "official"
+        assert validate_summary(summary)["world_id"] == "official"
+    assert "world_id" not in completion_summary({"state": "stopped"})
 
 
 def test_queue_requests_use_only_existing_bearer_origin_and_independent_no_proxy_clients():
@@ -532,6 +632,11 @@ def test_read_only_and_stopped_invocations_cannot_send_any_native_call():
         source, job, CheckpointOptions(connection_file="unused.json", run=True), monitor
     )
     assert summary["state"] == "stopped" and summary["release_state"] == "not_claimed"
+    explicit_world = replace(job, world_id="official")
+    summary = execute_job(
+        source, explicit_world, CheckpointOptions(connection_file="unused.json", run=True), monitor
+    )
+    assert summary["world_id"] == "official" and summary["state"] == "stopped"
 
 
 def test_genuinely_unavailable_queue_never_discloses_capability_or_remote_exception():
@@ -638,6 +743,7 @@ def test_cli_requires_explicit_consent_scope_and_bounded_budgets():
         ("Harry", "basic_pd_radar"),
         ("Tom", "tom_kalman_velocity_mvp"),
         ("Bui", "bui_alpha_beta_mvp"),
+        ("Ali", "ali_official_profile"),
     ],
 )
 def test_cli_named_teammate_shortcuts_resolve_to_reviewed_profile_ids(name, profile):
@@ -650,7 +756,7 @@ def test_list_profiles_groups_the_same_reviewed_metadata_by_teammate(capsys):
 
     assert cli.main(["controllers", "list"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert set(result["owners"]) == {"WSO", "Harry", "Tom", "Bui"}
+    assert set(result["owners"]) == {"WSO", "Harry", "Tom", "Bui", "Ali", "Published"}
     assert {entry["id"] for entries in result["owners"].values() for entry in entries} == set(
         PROFILE_IDS
     )
@@ -708,6 +814,147 @@ def owned_native_local():
         pytest.skip("Use the existing project Node environment and real WASM build")
     with isolated_simulation() as client:
         yield client
+
+
+@pytest.mark.parametrize(
+    "world_id,seed", [("official", 101), ("team", 0), ("across_phobos", 0xFFFFFFFF)]
+)
+def test_explicit_reviewed_native_world_runs_through_existing_fenced_runner(
+    owned_native_local, world_id, seed
+):
+    from wsorb.checkpoint import world_metadata
+    from wsorb.controller_worlds import controller_world, world_matches
+    from wsorb.local_api import control_context, validate_experiment_settings
+
+    source = owned_native_local
+    world = controller_world(world_id)
+    initial = source.configure_flight(world.settings, world.preset, seed)
+    assert world_matches(initial, world_id, seed), {
+        "world_id": world_id,
+        "seed": seed,
+        "expected_settings": world.settings,
+        "native_world": world_metadata(initial),
+    }
+    metadata = _job_metadata(
+        profile_id="coast",
+        seed=seed,
+        world_id=world_id,
+        duration_s=0.2,
+        expected_context=control_context(initial),
+        owner_page_id=None,
+    )
+    job = parse_job(metadata)
+    wrong_world = replace(job, world_id="team" if world_id != "team" else "official")
+    rejected = execute_job(
+        source,
+        wrong_world,
+        CheckpointOptions(connection_file="fixture.json", run=True),
+        JobMonitor(wrong_world, threading.Event()),
+    )
+    assert (
+        rejected["error_code"] == "comparison_mismatch"
+        and rejected["release_state"] == "not_claimed"
+    )
+    assert source.snapshot()["observation"]["time_s"] == 0
+    summary = execute_job(
+        source,
+        job,
+        CheckpointOptions(connection_file="fixture.json", run=True, wall_budget_s=15),
+        JobMonitor(job, threading.Event()),
+    )
+    assert summary["world_id"] == world_id
+    assert summary["error_code"] is None and summary["state"] == "duration_limit", {
+        "summary": summary,
+        "initial_world": world_metadata(initial),
+        "current_world": world_metadata(source.snapshot()),
+    }
+    assert (
+        summary["release_state"] == "acknowledged" and summary["world_metadata_unchanged"] is True
+    )
+    actual = source.snapshot()
+    assert actual["observation"]["seed"] == seed
+    assert (
+        validate_experiment_settings(actual["observation"]["experiment_settings"]) == world.settings
+    )
+    assert actual["observation"]["control_authority"]["status"] == "revoked"
+
+
+def test_ali_adapter_calls_the_original_policy_on_real_public_observations(owned_native_local):
+    from wsorb.controller_worlds import controller_world
+    from wsorb.controllers import create_controller, sample_from_observation
+    from wsorb.controllers.official_profile import official_profile_policy
+
+    source = owned_native_local
+    world = controller_world("official")
+    initial = source.configure_flight(world.settings, world.preset, 101)
+    observation = initial["observation"]
+    adapter, original = create_controller("ali_official_profile"), official_profile_policy()
+    produced = sample_from_observation(
+        observation, source_kind="local_public_snapshot", retain_observation=True
+    )
+    expected = original(observation)
+    actual = adapter.command(
+        produced, observation["radar"], now_elapsed_time_s=observation["time_s"]
+    )
+    for left, right in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(left, right)
+    assert adapter.report["eligible"] is True
+    assert adapter.report["guidance"]["can_command"] == original.report["can_command"]
+    assert (
+        adapter.report["decision_valid_until_elapsed_s"]
+        <= original.report["decision_valid_until_s"]
+    )
+    # Invalid delivery is not an eligible zero command and cannot start Play.
+    invalid = deepcopy(observation)
+    invalid["radar"] = []
+    invalid["radar_backup"] = []
+    failed = create_controller("ali_official_profile")
+    failed_sample = sample_from_observation(
+        invalid, source_kind="local_public_snapshot", retain_observation=True
+    )
+    failed.command(failed_sample, [], now_elapsed_time_s=invalid["time_s"])
+    assert failed.report["eligible"] is False
+    assert failed.report["guidance"]["can_command"] is False
+    assert source.snapshot()["runtime"]["running"] is False
+
+
+@pytest.mark.parametrize("profile", ["ali_official_profile", "official_basic_beeline"])
+def test_official_profiles_really_run_with_native_fences_and_bounded_leases(
+    owned_native_local, profile
+):
+    from wsorb.controller_worlds import controller_world
+    from wsorb.local_api import control_context
+
+    source = owned_native_local
+    world = controller_world("official")
+    initial = source.configure_flight(world.settings, world.preset, 100)
+    job = parse_job(
+        _job_metadata(
+            profile_id=profile,
+            world_id="official",
+            duration_s=0.5,
+            expected_context=control_context(initial),
+            owner_page_id=None,
+        )
+    )
+    summary = execute_job(
+        source,
+        job,
+        CheckpointOptions(connection_file="fixture.json", run=True, wall_budget_s=15),
+        JobMonitor(job, threading.Event()),
+    )
+    assert summary["world_id"] == "official"
+    assert summary["state"] == "duration_limit" and summary["error_code"] is None
+    assert (
+        summary["release_state"] == "acknowledged" and summary["world_metadata_unchanged"] is True
+    )
+    after = source.snapshot()
+    assert (
+        after["observation"]["control_authority"]["term"]
+        > initial["observation"]["control_authority"]["term"]
+    )
+    assert after["observation"]["control_authority"]["status"] == "revoked"
+    assert after["observation"]["mission"]["flight_analytics"]["burn_duration_s"] > 0
 
 
 @pytest.mark.parametrize("finish", ["duration", "stop", "context_mismatch"])

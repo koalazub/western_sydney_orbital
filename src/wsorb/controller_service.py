@@ -27,12 +27,13 @@ from . import diagnostics
 from .checkpoint import (
     MAX_OUTPUT_BYTES,
     CheckpointOptions,
-    _stock_world,
     _summary,
+    _validate_trial_world,
     run_checkpoint,
     run_trial,
     world_metadata,
 )
+from .controller_worlds import controller_world, uint32
 from .controllers import PROFILE_IDS
 from .flight_analytics import validate_run_analytics
 from .local_api import (
@@ -49,6 +50,7 @@ _PROFILE_NAMES = {
     "harry": "basic_pd_radar",
     "bui": "bui_alpha_beta_mvp",
     "tom": "tom_kalman_velocity_mvp",
+    "ali": "ali_official_profile",
 }
 MAX_QUEUE_RESPONSE_BYTES = 512 * 1024
 POLL_INTERVAL_S = 1.0
@@ -219,6 +221,7 @@ class ControllerJob:
     owner_page_id: str | None
     status: str
     stop_requested: bool
+    world_id: str | None = None
 
     @property
     def execution_identity(self) -> tuple[Any, ...]:
@@ -230,6 +233,7 @@ class ControllerJob:
             self.duration_s,
             tuple(sorted(self.expected_context.items())),
             self.owner_page_id,
+            self.world_id,
         )
 
 
@@ -247,7 +251,7 @@ def parse_job(value: Any, *, allow_stalled: bool = False) -> ControllerJob:
     if (
         not isinstance(value, dict)
         or not fields.issubset(value)
-        or set(value) - fields - {"created_at"}
+        or set(value) - fields - {"created_at", "world_id"}
     ):
         raise ControllerServiceError("invalid_job", "Invalid controller job metadata.")
     if "created_at" in value and (_number(value["created_at"]) is None or value["created_at"] < 0):
@@ -255,15 +259,15 @@ def parse_job(value: Any, *, allow_stalled: bool = False) -> ControllerJob:
     duration = _number(value["duration_s"])
     try:
         context = _expected_context(value["expected_context"])
+        seed = uint32(value["seed"])
+        world_id = controller_world(value["world_id"]).id if "world_id" in value else None
     except ValueError:
         raise ControllerServiceError("invalid_job", "Invalid controller consent context.") from None
     statuses = ("queued", "running", "stopping") + (("stalled",) if allow_stalled else ())
     if (
         not isinstance(value["profile_id"], str)
         or value["profile_id"] not in PROFILE_IDS
-        or type(value["seed"]) is not int
-        or value["seed"] != 100
-        or context["seed"] != 100
+        or context["seed"] != seed
         or context["running"] is not False
         or duration is None
         or not 0 < duration <= 1800
@@ -276,12 +280,13 @@ def parse_job(value: Any, *, allow_stalled: bool = False) -> ControllerJob:
     return ControllerJob(
         _uuid(value["id"]),
         value["profile_id"],
-        100,
+        seed,
         duration,
         context,
         owner,
         value["status"],
         value["stop_requested"],
+        world_id,
     )
 
 
@@ -309,7 +314,7 @@ def validate_summary(value: Any) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or not _SUMMARY_FIELDS.issubset(value)
-        or set(value) - _SUMMARY_FIELDS - {"analytics"}
+        or set(value) - _SUMMARY_FIELDS - {"analytics", "world_id"}
     ):
         raise ControllerServiceError("invalid_queue_response", message)
     measurement = value["measurement"]
@@ -354,6 +359,11 @@ def validate_summary(value: Any) -> dict[str, Any]:
     analytics = validate_run_analytics(value.get("analytics"))
     if value.get("analytics") is not None and (analytics is None or len(analytics["samples"]) > 48):
         raise ControllerServiceError("invalid_queue_response", message)
+    if "world_id" in value:
+        try:
+            controller_world(value["world_id"])
+        except ValueError:
+            raise ControllerServiceError("invalid_queue_response", message) from None
     return {
         **value,
         "measurement": {**measurement, "score": score, "score_breakdown": breakdown},
@@ -416,6 +426,7 @@ def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
                 if trial.get("world_metadata_unchanged") is True
                 else None
             ),
+            **({"world_id": controller_world(trial["world_id"]).id} if "world_id" in trial else {}),
         }
     )
 
@@ -477,10 +488,10 @@ def _queue_view(value: Any) -> dict[str, Any]:
         if (
             not isinstance(record, dict)
             or not record_fields.issubset(record)
-            or set(record) - record_fields - {"analytics"}
+            or set(record) - record_fields - {"analytics", "world_id"}
             or record.get("profile_id") not in PROFILE_IDS
             or type(record.get("seed")) is not int
-            or record["seed"] != 100
+            or not 0 <= record["seed"] <= 0xFFFFFFFF
             or _number(record.get("duration_s")) is None
             or not 0 < record["duration_s"] <= 1800
         ):
@@ -489,6 +500,7 @@ def _queue_view(value: Any) -> dict[str, Any]:
         validate_summary(
             {name: record[name] for name in _SUMMARY_FIELDS}
             | ({"analytics": record["analytics"]} if "analytics" in record else {})
+            | ({"world_id": record["world_id"]} if "world_id" in record else {})
         )
     return value
 
@@ -658,10 +670,9 @@ def _validate_job_snapshot(job: ControllerJob, snapshot: Mapping[str, Any]) -> N
         raise ControllerServiceError(
             "owner_in_use", "An existing controller owns this flight; no takeover."
         )
-    if not _stock_world(snapshot):
-        raise ControllerServiceError(
-            "stock_world_required", "Controller jobs require unchanged stock setup."
-        )
+    _validate_trial_world(
+        snapshot, world_id=job.world_id, seed=job.seed if job.world_id is not None else None
+    )
 
 
 def _verify_job_page(client: LocalSimulation, job: ControllerJob) -> None:
@@ -760,7 +771,10 @@ def execute_job(
         )
     started = time.monotonic()
     if monitor.cancelled():
-        return completion_summary({"state": "stopped", "release_state": "not_claimed"})
+        return completion_summary(
+            {"state": "stopped", "release_state": "not_claimed"}
+            | ({"world_id": job.world_id} if job.world_id is not None else {})
+        )
     entered_runner = False
     try:
         client = _job_client(source, job)
@@ -781,6 +795,8 @@ def execute_job(
             owned=False,
             deadline=started + options.wall_budget_s,
             expected_world=world_metadata(initial),
+            world_id=job.world_id,
+            seed=job.seed if job.world_id is not None else None,
             cancelled=monitor.cancelled,
         )
     except (Exception, KeyboardInterrupt) as error:
@@ -789,6 +805,8 @@ def execute_job(
             trial["release_state"] = "unconfirmed_native_watchdog_no_fallback"
     if monitor.heartbeat_lost:
         trial["state"], trial["error"] = "error", {"code": "heartbeat_lost"}
+    if job.world_id is not None:
+        trial["world_id"] = job.world_id
     return completion_summary(trial)
 
 
@@ -908,7 +926,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     scope.add_argument("--isolated", action="store_true")
     scope.add_argument("--connection-file", type=Path)
     scope.add_argument("--room-file", type=Path)
-    run.add_argument("--profile", required=True, help="profile ID, or Harry, Tom or Bui")
+    run.add_argument("--profile", required=True, help="profile ID, or Harry, Tom, Bui or Ali")
     run.add_argument("--run", action="store_true", required=True, help="explicit actuation consent")
     run.add_argument(
         "--await-owner", action="store_true", help="external read-only standby before one run"

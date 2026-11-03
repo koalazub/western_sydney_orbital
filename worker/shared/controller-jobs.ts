@@ -1,4 +1,5 @@
 import catalog from "../../src/wsorb/controllers/catalog.json" with { type: "json" };
+import worlds from "../../src/wsorb/controller_worlds.json" with { type: "json" };
 
 export const CONTROLLER_HEARTBEAT_MS = 15_000;
 export const MAX_CONTROLLER_RESULTS = 32;
@@ -41,12 +42,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA256 = /^[0-9a-f]{64}$/;
 
 export const controllerCatalog = catalog;
+export const controllerWorlds = worlds;
+export const CONTROLLER_WORLD_DEFINITIONS_VERSION = 1;
+export const CONTROLLER_WORLD_IDS = ["official", "team", "across_phobos"] as const;
+export type ControllerWorldId = typeof CONTROLLER_WORLD_IDS[number];
 
 export interface ControllerContext {
   trial_revision: number;
   tuning_revision: number;
   manual_interventions: number;
-  seed: 100;
+  seed: number;
   running: false;
 }
 
@@ -54,7 +59,9 @@ export interface ControllerJob {
   id: string;
   created_at: number;
   profile_id: string;
-  seed: 100;
+  seed: number;
+  // Absence preserves the legacy seed-100 stock-world execution path.
+  world_id?: ControllerWorldId;
   duration_s: number;
   expected_context: ControllerContext;
   owner_page_id: string | null;
@@ -90,7 +97,8 @@ interface ControllerMeasurement {
 export interface ControllerResult {
   id: string;
   profile_id: string;
-  seed: 100;
+  seed: number;
+  world_id?: ControllerWorldId;
   duration_s: number;
   state: typeof CONTROLLER_RESULT_STATES[number];
   native_success: boolean;
@@ -156,6 +164,17 @@ function choice<T extends string>(value: unknown, values: readonly T[], name: st
 function boolean(value: unknown, name: string): boolean {
   if (typeof value !== "boolean") return invalid(`Controller ${name} must be a boolean`);
   return value;
+}
+function uint32(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    return invalid(`Controller ${name} must be an unsigned 32-bit integer`);
+  }
+  return value;
+}
+function worldId(value: unknown): ControllerWorldId {
+  const id = choice(value, CONTROLLER_WORLD_IDS, "world ID");
+  if (!controllerWorlds.some(world => world.id === id)) invalid("Unknown reviewed controller world");
+  return id;
 }
 function measurementNumber(value: unknown): number | null {
   if (value === null || (typeof value === "number" && Number.isFinite(value))) return value;
@@ -252,10 +271,10 @@ function context(value: unknown): ControllerContext {
       invalid("Controller context revisions and seed must be unsigned 32-bit integers");
     }
   }
-  if (fields.seed !== 100 || fields.running !== false) invalid("A controller job requires paused seed 100 context");
+  if (fields.running !== false) invalid("A controller job requires paused context");
   return {
     trial_revision: fields.trial_revision as number, tuning_revision: fields.tuning_revision as number,
-    manual_interventions: fields.manual_interventions as number, seed: 100, running: false,
+    manual_interventions: fields.manual_interventions as number, seed: fields.seed as number, running: false,
   };
 }
 
@@ -263,9 +282,12 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
   const summary = shape(value, [
     "state", "native_success", "measurement", "release_state", "world_metadata_unchanged", "error_code",
     "execution_kind", "engine_sha256", "elapsed_s",
-  ], ["id", "profile_id", "seed", "duration_s", "analytics"]);
+  ], ["id", "profile_id", "seed", "duration_s", "world_id", "analytics"]);
   for (const name of ["id", "profile_id", "seed", "duration_s"] as const) {
     if (Object.hasOwn(summary, name) && summary[name] !== job[name]) invalid("Controller result identity differs from its job");
+  }
+  if (Object.hasOwn(summary, "world_id") && worldId(summary.world_id) !== job.world_id) {
+    invalid("Controller result world differs from its job");
   }
   const measurement = shape(summary.measurement, ["time_s", "range_m", "relative_speed_mps", "damage_j", "fuel_used_kg", "status"], ["score", "score_breakdown"]);
   const score = Object.hasOwn(measurement, "score") ? measurementNumber(measurement.score) : null;
@@ -279,6 +301,7 @@ function resultSummary(value: unknown, job: ControllerJob): ControllerResult {
   }
   return {
     id: job.id, profile_id: job.profile_id, seed: job.seed, duration_s: job.duration_s,
+    ...(job.world_id === undefined ? {} : { world_id: job.world_id }),
     state: choice(summary.state, CONTROLLER_RESULT_STATES, "result state"),
     native_success: boolean(summary.native_success, "native_success"),
     measurement: {
@@ -331,23 +354,27 @@ export function controllerJobsView(state: ControllerJobsState, now: number) {
 // Synchronous and free of I/O, clocks, ID generation and native engine calls.
 // Adapters must load, transition and save without an intervening await.
 export function controllerJobsAction(state: ControllerJobsState, input: unknown, env: ActionContext) {
-  const action = shape(input, ["action"], ["profile_id", "seed", "duration_s", "fresh", "expected_context", "job_id", "worker_id", "result"]);
+  const action = shape(input, ["action"], ["profile_id", "seed", "duration_s", "world_id", "fresh", "expected_context", "job_id", "worker_id", "result"]);
   if (action.action === "submit") {
-    shape(input, ["action", "profile_id", "seed", "duration_s", "fresh", "expected_context"]);
+    shape(input, ["action", "profile_id", "seed", "duration_s", "fresh", "expected_context"], ["world_id"]);
     if (typeof action.profile_id !== "string" || !controllerCatalog.some(profile => profile.id === action.profile_id)) {
       invalid("Unknown controller profile");
     }
-    if (action.seed !== 100 || action.fresh !== true) invalid("Controller jobs require seed 100 and fresh: true");
+    const seed = uint32(action.seed, "seed");
+    const world = Object.hasOwn(action, "world_id") ? worldId(action.world_id) : undefined;
+    if (action.fresh !== true) invalid("Controller jobs require fresh: true");
     if (typeof action.duration_s !== "number" || !Number.isFinite(action.duration_s) || action.duration_s <= 0 || action.duration_s > 1800) {
       invalid("Controller duration_s must be greater than zero and at most 1800");
     }
     const expectedContext = context(action.expected_context);
+    if (expectedContext.seed !== seed) invalid("Controller seed differs from its consent context");
     if (state.active) conflict("A controller job is already active");
     if (!heartbeatOnline(state, env.now)) throw new ControllerJobsError(503, "Controller service is offline");
     if (!env.ownerAvailable) throw new ControllerJobsError(503, "No connected simulation owner");
     const next: ControllerJobsState = { ...state, active: {
       job: {
-        id: env.jobId, created_at: env.now, profile_id: action.profile_id, seed: 100,
+        id: env.jobId, created_at: env.now, profile_id: action.profile_id, seed,
+        ...(world === undefined ? {} : { world_id: world }),
         duration_s: action.duration_s, expected_context: expectedContext, owner_page_id: env.ownerPageId,
         status: "queued", stop_requested: false,
       },
@@ -366,6 +393,7 @@ export function controllerJobsAction(state: ControllerJobsState, input: unknown,
       const job = state.active.job;
       const summary: ControllerResult = {
         id: job.id, profile_id: job.profile_id, seed: job.seed, duration_s: job.duration_s,
+        ...(job.world_id === undefined ? {} : { world_id: job.world_id }),
         state: "interrupted", native_success: false,
         measurement: { time_s: null, range_m: null, relative_speed_mps: null, damage_j: null, fuel_used_kg: null, status: "unknown", score: null, score_breakdown: null },
         release_state: state.active.worker_id === null ? "not_claimed" : "unconfirmed_native_watchdog_no_fallback",

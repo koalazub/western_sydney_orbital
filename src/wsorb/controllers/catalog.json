@@ -66,6 +66,28 @@
     "source": "examples/tom"
   },
   {
+    "id": "ali_official_profile",
+    "label": "Ali official profile",
+    "owner": "Ali",
+    "contributor": "Ali; WSO fenced native adapter",
+    "description": "Existing official_profile_policy with fresh public-radar readiness and current-lease clearance gates. Uses the competition beeline on the official preset; no STP runtime equivalence or docking claim.",
+    "profile": "Official profile, 10 m/s beeline with radar avoidance",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "src/wsorb/controllers/official_profile.py"
+  },
+  {
+    "id": "official_basic_beeline",
+    "label": "Published BasicController",
+    "owner": "Published",
+    "contributor": "Published BasicController example; WSO bounded translation and attitude port",
+    "description": "The published 10 m/s unity-gain beeline, capped at the native actuator limits with bounded shortest-arc attitude alignment. No debris avoidance. This is the saved official_basic_policy baseline, not Harry's PD controller.",
+    "profile": "Published Basic, 10 m/s, no debris avoidance",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "src/wsorb/flight/official_profile.py"
+  },
+  {
     "id": "userapi_body_z",
     "label": "Body +Z template",
     "owner": "Tom",

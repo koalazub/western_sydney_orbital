@@ -28,9 +28,24 @@ EXECUTION_KIND = "asynchronous_fenced_leased_API"
 
 
 @pytest.fixture(params=["native_headless", "room"])
-def owned_backend(request):
+def owned_backend(request, monkeypatch):
     if request.param == "native_headless":
         return request.getfixturevalue("headless_server"), "/__local/controllers"
+    parameters = request.node.callspec.params
+    if "world_id" in parameters:
+        # The test-owned native peer prepares its own world before connecting.
+        # Hosted controller RPC remains unable to reset/configure any owner.
+        monkeypatch.setenv(
+            "WSORB_ROOM_INITIAL_FLIGHT",
+            json.dumps(
+                {
+                    "profileId": "coast",
+                    "worldId": parameters["world_id"],
+                    "seed": parameters["seed"],
+                    "duration": 0.2,
+                }
+            ),
+        )
     _, _, room, path, _ = request.getfixturevalue("room_owner")
     return RoomSimulation.from_file(
         path, allow_loopback=True
@@ -76,14 +91,15 @@ def _poll(backend, worker_id):
     return _request(backend, {"action": "poll", "worker_id": worker_id})
 
 
-def _submit(snapshot, *, profile="baseline", duration=0.2):
+def _submit(snapshot, *, profile="baseline", duration=0.2, world_id=None):
     return {
         "action": "submit",
         "profile_id": profile,
-        "seed": 100,
+        "seed": snapshot["observation"]["seed"],
         "duration_s": duration,
         "fresh": True,
         "expected_context": control_context(snapshot),
+        **({"world_id": world_id} if world_id is not None else {}),
     }
 
 
@@ -146,7 +162,14 @@ def test_catalog_and_service_view_are_authenticated_and_do_not_start_native_cont
     before = client.snapshot()
     view = _get(owned_backend)
     assert view["catalog"] == json.loads((ROOT / "src/wsorb/controllers/catalog.json").read_text())
-    assert {entry["owner"] for entry in view["catalog"]} == {"Tom", "Harry", "Bui", "WSO"}
+    assert {entry["owner"] for entry in view["catalog"]} == {
+        "Tom",
+        "Harry",
+        "Bui",
+        "WSO",
+        "Ali",
+        "Published",
+    }
     assert view["service"] == {"online": False, "busy": False}
     assert view["active"] is None and view["results"] == []
     for headers, expected in (
@@ -221,6 +244,12 @@ def test_submit_is_strict_and_never_mutates_native_world(owned_backend):
             ("profile_id", ["baseline"]),
             ("seed", 101),
             ("seed", True),
+            ("seed", -1),
+            ("seed", 2**32),
+            ("seed", 100.5),
+            ("world_id", None),
+            ("world_id", "unknown"),
+            ("world_id", 1),
             ("fresh", False),
             ("fresh", 1),
             ("duration_s", 0),
@@ -335,6 +364,67 @@ def test_older_clients_can_complete_without_score_fields_and_do_not_invent_zero(
     measurement = completed["results"][-1]["measurement"]
     assert measurement == {**summary["measurement"], "score": None, "score_breakdown": None}
     assert "score" not in summary["measurement"]
+    assert "world_id" not in completed["results"][-1]
+    _unchanged(client, before)
+
+
+@pytest.mark.parametrize(
+    "world_id,seed", [("official", 0), ("team", 101), ("across_phobos", 0xFFFFFFFF)]
+)
+def test_explicit_world_and_uint32_seed_survive_queue_completion_without_replay(
+    owned_backend, world_id, seed
+):
+    from wsorb.checkpoint import world_metadata
+    from wsorb.controller_worlds import controller_world, world_matches
+
+    client, _ = owned_backend
+    world = controller_world(world_id)
+    before = (
+        client.snapshot()
+        if isinstance(client, RoomSimulation)
+        else client.configure_flight(world.settings, world.preset, seed)
+    )
+    assert world_matches(before, world_id, seed), {
+        "world_id": world_id,
+        "seed": seed,
+        "expected_settings": world.settings,
+        "native_world": world_metadata(before),
+    }
+    worker = str(uuid.uuid4())
+    assert _poll(owned_backend, worker)[0] == 200
+    request = _submit(before, profile="official_basic_beeline", world_id=world_id)
+    for invalid in (
+        {**request, "seed": (seed + 1) % 2**32},
+        {
+            **request,
+            "expected_context": {**request["expected_context"], "seed": (seed + 1) % 2**32},
+        },
+    ):
+        assert _request(owned_backend, invalid)[0] == 400
+    status, submitted, _ = _request(owned_backend, request)
+    assert status == 200
+    job = submitted["active"]
+    assert job["world_id"] == world_id and job["seed"] == seed
+    assigned = _poll(owned_backend, worker)[1]["job"]
+    assert assigned["world_id"] == world_id
+    assert assigned["expected_context"]["seed"] == seed
+    assert _request(owned_backend, {"action": "stop", "job_id": job["id"]})[0] == 200
+    summary = {**_unexecuted_summary(before), "world_id": world_id}
+    wrong_world = "team" if world_id != "team" else "official"
+    assert (
+        _complete(owned_backend, worker, job["id"], {**summary, "world_id": wrong_world})[0] == 400
+    )
+    assert (
+        _complete(owned_backend, worker, job["id"], {**summary, "seed": (seed + 1) % 2**32})[0]
+        == 400
+    )
+    status, completed, _ = _complete(owned_backend, worker, job["id"], summary)
+    assert status == 200
+    result = completed["results"][-1]
+    assert result["world_id"] == world_id and result["seed"] == seed
+    assert result["measurement"]["time_s"] == 0 and result["release_state"] == "not_claimed"
+    assert _poll(owned_backend, worker)[:2] == (200, {"job": None, "stop_requested": False})
+    assert _complete(owned_backend, worker, job["id"], summary)[0] == 409
     _unchanged(client, before)
 
 

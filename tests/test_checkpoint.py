@@ -8,7 +8,9 @@ import json
 import math
 import os
 import secrets
+from copy import deepcopy
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -25,6 +27,7 @@ from wsorb.checkpoint import (
     _record_command,
     _summary,
     _usage,
+    _validate_trial_world,
     _wait_remaining,
     decision_lease,
     main,
@@ -48,6 +51,122 @@ from wsorb.local_api import (
     StaleContextError,
 )
 from wsorb.room_api import RoomApiError, RoomSimulation
+
+
+def _world_receipt(world_id, seed=100):
+    """Pure setup metadata for validation, not sensor or native execution evidence."""
+    from wsorb.controller_worlds import controller_world
+
+    world = controller_world(world_id)
+    settings = world.settings
+    return {
+        "runtime": {"running": False},
+        "observation": {
+            "time_s": 0,
+            "seed": seed,
+            "trial_revision": 2,
+            "tuning_revision": 1,
+            "manual_interventions": 0,
+            "flight_preset": world.preset,
+            "launch_site_direction": None,
+            "experiment_settings": settings,
+            "geometry": {"debris_count": 500, "arrival_radius_m": 50.0},
+            "ship_tuning": {**settings["ship"], "thrust_scale": 1.0},
+            "debris_flow": {
+                name: settings["debris"][name]
+                for name in ("speed_mps", "speed_spread_mps", "stream_axis", "stream_sign")
+            },
+            "max_accel_mps2": 0.5,
+            "max_angular_accel_rad_s2": 0.05,
+            "control_authority": {
+                "epoch": 0,
+                "term": 0,
+                "status": "idle",
+                "run_id": None,
+                "controller_id": None,
+                "expires_at_sim_time_s": None,
+            },
+        },
+    }
+
+
+def test_versioned_worlds_are_full_normalized_distinct_and_preserve_archived_team_flow():
+    from wsorb.controller_worlds import WORLD_IDS, controller_world, parse_worlds
+    from wsorb.local_api import validate_experiment_settings
+
+    root = Path(__file__).resolve().parents[1]
+    definitions = json.loads((root / "src/wsorb/controller_worlds.json").read_text())
+    assert WORLD_IDS == ("official", "team", "across_phobos")
+    scenario = json.loads((root / "simulation/scenarios/phobos_escape.json").read_text())
+    defaults = validate_experiment_settings(scenario["experiment_settings"])
+    assert controller_world("across_phobos").settings == defaults
+    official = json.loads((root / "examples/official_comparison.json").read_text())
+    assert controller_world("official").preset == official["preset"]
+    expected_official = deepcopy(defaults)
+    expected_official["debris"].update(official["settings"]["debris"])
+    assert controller_world("official").settings == expected_official
+    expected_team = deepcopy(defaults)
+    expected_team["debris"].update(
+        distribution={"kind": "directed_stream"}, stream_axis="x", stream_sign=1
+    )
+    assert controller_world("team").preset == "far_side_l2"
+    assert controller_world("team").settings == expected_team
+    assert expected_team["debris"]["speed_mps"] == 20.0
+    assert expected_team["debris"]["speed_spread_mps"] == 4.0
+    for entry, world in zip(definitions, parse_worlds(definitions), strict=True):
+        assert validate_experiment_settings(entry["settings"]) == world.settings
+        detached = world.settings
+        detached["debris"]["count"] = 0
+        assert world.settings["debris"]["count"] == 500
+    for invalid in ([], definitions + definitions, [definitions[0]] * 3):
+        with pytest.raises(ValueError):
+            parse_worlds(invalid)
+    with pytest.raises(ValueError):
+        controller_world("unknown")
+
+
+@pytest.mark.parametrize("world_id", ["official", "team", "across_phobos"])
+@pytest.mark.parametrize("seed", [0, 100, 101, 0xFFFFFFFF])
+def test_reviewed_world_requires_exact_native_setup_and_seed(world_id, seed):
+    from wsorb.controller_worlds import world_matches
+
+    receipt = _world_receipt(world_id, seed)
+    assert world_matches(receipt, world_id, seed)
+    _validate_trial_world(receipt, world_id=world_id, seed=seed)
+    for other in ("official", "team", "across_phobos"):
+        if other != world_id:
+            assert not world_matches(receipt, other, seed)
+    assert not world_matches(receipt, world_id, (seed + 1) % 2**32)
+    for path, value in (
+        (("flight_preset",), "mars_facing_l1"),
+        (("launch_site_direction",), [1, 0, 0]),
+        (("ship_tuning", "thrust_scale"), 2.0),
+        (("geometry", "debris_count"), 499),
+        (("geometry", "arrival_radius_m"), 500.0),
+        (("debris_flow", "speed_mps"), 2.0),
+        (("experiment_settings", "debris", "speed_mps"), 2.0),
+        (("experiment_settings", "debris", "trajectory_adjustment"), "toward_lander"),
+        (("max_accel_mps2",), 1.0),
+        (("max_angular_accel_rad_s2",), 0.1),
+    ):
+        changed = deepcopy(receipt)
+        target = changed["observation"]
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        assert not world_matches(changed, world_id, seed)
+        with pytest.raises(CheckpointError, match="intended reviewed"):
+            _validate_trial_world(changed, world_id=world_id, seed=seed)
+
+
+def test_old_jobs_do_not_implicitly_adopt_a_reviewed_world_or_new_seed():
+    _validate_trial_world(_world_receipt("across_phobos"))
+    for world, seed in (("official", 100), ("team", 100), ("across_phobos", 101)):
+        with pytest.raises(CheckpointError) as rejected:
+            _validate_trial_world(_world_receipt(world, seed))
+        assert rejected.value.code == "stock_world_required"
+    with pytest.raises(CheckpointError, match="explicit reviewed"):
+        _validate_trial_world(_world_receipt("across_phobos"), seed=100)
 
 
 def test_parser_defaults_are_read_only_and_do_not_use_an_implicit_owner_connection():
@@ -371,6 +490,18 @@ def test_reusable_actuation_function_rejects_read_only_options_without_network_i
         run_checkpoint({"run": True})
 
 
+@pytest.mark.parametrize(
+    "world_id,seed",
+    [("unknown", 100), ("official", None), ("team", True), ("official", 2**32), (None, 100)],
+)
+def test_intended_world_and_seed_are_validated_before_any_native_io(world_id, seed):
+    client = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    options = CheckpointOptions(connection_file="unused.json", run=True)
+    with pytest.raises(CheckpointError) as invalid:
+        run_trial(client, options, policy="coast", world_id=world_id, seed=seed)
+    assert invalid.value.code == "invalid_options"
+
+
 @pytest.mark.parametrize("value", [True, 2**2048, math.nan, math.inf])
 def test_reusable_options_validate_numbers_without_overflow_or_boolean_consent(value):
     with pytest.raises(CheckpointError):
@@ -660,6 +791,7 @@ def test_one_real_owned_stock_trial_is_read_only_until_explicit_run():
         "coast",
         "bui_alpha_beta_mvp",
         "tom_kalman_velocity_mvp",
+        "official_basic_beeline",
         "userapi_body_z",
     ],
 )

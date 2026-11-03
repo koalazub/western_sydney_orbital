@@ -353,6 +353,26 @@ def _stock_world(snapshot: Mapping[str, Any]) -> bool:
         return False
 
 
+def _validate_trial_world(
+    snapshot: Mapping[str, Any], *, world_id: str | None = None, seed: int | None = None
+) -> None:
+    """An explicit reviewed setup is separate from the unchanged legacy guard."""
+    if world_id is None:
+        if seed is not None:
+            raise CheckpointError("invalid_options", "A seed requires an explicit reviewed world.")
+        if not _stock_world(snapshot):
+            raise CheckpointError(
+                "stock_world_required", "Checkpoint actuation requires unchanged stock setup."
+            )
+        return
+    from .controller_worlds import world_matches
+
+    if not world_matches(snapshot, world_id, seed):
+        raise CheckpointError(
+            "comparison_mismatch", "The native world differs from the intended reviewed setup."
+        )
+
+
 def native_success(snapshot: Mapping[str, Any]) -> bool:
     """Require the native mission outcome AND its actual stock arrival/damage limits."""
     values = native_measurement(snapshot)
@@ -579,9 +599,11 @@ def _engine_build_matches_expected(snapshot: Mapping[str, Any]) -> bool:
         return False
 
 
-def _validation_scope(client: LocalSimulation, *, owned: bool = False) -> str:
+def _validation_scope(
+    client: LocalSimulation, *, owned: bool = False, reviewed_world: bool = False
+) -> str:
     if owned:
-        return "fresh_owned_stock_trial"
+        return "fresh_owned_reviewed_world_trial" if reviewed_world else "fresh_owned_stock_trial"
     if isinstance(client, RoomSimulation):
         return "existing_hosted_room_trial_not_pristine_replay"
     return "existing_external_local_trial_not_pristine_replay"
@@ -753,6 +775,8 @@ def run_trial(
     owned: bool = False,
     deadline: float | None = None,
     expected_world: Mapping[str, Any] | None = None,
+    world_id: str | None = None,
+    seed: int | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Fly one explicit-consent trial with original-source leases and one actual grant.
@@ -765,6 +789,16 @@ def run_trial(
         raise CheckpointError("run_required", "Actuation requires explicit --run consent.")
     if owned and (not options.isolated or client not in _OWNED_CLIENTS):
         raise CheckpointError("invalid_scope", "Owned rate changes require an isolated invocation.")
+    if world_id is not None:
+        from .controller_worlds import controller_world, uint32
+
+        try:
+            controller_world(world_id)
+            uint32(seed)
+        except ValueError:
+            raise CheckpointError("invalid_options", "Invalid intended world or seed.") from None
+    elif seed is not None:
+        raise CheckpointError("invalid_options", "A seed requires an explicit reviewed world.")
     from .control_contract import vector
     from .controllers import catalog, create_controller, sample_from_observation
 
@@ -792,10 +826,7 @@ def run_trial(
         )
     if expected_world is not None and world != expected_world:
         raise CheckpointError("comparison_mismatch", "Fresh trial metadata/build does not match.")
-    if not _stock_world(initial):
-        raise CheckpointError(
-            "stock_world_required", "Checkpoint actuation requires unchanged stock setup."
-        )
+    _validate_trial_world(initial, world_id=world_id, seed=seed)
     if owned and (initial["runtime"]["running"] or _observation(initial)["time_s"] != 0):
         raise CheckpointError("fresh_trial_required", "Owned trials must start fresh and paused.")
     if not owned and initial["runtime"].get("rate") != 1:
@@ -841,9 +872,11 @@ def run_trial(
         "radar_clock_offset_basis": "native radar_clock=simulation_elapsed_seconds contract",
         "initial": native_measurement(initial),
         "initial_world": world,
-        "stock_world": True,
+        "stock_world": _stock_world(initial),
         "fresh_owned_trial": owned,
-        "validation_scope": _validation_scope(client, owned=owned),
+        "validation_scope": _validation_scope(
+            client, owned=owned, reviewed_world=world_id is not None
+        ),
         "lease_sim_s": LEASE_SIM_S,
         "cadence_hz": options.cadence_hz,
         "duration_limit_s": options.duration_s,
@@ -866,6 +899,8 @@ def run_trial(
         "diagnostics_source": "same shared policy report; anonymous associations, not physical IDs",
         "damage_limit_basis": "versioned stock acceptance limit, not a live SDK parameter",
     }
+    if world_id is not None:
+        result["world_id"] = world_id
     fence = None
     current = initial
     last_time = origin_sim
@@ -914,7 +949,11 @@ def run_trial(
             sample = (
                 sample_from_snapshot(current, source_kind=_source_kind(client))
                 if portable
-                else sample_from_observation(observation, source_kind=_source_kind(client))
+                else sample_from_observation(
+                    observation,
+                    source_kind=_source_kind(client),
+                    retain_observation=policy == "ali_official_profile",
+                )
             )
             compute_started = time.monotonic()
             accel, angular = controller.command(

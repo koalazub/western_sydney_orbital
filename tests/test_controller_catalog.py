@@ -29,9 +29,11 @@ IDS = (
     "coast",
     "bui_alpha_beta_mvp",
     "tom_kalman_velocity_mvp",
+    "ali_official_profile",
+    "official_basic_beeline",
     "userapi_body_z",
 )
-GENERIC_IDS = IDS[2:]
+GENERIC_IDS = tuple(identity for identity in IDS[2:] if identity != "ali_official_profile")
 TRACKED_IDS = ("bui_alpha_beta_mvp", "tom_kalman_velocity_mvp")
 FRAME = "Constructed native reference frame, SI; not a runtime measurement"
 SOURCE = "native_manual_public_observation"
@@ -119,13 +121,17 @@ def test_shared_json_catalog_is_exact_detached_safe_and_grouped_by_name():
     }
     for entry in entries:
         assert set(entry) == fields
-        assert entry["owner"] in ("Tom", "Harry", "Bui", "WSO")
+        assert entry["owner"] in ("Tom", "Harry", "Bui", "WSO", "Ali", "Published")
         assert type(entry["experimental"]) is bool
         assert type(entry["target_seeking"]) is bool
         assert not Path(entry["source"]).is_absolute()
     owners = {entry["id"]: entry["owner"] for entry in entries}
     assert owners == dict(
-        zip(IDS, ("WSO", "WSO", "Harry", "Harry", "Bui", "Tom", "Tom"), strict=True)
+        zip(
+            IDS,
+            ("WSO", "WSO", "Harry", "Harry", "Bui", "Tom", "Ali", "Published", "Tom"),
+            strict=True,
+        )
     )
     assert "harness selection" in entries[2]["contributor"]
     assert "template" in entries[-1]["label"].lower() and not entries[-1]["target_seeking"]
@@ -157,6 +163,15 @@ def test_factories_have_fresh_per_trial_state_and_return_real_decisions(controll
     first = policy_factory(controller_id, {})
     second = policy_factory(controller_id, {})
     assert first is not second and first.controller is not second.controller
+    if controller_id == "ali_official_profile":
+        # This deliberately incomplete numeric fixture lacks the five-unit
+        # resilient guidance contract. A zero fallback must not grant a lease.
+        with pytest.raises(ValueError, match="eligible decision"):
+            first(observation())
+        assert first.report["eligible"] is False
+        assert first.report["guidance"]["can_command"] is False
+        assert second.report["calls"] == 0
+        return
     assert callable(first) and isinstance(first(observation()), Decision)
     assert second.report["calls"] == 0
     if controller_id in GENERIC_IDS:
@@ -456,6 +471,44 @@ def test_hy_commands_are_existing_math_and_template_is_explicitly_not_guidance()
     np.testing.assert_array_equal(angular, np.zeros(3))
     assert controller.report["template"]["original_accel_body_mps2"] == [0.0, 0.0, 1.0]
     assert not controller.report["template"]["target_seeking"]
+
+
+@pytest.mark.parametrize("velocity", ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [11.0, 2.0, 0.0]))
+def test_published_basic_adapter_is_the_saved_original_math_not_harry_pd(velocity):
+    from runpy import run_path
+
+    from wsorb.flight.control import basic_command
+
+    data = observation(2.0, velocity=velocity)
+    data["shuttle"]["rotation"] = [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]
+    original = run_path(str(Path(__file__).resolve().parents[1] / "examples/flight_sweep.py"))[
+        "official_basic_policy"
+    ]({})
+    controller = create_controller("official_basic_beeline")
+    actual = command(controller, data)
+    for left, right in zip(actual, original(data), strict=True):
+        np.testing.assert_array_equal(left, right)
+    assert controller.report["eligible"] is True
+    assert any(
+        not np.array_equal(left, right)
+        for left, right in zip(actual, basic_command(data), strict=True)
+    )
+
+
+def test_ali_requires_original_public_observation_without_inventing_health_or_aliases():
+    data = observation()
+    controller = create_controller("ali_official_profile")
+    linear, angular = command(controller, data)
+    assert controller.report["eligible"] is False
+    np.testing.assert_array_equal(linear, np.zeros(3))
+    np.testing.assert_array_equal(angular, np.zeros(3))
+    retained = sample_from_observation(data, source_kind=SOURCE, retain_observation=True)
+    data["shuttle"]["position"][0] = 100
+    assert retained.source_observation["shuttle"]["position"][0] == 0
+    assert retained.source_observation["sensor_health"]["units"] == data["sensor_health"]["units"]
+    assert len(retained.source_observation["sensor_health"]["units"]) == 2
+    with pytest.raises(ValueError, match="Unknown reviewed"):
+        create_controller("wso_official_profile")
 
 
 def test_bui_projected_hold_cap_matches_prediction_and_angular_norm_is_bounded():

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "official",
+    "label": "Official competition reference",
+    "preset": "competition_reference",
+    "settings": {
+      "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
+      "debris": {
+        "count": 500,
+        "distribution": { "kind": "official_cloud" },
+        "radius_min_m": 0.4,
+        "radius_max_m": 40.4,
+        "speed_mps": 20.0,
+        "speed_spread_mps": 4.0,
+        "shell_inner_m": 60.0,
+        "shell_outer_m": 700.0,
+        "stream_axis": "y",
+        "stream_sign": -1
+      }
+    }
+  },
+  {
+    "id": "team",
+    "label": "Saved team L2 practice, 20 m/s stream",
+    "preset": "far_side_l2",
+    "settings": {
+      "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
+      "debris": {
+        "count": 500,
+        "distribution": { "kind": "directed_stream" },
+        "radius_min_m": 0.4,
+        "radius_max_m": 40.4,
+        "speed_mps": 20.0,
+        "speed_spread_mps": 4.0,
+        "shell_inner_m": 60.0,
+        "shell_outer_m": 700.0,
+        "stream_axis": "x",
+        "stream_sign": 1
+      }
+    }
+  },
+  {
+    "id": "across_phobos",
+    "label": "Across Phobos, current L2 defaults",
+    "preset": "far_side_l2",
+    "settings": {
+      "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
+      "debris": {
+        "count": 500,
+        "distribution": { "kind": "transit_stream" },
+        "radius_min_m": 0.4,
+        "radius_max_m": 40.4,
+        "speed_mps": 20.0,
+        "speed_spread_mps": 4.0,
+        "shell_inner_m": 60.0,
+        "shell_outer_m": 700.0,
+        "stream_axis": "y",
+        "stream_sign": -1
+      }
+    }
+  }
+]
