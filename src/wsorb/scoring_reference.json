@@ -1,11 +1,17 @@
 {
   "schema": "wsorb.scoring_reference",
   "schema_version": 1,
-  "reference_version": "2026-10-29.2",
-  "reviewed_on": "2026-10-29",
+  "reference_version": "2026-11-03.1",
+  "reviewed_on": "2026-11-03",
   "scope": "published_per_run_algebra_not_runtime_or_leaderboard_certification",
   "formula_id": "stu4_sim_scoring_c1e3fc8_v1",
   "local_receipt_formula_id": "practice_normalized_time_damage_fuel_v1",
+  "archived_scope": {
+    "reviewed_on": "2026-10-29",
+    "source_commit": "c1e3fc8f9ee3b189bba64d8bd87818a8003639cc",
+    "fields": ["formula_id", "local_receipt_formula_id", "sources.simulation", "constants", "algebra", "documented_model", "counter_semantics", "known_conflicts", "worked_examples", "local_comparison.score_compatibility"],
+    "note": "These fields preserve the 29 October review and historical publication contract. The missing timestep and mass conversion in counter_semantics.fuel describe this archived actuator only, not current_main. The historical score_compatibility reason is not a classification of current-formula local estimates."
+  },
   "sources": {
     "rules": {
       "url": "https://github.com/SimDynamX/SpaceTeamsPRO/discussions/218",
@@ -90,13 +96,131 @@
     "zero_time_bonus": 0.0
   },
   "current_main": {
-    "reviewed_on": "2026-11-02",
+    "reviewed_on": "2026-11-03",
     "source_commit": "c010564824c48488104e648781d5e987b402e47a",
+    "source_commit_date": "2026-10-31",
     "source_file": "Systems/Scoring.py",
+    "backend_version_alert": "2026/10/30",
     "formula_id": "official_time_damage_fuel_v1",
     "nominal_fuel_kg": 75.0,
     "fuel_penalty": "max(F / F_nom, 0)",
-    "note": "Current STU4-Sim main replaced the pinned 1.15 kg nominal fuel and the max(F/F_nom - 1, 0) term. The pinned review above is preserved; the local competition_reference preset carries 75.0 kg. Local counters are still not official STP counters."
+    "constants": {
+      "nominal_time_s": 120.0,
+      "nominal_fuel_kg": 75.0,
+      "impact_threshold_j": 209200.0,
+      "arrival_radius_m": 50.0,
+      "score_offset": 0.5,
+      "points_scale": 100.0,
+      "damage_multiplier": 2.0,
+      "zero_time_bonus": 0.0
+    },
+    "source_urls": {
+      "scoring": "https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py",
+      "actuator": "https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/JetSelectionActuator.py",
+      "configuration": "https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Sims/COMPETITION_SIM.simconf"
+    },
+    "counter_semantics": {
+      "fuel": {
+        "parameter_path": ["Stats", "FuelUsed"],
+        "scorer_unit_label": "kg",
+        "activity_vector_linear_components": "jet_force_divided_by_vehicle_mass",
+        "max_on_time": "max(max(onTimes), 0)",
+        "zero_impulse_guard": "max_on_time < 1e-12",
+        "firing_time_s": "remap(max(onTimes[i], 0), 0, max_on_time, 0, min(dt_tick, max_on_time))",
+        "jet_linear_impulse_ns": "mass * min(firing_time_s, dt_tick) * A[i, 0:3]",
+        "jet_angular_impulse_nms": "inertia @ (min(firing_time_s, dt_tick) * A[i, 3:6])",
+        "increment_per_iteration": "sum_i(norm(jet_linear_impulse_ns[i]) / (80 * 9.8))",
+        "timestep_multiplier_applied": true,
+        "force_conversion_mass_multiplier_applied": true,
+        "timestep_source": "difference_of_SimClock_timestamps_not_fixed_1_over_60",
+        "nonpositive_timestep_skipped": true,
+        "configured_loop_hz": 60.0,
+        "direct_command": false,
+        "effect_application": "summed_linear_and_angular_impulses_in_body_frame",
+        "minimum_on_time_filter": "selects_OnThrustersMain_indices_but_does_not_filter_impulse_or_fuel_sum",
+        "specific_impulse_s": 80.0,
+        "standard_gravity_mps2": 9.8,
+        "local_si_fuel_equivalence_certified": false
+      },
+      "damage": {
+        "parameter_path": ["Stats", "Damage"],
+        "scorer_unit_label": "J",
+        "official_description": "collision energy extracted from STP physics engine hit outputs",
+        "full_accumulator_source_in_reviewed_repositories": false,
+        "local_damage_equivalence_certified": false
+      },
+      "time": {
+        "origin": "scoring_system_initialization",
+        "assessment_sample": "preceding_iteration_elapsed_accumulator",
+        "configured_loop_hz": 10.0,
+        "scoring_loop_stops_physics_on_terminal": false,
+        "local_clock_equivalence_certified": false
+      }
+    },
+    "note": "Current main uses 75 kg and max(F/F_nom, 0). Its actuator now integrates per-jet impulses using actual elapsed time and mass. Local SI fuel is not incompatible by units alone; allocation, angular fuel, physics and timing still differ. Current-formula local estimates are not licensed STP receipts."
+  },
+  "current_scoring": {
+    "source": "current_main",
+    "formula_id": "official_time_damage_fuel_v1",
+    "constants_path": "current_main.constants",
+    "algebra": {
+      "time_bonus": "T_nom / T if T != 0 else 0",
+      "damage_penalty": "2 * D / D_max",
+      "fuel_penalty": "max(F / F_nom, 0)",
+      "success_score": "100 * (time_bonus - damage_penalty - fuel_penalty + 0.5)",
+      "failure_score": "100 * (-r / r0 - damage_penalty - fuel_penalty + 0.5)",
+      "clamped": false
+    },
+    "local_estimate": {
+      "classification": "current_formula_on_recorded_local_terminal_counters",
+      "stp_receipt": false,
+      "inputs": ["elapsed_time_s", "damage_j", "fuel_counter", "distance_m", "initial_distance_m"],
+      "missing_or_nonterminal_or_error": "unavailable_not_zero",
+      "failure_distance_denominator": "positive_initial_distance_required_for_browser_estimate",
+      "initial_range_source": "recorded_time_zero_target_range_only_not_geometry_or_current_engine",
+      "summary": "arithmetic_mean_of_complete_two_run_pair_means_from_per_run_scores",
+      "summary_of_median_counters": false,
+      "attempt_and_error_counts_preserved": true,
+      "legacy_scores_rewritten": false
+    },
+    "examples_kind": "hypothetical_algebra_not_observed_runs",
+    "worked_examples": [
+      {
+        "id": "hypothetical_175_success",
+        "inputs": {"elapsed_time_s": 80.0, "damage_j": 0.0, "fuel_counter": 18.75, "distance_m": 50.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 150.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 25.0, "offset_points": 50.0, "total": 175.0}
+      },
+      {
+        "id": "current_nominal_success",
+        "inputs": {"elapsed_time_s": 120.0, "damage_j": 0.0, "fuel_counter": 75.0, "distance_m": 50.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 100.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 100.0, "offset_points": 50.0, "total": 50.0}
+      },
+      {
+        "id": "current_zero_time_success",
+        "inputs": {"elapsed_time_s": 0.0, "damage_j": 0.0, "fuel_counter": 0.0, "distance_m": 50.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 0.0, "collision_penalty_points": 0.0, "fuel_penalty_points": 0.0, "offset_points": 50.0, "total": 50.0}
+      },
+      {
+        "id": "current_damage_at_threshold",
+        "inputs": {"elapsed_time_s": 120.0, "damage_j": 209200.0, "fuel_counter": 75.0, "distance_m": 50.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "success", "progress_basis": "time_ratio", "progress_points": 100.0, "collision_penalty_points": 200.0, "fuel_penalty_points": 100.0, "offset_points": 50.0, "total": -150.0}
+      },
+      {
+        "id": "current_damage_failure",
+        "inputs": {"elapsed_time_s": 120.0, "damage_j": 313800.0, "fuel_counter": 37.5, "distance_m": 5000.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "failed_damage", "progress_basis": "remaining_distance_ratio", "progress_points": -50.0, "collision_penalty_points": 300.0, "fuel_penalty_points": 50.0, "offset_points": 50.0, "total": -350.0}
+      },
+      {
+        "id": "current_damage_preempts_arrival",
+        "inputs": {"elapsed_time_s": 80.0, "damage_j": 313800.0, "fuel_counter": 18.75, "distance_m": 50.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "failed_damage", "progress_basis": "remaining_distance_ratio", "progress_points": -0.5, "collision_penalty_points": 300.0, "fuel_penalty_points": 25.0, "offset_points": 50.0, "total": -275.5}
+      },
+      {
+        "id": "current_running_unscored",
+        "inputs": {"elapsed_time_s": 120.0, "damage_j": 0.0, "fuel_counter": 75.0, "distance_m": 5000.0, "initial_distance_m": 10000.0},
+        "expected": {"status": "running", "progress_basis": null, "progress_points": null, "collision_penalty_points": null, "fuel_penalty_points": null, "offset_points": null, "total": null}
+      }
+    ]
   },
   "algebra": {
     "time_bonus": "T_nom / T if T != 0 else 0",

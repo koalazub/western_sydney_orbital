@@ -6,7 +6,7 @@ reference for a local port, not a certification that this practice simulator
 matches Space Teams PRO. The values below come from the cited source files, not
 from a licensed runtime observation.
 
-Sources were checked on 2 November 2026 against:
+Sources were checked on 3 November 2026 against:
 
 - [`SimDynamX/STU4-Sim` main at `c0105648`][sim-main] (31 October 2026).
 - [`SimDynamX/STU4-Solution` main at `8545c085`][solution-main] (19 October 2026).
@@ -77,6 +77,28 @@ published code does not clamp the final score. Damage failure is tested as
 `D > 209200`; at exactly the threshold, arrival can still succeed. Arrival is
 `r <= 50 m` with no arrival-speed or attitude gate in `Scoring.py`.
 
+A nominal success at `T = 120 s`, `D = 0 J`, `F = 75 kg` scores 50. A hypothetical
+success at `T = 80 s`, `D = 0 J`, `F = 18.75 kg` scores
+`150 - 0 - 25 + 50 = 175`. That is an algebra example, not an observed official
+175-point result. `Scoring.py` announces `Backend Sim Version: 2026/10/30`.
+
+The native `competition_reference` preset applies this formula to local counters.
+The revised saved-flight comparison puts **Points** first, with the time or
+distance, damage, fuel and offset breakdown in **Metric details**. It calculates
+current-formula local estimates from recorded terminal inputs, not STP receipts
+or archived legacy scores. Summary points average complete two-run pair scores
+calculated per run, never a formula applied to median counters. Missing inputs,
+nonterminal runs and errors remain unavailable; coverage and attempt/error counts
+remain visible. These browser changes were deployed on 3 November 2026.
+
+Current [JetSelectionActuator.py][actuator] no longer uses the unscaled activity
+counter from the older pin. It remaps positive jet on-times into the actual
+elapsed interval, converts each jet's acceleration to impulse with mass and
+inertia, and adds `sum(norm(linear_impulse_i)) / (80 * 9.8)` to `Stats/FuelUsed`.
+The configured 60 Hz is a requested loop rate, not a substitute for actual elapsed
+time. `DirectCommand = false` applies summed body-frame linear and angular
+impulses. See the [current fuel and timing analysis](scoring.md#current-fuel-damage-and-clock-limits).
+
 The example controller in `STU4-Solution` is a 10 m/s beeline with attitude
 alignment: [`BasicController.py`][basic]. It is a reference implementation, not
 a claim that the local controller or local flight matches it.
@@ -100,15 +122,28 @@ This repository does not claim one-to-one parity with the official mission.
   and its body-fixed frame. The local site radius, absolute coordinates and
   terrain are not the official ones; the 1305.8 m separation and 50 m keep-out
   are the values being ported.
-- **Fuel and damage counters.** Local fuel is an estimated SI mass and local
-  damage is a contact-energy estimate. Neither is the official
-  `Stats/FuelUsed` or `Stats/Damage` counter. The local dashboard cannot emit
-  comparable STP points.
+- **Fuel and damage counters.** Both current fuel models use impulse-based
+  kilograms, but their actuation differs. Local autonomous commands charge the
+  resultant centre-of-mass force and apply angular torque without extra fuel.
+  Official jet allocation charges individual jets, including those used for
+  rotation. Local manual-nozzle fuel sums its own jets, not the official layout
+  or firing-time remap. The complete official Blueprint damage accumulator is
+  still unavailable. Local fuel and contact-energy measurements support labelled
+  score estimates, not certified counter parity or official receipts.
+- **Scorer timing.** The local engine freezes at its terminal physics substep.
+  The official scorer samples its preceding elapsed accumulator on an asynchronous
+  10 Hz requested loop and does not stop physics. Its clock starts when that
+  scorer initializes. Licensed timing and impulse-effect execution remain unvalidated.
 - **Transit traffic.** `transit_stream` is a custom 20 m/s corridor and a stress
   test. It is not the official debris cloud and is not the competition field.
 - **Seed.** The official `SpawnDebris.py` hardcodes seed 100. The local new-world
-  control can request another seed for practice, so a local draw is not the
-  official draw unless it also uses seed 100 and the same distribution.
+  control supplies the requested seed to the local xorshift generator through
+  `seed.max(1)` in [`physics.rs`](../simulation/src/physics.rs).
+  [`official_cloud::spawn`](../simulation/src/physics/official_cloud.rs) uses that
+  generator for each local population. Seeds 100, 101 and 102 are separate seeded
+  initializations; repeats of a seed are deterministic. The official script uses
+  Python and NumPy generators with a different draw order. Even seed 100 and the
+  same distribution parameters do not establish identical STP bodies or motion.
 - **Gravity and sensors.** The local model uses a circular point-mass CR3BP
   approximation and a practice radar/telemetry implementation. It does not run
   the official SPICE ephemeris, sensor bus or scoring process.
@@ -125,17 +160,20 @@ The existing `far_side_l2` practice world, the 20 m/s transit stress mode and
 the 30-trial publication remain unchanged. Those records are local evidence,
 not official results.
 
-The earlier [scoring reference](scoring.md) preserves the 29 October review of
+The [scoring reference](scoring.md) leads with the current formula and preserves the 29 October review of
 the pinned `c1e3fc8f` revision, where the executable fuel penalty used
 `NominalFuel_kg = 1.15` and subtracted 1. The current main revision uses 75.0 kg
-and does not subtract 1. Keep those revisions distinct when comparing formulas.
-Local counters are not official counters under either revision.
+and does not subtract 1. It also corrects the old actuator's missing time and mass
+conversion. Keep those revisions distinct. Historical publication compatibility
+records and receipts stay unchanged; they do not prohibit a separately labelled
+current-formula estimate from complete local terminal measurements.
 
 [sim-main]: https://github.com/SimDynamX/STU4-Sim/tree/c010564824c48488104e648781d5e987b402e47a
 [solution-main]: https://github.com/SimDynamX/STU4-Solution/tree/8545c085426a71c39cbe1d544a844b3edb757007
 [simconf]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Sims/COMPETITION_SIM.simconf
 [spawn]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/SpawnDebris.py
 [scoring]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py
+[actuator]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/JetSelectionActuator.py#L129-L147
 [radar]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Radar.py
 [rock1]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/Rock1.enconf
 [rock2]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Entities/Rock2.enconf

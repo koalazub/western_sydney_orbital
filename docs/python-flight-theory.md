@@ -273,8 +273,9 @@ repulsion based on closest range, margin and closing-rate lookahead. It has no
 local swept candidate gate or arrival-distance braking envelope. Its configured
 attitude response time is not a native lease. Sequential SDK reads/writes and a
 post-compute deadline check cannot guarantee cleanup after process death. Shared
-10 m/s guidance, axis preference and caps do not make these algorithms identical.
-The source port has no licensed-runtime evidence.
+10 m/s speed references and acceleration caps do not make these algorithms
+identical. The source port has no licensed-runtime evidence. Actuator behavior
+and clock alignment still need external validation in that runtime.
 
 ## Useful experiments, and what 6/6 does not establish
 
@@ -306,12 +307,23 @@ Research comparisons worth making next are:
   eligibility/latency failures separate. Selecting a combined objective or final
   weights needs an explicit decision and data.
 
+The [local initializer](../simulation/src/physics.rs) seeds its xorshift generator
+with `seed.max(1)` and passes it to
+[`official_cloud::spawn`](../simulation/src/physics/official_cloud.rs). The
+requested seeds 100, 101 and 102 therefore feed separate local initializations;
+they are not forced to 100. Repeating a seed reuses its deterministic population.
+The [official script](https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/SpawnDebris.py)
+hardcodes 100 for its Python and NumPy generators. Different generators, draw
+order and local geometry mean that local seed 100 does not establish an identical
+STP population.
+
 The published [official comparison](official-comparison.md) records six local
 arrivals for Ali's profile across three seeds and two attempts each. Two attempts
 recorded damage. This does not establish collision-free flight, an independent
 six-draw reliability estimate, unseen-body clearance, live lease performance,
 low-speed docking, PID/ABG benefit, calibrated forecast uncertainty or licensed
-STP success. Official-cloud seed handling also means the three local seeds are
-not three independent cloud population draws. Local fuel and damage counters
-cannot produce comparable STP points. The publication supports those specific
-local outcomes, not a general safety or optimality claim.
+STP success. Three matched local seeds with deterministic repeats remain a small
+practice sample. Local fuel and damage counters cannot produce comparable STP
+points. The publication supports those specific local outcomes, not a general
+safety or optimality claim. Changes to reference helpers do not revise or improve
+these historical flights.

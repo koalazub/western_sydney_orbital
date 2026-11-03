@@ -1,54 +1,150 @@
 # Scoring and ranking reference
 
-Reviewed against first-party sources on 29 October 2026. This documents the
-published STU4 scorer and the submission rules. It does not certify that our
-practice physics, counters or timing reproduce Space Teams PRO.
+Reviewed on 3 November 2026 against `STU4-Sim` main at
+`c010564824c48488104e648781d5e987b402e47a`, dated 31 October. Its scorer announces
+`Backend Sim Version: 2026/10/30`. The dashboard uses this revision's formula,
+not the older 1.15 kg formulas preserved below.
 
-For the competition, use the actual official run's score, counters, video and
-logs. For local comparisons, keep historical practice receipts as diagnostics only.
-Do not reconstruct missing scores from a plot or an archived partial flight.
+## Current points formula
 
-> **Revision note (2 November 2026).** Current `STU4-Sim` main sets
-> `NominalFuel_kg = 75.0` and uses `max(F / 75.0, 0)`. This page preserves the
-> 29 October review of pinned revision `c1e3fc8f`, which used `1.15` and
-> `max(F / 1.15 - 1, 0)`; the worked examples below are for that revision.
-> See [the official reference](competition-reference.md) for current-main values.
-> Local fuel and damage counters remain non-comparable under either revision.
-
-## The documented formula requested for the dashboard
-
-The [scoring wiki][wiki] defines the successful-run equation as:
+The current [scorer][current-scorer] and [configuration][current-config] give:
 
 ```text
-Time Score = 120 / T
-Damage Penalty = 2 * D / 209200
-Fuel Penalty = F / 1.15
-Raw Score = Time Score - Damage Penalty - Fuel Penalty
-Final points = 100 * (Raw Score + 0.5)
+time_bonus = 120 / T, except time_bonus = 0 when T = 0
+damage_penalty = 2 * D / 209200
+fuel_penalty = max(F / 75, 0)
+
+success_points = 100 * (time_bonus - damage_penalty - fuel_penalty + 0.5)
+failure_points = 100 * (-r / r0 - damage_penalty - fuel_penalty + 0.5)
 ```
 
-`T` is completion time in seconds. `D` is accumulated collision damage, not
-collision count. `F` must be STP's `Stats/FuelUsed` counter. The constants come
-from the pinned competition configuration. A nominal success scores **50**.
-The wiki's worked example, `T = 96`, `D = 10460`, `F = 1.035`, has
-`1.25 - 0.10 - 0.90 = 0.25` raw score, then **75** final points. The raw score is
-dimensionless. The 0.5 offset and factor of 100 belong only to final points.
+`T` is scorer elapsed seconds, `D` accumulated damage in joules, `F` fuel used in
+kilograms, `r` distance to the target's centre and `r0` that distance at scorer
+initialization. Official results use the observed STP counters. Local estimates
+use the recorded local equivalents and are labelled as such. Higher points are
+better. The result is not a percentage, is not capped at 100 and may be negative.
 
-The wiki says failure substitutes distance for time, but does not publish the
-distance equation or numerical category enforcement. The executable equations
-below are a separate source, not a complete definition supplied by the wiki.
+Damage failure at `D > 209200` takes precedence over arrival at `r <= 50 m`.
+Equality at the damage threshold still permits arrival. There is no speed,
+attitude or dwell gate, and no hard timeout in the published scorer. Arrival
+speed, collision count, burns and turns do not add separate score terms.
 
-**The local dashboard cannot report comparable STP points.** Its physical fuel
-estimate is not STP's fuel counter. The earlier roughly -7,000 and -26,000 totals
-were invalid as STP comparisons. Swapping fuel penalties, dividing fuel by mass,
-or assuming a fixed 60 Hz actuator rate cannot repair the missing counter history.
+### How 175 points is possible
 
-New local flights return no score. The dashboard compares measured duration,
-estimated SI fuel, damage, burns and turns without an invented combined ranking.
-Historical receipts remain unchanged in archives and explicitly labelled legacy
-diagnostics in downloads. Version-2 publications carry a closed
-`score_compatibility` record with `stp_points_available = false`; matching legacy
-formula IDs and seed coverage do not override it.
+This is a hypothetical example, not a recorded flight or an official 175-point
+result. A success at `T = 80 s`, `D = 0 J`, `F = 18.75 kg` gives:
+
+```text
+150 time - 0 damage - 25 fuel + 50 offset = 175 points
+```
+
+The current formula fixtures are separate from the archived ones. Every row
+uses `r0 = 10000 m`; penalties below are positive values to subtract.
+
+| Reference ID | `T`, s | `D`, J | `F`, kg | `r`, m | Outcome | Time or distance | Damage | Fuel | Offset | Points |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| `hypothetical_175_success` | 80 | 0 | 18.75 | 50 | Success | 150 | 0 | 25 | 50 | 175 |
+| `current_nominal_success` | 120 | 0 | 75 | 50 | Success | 100 | 0 | 100 | 50 | 50 |
+| `current_zero_time_success` | 0 | 0 | 0 | 50 | Success | 0 | 0 | 0 | 50 | 50 |
+| `current_damage_at_threshold` | 120 | 209,200 | 75 | 50 | Success | 100 | 200 | 100 | 50 | -150 |
+| `current_damage_failure` | 120 | 313,800 | 37.5 | 5,000 | Damage failure | -50 | 300 | 50 | 50 | -350 |
+| `current_damage_preempts_arrival` | 80 | 313,800 | 18.75 | 50 | Damage failure | -0.5 | 300 | 25 | 50 | -275.5 |
+| `current_running_unscored` | 120 | 0 | 75 | 5,000 | Running | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable |
+
+### Read points in the comparison
+
+The score-first browser controls were deployed on 3 November 2026.
+**Points** is the first numeric comparison column. It applies the current formula
+to each saved terminal run's recorded time, damage, fuel and distance inputs.
+**Metric details** shows the time or distance term, damage penalty, fuel penalty,
+offset and total. These are current-formula local estimates, not STP receipts,
+and do not overwrite archived scores, counters, checksums or formula IDs.
+
+**Summary** shows the mean of complete two-run pair scores. Calculate each run's
+points, average the two repetitions for each seed, then average the complete
+pairs. Never score median time, damage and fuel as if they described one flight.
+Damage failures with complete terminal inputs can contribute; errors, unfinished
+runs and missing inputs cannot. Coverage, incomplete pairs, missing values and
+error/attempt counts remain visible. Unavailable is not zero.
+Point differences from baseline average complete matched pair-score differences;
+both profiles need both repetitions. The other metrics retain their median
+seed/repetition-matched differences.
+
+The native `competition_reference` preset already uses this same algebra on its
+local counters. Other practice presets, including L2, can remain natively
+unscored while the saved-run browser comparison calculates a labelled estimate
+where complete terminal inputs exist. Do not infer a terminal result from a
+partial plot or software-error trace.
+
+## Current fuel, damage and clock limits
+
+The [current actuator helper][current-actuator-fuel] corrects two problems in the
+29 October pin. It uses elapsed simulation time and converts jet acceleration
+back to impulse with vehicle mass. It no longer accumulates the old unscaled
+per-iteration activity value.
+
+For activity matrix `A`, define `M = max(max(onTimes), 0)`. If `M < 1e-12`, the
+helper returns zero impulse and fuel. Otherwise, for each jet:
+
+```text
+timeToFire_i = remap(max(onTimes[i], 0), 0, M, 0, min(dt_tick, M))
+activity_i = min(timeToFire_i, dt_tick) * A[i]
+linear_impulse_i = mass * activity_i[0:3]
+angular_impulse_i = inertia @ activity_i[3:6]
+delta_F = sum_i(norm(linear_impulse_i) / (80 * 9.8))
+```
+
+`A` still contains force/mass and inverse-inertia times torque. The helper sums
+individual jet impulse magnitudes for fuel, not the magnitude of their resultant.
+Jets used for rotation can consume fuel even when translation cancels.
+
+The [calling loop][current-actuator-loop] reads mass, inertia and both commands,
+applies their norm caps, solves the six-axis allocation, then passes the actual
+`SimClock` timestamp difference to the helper. It skips nonpositive elapsed time.
+The configuration requests 60 Hz with `DirectCommand = false`, so the loop applies
+the summed linear and angular impulses in the body frame. It does not assume
+`dt_tick = 1/60`. The minimum-on-time test selects the `OnThrustersMain` index
+list; that list does not filter the helper's impulse or fuel calculation.
+
+Our [physics integrator](../simulation/src/physics.rs) also charges force times
+elapsed time divided by `80 * 9.8`. For autonomous centre-of-mass commands,
+[`apply_actuator_forces`](../simulation/src/physics/live_tuning.rs) uses
+`mass * gain * norm(commanded_accel)` as its fuel force. It applies angular torque
+directly without an additional angular fuel charge. Manual nozzles and practice
+boost instead sum their own applied jets' force magnitudes. They do not reproduce
+the official six-axis allocation, nozzle geometry or firing-time remap. There is
+no constant mass or frequency conversion that supplies the missing allocation
+history. Both models now have an impulse-based kilogram interpretation; that
+alone does not make their fuel totals equal.
+
+Damage remains a separate gap. The [official answer][damage] describes collision
+energy from physics hit outputs, including infrastructure and Phobos contacts.
+The configuration initializes `Stats/Damage` on the `E_SpaceBuggy` Blueprint, but
+the reviewed repositories do not provide its complete hit-to-counter code. The
+local closing-energy contact estimate does not establish parity.
+Locally, a newly active lander/contact pair adds
+`0.5 * reduced_mass * closing_speed²`. Closing speed uses the maximum positive
+contact-normal component of the pre-step relative velocity. A continuing contact
+does not add that charge every step. This is the local accumulator, not a recovered
+equation for the official Blueprint.
+
+The [current scoring loop][current-scorer-loop] starts its clock and `r0` at scorer
+initialization, assesses the preceding iteration's elapsed accumulator, and
+requests 10 Hz through a Python sleep. It continues after a terminal alert instead
+of freezing physics. The local engine uses its physics clock and freezes at the
+terminal substep. Licensed clock, contact and impulse-effect behaviour remain
+unvalidated. For a submission, retain the actual official score, counters, video
+and logs. Source agreement is not runtime certification.
+
+The source failure equation divides directly by `r0`. The browser requires a
+recorded positive time-zero range for a failure estimate. Saved paths use their
+actual time-zero sample. Live profile results may use the time-zero row in the
+existing bounded native `result.analytics`, whose range is column index 7. The
+live job's measurement object does not supply initial range. Without that actual
+reading the failure estimate is unavailable; neither preset geometry nor a newer
+engine supplies a substitute. This needs no protocol change. The current native local
+scorer instead uses a zero distance term for a degenerate initial range. That is
+a local guard, not an upstream rule; none of the examples uses that case.
 
 ## Which source answers which question?
 
@@ -59,15 +155,17 @@ formula IDs and seed coverage do not override it.
 - [Mission Success, Failure, and Scoring][wiki] describes scoring and says arrivals
   belong above non-arrivals. The linked page is pinned to wiki revision
   `4ddae12f7d577b09c27dbfc9cab886ef98e693c5`, dated 19 October 2026.
-- [Scoring.py][scorer] is the published executable per-run algebra. The
-  [competition configuration][config] supplies its constants. These are source
+- [Current Scoring.py][current-scorer] is the published executable per-run algebra.
+  The [current competition configuration][current-config] supplies its constants. These are source
   evidence, not an observation of a licensed runtime.
 - Official answers clarify [collision energy and arrival][damage],
   [fuel/timing variability and validation][variance], and
   [the current debris seed][seeds]. Discussion comments can change. Their dates
   and comment anchors identify what was reviewed.
 
-The simulation pin is `c1e3fc8f9ee3b189bba64d8bd87818a8003639cc`. The observed
+### Preserved 29 October source record
+
+The archived simulation pin is `c1e3fc8f9ee3b189bba64d8bd87818a8003639cc`. The then-observed
 `main` was `3d7c342cd28817345bcd237279c44c95f9a990d1`, dated 26 October 2026.
 GitHub's trees show identical blobs for all three scoring-related files at both
 commits.
@@ -79,10 +177,13 @@ commits.
 | `Sims/COMPETITION_SIM.simconf` | `4a228831ea71c21e9aad304914abbf95d11bf5ed` | 822,061 |
 
 The [machine-readable reference](../src/wsorb/scoring_reference.json) records
-these pins, constants, disagreements and worked examples. Its formula IDs are
+both revisions, constants, disagreements and worked examples. Its formula IDs are
 repository labels, not version names assigned by the competition organizers.
 Schema version 1 is documentation data, not executable scenario configuration. The
-`algebra` strings are explanatory, not expressions to evaluate. `worked_examples`
+`algebra` strings are explanatory, not expressions to evaluate. `current_main`
+holds the current pinned URLs, corrected counter semantics and dashboard constants;
+`current_scoring` holds current examples and the local-estimate policy.
+`archived_scope` names the fields preserved from the older review. `worked_examples`
 contains inputs, outcomes and published-code point receipts. `documented_model`
 separately records the wiki formula and its 50-point and 75-point examples.
 Null ranking fields mean the
@@ -90,7 +191,25 @@ reviewed sources do not specify a policy; null running-score fields mean no
 terminal score is available. Content updates change `reference_version`;
 incompatible shape changes also change `schema_version`.
 
-## Published per-run score
+## Archived 29 October scorer and wiki
+
+Everything in this section describes `c1e3fc8f`, not current main. The
+[pinned scoring wiki][wiki] defines the successful-run equation as:
+
+```text
+Time Score = 120 / T
+Damage Penalty = 2 * D / 209200
+Fuel Penalty = F / 1.15
+Raw Score = Time Score - Damage Penalty - Fuel Penalty
+Final points = 100 * (Raw Score + 0.5)
+```
+
+Its nominal success scores 50. Its worked example `T = 96`, `D = 10460`,
+`F = 1.035` gives `1.25 - 0.10 - 0.90 = 0.25` raw score, then 75 points. The
+wiki says distance replaces time on failure but does not define that equation or
+numerical category enforcement. The executable formula below is a separate
+source. The raw score is dimensionless; the offset and factor of 100 belong to
+final points.
 
 Let `T` be the scorer's elapsed seconds, `D` the official `Stats/Damage` counter,
 `F` the official `Stats/FuelUsed` counter, `r` the current distance to the return
@@ -161,11 +280,11 @@ scoring process itself continues looping after either result. It does not stop
 the physics engine. This is narrower than the wiki's statement that arrival
 "stops the clock and ends your run."
 
-## Counter meanings and local differences
+## Archived counter meanings and practice receipts
 
-### Fuel is an official counter, not our SI estimate
+### The old actuator omitted time and mass
 
-[JetSelectionActuator.py][actuator-fuel] forms a six-component activity vector
+The archived [JetSelectionActuator.py][actuator-fuel] forms a six-component activity vector
 for each jet. Its first three components are the jet force divided by vehicle
 mass. It then accumulates
 
@@ -181,13 +300,14 @@ with `DirectCommand = false`. The sum is over individual jet activity, not the
 norm of the resultant acceleration. Jets used for rotation can therefore add
 fuel even when their translational effects cancel.
 
-Do not replace `F` with a physical kilograms estimate and claim identical
-official scoring. Our practice engine uses its own estimated SI fuel model.
-Matching `Isp = 80` and `g0 = 9.8` does not make the accumulation methods equal.
+This analysis remains valid for that pin only. Current main replaces this helper
+with the time- and mass-aware impulse calculation described above. Do not describe
+the current fuel counter as broken or incompatible with SI kilograms by definition.
 
 On [27 October][variance], collaborator AlexSein98 acknowledged PC-dependent
 fuel results from asynchronous Python systems and zero-order-held forces and
-torques. The reply says backend improvements may follow. Recheck upstream pins
+torques. The reply said backend improvements might follow; the current source has
+changed. Recheck upstream pins
 before a submission instead of treating this reference as permanent.
 
 ### Damage is accumulated collision energy
@@ -210,14 +330,16 @@ Older versions of [`simulation/src/mission.rs`](../simulation/src/mission.rs)
 applied the published code algebra to local fuel and damage estimates. They used
 the exact local physics clock and froze the local mission at the terminal physics
 substep. They also
-guards the failure-distance denominator with the minimum step when the initial
+guarded the failure-distance denominator with the minimum step when the initial
 distance is degenerate. The upstream `DistancePenalty` divides directly by
 `r0`. None of the examples here uses a degenerate initial distance.
 
-These counter differences make those totals unsuitable as STP point comparisons,
-not merely uncertified results. New local assessments retain arrival and damage
-outcomes but leave score and score breakdown unavailable. Existing archives are
-not rewritten.
+Those totals, including the earlier roughly -7,000 and -26,000 values, are not
+STP point comparisons. Changing a penalty, dividing fuel by mass or assuming a
+fixed 60 Hz cannot recover the old official counter history. Existing archives
+are not rewritten. Some later practice builds suppressed all native scores;
+the current competition-reference preset emits current-formula local estimates,
+while other native practice modes remain unscored.
 The receipt ID `practice_normalized_time_damage_fuel_v1` identifies a local
 score, not an official result. The Python
 [`native_score_breakdown`](../src/wsorb/scoring.py) function validates and copies
@@ -271,7 +393,12 @@ Do not invent those rules. Ask the organizers to settle them. Numerical
 descending order is useful locally, but it is not enough to claim exact
 official leaderboard ordering.
 
-## Known documentation conflicts
+## Preserved documentation conflicts
+
+This table records the 29 October wiki/code disagreement. Current main now uses
+75 kg and `max(F / 75, 0)`, so its nominal success is 50, not the old code's 150.
+The historical 1.15 kg examples are not current dashboard examples. Damage
+boundary, arrival-category and clock qualifications still apply.
 
 | Topic | Published wiki or answer | Published code |
 | --- | --- | --- |
@@ -286,7 +413,7 @@ equations and implementation details. Preserve the conflict instead of silently
 substituting either formula into production. Actual submitted official receipts
 and organizer decisions remain the competition evidence.
 
-## Worked algebra examples
+## Archived worked algebra examples
 
 These are hand-worked reference fixtures, not recorded flights, engine mocks or
 proof of runtime equivalence. `r0 = 10000 m` in every row. Fuel values are the
@@ -313,7 +440,8 @@ the closed version-1 reference shape, pinned-source metadata, scenario constants
 and explicit fixture values. It checks the fixtures' compatibility with the
 existing receipt validator without starting an engine, importing the SDK or
 fetching the network. The documented examples are reference checks, not observed
-STP flights. Native mission tests verify local assessments do not invent points.
+STP flights. Current examples separately check the 75 kg formula and do not turn
+these archived fixtures into new flight evidence.
 
 ## Local teammate comparisons and efficiency metrics
 
@@ -322,7 +450,13 @@ official team or school leaderboard. Compare measured duration, fuel, damage,
 success counts and activity without ranking incompatible legacy point totals.
 Declare the seed list, scenario/settings,
 engine build, controller version and budgets, and use the same cohort for every
-profile.
+profile. Current-formula browser estimates are a separate derived metric, not a
+rewrite or endorsement of archived point receipts. The closed historical
+`local_comparison.score_compatibility` record still says
+`reason = incompatible_local_si_counters` and `stp_points_available = false`.
+Existing publication validators depend on that exact record. Its reason describes
+the old comparison, not the corrected current actuator. Current estimate metadata
+instead says which local terminal counters and source formula were used.
 
 State which terminal outcomes enter each score summary and report the scored
 sample count. Retain software failures and unfinished trials in attempted-run
@@ -339,6 +473,11 @@ simulation-time integration resolution and source coverage. Missing historical
 metrics stay unavailable; sparse API polls do not establish exact episode counts
 or durations.
 
+[current-scorer]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py#L41-L67
+[current-scorer-loop]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py#L87-L141
+[current-config]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Sims/COMPETITION_SIM.simconf#L41752-L41828
+[current-actuator-fuel]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/JetSelectionActuator.py#L129-L147
+[current-actuator-loop]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/JetSelectionActuator.py#L269-L382
 [rules]: https://github.com/SimDynamX/SpaceTeamsPRO/discussions/218
 [wiki]: https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5
 [scorer]: https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L37-L67

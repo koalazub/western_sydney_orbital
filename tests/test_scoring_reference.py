@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from wsorb.scoring import (
+    COMPETITION_FORMULA,
     FORMULA,
     POINT_FIELDS,
     REFERENCE_FIELDS,
@@ -26,7 +27,7 @@ INPUT_FIELDS = (
     "distance_m",
     "initial_distance_m",
 )
-# Hand-worked values also documented in docs/scoring.md. No SDK, engine or scorer
+# Archived hand-worked values also documented in docs/scoring.md. No SDK, engine or scorer
 # is substituted here. Native mission tests own execution-level formula checks.
 EXAMPLES = [
     (
@@ -87,6 +88,58 @@ EXAMPLES = [
     ),
 ]
 
+CURRENT_EXAMPLES = [
+    (
+        "hypothetical_175_success",
+        (80.0, 0.0, 18.75, 50.0, 10000.0),
+        "success",
+        "time_ratio",
+        (150.0, 0.0, 25.0, 50.0, 175.0),
+    ),
+    (
+        "current_nominal_success",
+        (120.0, 0.0, 75.0, 50.0, 10000.0),
+        "success",
+        "time_ratio",
+        (100.0, 0.0, 100.0, 50.0, 50.0),
+    ),
+    (
+        "current_zero_time_success",
+        (0.0, 0.0, 0.0, 50.0, 10000.0),
+        "success",
+        "time_ratio",
+        (0.0, 0.0, 0.0, 50.0, 50.0),
+    ),
+    (
+        "current_damage_at_threshold",
+        (120.0, 209200.0, 75.0, 50.0, 10000.0),
+        "success",
+        "time_ratio",
+        (100.0, 200.0, 100.0, 50.0, -150.0),
+    ),
+    (
+        "current_damage_failure",
+        (120.0, 313800.0, 37.5, 5000.0, 10000.0),
+        "failed_damage",
+        "remaining_distance_ratio",
+        (-50.0, 300.0, 50.0, 50.0, -350.0),
+    ),
+    (
+        "current_damage_preempts_arrival",
+        (80.0, 313800.0, 18.75, 50.0, 10000.0),
+        "failed_damage",
+        "remaining_distance_ratio",
+        (-0.5, 300.0, 25.0, 50.0, -275.5),
+    ),
+    (
+        "current_running_unscored",
+        (120.0, 0.0, 75.0, 5000.0, 10000.0),
+        "running",
+        None,
+        (None, None, None, None, None),
+    ),
+]
+
 
 @pytest.fixture(scope="module")
 def reference():
@@ -102,9 +155,11 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
         "scope",
         "formula_id",
         "local_receipt_formula_id",
+        "archived_scope",
         "sources",
         "constants",
         "current_main",
+        "current_scoring",
         "algebra",
         "documented_model",
         "terminal_conditions",
@@ -117,8 +172,8 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
     }
     assert reference["schema"] == "wsorb.scoring_reference"
     assert type(reference["schema_version"]) is int and reference["schema_version"] == 1
-    assert reference["reference_version"] == "2026-10-29.2"
-    assert date.fromisoformat(reference["reviewed_on"]) == date(2026, 10, 29)
+    assert reference["reference_version"] == "2026-11-03.1"
+    assert date.fromisoformat(reference["reviewed_on"]) == date(2026, 11, 3)
     assert reference["scope"] == (
         "published_per_run_algebra_not_runtime_or_leaderboard_certification"
     )
@@ -129,7 +184,7 @@ def test_reference_has_a_closed_versioned_scope_and_no_nonfinite_values(referenc
     json.dumps(reference, allow_nan=False)
 
 
-def test_reference_constants_match_the_existing_versioned_scenario(reference):
+def test_archived_constants_stay_distinct_from_current_scenario_constants(reference):
     scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text())
     expected = {
         "nominal_time_s": 120.0,
@@ -154,6 +209,148 @@ def test_reference_constants_match_the_existing_versioned_scenario(reference):
     fuel = reference["counter_semantics"]["fuel"]
     for name in ("specific_impulse_s", "standard_gravity_mps2"):
         assert fuel[name] == scenario["lander"][name]
+
+
+def test_archived_scope_identifies_old_counter_analysis_and_publication_contract(reference):
+    archived = reference["archived_scope"]
+    assert set(archived) == {"reviewed_on", "source_commit", "fields", "note"}
+    assert date.fromisoformat(archived["reviewed_on"]) == date(2026, 10, 29)
+    assert archived["source_commit"] == reference["sources"]["simulation"]["pinned_commit"]
+    assert archived["fields"] == [
+        "formula_id",
+        "local_receipt_formula_id",
+        "sources.simulation",
+        "constants",
+        "algebra",
+        "documented_model",
+        "counter_semantics",
+        "known_conflicts",
+        "worked_examples",
+        "local_comparison.score_compatibility",
+    ]
+    assert "archived actuator only, not current_main" in archived["note"]
+    assert "not a classification of current-formula local estimates" in archived["note"]
+
+
+def test_current_source_pin_constants_and_algebra_are_explicit(reference):
+    current = reference["current_main"]
+    assert set(current) == {
+        "reviewed_on",
+        "source_commit",
+        "source_commit_date",
+        "source_file",
+        "backend_version_alert",
+        "formula_id",
+        "nominal_fuel_kg",
+        "fuel_penalty",
+        "constants",
+        "source_urls",
+        "counter_semantics",
+        "note",
+    }
+    assert current["reviewed_on"] == reference["reviewed_on"]
+    assert current["source_commit"] == "c010564824c48488104e648781d5e987b402e47a"
+    assert current["source_commit_date"] == "2026-10-31"
+    assert current["source_file"] == "Systems/Scoring.py"
+    assert current["backend_version_alert"] == "2026/10/30"
+    assert current["formula_id"] == COMPETITION_FORMULA
+    assert current["constants"] == {
+        "nominal_time_s": 120.0,
+        "nominal_fuel_kg": 75.0,
+        "impact_threshold_j": 209200.0,
+        "arrival_radius_m": 50.0,
+        "score_offset": 0.5,
+        "points_scale": 100.0,
+        "damage_multiplier": 2.0,
+        "zero_time_bonus": 0.0,
+    }
+    assert all(type(value) is float for value in current["constants"].values())
+    assert current["nominal_fuel_kg"] == current["constants"]["nominal_fuel_kg"]
+    scenario = json.loads((ROOT / "simulation/scenarios/phobos_escape.json").read_text())
+    for name in (
+        "nominal_time_s",
+        "nominal_fuel_kg",
+        "impact_threshold_j",
+        "arrival_radius_m",
+        "score_offset",
+    ):
+        assert current["constants"][name] == scenario["mission"][name]
+    prefix = f"https://github.com/SimDynamX/STU4-Sim/blob/{current['source_commit']}/"
+    assert current["source_urls"] == {
+        "scoring": f"{prefix}Systems/Scoring.py",
+        "actuator": f"{prefix}Systems/JetSelectionActuator.py",
+        "configuration": f"{prefix}Sims/COMPETITION_SIM.simconf",
+    }
+    scoring = reference["current_scoring"]
+    assert set(scoring) == {
+        "source",
+        "formula_id",
+        "constants_path",
+        "algebra",
+        "local_estimate",
+        "examples_kind",
+        "worked_examples",
+    }
+    assert scoring["source"] == "current_main"
+    assert scoring["formula_id"] == current["formula_id"]
+    assert scoring["constants_path"] == "current_main.constants"
+    assert scoring["examples_kind"] == "hypothetical_algebra_not_observed_runs"
+    assert scoring["algebra"] == {
+        **reference["algebra"],
+        "fuel_penalty": "max(F / F_nom, 0)",
+    }
+    assert scoring["algebra"]["fuel_penalty"] == current["fuel_penalty"]
+    assert scoring["local_estimate"] == {
+        "classification": "current_formula_on_recorded_local_terminal_counters",
+        "stp_receipt": False,
+        "inputs": list(INPUT_FIELDS),
+        "missing_or_nonterminal_or_error": "unavailable_not_zero",
+        "failure_distance_denominator": "positive_initial_distance_required_for_browser_estimate",
+        "initial_range_source": (
+            "recorded_time_zero_target_range_only_not_geometry_or_current_engine"
+        ),
+        "summary": "arithmetic_mean_of_complete_two_run_pair_means_from_per_run_scores",
+        "summary_of_median_counters": False,
+        "attempt_and_error_counts_preserved": True,
+        "legacy_scores_rewritten": False,
+    }
+
+
+def test_current_fuel_semantics_include_elapsed_time_mass_and_per_jet_allocation(reference):
+    current = reference["current_main"]["counter_semantics"]
+    archived = reference["counter_semantics"]
+    assert set(current) == {"fuel", "damage", "time"}
+    assert current["fuel"] == {
+        "parameter_path": ["Stats", "FuelUsed"],
+        "scorer_unit_label": "kg",
+        "activity_vector_linear_components": "jet_force_divided_by_vehicle_mass",
+        "max_on_time": "max(max(onTimes), 0)",
+        "zero_impulse_guard": "max_on_time < 1e-12",
+        "firing_time_s": (
+            "remap(max(onTimes[i], 0), 0, max_on_time, 0, min(dt_tick, max_on_time))"
+        ),
+        "jet_linear_impulse_ns": "mass * min(firing_time_s, dt_tick) * A[i, 0:3]",
+        "jet_angular_impulse_nms": "inertia @ (min(firing_time_s, dt_tick) * A[i, 3:6])",
+        "increment_per_iteration": "sum_i(norm(jet_linear_impulse_ns[i]) / (80 * 9.8))",
+        "timestep_multiplier_applied": True,
+        "force_conversion_mass_multiplier_applied": True,
+        "timestep_source": "difference_of_SimClock_timestamps_not_fixed_1_over_60",
+        "nonpositive_timestep_skipped": True,
+        "configured_loop_hz": 60.0,
+        "direct_command": False,
+        "effect_application": "summed_linear_and_angular_impulses_in_body_frame",
+        "minimum_on_time_filter": (
+            "selects_OnThrustersMain_indices_but_does_not_filter_impulse_or_fuel_sum"
+        ),
+        "specific_impulse_s": 80.0,
+        "standard_gravity_mps2": 9.8,
+        "local_si_fuel_equivalence_certified": False,
+    }
+    assert archived["fuel"]["timestep_multiplier_applied"] is False
+    assert archived["fuel"]["force_conversion_mass_multiplier_applied"] is False
+    assert current["fuel"]["local_si_fuel_equivalence_certified"] is False
+    assert current["damage"] == archived["damage"]
+    assert current["time"] == archived["time"]
 
 
 def test_source_pins_and_content_hashes_identify_the_reviewed_first_party_files(reference):
@@ -231,7 +428,7 @@ def test_source_pins_and_content_hashes_identify_the_reviewed_first_party_files(
         assert entry["mutable"] is True
 
 
-def test_documented_algebra_and_terminal_contract_are_explicit(reference):
+def test_archived_algebra_and_shared_terminal_contract_are_explicit(reference):
     assert reference["algebra"] == {
         "time_bonus": "T_nom / T if T != 0 else 0",
         "damage_penalty": "2 * D / D_max",
@@ -252,7 +449,7 @@ def test_documented_algebra_and_terminal_contract_are_explicit(reference):
     }
 
 
-def test_counter_reference_does_not_certify_local_si_or_clock_parity(reference):
+def test_archived_counter_reference_does_not_certify_local_si_or_clock_parity(reference):
     counters = reference["counter_semantics"]
     assert set(counters) == {"fuel", "damage", "time"}
     assert counters["fuel"] == {
@@ -336,6 +533,16 @@ def test_two_run_submission_mean_is_not_a_local_seed_or_school_ranking(reference
         "native_burn_and_turn_activity",
     ]
     assert local["score_compatibility"] == score_compatibility()
+    # Historical publications validate this exact record. Current estimates have
+    # their own metadata rather than silently changing its reason or shape.
+    assert local["score_compatibility"] == {
+        "stp_points_available": False,
+        "reason": "incompatible_local_si_counters",
+        "fuel_input": "local_si_propellant_kg",
+        "damage_input": "local_contact_energy_estimate",
+        "documented_formula_id": "stu4_wiki_scoring_4ddae12_v1",
+        "legacy_formula_id": "practice_normalized_time_damage_fuel_v1",
+    }
     assert local["score_compatibility"]["stp_points_available"] is False
     assert local["missing_terminal_score"] == "unavailable_not_zero"
     assert local["extra_efficiency_metrics_are_score_inputs"] is False
@@ -351,7 +558,7 @@ def test_two_run_submission_mean_is_not_a_local_seed_or_school_ranking(reference
 
 
 @pytest.mark.parametrize(("example_id", "inputs", "status", "basis", "points"), EXAMPLES)
-def test_worked_examples_match_explicit_fixtures_and_the_existing_receipt_contract(
+def test_archived_examples_match_explicit_fixtures_and_the_existing_receipt_contract(
     reference, example_id, inputs, status, basis, points
 ):
     examples = {entry["id"]: entry for entry in reference["worked_examples"]}
@@ -390,6 +597,66 @@ def test_worked_examples_match_explicit_fixtures_and_the_existing_receipt_contra
         "progress_basis": expected["progress_basis"],
         **{name: expected[name] for name in POINT_FIELDS},
         **{name: reference["constants"][name] for name in REFERENCE_FIELDS},
+    }
+    assert native_score_breakdown(receipt, score=expected["total"]) == receipt
+
+
+@pytest.mark.parametrize(("example_id", "inputs", "status", "basis", "points"), CURRENT_EXAMPLES)
+def test_current_examples_match_hypothetical_fixtures_and_current_receipt_shape(
+    reference, example_id, inputs, status, basis, points
+):
+    current = reference["current_scoring"]
+    constants = reference["current_main"]["constants"]
+    examples = {entry["id"]: entry for entry in current["worked_examples"]}
+    assert len(examples) == len(current["worked_examples"]) == len(CURRENT_EXAMPLES)
+    assert set(examples) == {entry[0] for entry in CURRENT_EXAMPLES}
+    assert set(examples).isdisjoint(entry["id"] for entry in reference["worked_examples"])
+    example = examples[example_id]
+    assert set(example) == {"id", "inputs", "expected"}
+    assert example["inputs"] == dict(zip(INPUT_FIELDS, inputs, strict=True))
+    assert all(type(value) is float and math.isfinite(value) for value in inputs)
+    expected = example["expected"]
+    assert expected == {
+        "status": status,
+        "progress_basis": basis,
+        **dict(zip(POINT_FIELDS, points, strict=True)),
+    }
+    assert f"`{example_id}`" in (ROOT / "docs/scoring.md").read_text()
+    elapsed, damage, fuel, distance, initial_distance = inputs
+    # Only arithmetic and boundary checks on hand-worked documentation data.
+    # No imported scorer, SDK or replacement simulation executes these examples.
+    if status == "running":
+        assert damage <= constants["impact_threshold_j"]
+        assert distance > constants["arrival_radius_m"]
+        assert native_score_breakdown(None, score=expected["total"]) is None
+        return
+    if status == "failed_damage":
+        assert damage > constants["impact_threshold_j"]
+        progress = -distance / initial_distance
+    else:
+        assert damage <= constants["impact_threshold_j"]
+        assert distance <= constants["arrival_radius_m"]
+        progress = constants["nominal_time_s"] / elapsed if elapsed != 0 else 0.0
+    scale = constants["points_scale"]
+    assert expected["progress_points"] == pytest.approx(scale * progress)
+    assert expected["collision_penalty_points"] == pytest.approx(
+        scale * constants["damage_multiplier"] * damage / constants["impact_threshold_j"]
+    )
+    assert expected["fuel_penalty_points"] == pytest.approx(
+        scale * max(fuel / constants["nominal_fuel_kg"], 0)
+    )
+    assert expected["offset_points"] == scale * constants["score_offset"]
+    assert expected["total"] == pytest.approx(
+        expected["progress_points"]
+        - expected["collision_penalty_points"]
+        - expected["fuel_penalty_points"]
+        + expected["offset_points"]
+    )
+    receipt = {
+        "formula": current["formula_id"],
+        "progress_basis": basis,
+        **{name: expected[name] for name in POINT_FIELDS},
+        **{name: constants[name] for name in REFERENCE_FIELDS},
     }
     assert native_score_breakdown(receipt, score=expected["total"]) == receipt
 

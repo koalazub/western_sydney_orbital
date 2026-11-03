@@ -79,8 +79,8 @@ pub fn assess(mission: &MissionState, metrics: FlightMetrics, config: &Mission) 
             );
             (Some(breakdown.total), Some(breakdown))
         }
-        // Local fuel is integrated SI mass, not STP's per-iteration activity counter.
-        // Archived local diagnostics remain unscored unless explicitly selected.
+        // The local actuator and contact models differ from STP's jet allocator
+        // and hit counters. Only the competition preset emits a native estimate.
         _ => (None, None),
     };
     Assessment {
@@ -105,8 +105,9 @@ pub fn damage_penalty(damage_j: f64, maximum_damage_j: f64) -> f64 {
     2.0 * damage_j / maximum_damage_j
 }
 
-/// Scoring.py `FuelPenalty`: nonnegative fuel ratio. The local counter is
-/// integrated SI propellant mass, not the source's per-iteration activity count.
+/// Current Scoring.py `FuelPenalty`: nonnegative fuel ratio. Both current models
+/// estimate propellant mass, but STP sums individual jet impulses while this
+/// engine integrates its local actuator model.
 pub fn fuel_penalty(fuel_used_kg: f64, nominal_fuel_kg: f64) -> f64 {
     (fuel_used_kg / nominal_fuel_kg).max(0.0)
 }

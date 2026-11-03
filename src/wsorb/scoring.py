@@ -1,7 +1,8 @@
-"""Validate historical local score receipts, not official STP points.
+"""Validate recorded local score receipts, including competition-preset estimates.
 
-Legacy receipts apply published code algebra to incompatible local SI fuel.
-Keep them as diagnostics. Never fill missing terms or infer official counters.
+The formula ID distinguishes current algebra from archived practice scoring.
+Neither establishes STP actuator or damage-counter parity. Never fill missing
+terms or infer official counters.
 """
 
 from __future__ import annotations
