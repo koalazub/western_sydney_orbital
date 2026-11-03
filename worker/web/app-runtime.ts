@@ -9,6 +9,7 @@ import { installDiagnostics } from "./diagnostics.ts";
 import { installControllerProfiles } from "./controller-profiles.ts";
 import { describeControllerStatus } from "./controller-status.ts";
 const diagnostics = installDiagnostics();
+type RoomConnection = { origin: string; id: string; key: string };
 type Engine = RoomEngine & {
   default: (options: unknown) => Promise<unknown>;
   start_simulation: (selector: string) => void;
@@ -115,6 +116,8 @@ let engine: Engine | undefined;
 let engineBuild: { bytes: number; sha256: string } | undefined;
 let ready = false;
 let roomSessionActive = false;
+let roomConnected = false;
+let roomOpening: Promise<void> | null = null;
 let failed = false;
 let platformMessage = "WebGPU · Click the scene to activate ship and debug controls";
 let startupPhase = "checking_graphics";
@@ -175,6 +178,73 @@ function readRoomConnection(): { origin: string; id: string; key: string } | nul
   return { origin: location.origin, id, key };
 }
 
+function connectPythonRoom(connection: RoomConnection, signal?: AbortSignal): Promise<void> {
+  if (roomConnected && roomConnection === connection) return Promise.resolve();
+  if (roomOpening) return roomOpening;
+  const loaded = engine, build = engineBuild;
+  if (!loaded || !build || failed) return Promise.reject(new Error("The game is no longer ready."));
+  const text = byId("python-room-status"), disconnect = byId<HTMLButtonElement>("disconnect-python");
+  byId("python-room").hidden = false;
+  const events = new AbortController();
+  roomSessionActive = true;
+  roomOpening = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let session: ReturnType<typeof connectRoom> | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); signal?.removeEventListener("abort", cancelled);
+      if (error) reject(error); else resolve();
+    };
+    const cancelled = () => {
+      session?.disconnect();
+      if (!session) { events.abort(); roomSessionActive = roomConnected = false; }
+      finish(new Error("Flight startup cancelled."));
+    };
+    const timer = setTimeout(() => {
+      session?.disconnect();
+      finish(new Error("The private flight room did not connect in time."));
+    }, 15_000);
+    signal?.addEventListener("abort", cancelled, { once: true });
+    if (signal?.aborted) { cancelled(); return; }
+    try {
+      session = connectRoom(connection, loaded, build, (status, error) => {
+        const messages: Record<string, string> = {
+          connecting: "Connecting to the private Python room.",
+          claiming: "Connecting this game's control channel.",
+          connected: "Python room connected. Start the private runner on your machine, then use Run flight for the selected code. Shift+Esc disconnects.",
+          conflict: "Another browser owns this room. It was not replaced.",
+          error: "Python room stopped. No call is retried.",
+          indeterminate: "Python room stopped. A command's outcome is unknown. Inspect the actual flight before reconnecting.",
+          disconnected: "Python room disconnected. Native thrust expires on its original simulation-time lease.",
+        };
+        text.textContent = `Room ${connection.id.slice(0, 8)} · ${messages[status] ?? "Python room stopped."}`;
+        if (error) text.textContent += ` ${error}`;
+        const ended = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
+        roomSessionActive = !ended;
+        roomConnected = status === "connected";
+        disconnect.hidden = ended;
+        if (ended) { events.abort(); finish(new Error(messages[status])); }
+        if (roomConnected) finish();
+        dispatchEvent(new CustomEvent("wsorb:controller-status"));
+      },
+      () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true,
+      undefined,
+      () => ready && !failed && engine === loaded && JSON.parse(loaded.renderer_status()).ready === true);
+      const disconnectRoom = () => { session?.disconnect(); canvas.focus({ preventScroll: true }); };
+      disconnect.addEventListener("click", disconnectRoom, { once: true, signal: events.signal });
+      window.addEventListener("keydown", event => {
+        if (disconnect.hidden || event.repeat || event.code !== "Escape" || !event.shiftKey
+          || event.ctrlKey || event.metaKey || event.altKey) return;
+        event.preventDefault(); event.stopImmediatePropagation(); disconnectRoom();
+      }, { capture: true, signal: events.signal });
+    } catch {
+      events.abort(); roomSessionActive = roomConnected = false;
+      disconnect.hidden = true; finish(new Error("The private Python room could not connect."));
+    }
+  }).finally(() => { roomOpening = null; });
+  return roomOpening;
+}
+
 function offerPythonConnection() {
   if (!engine || !engineBuild) return;
   const panel = byId("python-room");
@@ -185,7 +255,7 @@ function offerPythonConnection() {
     if (location.protocol === "https:") {
       panel.hidden = false;
       disconnect.hidden = true;
-      text.textContent = "This hosted game has no Python room connection. The local notebook controls a separate local flight, not this tab. Open a private room link to attach Python here.";
+      text.textContent = "Python runs on your machine, not this site. Open a private room link and connect your local runner. Set up Python runner shows the commands.";
     }
     return;
   }
@@ -203,57 +273,7 @@ function offerPythonConnection() {
       text.textContent = "Python connection declined. The game stays under manual control.";
       return;
     }
-    const loaded = engine;
-    const build = engineBuild;
-    if (!loaded || !build || failed) {
-      text.textContent = "The game is no longer ready. No Python connection was opened.";
-      return;
-    }
-    const sessionEvents = new AbortController();
-    roomSessionActive = true;
-    try {
-      const session = connectRoom(connection, loaded, build, (status, error) => {
-        const messages: Record<string, string> = {
-          connecting: "Connecting to your private Python room.",
-          claiming: "Requesting this room's browser ownership. An existing owner will not be replaced.",
-          connected: "Python room connected. Open Controller profiles to select a teammate. Start the Python runner with this room's private descriptor. Shift+Esc disconnects.",
-          conflict: "Another browser owns this room. It was not replaced.",
-          error: "Python room stopped. No call is retried.",
-          indeterminate: "Python room stopped. A command's outcome is unknown. Inspect the actual flight before reconnecting.",
-          disconnected: "Python room disconnected. No commands are retried. Native thrust expires on its original simulation-time lease.",
-        };
-        text.textContent = `Room ${connection.id.slice(0, 8)} · ${messages[status] ?? "Python room stopped. Inspect the game before reconnecting."}`;
-        if (error) text.textContent += ` ${error}`;
-        const ended = ["disconnected", "error", "conflict", "indeterminate"].includes(status);
-        disconnect.hidden = ended;
-        roomSessionActive = !ended;
-        if (ended) sessionEvents.abort();
-      },
-      () => ready && !failed && engine === loaded && !document.hidden && JSON.parse(loaded.renderer_status()).ready === true,
-      undefined,
-      () => ready && !failed && engine === loaded && JSON.parse(loaded.renderer_status()).ready === true);
-      const disconnectRoom = () => {
-        session.disconnect();
-        disconnect.hidden = true;
-        canvas.focus({ preventScroll: true });
-      };
-      disconnect.addEventListener("click", disconnectRoom, { once: true, signal: sessionEvents.signal });
-      // Tab belongs to the native HUD while the canvas has focus. Keep the
-      // platform disconnect available without trapping keyboard-only users.
-      window.addEventListener("keydown", event => {
-        if (disconnect.hidden || event.repeat || event.code !== "Escape" || !event.shiftKey
-          || event.ctrlKey || event.metaKey || event.altKey) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        disconnectRoom();
-      }, { capture: true, signal: sessionEvents.signal });
-      addEventListener("pagehide", () => session.disconnect(), { once: true, signal: sessionEvents.signal });
-    } catch {
-      sessionEvents.abort();
-      roomSessionActive = false;
-      text.textContent = "The private Python room could not connect. No flight command was sent.";
-      disconnect.hidden = true;
-    }
+    void connectPythonRoom(connection).catch(() => { text.textContent = "The private Python room could not connect. No flight command was sent."; });
   }, { once: true });
   // Escape must not reuse a previous dialog's "allow" return value.
   permission.returnValue = "";
@@ -960,6 +980,7 @@ async function start() {
     await waitForRenderer();
     if (failed) return;
     ready = true;
+    dispatchEvent(new CustomEvent("wsorb:controller-status"));
     // Bind only the module the app already initialized and started. Diagnostics
     // never call default(), start_simulation(), commands or camera acquisition.
     diagnostics.bindEngine(loaded, () => ready && !failed && engine === loaded);
@@ -986,7 +1007,7 @@ async function start() {
 installControllerProfiles({
   engine: () => engine,
   ready: () => ready && !failed && !document.hidden && engine !== undefined,
-  room: () => roomSessionActive ? roomConnection : null,
+  room: () => roomConnected ? roomConnection : null,
   local: () => browserGlobals.__wsorbLocalApi,
 });
 void start();

@@ -284,6 +284,7 @@ def test_publication_validates_the_matched_cohort_instead_of_importing_jobs():
     imports = re.findall(r'^import .*? from "([^"]+)";', SOURCE, re.MULTILINE)
     assert set(imports) == {
         "../../src/wsorb/controllers/catalog.json",
+        "../../src/wsorb/controller_worlds.json",
         "../../simulation/scenarios/flight_analytics.json",
         "../shared/controller-jobs.ts",
         "../../src/wsorb/scoring_reference.json",
@@ -483,9 +484,10 @@ def test_download_links_use_only_the_fixed_public_asset_contract(page):
 def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(page):
     assert "disabled" in page.ids["run-controller"]["attrs"]
     assert "run.disabled = true;" in CONTROLLERS
-    assert "run.disabled = busy || !current?.service.online || !!active || !options.ready();" in (
-        CONTROLLERS
-    )
+    assert (
+        "run.disabled = busy || !current?.service.online || current.service.busy "
+        "|| !!active || !options.ready();"
+    ) in CONTROLLERS
     assert "const analytics = installFlightAnalytics();" in CONTROLLERS
     assert CONTROLLERS.count("analytics.updateRoomResults(view.results);") == 1
     unavailable = CONTROLLERS.split("function unavailableResults()", 1)[1].split(
@@ -528,6 +530,8 @@ def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(pa
     )[1].split('byId("controller-score-label")', 1)[0]
     for recovered_data in (
         "if (!sameSource(source, resultsSource()))",
+        'typeof value.service.online !== "boolean"',
+        'typeof value.service.busy !== "boolean"',
         "renderResults(view.results);",
         "analytics.updateRoomResults(view.results);",
         "savedSource = source;",
@@ -537,8 +541,8 @@ def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(pa
     ):
         assert recovered_data in accepted
     for preserved in (
-        "if (!await confirmFreshTrial(label(profile.value))) return;",
-        "const expected = await freshTrial(api);",
+        "before.time_s > 0 && !await confirmFreshTrial(label(chosen.profileId), chosen)",
+        "const expected = await freshTrial(api, chosen, signal);",
         "const changedProfile = async () => { description(); await requestStop(); };",
         "if (disposed || document.hidden || !autoUpdate || "
         "!panel.open && !confirmedView()?.active) return;",
@@ -617,7 +621,7 @@ def test_dashboard_opens_profiles_and_keeps_recorded_data_separate():
 
 def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_consent(page):
     assert content(page.ids["open-controllers"]) == "Test profiles"
-    assert content(page.ids["run-controller"]) == "Run fresh test"
+    assert content(page.ids["run-controller"]) == "Run flight"
     assert content(page.ids["watch-controller-flight"]) == "Watch flight"
     assert "new Set(profiles.map(entry => entry.owner))" in CONTROLLERS
     assert 'if (owners.includes("Bui")) owner.value = "Bui";' in CONTROLLERS
@@ -635,31 +639,61 @@ def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_conse
         "function schedule()", 1
     )[0]
     ordered = [
+        "const chosen = selection();",
+        "before.time_s > 0 && !await confirmFreshTrial(label(chosen.profileId), chosen)",
         "const send = request();",
         "render(await send(), source);",
-        "if (!view?.service.online || view.active || !options.ready())",
-        "if (!await confirmFreshTrial(label(profile.value))) return;",
-        "const expected = await freshTrial(api);",
-        'action: "submit", profile_id: id, seed: 100',
+        "const current = confirmedView();",
+        "if (!current?.service.online || current.service.busy || "
+        "current.active || !options.ready())",
+        "const expected = await freshTrial(api, chosen, signal);",
+        'op: "view", mode: "orbit", focus: "Shuttle"',
+        'action: "submit", profile_id: chosen.profileId, world_id: chosen.worldId',
+        'panel.close("watch");',
     ]
     assert [submit.index(part) for part in ordered] == sorted(
         submit.index(part) for part in ordered
     )
-    assert "owner.disabled = profile.disabled = true;" in submit
+    assert "owner.disabled = profile.disabled = world.disabled = seed.disabled" in submit
+    assert "if (busy || run.disabled) return;" in submit
     assert "fresh: true, expected_context: expected" in submit
-    assert 'op: "configure_flight", preset: "far_side_l2"' in CONTROLLERS
-    assert "settings: scenario.experiment_settings" in CONTROLLERS
-    assert "20 m/s Across Phobos crossflow, light attraction off" in CONTROLLERS
+    assert "seed: chosen.seed" in submit and "duration_s: chosen.duration" in submit
+    launcher = (WEB / "flight-launch.ts").read_text()
+    assert 'op: "configure_flight", preset: world.preset' in launcher
+    assert "seed: selection.seed, settings: world.settings" in launcher
+    assert "sameData(nativeSettings(actual.experiment_settings), world.settings)" in launcher
+    assert "controller-world" in page.ids and "controller-seed" in page.ids
     assert "Set up Python runner" in content(page.ids["setup-controller"])
     assert page.ids["controller-setup"]["tag"] == "details"
     assert "open" not in page.ids["controller-setup"]["attrs"]
-    assert "controllers serve --connection-file" in content(page.ids["controller-setup"])
-    assert "controllers serve --room-file PATH --run" in content(page.ids["controller-setup"])
+    setup = content(page.ids["controller-setup"])
+    assert "Python runs on a teammate's machine" in setup
+    assert "Cloudflare Free" in setup and "does not start or host Python" in setup
+    for command in (
+        "devenv shell",
+        "WSORB_LAB=1 just local",
+        "uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run",
+        "uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json",
+        "uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run",
+    ):
+        assert command in setup
+    assert "A comparison link only selects flight settings" in setup
+    assert "ready game and an online, idle Python service" in setup
     assert (
         'if (!api) throw new Error("The real engine is unavailable. No run was started.")' in submit
     )
     for forbidden in ("eval(", "new Function(", "python-worker", "create_controller("):
         assert forbidden not in CONTROLLERS
+    runtime = (WEB / "app-runtime.ts").read_text()
+    for removed in ("prepareHosted", "automaticHosted", "startHostedRunner", "createFlightRoom"):
+        assert removed not in CONTROLLERS and removed not in runtime
+    assert not (WEB / "hosted-runner.ts").exists()
+    assert 'permission.returnValue !== "allow"' in runtime
+    assert 'permission.returnValue = "";' in runtime
+    assert "connectPythonRoom(connection)" in runtime
+    assert "room: () => roomConnected ? roomConnection : null" in runtime
+    assert "Python runs on your machine, not this site" in content(page.ids["controller-scope"])
+    assert "This site does not host Python" in SHELL
 
 
 def test_watched_job_keeps_stop_outside_modal_without_claiming_native_running(page):
@@ -683,8 +717,8 @@ def test_watched_job_keeps_stop_outside_modal_without_claiming_native_running(pa
         'panel.returnValue === "watch" ? byId("simulation-canvas") : openingControl' in CONTROLLERS
     )
     assert (
-        "stop.disabled = outsideStop.disabled = busy || !active || active.stop_requested;"
-        in CONTROLLERS
+        "stop.disabled = outsideStop.disabled = starting ? starting.signal.aborted : "
+        "busy || !active || active.stop_requested;" in CONTROLLERS
     )
     assert "const current = confirmedView();" in CONTROLLERS
     assert "sameSource(viewSource, resultsSource()) && sourceAvailable(viewSource)" in CONTROLLERS
@@ -697,6 +731,17 @@ def test_watched_job_keeps_stop_outside_modal_without_claiming_native_running(pa
         "Stop was not confirmed. Inspect the live flight and refresh before another action." in stop
     )
     assert "api.control(" not in stop
+    assert "starting.abort();" in stop
+    assert 'confirmation.close("cancel")' in stop
+    submit = CONTROLLERS.split('run.addEventListener("click", async () => {', 1)[1].split(
+        "function schedule()", 1
+    )[0]
+    assert 'stop.textContent = outsideStop.textContent = starting ? "Cancel startup"' in CONTROLLERS
+    assert "const signal = starting.signal;" in submit
+    assert "if (signal.aborted && record(submitted.active)" in submit
+    assert 'action: "stop", job_id: submitted.active.id' in submit
+    assert submit.count('action: "submit"') == 1
+    assert "controller-flight-measurements" in page.ids
     presenter = CONTROLLERS.split("function renderRunnerControls()", 1)[1].split(
         "function renderDataStatus()", 1
     )[0]

@@ -59,7 +59,7 @@ function validNotebookUrl(value: unknown): value is string {
   } catch { return false; }
 }
 
-export class Room extends DurableObject {
+export class Room extends DurableObject<Env> {
   private readonly commandWaiters = new Map<string, (result: unknown) => void>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

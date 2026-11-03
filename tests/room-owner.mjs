@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHeadless } from "../worker/scripts/headless.mjs";
 import { connectRoom } from "../worker/web/room-control.ts";
+import { freshTrial } from "../worker/web/flight-launch.ts";
 
 const connection = JSON.parse(await readFile(process.argv[2], "utf8"));
 const origin = new URL(connection.url);
@@ -19,6 +20,9 @@ const moduleUrl = pathToFileURL(resolve(publicRoot, "sim/wsorb_bevy.js"));
 moduleUrl.searchParams.set("v", engineBuild.sha256);
 // createHeadless initialized this exact module. Never initialize it twice.
 const api = await import(moduleUrl.href);
+if (process.env.WSORB_ROOM_INITIAL_FLIGHT) {
+  await freshTrial(api, JSON.parse(process.env.WSORB_ROOM_INITIAL_FLIGHT), new AbortController().signal);
+}
 const report = state => console.log(JSON.stringify({ state, backend: "native_headless", browser_gpu_verified: false }));
 const owner = connectRoom(
   { origin: connection.url, id: connection.room_id, key: connection.token },

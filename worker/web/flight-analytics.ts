@@ -1,6 +1,7 @@
 // Read-only presentation of published trials and genuine job receipts. This
 // module has no engine, connection, command or controller-selection capability.
 import profiles from "../../src/wsorb/controllers/catalog.json";
+import worlds from "../../src/wsorb/controller_worlds.json";
 import definitions from "../../simulation/scenarios/flight_analytics.json";
 import scoringReference from "../../src/wsorb/scoring_reference.json";
 import { CONTROLLER_EXECUTION_KIND, CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
@@ -285,16 +286,17 @@ function roomRuns(results: Array<Record<string, unknown>>): PlotRun[] {
     const score = finite(raw.score) && result.world_metadata_unchanged !== false ? raw.score : null;
     const hash = sha256(result.engine_sha256) ? result.engine_sha256 : null;
     const duration = finite(result.duration_s) && result.duration_s > 0 && result.duration_s <= 1800 ? result.duration_s : null;
-    const comparable = hash !== null && duration !== null && result.world_metadata_unchanged === true && result.execution_kind === CONTROLLER_EXECUTION_KIND;
+    const world = worlds.find(world => world.id === result.world_id);
+    const comparable = world !== undefined && hash !== null && duration !== null && result.world_metadata_unchanged === true && result.execution_kind === CONTROLLER_EXECUTION_KIND;
     const analytics = validateAnalytics(result.analytics, MAX_ROOM_SAMPLES);
     runs.push({ id: result.id, profileId: profile.id, label: `${profile.owner} / ${profile.label}`, seed: result.seed, repetition: null,
       outcome: result.native_success === true && result.world_metadata_unchanged === true ? "Station region reached"
         : raw.status === "failed_damage" ? "Collision damage failure" : typeof result.state === "string" && Object.hasOwn(outcomes, result.state) ? outcomes[result.state] : "Unknown outcome",
       score, terms: validateTerms(raw.score_breakdown, score), measurement,
       analytics: analytics && (measurement.time_s === null || same(analytics.totals.observed_sim_s as number, measurement.time_s)) ? analytics : null,
-      engineHash: hash, cohortKey: comparable ? `${hash}:${result.seed}:${duration}:${CONTROLLER_EXECUTION_KIND}` : `unverified:${result.id}`,
-      cohortLabel: comparable ? `Engine ${hash}; seed ${result.seed}; time limit ${duration} s; ${CONTROLLER_EXECUTION_KIND}.`
-        : `Run ${result.id}. Comparison unavailable: matching build, seed, time limit and unchanged world were not verified.` });
+      engineHash: hash, cohortKey: comparable ? `${hash}:${world!.id}:${result.seed}:${duration}:${CONTROLLER_EXECUTION_KIND}` : `unverified:${result.id}`,
+      cohortLabel: comparable ? `${world!.label}; engine ${hash}; seed ${result.seed}; time limit ${duration} s; ${CONTROLLER_EXECUTION_KIND}.`
+        : `Run ${result.id}. Comparison unavailable: world identity, matching build, seed, time limit and unchanged world were not verified.` });
   }
   return runs;
 }

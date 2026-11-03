@@ -410,6 +410,45 @@ def test_comparison_is_read_only_bounded_and_has_recovery_explainers():
     page = (WEB / "compare.html").read_text()
     assert 'lang="en"' in page and "<noscript>" in page
     assert "simulation-canvas" not in page and "app.js" not in page
+    matrix = (WEB / "comparison-matrix.ts").read_text()
+    assert "Fly this code selects settings for a new flight, not a replay" in matrix
+    assert "Python must run on your machine" in matrix
+    assert "This site does not host Python" in matrix
+    assert 'fly.setAttribute("aria-describedby", flightNote.id)' in matrix
+    assert "Connect Python running on your machine, then choose Run flight" in matrix
+
+
+def test_flight_links_keep_profile_world_seed_and_budget_without_substituting_unknowns():
+    node_assertions(
+        """
+        import assert from 'node:assert/strict';
+        import {flightLink,flightSelection} from './worker/web/flight-selection.ts';
+        for(const profile of ['basic_pd_radar','bui_alpha_beta_mvp','tom_kalman_velocity_mvp',
+          'official_basic_beeline','ali_official_profile']) {
+          for(const world of ['official','team','across_phobos']) {
+            const url=new URL(flightLink(profile,world,102,300),'https://example.test');
+            assert.equal(url.pathname,'/');
+            assert.deepEqual(flightSelection(url.searchParams),
+              {profileId:profile,worldId:world,seed:102,duration:300});
+          }
+        }
+        const alias=new URL(flightLink('wso_official_profile','official',101,300),
+          'https://example.test');
+        assert.equal(alias.searchParams.get('profile'),'ali_official_profile');
+        for(const seed of [0,4294967295]) {
+          const link=new URL(flightLink('bui_alpha_beta_mvp','team',seed,600),
+            'https://example.test');
+          assert.deepEqual(flightSelection(link.searchParams),
+            {profileId:'bui_alpha_beta_mvp',worldId:'team',seed,duration:600});
+        }
+        assert.equal(flightLink('not-reviewed','official',100,300),null);
+        assert.equal(flightLink('basic_pd_radar','unknown',100,300),null);
+        for(const seed of [-1,1.5,4294967296,NaN])
+          assert.equal(flightLink('basic_pd_radar','official',seed,300),null);
+        alias.searchParams.append('seed','100');
+        assert.equal(flightSelection(alias.searchParams),null);
+        """
+    )
 
 
 def test_publication_hashes_are_checked_during_browser_build():

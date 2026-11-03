@@ -38,7 +38,7 @@
       The flight HUD shows actual speed/climb in metres per second, terrain-centre clearance in metres and thrust acceleration. Details and Export include force, torque, spin, target range/closing, peaks and estimated fuel/damage. These are local rotating-frame measurements, not STP-equivalent physics.
       Period steps, T changes playback rate, R opens reset confirmation and I opens the inspector. M maximizes; X or Fullscreen enters browser fullscreen. Tab selects game controls and Enter activates them. Space is lift, not button activation. Esc closes panels or releases the view.
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
-      Shift+C opens Test profiles for reviewed teammate Python code. A connected Python runner is required. Watch flight returns focus to this canvas. With Debug guides on, the orange trail shows actual lander positions, not a predicted route.
+      Shift+C opens Test profiles for reviewed teammate Python code. Python must run on your machine and connect to this tab before Run flight is available. Choose a world and Run flight to follow the lander automatically. With Debug guides on, the orange trail shows actual lander positions, not a predicted route.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
     </div>
@@ -52,6 +52,7 @@
           <button id="stop-controller-flight" type="button" aria-describedby="controller-flight-status" disabled>Stop controller</button>
           <button id="refresh-controller-flight" type="button" hidden>Refresh status</button>
         </div>
+        <p id="controller-flight-measurements" class="controller-flight__measurements"></p>
         <p id="controller-flight-error" role="alert"></p>
         <details class="controller-flight__help">
           <summary>Flightpath tips</summary>
@@ -70,7 +71,7 @@
     </footer>
     <dialog id="python-permission" aria-labelledby="python-permission-title" aria-describedby="python-permission-detail">
       <h2 id="python-permission-title">Connect your Python controller?</h2>
-      <p id="python-permission-detail">This private room link lets Python read this game's public sensors, claim control and fly the lander with expiring commands. Your Python code stays on your machine. Python can control this flight only after you allow the connection and start the script.</p>
+      <p id="python-permission-detail">This private room link lets Python read this game's public sensors, claim control and fly the lander with expiring commands. Python runs on your machine, not this site. It can control this flight only after you allow the connection and explicitly start a controller.</p>
       <p>Keep this game visible. Manual ship input or pausing ends the controller's run. Connecting does not reset or tune this flight.</p>
       <form method="dialog">
         <button value="cancel" type="submit" autofocus>Keep manual control</button>
@@ -82,7 +83,7 @@
         <h2 id="controller-title">Test profiles</h2>
         <button id="close-controllers" type="button" aria-label="Close flight lab">Close</button>
       </header>
-      <p id="controller-scope">Run a teammate's reviewed Python code and watch its actual flight. Fresh tests use far-side L2 local practice, the 20 m/s Across Phobos crossflow, seed 100 and 500 debris bodies. This is not an official competition flight.</p>
+      <p id="controller-scope">Python runs on your machine, not this site. Connect your runner, choose a teammate and world, then Run flight. The camera follows the lander. Points use local measurements, not official STP counters.</p>
       <div class="controller-fields">
         <label for="controller-owner">Teammate
           <select id="controller-owner" name="controller-owner"></select>
@@ -90,11 +91,18 @@
         <label for="controller-profile">Code profile
           <select id="controller-profile" name="controller-profile" aria-describedby="controller-implementation controller-profile-kind"></select>
         </label>
+        <label for="controller-world">World
+          <select id="controller-world" name="controller-world"></select>
+        </label>
+        <label for="controller-seed">Seed
+          <input id="controller-seed" name="controller-seed" type="number" min="0" max="4294967295" step="1" value="100" required>
+        </label>
         <label for="controller-duration">Simulation time budget
           <select id="controller-duration" name="controller-duration">
             <option value="60">60 seconds</option>
+            <option value="300" selected>300 seconds</option>
             <option value="600">600 seconds</option>
-            <option value="1800" selected>1800 seconds</option>
+            <option value="1800">1800 seconds</option>
           </select>
         </label>
       </div>
@@ -110,10 +118,10 @@
       </dl>
       <p id="controller-service-status" role="status"></p>
       <p id="controller-error" role="alert"></p>
-      <p id="controller-fresh-warning">Run fresh replaces this tab's flight. Stop the current controller first. Selecting another profile requests Stop; it never resets or starts a flight by itself.</p>
+      <p id="controller-fresh-warning">Run flight starts a fresh flight in the selected world. If this tab has already flown, you will be asked before replacing it.</p>
       <p id="controller-run-reason"></p>
       <div class="controller-actions">
-        <button id="run-controller" type="button" aria-describedby="controller-run-reason controller-fresh-warning" disabled>Run fresh test</button>
+        <button id="run-controller" type="button" aria-describedby="controller-run-reason controller-fresh-warning" disabled>Run flight</button>
         <button id="stop-controller" type="button" disabled>Stop controller</button>
         <button id="watch-controller-flight" type="button" disabled>Watch flight</button>
         <button id="setup-controller" type="button" aria-expanded="false" aria-controls="controller-setup">Set up Python runner</button>
@@ -122,9 +130,12 @@
       </div>
       <details id="controller-setup">
         <summary>Connect the Python runner</summary>
-        <p>Local game: start <code>just controllers serve --connection-file .devenv/wsorb-local.json --run</code> with the descriptor for this server.</p>
-        <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
-        <p>Start or reconnect the runner, then check the connection. Python must be online to run these profiles.</p>
+        <p>Python runs on a teammate's machine. The hosted site stays on Cloudflare Free and only relays authenticated calls to this browser. It does not start or host Python.</p>
+        <p>Run these commands from the repository root inside <code>devenv shell</code>.</p>
+        <p>Local game: after <code>just setup</code> and <code>just build</code>, start <code>WSORB_LAB=1 just local</code>. In a second devenv shell, start <code>uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run</code>.</p>
+        <p>Hosted game: create a private room with <code>uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json</code>. Open its private browser link and allow Python, then start <code>uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run</code> on your machine. Keep the link and file private.</p>
+        <p>A comparison link only selects flight settings. To connect that open hosted tab without losing them, paste the room link's <code>#room=…&amp;key=…</code> fragment at the end of its address and allow Python. A local notebook cannot control an unrelated hosted tab.</p>
+        <p>Keep the runner running, then check the connection. Run flight needs a ready game and an online, idle Python service.</p>
         <button id="reconnect-controller" type="button">Check connection</button>
       </details>
       <h3 id="controller-room-heading">Current connection job results</h3>

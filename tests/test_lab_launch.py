@@ -232,6 +232,32 @@ def test_parser_and_help_do_not_start_an_editor_or_create_a_token(tmp_path):
     assert notebook.notebook_dir == Path("notebook")
 
 
+def test_profile_setup_documents_local_python_and_native_uv_commands():
+    local = (
+        "uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run"
+    )
+    room = "uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json"
+    relay = "uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run"
+    for path in ("docs/flight-lab.md", "examples/README.md", "worker/web/index.html"):
+        source = (ROOT / path).read_text()
+        assert "devenv shell" in source
+        assert "WSORB_LAB=1 just local" in source
+        assert "Cloudflare Free" in source
+        for command in (local, room, relay):
+            assert command in source
+        for obsolete in (
+            "just controllers",
+            "Hosted Python starts automatically",
+            "starts Python automatically",
+        ):
+            assert obsolete not in source
+    comparison = (ROOT / "docs/official-comparison.md").read_text()
+    assert room in comparison and relay in comparison
+    assert "Python runs on your machine" in comparison
+    assert "does not start Python" in comparison
+    assert "Keep the query parameters" in comparison
+
+
 def test_invalid_environment_port_fails_before_launch(tmp_path):
     token_file = tmp_path / "uncreated.token"
     result = subprocess.run(
@@ -445,6 +471,7 @@ def notebook_server(tmp_path_factory, real_marimo):
         "worker/public/index.html",
         "worker/public/sim/manifest.json",
         "src/wsorb/controllers/catalog.json",
+        "src/wsorb/controller_worlds.json",
     ):
         target = workspace / relative
         target.parent.mkdir(parents=True, exist_ok=True)

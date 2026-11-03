@@ -8,6 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createHeadless } from "../worker/scripts/headless.mjs";
 import { connectRoom, executeRoomCall } from "../worker/web/room-control.ts";
+import { freshTrial } from "../worker/web/flight-launch.ts";
+import { flightWorlds } from "../worker/web/flight-selection.ts";
 
 test("room calls against the verified native WASM, with renderer unstarted", async t => {
   const publicRoot = fileURLToPath(new URL("../worker/public/", import.meta.url));
@@ -335,6 +337,42 @@ test("room calls against the verified native WASM, with renderer unstarted", asy
       nativeRejection(request, "stale_context");
       assert.deepEqual(snapshot(), after);
       assert.deepEqual(invoke("command", { command: release(after, run) }), { ok: true, value: { ok: true } });
+    });
+    await t.test("launcher prepares the chosen real world and seed without playing or claiming", async () => {
+      for (const world of flightWorlds) {
+        const seed = world.id === "team" ? 0 : world.id === "official" ? 101 : 0xffffffff;
+        const selected = { profileId: "basic_pd_radar", worldId: world.id, seed, duration: 300 };
+        let consent;
+        try {
+          consent = await freshTrial(api, selected, new AbortController().signal);
+        } catch (error) {
+          assert.fail(`Launcher world ${world.id}, seed ${selected.seed}: ${error.message}`);
+        }
+        const actual = snapshot();
+        assert.equal(actual.observation.flight_preset, world.preset);
+        const expectedNativeSettings = structuredClone(world.settings);
+        if (expectedNativeSettings.debris.distribution.kind === "directed_stream") {
+          delete expectedNativeSettings.debris.distribution;
+        }
+        assert.deepEqual(actual.observation.experiment_settings, expectedNativeSettings, `Native serialized setup for ${world.id}`);
+        assert.equal(actual.observation.seed, seed);
+        assert.equal(actual.observation.time_s, 0);
+        assert.equal(actual.runtime.running, false);
+        assert.notEqual(actual.observation.control_authority.status, "active");
+        assert.deepEqual(consent, context(actual));
+      }
+      const before = snapshot();
+      const selection = { profileId: "basic_pd_radar", worldId: "official", seed: 101, duration: 300 };
+      await assert.rejects(freshTrial(api, selection, AbortSignal.abort()), { name: "AbortError" });
+      assert.deepEqual(snapshot(), before, "Cancelled startup cannot reset a flight");
+      await assert.rejects(freshTrial(api, { ...selection, worldId: "unknown" }, new AbortController().signal), /supported flight world/);
+      assert.deepEqual(snapshot(), before, "Unknown world cannot fall back to L2");
+      const active = invoke("command", { command: claim(before, "launcher-blocked") });
+      assert.equal(active.ok, true, active.error);
+      const owned = snapshot();
+      await assert.rejects(freshTrial(api, selection, new AbortController().signal), /Stop the active controller/);
+      assert.deepEqual(snapshot(), owned, "Fresh setup cannot replace an active controller");
+      assert.equal(invoke("command", { command: release(owned, "launcher-blocked") }).ok, true);
     });
   } finally {
     // Stop only this test's scheduler. Never issue native pause/reset/release on

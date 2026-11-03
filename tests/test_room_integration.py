@@ -47,8 +47,7 @@ def room_worker(tmp_path_factory):
         process = subprocess.Popen(
             [
                 node,
-                "worker/scripts/cloudflare.mjs",
-                "wrangler",
+                "worker/node_modules/.bin/wrangler",
                 "dev",
                 "--config",
                 "worker/wrangler.jsonc",

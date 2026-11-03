@@ -38,6 +38,7 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .controller-flight__controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .controller-flight__controls > p { flex: 1 1 16rem; min-width: 0; margin: 0; }
 .controller-flight__controls > .controller-flight__score { flex: 0 1 auto; color: #edf1f7; font-size: 1.125rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.controller-flight__measurements { margin-block: 8px 0; font-variant-numeric: tabular-nums; }
 .controller-flight button { max-width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid #78869b; border-radius: 5px; color: #edf1f7; background: transparent; font: inherit; cursor: pointer; }
 .controller-flight button:disabled { opacity: .48; cursor: default; }
 .controller-flight :is(button, summary):focus-visible { outline: 2px solid #a9c8ff; outline-offset: 3px; }
@@ -74,6 +75,8 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #controller-panel button { cursor: pointer; }
 #controller-panel button:disabled { cursor: default; opacity: .48; }
 #controller-panel select { max-width: 100%; font-family: inherit; font-size: .8125rem; }
+#controller-panel input[type="number"] { min-height: 40px; padding: 8px 12px; border: 1px solid var(--lab-input-border); border-radius: 7px; background: var(--lab-surface); color: var(--lab-text); font: inherit; font-size: 1rem; }
+#controller-panel input[type="number"]:focus-visible { outline: 2px solid #a9c8ff; outline-offset: 3px; }
 :where(#controller-panel) :where(p, h2, h3, h4) { margin: 0; }
 #controller-panel :is(h2, h3, h4) { text-wrap: balance; }
 #controller-panel a { color: var(--lab-accent); text-underline-offset: .2em; }
@@ -206,7 +209,8 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .lab-surface { padding: 24px; background: var(--lab-surface); border: 1px solid var(--lab-border); border-radius: 10px; min-width: 0; }
 .controller-fields { display: flex; flex-wrap: wrap; gap: 16px; }
 .controller-fields label { display: grid; gap: 6px; flex: 1 1 9rem; min-width: 0; color: var(--lab-muted); font-size: .75rem; }
-.controller-fields select { width: 100%; }
+.controller-fields :is(select, input) { width: 100%; min-width: 0; box-sizing: border-box; }
+.comparison-fly { display: inline-flex; align-items: center; min-height: 32px; margin-inline-start: 2rem; color: #a9c8ff; font-size: .75rem; font-weight: 500; text-decoration: underline; text-underline-offset: .2em; }
 .controller-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-block: 20px; }
 .controller-profile-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-block-start: 16px; }
 #controller-panel #controller-implementation { color: var(--lab-text); font-size: .875rem; }

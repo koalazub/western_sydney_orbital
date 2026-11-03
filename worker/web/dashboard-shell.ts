@@ -37,7 +37,7 @@ export function mountDashboard(panel: HTMLDialogElement) {
           </details>
         </section>
         <section id="lab-view-run" class="lab-view" aria-label="Test Python profiles">
-          <div class="lab-section-heading"><div><h3>Fly a teammate's code</h3><p>Choose a Python profile, run a fresh test, then Watch flight.</p></div><span class="lab-badge">Local practice</span></div>
+          <div class="lab-section-heading"><div><h3>Fly a teammate's code</h3><p>Connect Python running on your machine, choose a teammate and world, then Run flight. The camera follows the lander automatically. This site does not host Python.</p></div><span class="lab-badge">Local simulation</span></div>
           <section id="controller-latest-result" class="controller-latest-result" aria-labelledby="controller-latest-result-heading" hidden>
             <div><h4 id="controller-latest-result-heading">Latest result</h4><p id="controller-latest-result-profile"></p><p id="controller-latest-result-scope">Local estimate · STP formula, local measurements.</p></div>
             <div class="controller-latest-result__points"><strong id="controller-latest-result-points">n/a</strong><span>pts</span></div>
@@ -45,10 +45,10 @@ export function mountDashboard(panel: HTMLDialogElement) {
             <button type="button" class="lab-text-button" data-lab-view="data">View score details</button>
             <p id="controller-latest-result-announcement" class="screen-reader-only" role="status"></p>
           </section>
-          <div class="lab-run-grid"><section id="lab-run-controls" class="lab-surface" aria-label="Next profile test"></section><section class="lab-surface lab-run-context"><p class="lab-eyebrow">Fresh test conditions</p><h4>Across Phobos</h4><dl><div><dt>Debris</dt><dd>500 bodies · 20 m/s crossflow</dd></div><div><dt>Seed</dt><dd>100</dd></div><div><dt>Linear limit</dt><dd>0.5 m/s²</dd></div><div><dt>Angular limit</dt><dd>0.05 rad/s²</dd></div><div><dt>Target</dt><dd>Far-side L2 practice station</dd></div></dl><p>Transverse flow, light attraction off. Local physics and sensors, not an official competition flight.</p><details class="lab-disclosure"><summary>See the actual flightpath</summary><p>Watch flight returns to the live scene. Press F there to follow the lander. With Debug guides on, the orange trail shows actual lander positions, not a predicted route. Stop stays available below the scene.</p></details><details class="lab-disclosure"><summary>Native connection evidence</summary><div class="lab-native-status"><p id="controller-native-status" role="status">Waiting for native controller evidence.</p><p id="controller-native-evidence"></p></div><div id="lab-run-connection"></div></details></section></div>
+          <div class="lab-run-grid"><section id="lab-run-controls" class="lab-surface" aria-label="Next profile test"></section><section class="lab-surface lab-run-context"><p class="lab-eyebrow">Selected flight</p><h4 id="controller-world-summary"></h4><p id="controller-world-description"></p><dl><div><dt>Linear limit</dt><dd>0.5 m/s²</dd></div><div><dt>Angular limit</dt><dd>0.05 rad/s²</dd></div></dl><p>The simulation runs in this tab. Keep it visible while Python flies. Stop stays below the scene beside live fuel, damage, range and speed.</p><details class="lab-disclosure"><summary>See the actual flightpath</summary><p>The orange trail shows actual positions, not a predicted route. Run flight opens the lander view. Watch flight returns to it whenever you reopen this panel.</p></details><details class="lab-disclosure"><summary>Native connection evidence</summary><div class="lab-native-status"><p id="controller-native-status" role="status">Waiting for native controller evidence.</p><p id="controller-native-evidence"></p></div><div id="lab-run-connection"></div></details></section></div>
           <div class="lab-section-heading lab-recent-heading"><div><h3>Your recent flights</h3><p>Connection results, separate from the published comparison.</p></div><button type="button" class="lab-text-button" data-lab-view="data">View receipts</button></div>
           <p id="controller-recent-data-status" class="lab-connection-data-status" role="status" aria-atomic="true">Connection data not loaded.</p>
-          <div id="lab-room-empty" class="lab-empty" hidden><span aria-hidden="true">⌁</span><h4>No flight recorded yet</h4><p>Choose a profile and use Run fresh test. Measured charts appear here after the run.</p></div>
+          <div id="lab-room-empty" class="lab-empty" hidden><span aria-hidden="true">⌁</span><h4>No flight recorded yet</h4><p>Choose a profile and use Run flight. Measured charts appear here after the run.</p></div>
           <div id="dashboard-room-overview" hidden></div>
         </section>
         <section id="lab-view-data" class="lab-view" aria-label="Recorded data and provenance" hidden>
@@ -85,7 +85,7 @@ export function mountDashboard(panel: HTMLDialogElement) {
   controllerNotes.append(summary, byId("controller-description"), byId("controller-source-metadata"));
   run.append(controllerNotes, byId("controller-setup"));
   byId("lab-run-connection").append(byId("local-python-connection"), byId("python-room"));
-  byId("controller-fresh-warning").textContent = "Run fresh asks before replacing this tab's flight. Changing a selection requests Stop first. It never starts or resets a flight.";
+  byId("controller-fresh-warning").textContent = "Run flight uses the selected world and seed. It asks before replacing a flight that has already started. Changing a selection requests Stop first.";
 
   const notes = byId("lab-data-notes");
   for (const id of ["controller-score-label", "controller-score-detail", "controller-score-sources", "controller-score-comparison", "fuel-model-notes"]) notes.append(byId(id));

@@ -2,6 +2,7 @@ import { DEFAULT_VISIBLE_METRICS, formatMetric, getMetric, isEfficiencyMetric, i
   type WorkspaceActions, type WorkspaceState, type WorkspaceWidget } from "./comparison-model.ts";
 import { finite, outcomeLabel, traceStyle, type PathRun } from "./path-comparison-data.ts";
 import { SCORE_CONSTANTS, SCORE_REFERENCE, type ScoreComponents } from "./score-estimate.ts";
+import { flightLink } from "./flight-selection.ts";
 
 const sources: Record<Metric["source"], string> = { recorded: "Recorded", native: "Native", sampled: "Sampled", calculated: "Calculated" };
 let instances = 0;
@@ -44,7 +45,7 @@ type MetricCell = { element: HTMLTableCellElement; value: HTMLElement; delta: HT
 type RowView = {
   row: MetricRow; element: HTMLTableRowElement; identity: HTMLTableCellElement; outcomeCell: HTMLTableCellElement;
   select: HTMLInputElement; inspect: HTMLButtonElement; name: HTMLSpanElement; swatch: SVGSVGElement;
-  outcome: HTMLElement; arrivals: HTMLElement;
+  outcome: HTMLElement; arrivals: HTMLElement; fly: HTMLAnchorElement;
   cells: Map<string, MetricCell>;
 };
 
@@ -110,6 +111,8 @@ export function installMetricMatrix(container: HTMLElement, actions: WorkspaceAc
   toolbar.append(modeLabel, picker); header.append(heading, toolbar);
   const scope = html("p", "comparison-visually-hidden"); scope.id = `${prefix}-scope`;
   const scoreNote = html("p", "comparison-score-note", "Local estimate · STP formula, local measurements");
+  const flightNote = html("p", "comparison-muted", "Fly this code selects settings for a new flight, not a replay. Python must run on your machine and connect through the local game or a private room. This site does not host Python.");
+  flightNote.id = `${prefix}-flight-note`;
   const scoreAggregation = html("span", "comparison-score-aggregation"); scoreNote.append(scoreAggregation);
   scoreNote.id = `${prefix}-score-note`;
   const status = html("p", "comparison-live"); status.setAttribute("role", "status"); status.setAttribute("aria-atomic", "true");
@@ -166,7 +169,7 @@ export function installMetricMatrix(container: HTMLElement, actions: WorkspaceAc
   scoreBreakdown.append(scoreTable);
   coverage.append(scoreMethod, scoreBreakdown, aboutNote, coverageIntro, nativeNote, timingNote, coverageScroll, definitions,
     html("h3", "", "Outcomes and sources"), outcomeDetails, selectionNote);
-  root.append(header, scoreNote, scope, status, noMetrics, scroll, empty, coverage); container.append(root);
+  root.append(header, scoreNote, scope, flightNote, status, noMetrics, scroll, empty, coverage); container.append(root);
 
   let current: WorkspaceState | null = null, rendered: WorkspaceState | null = null, disposed = false;
   let modelRows: MetricRow[] = [], displayedRows: MetricRow[] = [], visibleMetrics: Metric[] = [];
@@ -262,9 +265,12 @@ export function installMetricMatrix(container: HTMLElement, actions: WorkspaceAc
     const inspect = html("button", "comparison-row-name"), name = html("span"); inspect.type = "button";
     const swatch = svg("svg", { viewBox: "0 0 32 10", width: 32, height: 10, class: "comparison-swatch", "aria-hidden": "true", focusable: "false" });
     inspect.append(swatch, name); identityContent.append(selectLabel, inspect); identity.append(identityContent);
+    const fly = html("a", "comparison-fly", "Fly this code");
+    fly.setAttribute("aria-describedby", flightNote.id);
+    identity.append(fly);
     const outcomeCell = html("td"), outcome = html("small", "comparison-trial-outcome"), arrivals = html("span", "comparison-arrival-count");
     outcomeCell.append(arrivals, outcome); element.append(identity, outcomeCell);
-    view = { row, element, identity, outcomeCell, select, inspect, name, swatch, outcome, arrivals, cells: new Map() };
+    view = { row, element, identity, outcomeCell, select, inspect, name, swatch, outcome, arrivals, fly, cells: new Map() };
     views.set(row.id, view);
     const created = view;
     select.addEventListener("change", () => {
@@ -480,6 +486,11 @@ export function installMetricMatrix(container: HTMLElement, actions: WorkspaceAc
         const view = rowView(row), style = traceStyle(row.algorithm), isBaseline = row.algorithm === state.baseline;
         const name = `${style ? `${style.number}. ` : ""}${row.label}`;
         view.name.textContent = name;
+        const launch = flightLink(row.algorithm, state.data.id, state.seed, state.data.comparison.duration_s);
+        view.fly.hidden = launch === null;
+        if (launch) view.fly.href = launch; else view.fly.removeAttribute("href");
+        view.fly.setAttribute("aria-label", `Choose ${row.label} for a fresh flight in ${state.data.id === "official" ? "Competition hop" : "Historical L2 practice"}, seed ${state.seed}`);
+        view.fly.title = `${row.algorithm === "wso_official_profile" ? "Ali official profile, formerly labelled wso_official_profile. " : ""}Connect Python running on your machine, then choose Run flight. This starts a new run, not a replay.`;
         view.inspect.setAttribute("aria-label", `${name}, inspect only this controller's saved path`);
         view.swatch.toggleAttribute("hidden", !style);
         if (style) {
