@@ -38,12 +38,27 @@
       The flight HUD shows actual speed/climb in metres per second, terrain-centre clearance in metres and thrust acceleration. Details and Export include force, torque, spin, target range/closing, peaks and estimated fuel/damage. These are local rotating-frame measurements, not STP-equivalent physics.
       Period steps, T changes playback rate, R opens reset confirmation and I opens the inspector. M maximizes; X or Fullscreen enters browser fullscreen. Tab selects game controls and Enter activates them. Space is lift, not button activation. Esc closes panels or releases the view.
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
+      Shift+C opens Test profiles for reviewed teammate Python code. A connected Python runner is required. Watch flight returns focus to this canvas. With Debug guides on, the orange trail shows actual lander positions, not a predicted route.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
     </div>
     <footer class="simulation-tools" aria-label="Python flight tools">
-      <a class="comparison-link" href="/compare.html" target="_blank" rel="noopener noreferrer">Compare recorded flight paths, opens in a new tab</a>
-      <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-keyshortcuts="Shift+C" hidden>Controller profiles</button>
+      <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-controls="controller-panel" aria-keyshortcuts="Shift+C" hidden>Test profiles</button>
+      <a class="comparison-link" href="/compare.html" target="_blank" rel="noopener noreferrer" aria-label="Compare flights, opens in a new tab">Compare flights</a>
+      <section id="controller-flight" class="controller-flight" aria-label="Python profile flight" hidden>
+        <div class="controller-flight__controls">
+          <p id="controller-flight-status" role="status" aria-atomic="true"></p>
+          <p id="controller-flight-score" class="controller-flight__score" role="status" hidden></p>
+          <button id="stop-controller-flight" type="button" aria-describedby="controller-flight-status" disabled>Stop controller</button>
+          <button id="refresh-controller-flight" type="button" hidden>Refresh status</button>
+        </div>
+        <p id="controller-flight-error" role="alert"></p>
+        <details class="controller-flight__help">
+          <summary>Flightpath tips</summary>
+          <p>Focus the scene and press F to follow the lander. Debug guides are on by default. The orange lander trail follows actual positions, not a predicted route. Manual thrust or pausing ends the Python run.</p>
+          <button id="pause-controller-flight-updates" type="button">Pause updates</button>
+        </details>
+      </section>
       <section id="local-python-connection" class="python-room local-python-connection" aria-label="Local Python connection" hidden>
         <p id="local-python-status" role="status"></p>
         <details class="connection-details"><summary>Connection & observed events</summary><p id="local-python-evidence" class="connection-evidence"></p><p id="local-python-endpoint"></p><ol id="local-controller-events"></ol></details>
@@ -64,18 +79,18 @@
     </dialog>
     <dialog id="controller-panel" aria-labelledby="controller-title" aria-describedby="controller-scope">
       <header class="controller-heading">
-        <h2 id="controller-title">Controller profiles and flight metrics</h2>
-        <button id="close-controllers" type="button" aria-label="Close controller profiles">Close</button>
+        <h2 id="controller-title">Test profiles</h2>
+        <button id="close-controllers" type="button" aria-label="Close flight lab">Close</button>
       </header>
-      <p id="controller-scope">Python runs the selected logic. This game supplies real physics and sensors. Every fresh test uses the far-side L2 practice world, the 20 m/s transit stress field, seed 100 and 500 debris bodies; it is not an official competition flight.</p>
+      <p id="controller-scope">Run a teammate's reviewed Python code and watch its actual flight. Fresh tests use far-side L2 local practice, the 20 m/s Across Phobos crossflow, seed 100 and 500 debris bodies. This is not an official competition flight.</p>
       <div class="controller-fields">
         <label for="controller-owner">Teammate
           <select id="controller-owner" name="controller-owner"></select>
         </label>
-        <label for="controller-profile">Profile
-          <select id="controller-profile" name="controller-profile" aria-describedby="controller-description"></select>
+        <label for="controller-profile">Code profile
+          <select id="controller-profile" name="controller-profile" aria-describedby="controller-implementation controller-profile-kind"></select>
         </label>
-        <label for="controller-duration">Simulation time limit
+        <label for="controller-duration">Simulation time budget
           <select id="controller-duration" name="controller-duration">
             <option value="60">60 seconds</option>
             <option value="600">600 seconds</option>
@@ -83,13 +98,25 @@
           </select>
         </label>
       </div>
+      <div id="controller-profile-summary" class="controller-profile-summary">
+        <p id="controller-implementation"></p>
+        <span id="controller-profile-kind" class="lab-badge"></span>
+      </div>
       <p id="controller-description"></p>
+      <dl id="controller-source-metadata" class="controller-source-metadata">
+        <div><dt>Python source</dt><dd><code id="controller-profile-source"></code></dd></div>
+        <div><dt>Profile ID</dt><dd><code id="controller-profile-id"></code></dd></div>
+        <div><dt>Implementation credit</dt><dd id="controller-profile-contributor"></dd></div>
+      </dl>
       <p id="controller-service-status" role="status"></p>
       <p id="controller-error" role="alert"></p>
       <p id="controller-fresh-warning">Run fresh replaces this tab's flight. Stop the current controller first. Selecting another profile requests Stop; it never resets or starts a flight by itself.</p>
+      <p id="controller-run-reason"></p>
       <div class="controller-actions">
-        <button id="run-controller" type="button" disabled>Run fresh test</button>
+        <button id="run-controller" type="button" aria-describedby="controller-run-reason controller-fresh-warning" disabled>Run fresh test</button>
         <button id="stop-controller" type="button" disabled>Stop controller</button>
+        <button id="watch-controller-flight" type="button" disabled>Watch flight</button>
+        <button id="setup-controller" type="button" aria-expanded="false" aria-controls="controller-setup">Set up Python runner</button>
         <button id="refresh-controller-results" type="button">Refresh results</button>
         <button id="pause-controller-updates" type="button">Pause updates</button>
       </div>
@@ -97,16 +124,19 @@
         <summary>Connect the Python runner</summary>
         <p>Local game: start <code>just controllers serve --connection-file .devenv/wsorb-local.json --run</code> with the descriptor for this server.</p>
         <p>Hosted game: open the private link from <code>wsorb room create</code>, allow Python, then start <code>just controllers serve --room-file PATH --run</code>. A local notebook cannot control an unrelated hosted tab.</p>
+        <p>Start or reconnect the runner, then check the connection. Python must be online to run these profiles.</p>
+        <button id="reconnect-controller" type="button">Check connection</button>
       </details>
       <h3 id="controller-room-heading">Current connection job results</h3>
-      <p id="controller-score-label">STP's documented success formula</p>
-      <p id="controller-score-detail"><strong>Pinned 29 October review.</strong> <code>Raw Score = Time Score − Damage Penalty − Fuel Penalty<br>Raw Score = 120/T − 2D/209200 − F/1.15<br>Final points = 100 × [Raw Score + 0.5]</code>T is completion time in seconds. D is accumulated collision damage in joules, not collision count. F must be STP's Stats/FuelUsed counter, not this simulator's physical fuel estimate. The local runs cannot supply comparable raw scores or final points. Current STU4-Sim main uses NominalFuel_kg 75.0 and max(F/75.0, 0); see the official competition reference in the README.</p>
-      <div id="controller-score-sources"><p><a href="https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5" referrerpolicy="no-referrer">Official scoring documentation</a>. A nominal successful run has raw score 0 and final points 50.</p><section aria-labelledby="score-example-heading"><h4 id="score-example-heading">Documentation example, not a recorded flight</h4><p>T = 96 s, D = 10,460 J, official fuel counter F = 1.035.</p><dl id="controller-score-example" class="lab-score-example"><div><dt>Time score</dt><dd data-score-term="time_score">1.25</dd></div><div><dt>Damage penalty</dt><dd data-score-term="damage_penalty">0.10</dd></div><div><dt>Fuel penalty</dt><dd data-score-term="fuel_penalty">0.90</dd></div><div><dt>Raw score</dt><dd data-score-term="raw_score">0.25</dd></div><div><dt>Final points</dt><dd data-score-term="points">75</dd></div></dl></section><details class="lab-disclosure"><summary>Why no point estimate?</summary><p>The published <a href="https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L37-L67" referrerpolicy="no-referrer">Scoring.py</a> at that pin instead uses max(F/1.15 − 1, 0) for fuel, giving 150 for the nominal run and 165 for the wiki example. Current main uses 75.0 kg and max(F/75.0, 0). The formula disagreement remains unresolved. Both formulas require the official counters. Local SI kilograms cannot be converted from the saved totals. The wiki does not fully specify failure's distance equation. New local runs have no score; historical local totals remain legacy diagnostics, not STP points.</p></details></div>
+      <p id="controller-results-status" class="lab-connection-data-status" role="status" aria-atomic="true">Connection data not loaded. Refresh results only reads saved data.</p>
+      <p id="controller-score-label">Points · current STP formula, local estimate</p>
+      <p id="controller-score-detail"><code>Success = 100 × [120/T − 2D/209200 − max(F/75, 0) + 0.5]<br>Damage failure = 100 × [−r/r₀ − 2D/209200 − max(F/75, 0) + 0.5]</code>T is terminal time in seconds, D is accumulated collision damage, F is fuel used, r is final target range and r₀ is recorded initial target range. At T = 0, the time term is 0. Points can be negative and are not capped at 100. These estimates apply the current source equation to recorded local measurements, not official STP counters.</p>
+      <div id="controller-score-sources"><p><a href="https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py" referrerpolicy="no-referrer">Current STU4-Sim scoring source</a>, revision <code>c0105648</code>. Nominal time 120 s, damage threshold 209,200 J and nominal fuel 75. The native competition preset uses this formula; completed L2 receipts are estimated from their final counters here.</p><p>Only confirmed native terminal receipts with unchanged flight context qualify. Damage failures use the actual time-zero target range from validated native analytics. Without that reading, points stay n/a. Running, time-budget, stopped, interrupted and error results stay n/a. Missing values are never zero. Legacy receipt totals are preserved separately, never relabelled as current points.</p><details class="lab-disclosure"><summary>Historical wiki formula and example</summary><p>The <a href="https://github.com/SimDynamX/STU4-Solution/wiki/2.-Mission-Success,-Failure,-and-Scoring/4ddae12f7d577b09c27dbfc9cab886ef98e693c5" referrerpolicy="no-referrer">19 October scoring wiki</a> used F/1.15. It is not the current 75-unit source equation used for these estimates.</p><section aria-labelledby="score-example-heading"><h4 id="score-example-heading">Historical documentation example, not a flight</h4><p>T = 96 s, D = 10,460 J, official fuel counter F = 1.035.</p><dl id="controller-score-example" class="lab-score-example"><div><dt>Time score</dt><dd data-score-term="time_score">1.25</dd></div><div><dt>Damage penalty</dt><dd data-score-term="damage_penalty">0.10</dd></div><div><dt>Fuel penalty</dt><dd data-score-term="fuel_penalty">0.90</dd></div><div><dt>Raw score</dt><dd data-score-term="raw_score">0.25</dd></div><div><dt>Historical points</dt><dd data-score-term="points">75</dd></div></dl></section></details></div>
       <details id="fuel-model-notes" class="lab-disclosure">
-        <summary>Why this fuel estimate differs from STP</summary>
+        <summary>How local fuel differs from STP</summary>
         <p>The local model calculates physical fuel from measured propellant-force impulse divided by <code>80 s × 9.8 m/s²</code>. One archived Tom flight, <code>trial-00004</code>, recorded <code>66,637.052 N s ÷ 784 m/s = 84.996 kg</code>. That is one flight, not fuel summed across the cohort.</p>
-        <p>The <a href="https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/JetSelectionActuator.py#L69-L126" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">pinned STP actuator source</a> accumulates per-jet acceleration once per actuator iteration. Its timestep multiplication is commented out, and it does not multiply by vehicle mass. <a href="https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/Scoring.py#L99-L128" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">STP labels that counter as kg</a>, but it is not this force-based estimate. Links open in a new tab.</p>
-        <p>There is no reliable conversion from these saved totals alone. Exact reconciliation needs matching controller and simulator versions plus actuator history. Recorded measurements stay unchanged, and local fuel is not used to estimate STP points.</p>
+        <p>The <a href="https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/JetSelectionActuator.py" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">current STP actuator source, opens in a new tab</a> uses timestep, vehicle mass and per-jet impulse for fuel. Local autonomous fuel instead uses resultant translational force. Direct angular torque adds no extra local fuel.</p>
+        <p>The actuator models differ even though both report fuel in kilograms. These point estimates use recorded local fuel directly, not a conversion to the official counter. They are local estimates, not official STP scores.</p>
       </details>
       <div class="controller-fields">
         <label for="controller-result-sort">Result order within each comparison group
@@ -115,13 +145,29 @@
           </select>
         </label>
       </div>
-      <p id="controller-score-comparison">Compare measured flights only within matching builds, seeds and time limits. No ranking uses legacy local point totals. Station-region arrival is not docking.</p>
-      <div class="controller-results" tabindex="0" aria-label="Connection measurements and legacy diagnostics, scroll horizontally">
-        <table id="controller-results-table" aria-describedby="controller-score-label controller-score-detail controller-score-comparison">
-          <caption>Actual connection measurements, newest first. Legacy SI totals and terms are preserved diagnostics, not STP points. n/a means unavailable, never zero.</caption>
-          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Legacy SI total, not STP</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Legacy progress term</th><th scope="col">Legacy collision term</th><th scope="col">Legacy fuel term</th><th scope="col">Legacy offset</th></tr></thead>
+      <p id="controller-score-comparison">Compare matching builds, seeds and time budgets. Points are local estimates using the current STP formula. Station-region arrival is not docking. Legacy totals do not enter current estimates.</p>
+      <div class="controller-results controller-score-results" tabindex="0" aria-label="Connection points and measurements, scroll horizontally">
+        <table id="controller-results-table" aria-describedby="controller-results-status controller-score-label controller-score-detail controller-score-comparison">
+          <caption>Local estimate · STP formula, local measurements. Newest first within matching builds, seeds and budgets. n/a means no confirmed terminal result or missing inputs.</caption>
+          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Points · pts</th><th scope="col">Outcome</th><th scope="col">Time · s</th><th scope="col">Fuel · kg</th><th scope="col">Damage · J</th></tr></thead>
         </table>
       </div>
+      <details id="controller-result-details" class="lab-disclosure">
+        <summary>Score details and receipts</summary>
+        <div class="controller-results" tabindex="0" aria-label="Current point estimate breakdown, scroll horizontally">
+          <table id="controller-score-breakdown-table" aria-describedby="controller-score-detail">
+            <caption>Current-formula terms in points. Subtract damage and fuel penalties; add progress and offset. Original numeric precision is retained here.</caption>
+            <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Points · pts</th><th scope="col">Progress · pts</th><th scope="col">Damage penalty · pts</th><th scope="col">Fuel penalty · pts</th><th scope="col">Offset · pts</th><th scope="col">Basis or missing input</th></tr></thead>
+          </table>
+        </div>
+        <details class="lab-disclosure"><summary>Archived measurements and legacy totals</summary>
+        <div class="controller-results" tabindex="0" aria-label="Archived connection measurements and legacy diagnostics, scroll horizontally">
+        <table id="controller-legacy-results-table" aria-describedby="controller-results-status controller-score-comparison">
+          <caption>Original connection receipts. Legacy totals are historical diagnostics, not the current point estimate.</caption>
+          <thead><tr><th scope="col">Teammate / profile</th><th scope="col">Legacy SI total, not STP</th><th scope="col">Limit, s</th><th scope="col">Outcome</th><th scope="col">Time, s</th><th scope="col">Range, m</th><th scope="col">Arrival / relative speed, m/s</th><th scope="col">Damage, J</th><th scope="col">Fuel used, kg</th><th scope="col">Legacy progress term</th><th scope="col">Legacy collision term</th><th scope="col">Legacy fuel term</th><th scope="col">Legacy offset</th></tr></thead>
+        </table>
+        </div></details>
+      </details>
       <details id="flight-analytics" class="flight-analytics">
         <summary>Published teammate scoreboard and measured flight metrics</summary>
         <p id="analytics-read-only">These controls only filter recorded measurements. They never select a flight controller, request Stop, reset a flight or start a run. Public trial data loads only when this section opens.</p>
@@ -138,7 +184,7 @@
               </table>
             </div>
             <p id="published-analytics-ranking" role="status"></p>
-            <p id="published-scoreboard-note">STP points are unavailable because local fuel and damage differ from STP's counters. Matching formula IDs, builds and seeds do not repair that mismatch. Historical score fields in downloads and collapsed receipts are legacy SI diagnostics only. Burn and turn counts are not score inputs. <a href="#controller-score-detail">Documented formula and counter limits</a>.</p>
+            <p id="published-scoreboard-note">Compare flights shows current-formula local point estimates where terminal inputs exist. This historical table preserves measurements and legacy diagnostics, not official competition scores. Burn and turn counts are not score inputs. <a href="#controller-score-detail">Current formula and counter limits</a>.</p>
             <details class="analytics-manifest">
               <summary>Recorded source mode, build, settings and limitations</summary>
               <dl id="published-analytics-manifest"></dl>
@@ -211,13 +257,21 @@
         </section>
         <section aria-labelledby="official-comparison-heading">
           <h3 id="official-comparison-heading">Official-profile comparison</h3>
-          <p>Five local policies on the 1.31 km competition reference and the 500-body official cloud: the published BasicController beeline, Ali's official-profile controller, WSO's checkpoint profiles and the basic PD/radar reference. Three seeds with two consecutive attempts each.</p>
-          <p><a href="/compare.html" target="_blank" rel="noopener noreferrer">Compare paired flight paths and time graphs, opens in a new tab</a>. Use the same seed and repetition to inspect recorded positions, requests, speed, fuel and damage together. The <a href="/analytics/official-comparison.svg" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">cohort summary chart, opens in a new tab</a> remains available for aggregate results.</p>
-          <p>Local fuel and damage are not STP counters. Arrival time uses successful runs only; the summary's final-speed and fuel medians include physical failures. They do not describe one median flight.</p>
+          <p><a href="/compare.html" target="_blank" rel="noopener noreferrer" aria-label="Compare flights, opens in a new tab">Compare flights</a> · Local simulation, 1.31 km hop, 500 bodies.</p>
+          <details class="lab-disclosure">
+            <summary>Scope and evidence</summary>
+            <p>Five policies, three paired seeds and two consecutive attempts per seed: the published BasicController beeline, Ali's official-profile controller, WSO's checkpoint profiles and the basic PD/radar reference.</p>
+            <p>Local fuel and damage are not STP counters. Arrival-time medians use successful runs only. Final-speed and fuel medians include physical failures. They do not describe one median flight.</p>
+            <nav class="analytics-downloads" aria-label="Official-profile comparison evidence">
+              <a href="/analytics/official-comparison.svg" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" aria-label="Cohort summary, opens in a new tab">Cohort summary</a>
+              <a href="/analytics/paths-official.json" download referrerpolicy="no-referrer">Recorded flights JSON</a>
+              <a href="/analytics/paths-official-trials.csv" download referrerpolicy="no-referrer">Trial metrics CSV</a>
+            </nav>
+          </details>
         </section>
-        <section aria-labelledby="room-analytics-heading">
+        <section aria-labelledby="room-analytics-heading" aria-describedby="controller-results-status">
           <h3 id="room-analytics-heading">Current connection job analytics</h3>
-          <p>Only jobs returned by this tab's existing connection appear here. The seven reviewed profiles are supported. Legacy jobs without native analytics show n/a; the publication above never fills those gaps. Refresh and Pause updates above also control this section.</p>
+          <p>Only jobs returned by this tab's existing connection appear here. Reviewed catalog profiles are supported. Legacy jobs without native analytics show n/a; the publication above never fills those gaps. Refresh and Pause updates above also control this section.</p>
           <div class="controller-fields analytics-controls">
             <label for="room-analytics-cohort">Current job comparison group
               <select id="room-analytics-cohort" name="room-analytics-cohort" aria-describedby="room-analytics-cohort-detail" disabled></select>
@@ -232,8 +286,8 @@
               <select id="room-analytics-profile" name="room-analytics-profile" disabled></select>
             </label>
           </div>
-          <p id="room-analytics-cohort-detail">No completed jobs from this connection.</p>
-          <p id="room-analytics-status" role="status">No completed jobs from this connection.</p>
+          <p id="room-analytics-cohort-detail">Connection receipts have not loaded.</p>
+      <p id="room-analytics-status" role="status">Connection analytics not loaded.</p>
           <figure class="analytics-figure">
             <figcaption>Current job samples by actual simulation time. Scroll the graph horizontally on a narrow screen.</figcaption>
             <div class="analytics-chart-scroll" tabindex="0" role="region" aria-label="Current job metric graph, scroll horizontally">

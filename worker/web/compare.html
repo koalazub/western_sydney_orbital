@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="comparison-document">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101319">
-  <title>Recorded flight comparison · Western Sydney Orbital</title>
+  <title>Compare flights · Western Sydney Orbital</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="comparison-document">
+  <a class="comparison-skip-link" href="#standalone-path-comparison">Skip to flight comparison</a>
   <main class="comparison-page">
     <header class="comparison-page-header">
-      <div><p>Western Sydney Orbital</p><h1>Recorded flight comparison</h1></div>
-      <a href="/">Open simulation</a>
+      <div><p>Western Sydney Orbital</p><h1 id="comparison-title">Compare flights</h1></div>
+      <a href="/" target="_blank" rel="noopener noreferrer" aria-label="Open simulation, opens in a new tab">Open simulation</a>
     </header>
-    <p class="path-note">Read-only analysis. No GPU, Python connection or flight control is needed. Local fuel and damage are not STP counters. Arrivals are station-region entry, not docking.</p>
-    <section id="standalone-path-comparison"><p>Loading comparison controls.</p></section>
-    <noscript>Enable JavaScript to inspect the saved trajectories. <a href="/analytics/official-comparison.svg">Open the summary chart</a> or <a href="/analytics/paths-official.json" download>download recorded measurements</a>.</noscript>
+    <section id="standalone-path-comparison" tabindex="-1" aria-labelledby="comparison-title"><p>Loading saved flights.</p></section>
+    <noscript><p class="comparison-noscript">Enable JavaScript to compare saved flights and local point estimates. These are not official STP results. <a href="/analytics/official-comparison.svg" referrerpolicy="no-referrer">Open the cohort summary</a>, <a href="/analytics/paths-official.json" download referrerpolicy="no-referrer">download competition-hop flights</a> or <a href="/analytics/paths-team.json" download referrerpolicy="no-referrer">download historical L2 flights</a>.</p></noscript>
   </main>
   <script type="module" src="/comparison.js"></script>
 </body>

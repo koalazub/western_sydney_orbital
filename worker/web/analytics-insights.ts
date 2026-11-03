@@ -1,4 +1,5 @@
-// Supplied measurements only. This module does not load data or control flights.
+// Chart notes use supplied measurements only. This module does not load data or
+// control flights. The overview keeps these narratives in a closed disclosure.
 export type InsightRun = {
   label: string;
   outcome?: string;
@@ -41,10 +42,10 @@ type Counts = { attempts: number; successes: number };
 type Selection = { completed: InsightGroup[]; comparable: boolean; scope: string };
 
 const GUIDANCE: Record<Metric, string> = {
-  fuel: "Use less fuel for a completed flight.",
-  time: "Reach the station sooner, without adding damage.",
-  thrust: "Less engine-on time to reach the station is better. Check fuel and damage too.",
-  turn: "Avoid needless spin; turns can still be needed for avoidance.",
+  fuel: "Compare local fuel use after arrival.",
+  time: "Compare arrival time with fuel and damage.",
+  thrust: "Compare engine-on time with fuel and damage after arrival.",
+  turn: "Compare physical turning with angular thrust. Avoidance can require turns.",
 };
 
 function nonnegative(value: unknown): number | null {

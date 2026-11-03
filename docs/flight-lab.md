@@ -2,6 +2,8 @@
 
 Start with the [README](../README.md) for a first flight. This guide keeps the less frequent tasks and the limits that matter when interpreting an experiment.
 
+The Across Phobos defaults and score-first profile/comparison controls were deployed on 3 November 2026 as Worker version `3abfa18e-a29c-464d-bdc3-08eb90688f91`. The full code verification passed; visual review is owner-led.
+
 - [Other ways to start](#other-ways-to-start)
 - [Inputs and launch placement](#inputs-and-launch-placement)
 - [Debris settings and model limits](#debris-settings-and-model-limits)
@@ -91,7 +93,7 @@ Reset flight returns to the chosen custom launch site. Creating a new world retu
 
 ### Choose a target setup or place the lander separately
 
-In **Launch**, expand the new-world setup to choose **Competition reference · 1.31 km hop**, **Far-side L2** or **Mars-facing L1**. Choose **Official debris cloud** or a practice debris mode in **Debris**. **Create paused world** opens a replacement confirmation; **Replace run at time zero** applies it. Expand **Size, shell and ejection inputs** for advanced settings. The default remains the far-side L2 practice setup with the 20 m/s transit stress field and 500 debris bodies. Choosing a draft does not replace an ongoing flight or limit where you can drag the current pad.
+In **Launch**, expand the new-world setup to choose **Competition reference · 1.31 km hop**, **Far-side L2** or **Mars-facing L1**. Choose **Official debris cloud** or a practice debris mode in **Debris**. **Create paused world** opens a replacement confirmation; **Replace run at time zero** applies it. Expand **Size, shell and ejection inputs** for advanced settings. The default is far-side L2 with 500 debris bodies moving **Across Phobos** in the negative world-Y direction at a mean 20 m/s, with a 4 m/s birth-speed spread and light attraction off. Choosing a draft does not replace an ongoing flight or limit where you can drag the current pad.
 
 The advanced lander-only placement controls are a different tool. Enter world X, Y and Z coordinates and select **Apply XYZ position** to move the lander without moving its pad. **Reload current XYZ** fills the fields from the current lander position. Placement pauses flight, aligns the lander away from Phobos, stops its motion and clears thrust. Placement inside another body or outside the supported world is rejected.
 
@@ -106,7 +108,7 @@ Positive X points toward Mars; negative X points away. These are world coordinat
 Debris bodies have mass, velocity and spin. Gravity changes their paths, and physical collisions can change their motion. They do not move merely because the renderer advances a decorative animation.
 
 - **Official debris cloud** is the 500-body competition distribution: a compact cloud offset 500 m toward the target, 0.40–0.80 m/s drift, weighted rock classes and radii up to 20 m. Its fixed count, sizes and extents are not edited by the practice sliders.
-- **Transit traffic** is a custom 20 m/s stress mode, not the competition field. It fills the launch-to-station route with a continuing mean-direction flow and 500 physical bodies. Mean speed, axis, sign and birth spread remain editable in **Debris**.
+- **Transit traffic** is a custom 20 m/s stress mode, not the competition field. Its default **Across Phobos** flow crosses the launch-to-station route rather than heading toward Phobos or along the route. It has 500 physical bodies. Mean speed, axis, sign and birth spread remain editable in **Debris**.
 - **Broad shell stream** preserves the earlier surrounding-Phobos stream. New rocks enter through the upstream side as others leave its bounded area.
 - **Impact ejecta** starts a debris cloud with an adjustable velocity kick and direction. Gravity and collisions then determine its paths. Some rocks can remain bound, some fall back and some escape. A circular belt is not guaranteed.
 
@@ -116,7 +118,7 @@ To try light attraction, use **Launch → New world → Light lander attraction 
 
 The [published debris script](https://github.com/SimDynamX/STU4-Sim/blob/c1e3fc8f9ee3b189bba64d8bd87818a8003639cc/Systems/SpawnDebris.py) contains this routine with `doTrajectoryAdjustment = False`. Its optional update is a 0.02 m/s impulse to one body per overall 60 Hz iteration, not to every body at 60 Hz. Our scheduler uses simulation time for repeatable local trials. The route traffic volume and coherent mean direction are requested practice settings, not a claim about the official random-tangent initialization or asynchronous timing.
 
-The 20 m/s transit stress field is not arrival-validated. With attraction off and seed 100, default A* guidance failed on impact at 54.75 s and Bui's adapter at 44 s. Those failures do not establish the official-cloud result. Verified Start/Stop behaviour and older broad-stream arrivals do not establish safe navigation through either field.
+The 20 m/s transit stress field is not arrival-validated. In the earlier flow configuration, with attraction off and seed 100, default A* guidance failed on impact at 54.75 s and Bui's adapter at 44 s. Those recorded failures do not measure the new Across Phobos default or establish the official-cloud result. Verified Start/Stop behaviour and older broad-stream arrivals do not establish safe navigation through either field.
 
 Gravity remains active for the lander and every asteroid. The local model includes Phobos gravity, differential Mars gravity and the rotating-frame Coriolis and centrifugal terms. It is a circular point-mass approximation, not STP's SPICE ephemeris runtime. Mean-flow inputs do not overwrite the gravitational or collision response every frame.
 
@@ -138,7 +140,7 @@ devenv shell uv run --locked wsorb checkpoint --isolated --run --policy compare 
 
 This script uses authenticated HTTP calls and the same portable numeric controller as the colleague-facing STP script. It does not click the interface, reset an open flight, call a fixed-step test driver or emulate `spaceteams`. The two portable profiles differ only in body-axis preference; they are separate from the notebook's native-contract resilient A* controller. Default inspection is read-only, and default playback is 1×. Accelerated runs can expire their leases when computation or transport is too slow; expiry is a failed attempt, not permission to extend or retime the decision.
 
-The final JSON reports native arrival, range, speed, damage, fuel and source/configuration diagnostics. New local runs leave score unavailable. A run succeeds only on native mission success with the unchanged arrival/damage limits. L1 command effort is a proxy, not fuel. No report files are written automatically. To inspect an existing local flight, supply an explicit `--connection-file`; it is never implicitly reset, tuned or used for comparison.
+The final JSON reports native arrival, range, speed, damage, fuel and source/configuration diagnostics. Native score availability depends on the preset. `competition_reference` uses the current published formula on local counters; L1/L2 practice modes remain natively unscored. Neither is an official STP receipt. A run succeeds only on native mission success with the unchanged arrival/damage limits. L1 command effort is a proxy, not fuel. No report files are written automatically. To inspect an existing local flight, supply an explicit `--connection-file`; it is never implicitly reset, tuned or used for comparison.
 
 ## Hosted Python connection
 
@@ -194,6 +196,10 @@ The [README's controller steps](../README.md#run-a-controller) cover connecting,
 Resilient Stop requests a guarded native release without clearing a newer manual command. If release cannot be confirmed, native expiry still bounds the old command. Use **P** or **Pause physics** to pause, and confirm that the clock has stopped. Select **Connect / Refresh** for read-only guidance again.
 
 For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI example is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; their original SDK entrypoints and displays remain in [`examples/`](../examples/).
+
+Select **Test profiles** below the game to open the Python runner directly. Choose Bui, Tom, Harry or another catalog owner and a code profile. **Set up Python runner** gives the local or private-room command; Run stays disabled until the Python service and game are ready. **Run fresh test** asks before replacing this tab's flight with the Across Phobos defaults. It queues the selected Python adapter, not a JavaScript copy. **Watch flight** returns to the native scene; the orange trail with Debug guides enabled records actual lander positions, not predictions. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
+
+The profile result puts **Points** before the physical diagnostics and shows the current-formula local breakdown when terminal inputs are available. It is not an official receipt. For a damage failure, initial range must come from the actual time-zero row in the existing bounded native analytics. The job's final measurement alone does not contain that range; if the row is missing, failure points remain unavailable. No preset geometry, current-engine assumption or protocol extension fills the gap. Errors and unfinished attempts remain attempts, not zero-point results.
 
 `just controllers list` lists profile names and adaptations. `just controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `just controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
 
@@ -254,7 +260,7 @@ Phobos and Mars use [credited spacecraft surface maps](../worker/web/assets/ATTR
 
 The [README's recorded comparison](../README.md#recorded-teammate-flights) covers 30 older broad-stream trials, not the transit stress field or the official cloud. It used far-side L2, 500 bodies and seeds 100, 101, 102, 103 and 104. Each profile ran twice consecutively per seed, with a 600 s horizon, 0.5 s controller step and 0.05 s physics step.
 
-The separate [official-profile comparison](official-comparison.md) uses `competition_reference` with `official_cloud`, three seeds, two consecutive attempts and the same 500-body population. It includes the published `BasicController.py` baseline, Ali's official-profile policy, WSO's checkpoint profiles and the older basic PD reference. It does not replace this historical broad-stream comparison.
+The separate [official-profile comparison](official-comparison.md) uses `competition_reference` with `official_cloud`, three seeds, two consecutive attempts and 500 bodies per world. Each requested seed feeds the local generator; matching policies and repeats reuse that seed's deterministic population. This does not make local seed 100 the STP population. The comparison includes the published `BasicController.py` baseline, Ali's official-profile policy, WSO's checkpoint profiles and the older basic PD reference. It does not replace this historical broad-stream comparison.
 
 Only the connected target-seeking profiles enter this comparison. Coast, body-Z templates and WSO's separate checkpoint profiles remain selectable, but are not mixed into its medians. Harry's profile is a shared baseline selected by his workflow, not a claim that he authored it.
 
@@ -264,7 +270,7 @@ Medians use available physical results, including damage failures and partial ti
 
 The [competition rules](https://github.com/SimDynamX/SpaceTeamsPRO/discussions/218) require two consecutive unchanged-code runs in one continuous video and average their scores. This headless comparison mirrors only that pairing. It is not an official submission, video or licensed SDK run. Averaging pair means across seeds is a local choice, not an official aggregate, tie-break rule or rule for mixed outcomes.
 
-Local fuel and damage do not reproduce the official counters, so STP points are unavailable. No conversion or combined ranking is assumed. Historical local score receipts and pair means remain unchanged in downloads as legacy diagnostics. The [scoring reference](scoring.md) preserves the documented 75-point worked example and the executable fuel-penalty conflict.
+Historical local score receipts and pair means remain unchanged in downloads as legacy diagnostics, not official STP points. The revised browser comparison calculates a separate current-formula local estimate from each recorded terminal run's time, damage, fuel and distance inputs. It does not relabel the old totals. The [scoring reference](scoring.md) leads with the current 75 kg formula and a hypothetical 175-point example, then preserves the older wiki's 75-point example and 1.15 kg code conflict. No official 175-point result is claimed.
 
 ### Fuel, burns and turns
 
@@ -275,6 +281,20 @@ Native physics counts contiguous propellant-force episodes above 1e-6 N, angular
 Native totals stay exact when interior public samples are dropped. Every plotted series keeps its actual initial and final observations. Full native episode counts, active durations, damage, rotation and coverage remain in the downloads. The [dataset](analytics/team-comparison/dataset.json) records the engine build, source hashes and definitions; the [artifact manifest](analytics/team-comparison/manifest.json) records file checksums. Private source snapshots, raw radar, camera payloads and exception strings are not published.
 
 Published measurements load independently of the Python runner and WebGPU startup. The dashboard keeps current-connection jobs separate from this saved build. Local changes are not automatically published to the hosted player.
+
+### Hosted comparison workspace
+
+The [hosted read-only comparison workspace](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html) starts with the Summary matrix and two Flight path maps. Only the baseline controller's actual runs are selected initially. Choose a row name to inspect that controller alone, or use its checkbox to add or remove its runs. **Columns** changes the metrics; **Metric details** holds counts, paired coverage, raw readings and provenance.
+
+The matrix and scatter plot use whole saved flights. **Trials** uses the current seed/repetition pair. **Summary** groups outcome-filtered attempts by controller, using arrivals-only efficiency medians and available all-attempt readings for context. Counts and spread are per metric. Paired Δ is the median of individual differences matched by seed and repetition, not a difference of medians; efficiency Δ requires both runs to have arrived. These reductions do not rewrite archived medians, which include physical failures.
+
+**Points** is the first numeric column in the hosted comparison. Its per-trial value uses the current formula on recorded local terminal counters, with the time or distance term, damage penalty, fuel penalty and offset in **Metric details**. Unlike the efficiency medians, Summary points are the mean of complete two-run pair scores calculated from per-run points. Damage failures can score when their terminal inputs are complete. Missing inputs, unfinished runs and software errors have no estimate, not zero; coverage, incomplete pairs and attempt/error counts stay visible. Do not apply the nonlinear time formula to median counters.
+
+For Points, **Show differences from baseline** averages complete matched pair-score differences, with both repetitions available for both profiles. It does not use the median Δ reduction used by the other metrics. The same mean reduction applies to the displayed point components.
+
+Open **Filters** for outcome, inspected seed/repetition, baseline and **Show differences from baseline**. That difference switch applies to both the matrix and timelines. **Inspect time** opens cursor, interval and track controls; interval totals appear only after selecting an interval. **Explore trade-offs** opens the scatter plot. Its points remain actual trials in both modes. Selecting one opens its pair. In Trials, changing the pair maps selected controller identities to that pair's actual runs; Summary retains the selected source IDs. The maps show only selected runs from the inspected pair and their baseline, never an averaged path or a cross-pair overlay. They stay empty if no selected run belongs to that pair. Cursor and interval controls do not recalculate whole-flight matrix values or scatter trade-offs. **Data & method** and **Export data** remain closed until needed. Published source-engine hashes and measurements stay unchanged when the live engine changes.
+
+Both official and historical-team metric supplements are hosted and use existing saved receipts, not new flights. Missing native data remains null, paths are not extrapolated, and command samples never stand in for burn or turn counters. Saved path measurements remain usable if a supplement cannot load. The historical native datasets and SVGs remain separate evidence.
 
 ## Repeat and publish a comparison
 
@@ -311,7 +331,7 @@ Add the setup, reason for the experiment, result and next question to our [share
 
 ## What local practice does not prove
 
-Our practice world uses simplified gravity, terrain, contact, fuel and damage models. A local success does not establish equivalent behaviour in Space Teams PRO. New local runs return no score; historical local scores are not STP points. The `competition_reference` preset ports the 1305.8 m route and 50 m keep-out, and `official_cloud` ports the 500-body distribution, but terrain, absolute frame and counters still differ. See [official reference and local differences](competition-reference.md).
+Our practice world uses simplified gravity, terrain, contact, fuel and damage models. A local success does not establish equivalent behaviour in Space Teams PRO. The native `competition_reference` preset and the saved-run browser estimates use the current published formula on local measurements; L1/L2 native practice outcomes remain unscored. Historical local scores and new estimates are not official STP points. Current upstream fuel now includes elapsed time and mass, but official jet allocation, angular fuel use, the damage Blueprint and scorer timing still differ or remain unvalidated. The `competition_reference` preset ports the 1305.8 m route and 50 m keep-out, and `official_cloud` ports the 500-body distribution, but terrain and absolute frame still differ. See [official reference and local differences](competition-reference.md).
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 

@@ -6,7 +6,8 @@ submission, leaderboard result or licensed-runtime measurement.
 
 The historical [teammate comparison](../README.md#recorded-teammate-flights) is
 separate: it used the older broad-stream world. This page covers the official
-geometry, the fixed 500-body cloud and the published example controller.
+relative geometry, a local cloud with a fixed 500-body count and the published
+example controller.
 
 The published run predates the owner designation and labels the same policy
 `wso_official_profile`. The current entrypoint is
@@ -41,15 +42,18 @@ licensed runtime.
   acquisition timestamp. No hidden debris state is supplied to a policy.
 
 Two repetitions per seed mirror the rules' consecutive-pair idea, but the local
-averaging is descriptive. Three matched seeds are not three independent
-population draws.
+averaging is descriptive. The local generator uses the requested seeds 100, 101
+and 102; repeats of a seed reuse its deterministic population. This is a small
+three-seed sample, not six independent reliability draws. The official script
+hardcodes seed 100, but matching that number does not make the local and STP
+populations identical. See [seed and generator differences](competition-reference.md#remaining-local-differences).
 
 ## Results
 
 The per-trial records and summary are the published result:
 
 - [Metric dashboard](analytics/official-comparison/performance.svg)
-- [Interactive paths and time graphs](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html)
+- [Hosted read-only comparison workspace](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html)
 - [Curated ownship paths](analytics/path-comparison/official.json)
 - [Trace-derived per-trial metrics CSV](analytics/path-comparison/official-trials.csv)
 - [Per-trial CSV](analytics/official-comparison/runs.csv)
@@ -82,27 +86,42 @@ Across six attempts per policy (three seeds, two consecutive attempts each):
 
 Arrival-time medians use successful runs only. Final-speed and fuel medians use
 physical outcomes, including damage failures. They are separate distributions,
-not measurements from one representative flight. The interactive view instead
-compares the actual flights at one seed and repetition.
+not measurements from one representative flight. These archive values remain
+unchanged.
 
-The published baseline is the fastest, but it enters the arrival region at about
-10 m/s and both seed-102 attempts failed the 209,200 J damage threshold
+The hosted workspace's efficiency summaries use
+arrivals only; context summaries use available readings from all attempts in the
+outcome filter. Its paired Δ is the median of individual seed/repetition-matched
+differences, not a difference of medians. Efficiency Δ requires both runs to have
+arrived. Trial rows retain failure and partial-error readings, with counts and
+spread reported per metric. These summaries need not equal the archived table.
+
+The published baseline has the shortest successful-arrival median, but enters the
+arrival region at about 10 m/s and both seed-102 attempts failed the 209,200 J damage threshold
 (209,326 J). Ali's official profile arrived on every attempt and entered at
 about 1.2 m/s; it observed 49,464 J on seed 101 but stayed below the threshold,
 and used more fuel than the baseline. Basic PD also arrived on every attempt, but
 later and with more local fuel. The checkpoint profiles were less reliable on
-this field: `baseline` never produced an eligible decision, while `body-axis`
-arrived on two seeds and became ineligible on the third. Those are real policy
-outcomes, not hidden retries.
+this field. Every checkpoint `baseline` attempt eventually ended in a policy
+eligibility error, after 75.5 s on seed 100, 127 s on seed 101 and 115.5 s on seed
+102. Both repetitions retained those partial flights. The trace-derived CSV
+preserves their range, speed, fuel and damage readings; they are not arrivals.
+The `body-axis` profile arrived on seeds 100 and 102 and ended in a policy
+eligibility error at 78 s on seed 101. Those are real policy outcomes, not hidden
+retries.
 
 Completion means native mission success and entry to the 50 m arrival region.
 It is not a docking or low-speed rendezvous claim. Damage, local fuel, time and
 relative speed are recorded separately. Errors and timeouts stay in the attempt
 counts; they are not silently replaced by a successful seed.
 
-The official formula is applied only to local time, damage and fuel estimates.
-Local fuel is integrated propellant mass, not STP's `FuelUsed` counter, so the
-displayed score is a local diagnostic and not STP points.
+The revised browser comparison calculates points with the current published
+formula on recorded local terminal time, damage, fuel and distance inputs.
+These are local estimates, not STP receipts. Current upstream fuel includes both
+elapsed time and mass, unlike the older actuator pin. The remaining differences
+include individual jet allocation and angular fuel, the unpublished damage
+Blueprint and asynchronous scorer timing. See the [current scoring analysis](scoring.md).
+The archived score fields, physical measurements and artifact checksums stay unchanged.
 
 ## Repeat it
 
@@ -131,26 +150,68 @@ just flight-analyze runs/official-comparison-2026-11-02 trial-00012 runs/seed-10
 ```
 
 The new report reads existing traces only. It refuses an existing output file.
-Its path coordinates use the same fixed basis as the hosted comparison, and its
+Its path coordinates use the same fixed basis as the hosted workspace, and its
 command segments retain their actual preceding intervals.
 
 ## Inspect a path adjustment
 
-Open [the read-only comparison](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html).
-It also appears first in **Controller profiles → Compare**, without starting a
-flight. The standalone page does not load the game engine or need WebGPU.
+The [hosted read-only comparison workspace](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html)
+now includes the matrix, scatter plot and interval inspector for the saved
+flights. It does not start a flight, load the game engine or need WebGPU.
 
-1. Choose the competition hop or historical L2 world, then a seed and repetition.
-   The two worlds never share a metric comparison.
-2. Use the numbered legend to show the controllers you want. Their colours and
-   line patterns stay fixed across every plot.
-3. Move the time control, select a graph, or select a damage interval. Both path
-   projections, all time graphs and the exact-value table inspect that timestamp.
-4. Read the path with range, speed, requested acceleration, local fuel and damage.
-   Expand the signed body-axis requests to inspect reversals. Radar range is a
-   noisy observation, not hull clearance or a collider identity.
-5. Switch to equal map scales before judging a manoeuvre's angle. The expanded
-   cross-track view makes small detours visible but distorts angles.
+### Use the hosted workspace
+
+The controls described here were deployed on 3 November 2026. Archived flight measurements remain unchanged.
+
+Choose a world above the Summary matrix. **Filters** contains outcome, inspected
+seed/repetition, baseline and **Show differences from baseline**. Differences are
+off initially; the switch applies to matrix values and timelines together. The
+worlds never share a metric comparison. Cursor and interval changes do not alter
+whole-flight matrix or scatter values.
+
+- Select a row name to inspect only that controller, or use its checkbox to add
+  or remove its actual source runs. Only the baseline is selected initially.
+  **Columns** changes metrics; closed **Metric details** holds counts, paired
+  coverage, raw readings and provenance. **Trials** shows the current
+  seed/repetition pair. **Summary** groups the outcome-filtered attempts by
+  controller, with arrivals-only efficiency medians and all-attempt context.
+- **Points** is the first numeric column. **Metric details** shows its time or
+  remaining-distance term, damage penalty, fuel penalty, offset and total. Trial
+  points use each run's recorded terminal inputs. Summary points are the mean of
+  complete two-run pair scores, calculated from individual run scores rather than
+  median time, damage or fuel. Terminal damage failures can contribute; missing
+  inputs, unfinished runs and errors remain unavailable, never zero. Coverage,
+  incomplete pairs and attempt/error counts remain visible. These are labelled
+  current-formula local estimates, not newly observed official results. The
+  [175-point example](scoring.md#how-175-points-is-possible) is hypothetical.
+  Failure distance uses the actual saved time-zero target range, never preset
+  geometry or the current engine; a missing initial reading leaves points unavailable.
+  Point differences from baseline average complete matched pair-score differences,
+  with both repetitions available for both profiles. Point components use that
+  same mean reduction; other metrics retain their median paired Δ.
+- Open **Explore trade-offs** to choose scatter axes and select points or a range. Selection follows
+  actual source run IDs, even in Summary. A single point opens its seed and
+  repetition. In Trials, changing the pair maps selected controller identities to
+  its actual runs; Summary retains the selected source IDs. A multi-pair
+  selection does not merge trajectories.
+- **Flight path** shows the two actual path projections first. Open **Inspect
+  time** for cursor, interval and track controls, or select a graph point to
+  inspect it. Interval endpoint totals appear only after selecting an interval.
+  The inspector shows selected runs in the current seed/repetition pair plus
+  their baseline. If that pair contains no selected run, it stays empty rather
+  than substituting another trial. Compare interval endpoint changes, alignment
+  and baseline differences with both path projections. It never overlays
+  different seed/repetition pairs or treats an aggregate as a flight.
+- Use equal map scale before judging angles. Detail scale makes small detours
+  visible but distorts them. Radar range is not hull clearance or collider identity.
+
+`Data & method` contains limitations and source hashes. `Export data` contains
+the world JSON, selected actual-run samples CSV and theory reference.
+Both official and historical-team metric supplements are hosted. They use
+existing saved receipts, not new flights. Missing native data remains null;
+commands never substitute for burn or turn counters. Saved path measurements
+remain usable if a supplement cannot load. The published source-engine hashes
+and measurements do not change when the live game's defaults or engine change.
 
 The maps use a fixed basis from the first launch position to the first target
 position. Lateral and normal are two perpendicular offsets, not altitude or
@@ -168,6 +229,14 @@ To publish paths from saved evidence without flying again:
 ```sh
 just path-comparison runs/official-comparison-2026-11-02 official
 just path-comparison runs/teammate-analytics-69 team
+```
+
+The hosted metric supplements were generated from saved receipts without
+rerunning flights. To reproduce their publication:
+
+```sh
+just comparison-metrics runs/official-comparison-2026-11-02 official
+just comparison-metrics runs/teammate-analytics-69 team
 ```
 
 Historical summaries and original publications remain unchanged. The curated

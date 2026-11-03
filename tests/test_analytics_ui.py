@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -126,9 +128,11 @@ def test_single_run_is_an_explicit_read_only_selection_beside_aggregate():
     assert "matching.filter(run => run.id === runChoice.value)" in SOURCE
     assert "aggregate ? selectedProfiles : undefined" in SOURCE
     assert 'runChoice.addEventListener("change", published.render)' in SOURCE
-    assert "No averaging with other runs." in SOURCE
+    assert "One recorded flight, with no averaging across runs." in SOURCE
+    assert "Missing native analytics stay unavailable." in SOURCE
     assert "not summed fuel" in SOURCE
-    assert "${run.label} · seed ${run.seed} · ${run.id}" in SOURCE
+    assert "${run.id} · ${run.label}" in SOURCE
+    assert "summary.textContent = run ? `Seed ${run.seed} · ${run.id} · ${run.outcome}" in SOURCE
     assert 'new Option("All recorded seeds", "all")' in SOURCE
     assert 'seedChoice.disabled = measurementView === "aggregate"' in SOURCE
     assert 'new Option(`Seed ${run.seed} · rep ${run.repetition ?? "n/a"}' in SOURCE
@@ -143,10 +147,11 @@ def test_fuel_explanation_names_the_actual_single_run_and_counter_mismatch(page)
     text = content(notes)
     assert "trial-00004" in text and "84.996 kg" in text
     assert "one flight, not fuel summed across the cohort" in text
-    assert "timestep multiplication is commented out" in text
-    assert "does not multiply by vehicle mass" in text
-    assert "no reliable conversion" in text
-    assert "Recorded measurements stay unchanged" in text
+    assert "uses timestep, vehicle mass and per-jet impulse" in text
+    assert "resultant translational force" in text
+    assert "Direct angular torque adds no extra local fuel" in text
+    assert "recorded local fuel directly" in text
+    assert "local estimates, not official STP scores" in text
 
 
 def test_analytics_is_a_disclosure_inside_the_existing_native_dialog(page):
@@ -414,7 +419,12 @@ def test_measured_comparison_does_not_display_or_rank_incompatible_pair_points(p
     scoreboard = page.ids["published-analytics-scoreboard"]
     assert "Medians over available physical outcomes" in content(scoreboard)
     assert "No point ranking" in content(scoreboard)
-    assert "STP points are unavailable" in content(page.ids["published-scoreboard-note"])
+    assert "Compare flights shows current-formula local point estimates" in content(
+        page.ids["published-scoreboard-note"]
+    )
+    assert "preserves measurements and legacy diagnostics" in content(
+        page.ids["published-scoreboard-note"]
+    )
     publication = section("function renderPublication(", "export function installFlightAnalytics()")
     assert "sort(" not in publication
     assert "rounded(entry.mean_score)" not in publication
@@ -441,11 +451,28 @@ def test_download_links_use_only_the_fixed_public_asset_contract(page):
         "/analytics/turns.svg",
         "/analytics/efficiency.svg",
         "/analytics/official-comparison.svg",
+        "/analytics/paths-official.json",
+        "/analytics/paths-official-trials.csv",
     }
     for link in links:
         assert link["attrs"]["referrerpolicy"] == "no-referrer"
         if "download" in link["attrs"]:
-            assert page.ids["published-analytics-content"] in link["parents"]
+            if link["attrs"]["href"] in {
+                "/analytics/paths-official.json",
+                "/analytics/paths-official-trials.csv",
+            }:
+                assert any(
+                    parent["tag"] == "nav"
+                    and parent["attrs"].get("aria-label") == "Official-profile comparison evidence"
+                    for parent in link["parents"]
+                )
+                assert any(
+                    parent["tag"] == "section"
+                    and parent["attrs"].get("aria-labelledby") == "official-comparison-heading"
+                    for parent in link["parents"]
+                )
+            else:
+                assert page.ids["published-analytics-content"] in link["parents"]
         else:
             assert link["attrs"]["href"] == "/analytics/official-comparison.svg"
             assert link["attrs"]["target"] == "_blank"
@@ -456,21 +483,69 @@ def test_download_links_use_only_the_fixed_public_asset_contract(page):
 def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(page):
     assert "disabled" in page.ids["run-controller"]["attrs"]
     assert "run.disabled = true;" in CONTROLLERS
-    assert "run.disabled = busy || !view.service.online || !!active || !options.ready();" in (
+    assert "run.disabled = busy || !current?.service.online || !!active || !options.ready();" in (
         CONTROLLERS
     )
     assert "const analytics = installFlightAnalytics();" in CONTROLLERS
     assert CONTROLLERS.count("analytics.updateRoomResults(view.results);") == 1
-    assert "analytics.updateRoomResults([]);" in CONTROLLERS
+    unavailable = CONTROLLERS.split("function unavailableResults()", 1)[1].split(
+        "const request =", 1
+    )[0]
+    assert 'dataState = savedCount === undefined ? "unavailable" : "stale";' in unavailable
+    assert "renderDataStatus();" in unavailable
+    assert "view = undefined;" in unavailable
+    assert "renderRunnerControls();" in unavailable
+    for destructive_update in (
+        "analytics.updateRoomResults(",
+        "renderResults(",
+        "table.replaceChildren(",
+    ):
+        assert destructive_update not in unavailable
+    assert re.search(r"\b(?:savedCount|savedSource)\s*=(?!=)", unavailable) is None
+    data_status = CONTROLLERS.split("function renderDataStatus()", 1)[1].split(
+        "function unavailableResults()", 1
+    )[0]
+    for retained_status in (
+        "Connection data stale. Showing the last successful receipts and traces.",
+        "Previous connection data retained, not current.",
+        "Check the Python connection, then use Refresh results.",
+        "Refresh only reads saved data.",
+        '"controller-results-status", "controller-recent-data-status"',
+        "target.dataset.dataState = displayedState;",
+    ):
+        assert retained_status in data_status
+    refresh = CONTROLLERS.split("async function refresh()", 1)[1].split(
+        "async function requestStop()", 1
+    )[0]
+    assert "const value = await request()();" in refresh
+    assert refresh.count("if (version !== refreshVersion) return;") == 2
+    assert refresh.index("if (version !== refreshVersion) return;") < refresh.index(
+        "render(value, source);"
+    )
+    assert "unavailableResults();" in refresh
+    accepted = CONTROLLERS.split(
+        "function render(value: Record<string, unknown>, source: ResultsSource)", 1
+    )[1].split('byId("controller-score-label")', 1)[0]
+    for recovered_data in (
+        "if (!sameSource(source, resultsSource()))",
+        "renderResults(view.results);",
+        "analytics.updateRoomResults(view.results);",
+        "savedSource = source;",
+        "savedCount = view.results.length;",
+        'dataState = "loaded";',
+        "renderDataStatus();",
+    ):
+        assert recovered_data in accepted
     for preserved in (
         "if (!await confirmFreshTrial(label(profile.value))) return;",
         "const expected = await freshTrial(api);",
         "const changedProfile = async () => { description(); await requestStop(); };",
-        "if (!panel.open || !autoUpdate) return;",
-        'byId<HTMLButtonElement>("pause-controller-updates")',
+        "if (disposed || document.hidden || !autoUpdate || "
+        "!panel.open && !confirmedView()?.active) return;",
+        'byId("pause-controller-updates").addEventListener("click", toggleUpdates);',
         "panel.querySelector<HTMLButtonElement>('.lab-navigation "
-        '[data-lab-view="compare"]\')?.focus();',
-        "open.focus({ preventScroll: true });",
+        '[data-lab-view="run"]\')?.focus();',
+        "target.focus({ preventScroll: true });",
         'event.code !== "KeyC" || !event.shiftKey',
     ):
         assert preserved in CONTROLLERS
@@ -523,41 +598,241 @@ def test_declared_chart_and_legend_colors_have_measured_contrast():
     assert _contrast("#94d9f5", "#101923") >= 3
 
 
-def test_dashboard_defaults_to_visible_graphs_and_moves_raw_tables_out_of_compare():
-    assert 'showView("compare")' in SHELL
+def test_dashboard_opens_profiles_and_keeps_recorded_data_separate():
+    assert 'showView("run")' in SHELL
+    assert 'dashboard.showView("run")' in CONTROLLERS
+    assert 'id="lab-view-run" class="lab-view" aria-label="Test Python profiles"' in SHELL
+    assert 'id="lab-view-compare" class="lab-view" aria-label="Compare flights" hidden' in SHELL
     assert 'id="dashboard-overview"' in SHELL
     assert 'id="lab-view-data"' in SHELL
     assert 'byId("lab-data-content").append(byId("flight-analytics"))' in SHELL
     assert (
         "table" not in SHELL.split('id="lab-view-compare"', 1)[1].split('id="lab-view-run"', 1)[0]
     )
-    assert "STP points unavailable" in SHELL
+    assert "Points use the current STP formula" in SHELL
+    assert "Local estimates appear in Compare and connection results" in SHELL
     assert "View scoring formula" in SHELL
     assert 'if (!button.closest(".lab-navigation"))' in SHELL
 
 
-def test_documented_formula_sources_and_legacy_limits_are_visible_in_data_view(page):
-    assert "Raw Score = Time Score" in content(page.ids["controller-score-detail"])
-    assert "Final points = 100" in content(page.ids["controller-score-detail"])
-    assert "120/T" in content(page.ids["controller-score-detail"])
-    assert "2D/209200" in content(page.ids["controller-score-detail"])
-    assert "F/1.15" in content(page.ids["controller-score-detail"])
-    assert "not collision count" in content(page.ids["controller-score-detail"])
-    assert "Stats/FuelUsed" in content(page.ids["controller-score-detail"])
-    assert "150" in content(page.ids["controller-score-sources"])
-    assert "75" in content(page.ids["controller-score-sources"])
-    assert "Legacy SI total, not STP" in content(page.ids["controller-results-table"])
+def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_consent(page):
+    assert content(page.ids["open-controllers"]) == "Test profiles"
+    assert content(page.ids["run-controller"]) == "Run fresh test"
+    assert content(page.ids["watch-controller-flight"]) == "Watch flight"
+    assert "new Set(profiles.map(entry => entry.owner))" in CONTROLLERS
+    assert 'if (owners.includes("Bui")) owner.value = "Bui";' in CONTROLLERS
+    assert "profiles.filter(entry => entry.owner === owner.value)" in CONTROLLERS
+    assert "Number(b.target_seeking) - Number(a.target_seeking)" in CONTROLLERS
+    for identity in (
+        "controller-profile-source",
+        "controller-profile-id",
+        "controller-profile-contributor",
+        "controller-profile-kind",
+        "controller-run-reason",
+    ):
+        assert identity in page.ids
+    submit = CONTROLLERS.split('run.addEventListener("click", async () => {', 1)[1].split(
+        "function schedule()", 1
+    )[0]
+    ordered = [
+        "const send = request();",
+        "render(await send(), source);",
+        "if (!view?.service.online || view.active || !options.ready())",
+        "if (!await confirmFreshTrial(label(profile.value))) return;",
+        "const expected = await freshTrial(api);",
+        'action: "submit", profile_id: id, seed: 100',
+    ]
+    assert [submit.index(part) for part in ordered] == sorted(
+        submit.index(part) for part in ordered
+    )
+    assert "owner.disabled = profile.disabled = true;" in submit
+    assert "fresh: true, expected_context: expected" in submit
+    assert 'op: "configure_flight", preset: "far_side_l2"' in CONTROLLERS
+    assert "settings: scenario.experiment_settings" in CONTROLLERS
+    assert "20 m/s Across Phobos crossflow, light attraction off" in CONTROLLERS
+    assert "Set up Python runner" in content(page.ids["setup-controller"])
+    assert page.ids["controller-setup"]["tag"] == "details"
+    assert "open" not in page.ids["controller-setup"]["attrs"]
+    assert "controllers serve --connection-file" in content(page.ids["controller-setup"])
+    assert "controllers serve --room-file PATH --run" in content(page.ids["controller-setup"])
+    assert (
+        'if (!api) throw new Error("The real engine is unavailable. No run was started.")' in submit
+    )
+    for forbidden in ("eval(", "new Function(", "python-worker", "create_controller("):
+        assert forbidden not in CONTROLLERS
+
+
+def test_watched_job_keeps_stop_outside_modal_without_claiming_native_running(page):
+    flight = page.ids["controller-flight"]
+    assert "hidden" in flight["attrs"]
+    assert flight not in page.ids["simulation-canvas"]["parents"]
+    assert page.ids["controller-panel"] not in flight["parents"]
+    assert page.ids["controller-flight-status"]["attrs"]["role"] == "status"
+    assert page.ids["controller-flight-error"]["attrs"]["role"] == "alert"
+    outside_stop = page.ids["stop-controller-flight"]
+    assert outside_stop["tag"] == "button" and "disabled" in outside_stop["attrs"]
+    assert outside_stop["attrs"]["aria-describedby"] == "controller-flight-status"
+    assert "actual positions, not a predicted route" in content(flight)
+    assert "pause-controller-flight-updates" in page.ids
+    assert 'outsideStop.addEventListener("click", () => { void requestStop(); });' in CONTROLLERS
+    assert (
+        'watch.addEventListener("click", () => { if (!watch.disabled) panel.close("watch"); });'
+        in CONTROLLERS
+    )
+    assert (
+        'panel.returnValue === "watch" ? byId("simulation-canvas") : openingControl' in CONTROLLERS
+    )
+    assert (
+        "stop.disabled = outsideStop.disabled = busy || !active || active.stop_requested;"
+        in CONTROLLERS
+    )
+    assert "const current = confirmedView();" in CONTROLLERS
+    assert "sameSource(viewSource, resultsSource()) && sourceAvailable(viewSource)" in CONTROLLERS
+    stop = CONTROLLERS.split("async function requestStop()", 1)[1].split("const changedProfile", 1)[
+        0
+    ]
+    assert "if (!current?.active || busy) return;" in stop
+    assert 'action: "stop", job_id: current.active.id' in stop
+    assert (
+        "Stop was not confirmed. Inspect the live flight and refresh before another action." in stop
+    )
+    assert "api.control(" not in stop
+    presenter = CONTROLLERS.split("function renderRunnerControls()", 1)[1].split(
+        "function renderDataStatus()", 1
+    )[0]
+    assert "Last confirmed profile. Status unavailable" in presenter
+    assert "last confirmed, updates paused" in presenter
+    assert "Controller running" not in presenter
+
+
+def test_current_formula_and_separate_legacy_receipts_are_visible_in_data_view(page):
+    detail = content(page.ids["controller-score-detail"])
+    assert "Success = 100" in detail and "Damage failure = 100" in detail
+    assert "120/T" in detail and "2D/209200" in detail
+    assert "max(F/75, 0)" in detail
+    assert "recorded initial target range" in detail
+    assert "At T = 0, the time term is 0" in detail
+    assert "negative and are not capped at 100" in detail
+    assert "recorded local measurements, not official STP counters" in detail
+    sources = page.ids["controller-score-sources"]
+    assert any(
+        element["tag"] == "a"
+        and sources in element["parents"]
+        and "c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py"
+        in element["attrs"].get("href", "")
+        for element in page.elements
+    )
+    source_text = content(sources)
+    assert "actual time-zero target range from validated native analytics" in source_text
+    assert "Running, time-budget, stopped, interrupted and error results stay n/a" in source_text
+    table = page.ids["controller-results-table"]
+    headings = [
+        content(element)
+        for element in page.elements
+        if element["tag"] == "th" and table in element["parents"]
+    ]
+    assert headings[:2] == ["Teammate / profile", "Points · pts"]
+    assert "Legacy SI total, not STP" not in content(table)
+    assert "Legacy SI total, not STP" in content(page.ids["controller-legacy-results-table"])
+    details = page.ids["controller-result-details"]
+    assert details["tag"] == "details" and "open" not in details["attrs"]
+    assert details in page.ids["controller-legacy-results-table"]["parents"]
+    assert details in page.ids["controller-score-breakdown-table"]["parents"]
+    assert "Original numeric precision" in content(page.ids["controller-score-breakdown-table"])
     assert 'value="score"' not in (WEB / "index.html").read_text()
     assert "rankingScore" not in CONTROLLERS and "scoreOrder" not in CONTROLLERS
     assert "Raw score" in content(page.ids["controller-score-example"])
     assert "0.25" in content(page.ids["controller-score-example"])
-    assert "Documentation example, not a recorded flight" in content(
+    assert "Historical documentation example, not a flight" in content(
         page.ids["score-example-heading"]
     )
-    assert "STP raw score: n/a" in SHELL and "Final points: n/a" in SHELL
+    assert "STP raw score: n/a" not in SHELL and "Final points: n/a" not in SHELL
     assert 'link.target = "_blank"' in SOURCE
     assert 'link.rel = "noopener noreferrer"' in SOURCE
     assert "(opens in a new tab)" in SOURCE
+
+
+def test_real_profile_score_reduction_requires_terminal_context_and_recorded_failure_range():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the actual profile score reduction")
+    subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            r"""
+            import assert from 'node:assert/strict';
+            import {readFileSync} from 'node:fs';
+            import {stripTypeScriptTypes} from 'node:module';
+            import {runInNewContext} from 'node:vm';
+            import {estimateScore} from './worker/web/score-estimate.ts';
+            import * as jobs from './worker/shared/controller-jobs.ts';
+            const source=readFileSync('worker/web/controller-profiles.ts','utf8');
+            // Execute the real pure receipt reduction, without installing a DOM,
+            // engine, transport or a substitute controller implementation.
+            const pure=source.slice(source.indexOf('const record ='),
+              source.indexOf('const numericScore ='));
+            assert(pure.includes('function currentScore('));
+            const score=runInNewContext(stripTypeScriptTypes(pure)+'\ncurrentScore',
+              {estimateScore,...jobs});
+            const receipt={state:'native_terminal',native_success:true,error_code:null,
+              world_metadata_unchanged:true,analytics:null,
+              measurement:{status:'success',time_s:80,damage_j:0,fuel_used_kg:18.75,
+                range_m:50,score:-999,score_breakdown:null}};
+            const before=JSON.stringify(receipt);
+            assert.equal(score(receipt).total,175,'Current local estimate ignores the legacy -999');
+            assert.equal(JSON.stringify(receipt),before,'The receipt stays unchanged');
+            for(const state of ['stopped','duration_limit','wall_budget_limit',
+              'interrupted','error'])
+              assert.equal(score({...receipt,state}),null,
+                'A late success observation is not terminal consent');
+            for(const field of ['world_metadata_unchanged','native_success'])
+              for(const value of [false,null,undefined])
+                assert.equal(score({...receipt,[field]:value}),null);
+            for(const error_code of ['controller_failed','interrupted',undefined])
+              assert.equal(score({...receipt,error_code}),null);
+            for(const key of ['time_s','damage_j','fuel_used_kg'])
+              assert.equal(score({...receipt,measurement:{...receipt.measurement,[key]:null}}),null);
+            const failure={...receipt,native_success:false,measurement:{...receipt.measurement,
+              status:'failed_damage',time_s:120,damage_j:313800,fuel_used_kg:75,range_m:5000}};
+            assert.equal(score(failure),null,
+              'Neither the current world nor a legacy score supplies r0');
+            failure.analytics={schema_version:1,definition_id:jobs.CONTROLLER_ANALYTICS_DEFINITION,
+              source_kind:'native_physics_step_counters_with_sampled_public_series',
+              columns:[...jobs.CONTROLLER_ANALYTICS_COLUMNS],sample_count:2,
+              totals:{schema_version:1,definition_id:jobs.CONTROLLER_ANALYTICS_DEFINITION,observed_sim_s:120},
+              samples:[[0,0,0,0,0,0,0,10000,0],[120,75,0,0,0,0,1,5000,313800]]};
+            assert.equal(score(failure).total,-400,'Failure uses its recorded time-zero range');
+            for(const mutate of [
+              x=>x.analytics.samples[0][0]=.1,
+              x=>x.analytics.samples[0][7]=null,
+              x=>x.analytics.samples[0][7]=0,
+              x=>x.analytics.samples[1][0]=0,
+              x=>x.analytics.columns.reverse(),
+              x=>x.analytics.definition_id='unknown',
+              x=>x.analytics.source_kind='unverified',
+              x=>x.analytics.schema_version=2,
+              x=>x.analytics.sample_count=1,
+              x=>x.analytics.totals.observed_sim_s=0,
+              x=>x.analytics.totals.definition_id='unknown',
+              x=>x.analytics.samples=Array.from({length:49},(_,i)=>[i,0,0,0,0,0,0,10000,0]),
+              x=>x.world_metadata_unchanged=false,
+              x=>x.native_success=true,
+              x=>x.error_code='controller_failed',
+            ]){
+              const invalid=structuredClone(failure);mutate(invalid);
+              assert.equal(score(invalid),null,
+                'Invalid or unrelated analytics cannot establish r0');
+            }
+            """,
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
 
 
 def test_failed_publication_retry_does_not_destroy_the_overview_renderer():
@@ -608,5 +883,12 @@ def test_custom_metric_charts_share_actual_sample_inspection_and_reading_guidanc
     assert "label: metric.label, value: row[metric.column]" in graph
     assert '"data-chart-inspection-series": run.id' in graph
     assert "metric.guidance" in graph
-    assert "Less engine-on time to reach the station is better" in SOURCE
+    assert "Compare engine-on time with fuel and damage after arrival." in SOURCE
+    assert 'svg.setAttribute("aria-labelledby", `${prefix}-plot-title`)' in graph
+    assert 'svg.setAttribute("aria-describedby", `${prefix}-plot-description`)' in graph
+    assert 'selectionSummary.textContent = "Read selection notes"' in SOURCE
+    assert "selectionNotes.open" not in SOURCE
+    assert (
+        'run.analytics ? `${run.analytics.sample_count} samples` : "samples unavailable"' in SOURCE
+    )
     assert '.metric-chart[tabindex="0"]:focus-visible' in CSS

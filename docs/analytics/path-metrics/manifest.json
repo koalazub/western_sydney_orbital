@@ -1,0 +1,1 @@
+{"artifacts":[{"bytes":642972,"id":"official","path":"official.json","sha256":"081889ee46cd14f60d912b1500f97b71aa6b2fe36acd6aca7b724b47be5915fc"},{"bytes":544849,"id":"team","path":"team.json","sha256":"7abf9712783bfece069171972ee7ef34c39aef080928a80635a06b154c76bf49"}],"schema":"wsorb.comparison_metrics.artifacts","schema_version":1}

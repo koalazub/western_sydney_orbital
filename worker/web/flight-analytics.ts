@@ -24,7 +24,7 @@ const NATIVE_NUMBERS = ["observed_sim_s", ...EPISODES.flatMap(name => [`${name}_
 const FLAGS = EPISODES.map(name => `${name}_active`);
 const METRICS = [
   { label: "Cumulative fuel used", unit: "kg", column: 1, guidance: "Use less fuel for a completed arrival. These are local fuel estimates." },
-  { label: "Translation burn time", unit: "s", column: 2, guidance: "Less engine-on time to reach the station is better. Compare fuel and damage too." },
+  { label: "Translation burn time", unit: "s", column: 2, guidance: "Compare engine-on time with fuel and damage after arrival." },
   { label: "Angular actuation time", unit: "s", column: 3, guidance: "Avoid unnecessary angular thrust. The lander can keep turning after thrust ends." },
   { label: "Physical turn time", unit: "s", column: 4, guidance: "Reduce unnecessary spin. Physical turning and angular thrust are different measurements." },
   { label: "Total orientation angle", unit: "rad", column: 5, guidance: "This is total rotation travelled, not remaining heading error. Avoid needless rotation." },
@@ -355,21 +355,32 @@ function renderGraph(prefix: string, runs: PlotRun[], metric: typeof METRICS[num
   customInspections.get(prefix)?.(); customInspections.delete(prefix);
   const svg = document.getElementById(`${prefix}-plot`) as unknown as SVGSVGElement;
   const caption = svg.closest("figure")?.querySelector("figcaption");
-  if (caption) caption.textContent = `${metric.guidance} Scroll horizontally on narrow screens.`;
   const legend = byId<HTMLOListElement>(`${prefix}-legend`);
-  const description = `${metric.label} in ${metric.unit} against actual simulation time in seconds. Points are recorded samples; lines only connect adjacent available samples. Missing values break lines. Full numeric data follows.`;
+  const description = `${metric.label} in ${metric.unit} by simulation time in seconds.`;
+  if (caption) {
+    const notes = document.createElement("details"); notes.className = "analytics-data";
+    const summary = document.createElement("summary"); summary.textContent = "Read chart notes";
+    const guidance = document.createElement("p"); guidance.textContent = metric.guidance;
+    const method = document.createElement("p");
+    method.textContent = "Points are recorded samples. Lines connect adjacent available samples; missing values break lines. Trace numbers identify runs in the legend. Coincident repetitions can overlap, but never form one trajectory. Full numeric data follows. Scroll horizontally on narrow screens.";
+    notes.append(summary, guidance, method);
+    caption.replaceChildren(document.createTextNode(`${metric.label}, ${metric.unit} · time, s`), notes);
+  }
+  svg.setAttribute("aria-labelledby", `${prefix}-plot-title`);
+  svg.setAttribute("aria-describedby", `${prefix}-plot-description`);
   svg.replaceChildren(svgNode("title", { id: `${prefix}-plot-title` }, `${metric.label} by simulation time`),
     svgNode("desc", { id: `${prefix}-plot-description` }, description));
   legend.replaceChildren();
   const selected = runs.filter(run => run.analytics?.samples.some(row => row[metric.column] !== null));
   if (!selected.length) {
+    svg.querySelector("desc")!.textContent = "No recorded samples for this selection.";
     svg.append(svgNode("text", { x: "24", y: "64", class: "analytics-empty" }, "No recorded samples for this selection."));
     return;
   }
   const points = selected.flatMap(run => run.analytics!.samples.filter(row => row[metric.column] !== null));
   const [xmin, xmax] = extent(points.map(row => row[0]!)), [ymin, ymax] = extent(points.map(row => row[metric.column]!));
   const selectedSeeds = [...new Set(selected.map(run => run.seed))];
-  svg.querySelector("desc")!.textContent = `${selected.length} recorded runs across seeds ${selectedSeeds.join(", ")}. ${description} Trace numbers identify runs in the legend. Coincident repetitions can overlap; they are never joined into one trajectory.`;
+  svg.querySelector("desc")!.textContent = `${selected.length} recorded runs across seeds ${selectedSeeds.join(", ")}. ${description}`;
   const x = (value: number) => 88 + (value - xmin) / (xmax - xmin) * 608;
   const y = (value: number) => 260 - (value - ymin) / (ymax - ymin) * 220;
   for (let i = 0; i <= 4; i++) {
@@ -435,7 +446,7 @@ function installPlot(prefix: string, onSelection?: (runs: PlotRun[]) => void, ch
       }
     }
     const available = selected.filter(run => run.analytics).length;
-    const message = `${selected.length} selected runs; ${available} with native analytics; ${sampleCount} actual samples. ${selected.length - available} unavailable. Metric: ${column.label}.`;
+    const message = `${selected.length} runs · ${available} with native analytics · ${sampleCount} samples · ${selected.length - available} unavailable`;
     const status = byId(`${prefix}-status`);
     if (status.textContent !== message) status.textContent = message;
     if (csvUrl) URL.revokeObjectURL(csvUrl);
@@ -488,7 +499,7 @@ function renderPublication(publication: Publication) {
   const limitations = byId<HTMLUListElement>("published-analytics-limitations");
   limitations.replaceChildren(...(comparison.limitations as string[]).map(value => { const item = document.createElement("li"); item.textContent = value; return item; }));
   const body = bodyOf(byId<HTMLTableElement>("published-analytics-scoreboard"));
-  byId("published-analytics-ranking").textContent = "Unranked measured profiles. Legacy SI totals are not comparable STP points, even with matching builds and seeds.";
+  byId("published-analytics-ranking").textContent = "Unranked measured profiles. Local fuel and damage are not STP counters.";
   for (const entry of publication.profiles) {
     const row = body.insertRow();
     [`${entry.owner} / ${entry.label}`, `${entry.successes}/${entry.attempts}`,
@@ -519,6 +530,11 @@ export function installFlightAnalytics() {
   const roomOverview = installAnalyticsOverview(byId("dashboard-room-overview"));
   const runChoice = byId<HTMLSelectElement>("overview-run");
   const seedChoice = byId<HTMLSelectElement>("published-analytics-seed");
+  const selectionNotes = document.createElement("details"); selectionNotes.className = "lab-disclosure";
+  const selectionSummary = document.createElement("summary"); selectionSummary.textContent = "Read selection notes";
+  const selectionNote = document.createElement("p");
+  selectionNotes.append(selectionSummary, selectionNote);
+  byId("overview-selection-status").after(selectionNotes);
   const measurementButtons = document.querySelectorAll<HTMLButtonElement>("[data-measurement-view]");
   let measurementView: "aggregate" | "run" = "aggregate";
   let lastSingleSeed = "100";
@@ -538,10 +554,12 @@ export function installFlightAnalytics() {
     const summary = byId("overview-selection-status");
     if (aggregate) {
       const seeds = new Set(selected.map(run => run.seed));
-      summary.textContent = `Aggregate · ${selected.length} recorded flights across ${seeds.size} seeds. Cards and charts show cohort medians, not summed fuel. Arrival rates count every attempt. Individual flights remain available in Single run.`;
+      summary.textContent = `${selected.length} recorded flights · ${seeds.size} seeds · full-cohort medians`;
+      selectionNote.textContent = "Cards and charts show published cohort medians, not summed fuel. Arrival rates count every attempt. Medians use available physical outcomes, including non-arrivals. Individual flights remain available in Single run.";
     } else {
       const run = selected[0];
-      summary.textContent = run ? `One recorded flight · ${run.label} · seed ${run.seed} · ${run.id}. ${run.outcome}. ${run.analytics?.sample_count ?? 0} recorded samples. No averaging with other runs.` : "No recorded flight matches this selection.";
+      summary.textContent = run ? `Seed ${run.seed} · ${run.id} · ${run.outcome} · ${run.analytics ? `${run.analytics.sample_count} samples` : "samples unavailable"}` : "No recorded flight matches this selection.";
+      selectionNote.textContent = run ? `${run.label}. One recorded flight, with no averaging across runs. Missing native analytics stay unavailable.` : "Choose another seed or profile to inspect a recorded flight.";
     }
   }, choosePublishedRuns);
   for (const button of measurementButtons) button.addEventListener("click", () => {
@@ -594,7 +612,7 @@ export function installFlightAnalytics() {
       status.classList.add("screen-reader-only");
     } catch {
       // Never expose server text, URLs, exception messages or private details.
-      status.textContent = "Published analytics unavailable. No valid matched-trial publication is available here. Current connection jobs remain separate below.";
+      status.textContent = "Published analytics unavailable. Retry loading the recorded comparison. Connection jobs stay separate.";
       retry.hidden = false;
       const empty = byId("dashboard-overview").querySelector<HTMLElement>(".overview-empty")!;
       empty.classList.add("lab-empty"); empty.hidden = false;

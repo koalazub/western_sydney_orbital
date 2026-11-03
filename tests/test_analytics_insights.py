@@ -123,10 +123,10 @@ def test_arrivals_require_an_explicit_success_outcome_not_short_duration_or_prox
 
 def test_guidance_gives_a_useful_direction_even_without_observations():
     for direction in (
-        "Use less fuel for a completed flight.",
-        "Reach the station sooner, without adding damage.",
-        "Less engine-on time to reach the station is better. Check fuel and damage too.",
-        "Avoid needless spin; turns can still be needed for avoidance.",
+        "Compare local fuel use after arrival.",
+        "Compare arrival time with fuel and damage.",
+        "Compare engine-on time with fuel and damage after arrival.",
+        "Compare physical turning with angular thrust. Avoidance can require turns.",
     ):
         assert direction in SOURCE
     derive = SOURCE.split("export function deriveMetricInsight(", 1)[1]

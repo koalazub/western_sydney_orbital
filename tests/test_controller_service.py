@@ -336,6 +336,51 @@ def test_legacy_completion_measurements_stay_unscored_and_partial_score_fields_n
     )
 
 
+@pytest.mark.parametrize(
+    "status,damage,native_success",
+    [("success", 0.0, True), ("failed_damage", 313800.0, False)],
+)
+def test_terminal_counters_do_not_turn_a_browser_estimate_into_a_native_score_receipt(
+    status, damage, native_success
+):
+    # Contract inputs only. The browser can estimate from these counters, but the
+    # queue must not manufacture a native score or a new initial-range field.
+    final = {
+        "time_s": 80.0,
+        "range_m": 50.0,
+        "relative_speed_mps": 1.0,
+        "damage_j": damage,
+        "fuel_used_kg": 18.75,
+        "status": status,
+        "initial_range_m": 10000.0,
+    }
+    before = json.dumps(final, sort_keys=True)
+    summary = completion_summary(
+        {
+            "state": "native_terminal",
+            "native_success": native_success,
+            "world_metadata_unchanged": True,
+            "release_state": "acknowledged",
+            "final": final,
+        }
+    )
+    assert summary["native_success"] is native_success
+    assert summary["world_metadata_unchanged"] is True
+    assert summary["measurement"] == {
+        **{key: value for key, value in final.items() if key != "initial_range_m"},
+        "score": None,
+        "score_breakdown": None,
+    }
+    assert json.dumps(final, sort_keys=True) == before
+    with pytest.raises(ControllerServiceError):
+        validate_summary(
+            {
+                **summary,
+                "measurement": {**summary["measurement"], "initial_range_m": 10000.0},
+            }
+        )
+
+
 def test_score_schema_rejects_nonfinite_terms_wrong_signs_labels_and_inconsistent_totals():
     summary = completion_summary({"state": "native_terminal"})
     measurement = {**summary["measurement"], "score": -26000.125, "score_breakdown": _score_terms()}

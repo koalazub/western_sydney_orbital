@@ -1352,3 +1352,158 @@ def test_original_official_trial_csv_is_incomplete_not_a_zero_measurement_source
         for row in groups
         if row["median_final_target_range_m"] != ""
     )
+
+
+def metric_path_fixture(saved_sweep, tmp_path, monkeypatch):
+    import wsorb.comparison_metrics as metrics
+
+    paths = tmp_path / "published-paths"
+    output = paths / "official.json"
+    data = write_comparison(
+        saved_sweep, output, comparison_id="official", manifest=paths / "manifest.json"
+    )
+    monkeypatch.setattr(metrics, "_PATHS", paths)
+    monkeypatch.setattr(metrics, "_OUTPUT", tmp_path / "published-metrics")
+    return metrics, data, paths
+
+
+def add_native_receipt_fixture(saved_sweep, index=0):
+    from wsorb.flight_analytics import COUNTERS, DEFINITION_ID, EPISODES, NATIVE_NUMBERS
+
+    def add_receipts(rows):
+        for row in rows:
+            now = row["observation"]["time_s"]
+            native = {
+                "schema_version": 1,
+                "definition_id": DEFINITION_ID,
+                **dict.fromkeys((*COUNTERS, *NATIVE_NUMBERS), 0),
+                **{f"{episode}_active": False for episode in EPISODES},
+                "observed_sim_s": now,
+                "burn_count": int(now > 0),
+                "burn_duration_s": now,
+                "longest_burn_s": now,
+            }
+            row["observation"]["mission"]["flight_analytics"] = native
+
+    mutate_trace(saved_sweep, index, add_receipts)
+    write_summaries(saved_sweep)
+
+
+def test_extra_metrics_keep_missing_native_and_policy_receipts_distinct_from_zero(
+    saved_sweep, tmp_path, monkeypatch
+):
+    def sparse_timings(rows):
+        for row, elapsed in zip(rows[1:], (0.01, None, 2, 0), strict=True):
+            row["policy_wall_s"] = elapsed
+
+    mutate_trace(saved_sweep, 0, sparse_timings)
+    mutate_trace(saved_sweep, 1, lambda rows: [row.update(policy_wall_s=None) for row in rows])
+    mutate_trace(saved_sweep, 2, lambda rows: [row.pop("policy_wall_s") for row in rows])
+    write_summaries(saved_sweep)
+    metrics, _, paths = metric_path_fixture(saved_sweep, tmp_path, monkeypatch)
+    source_before, paths_before = snapshot(saved_sweep), snapshot(paths)
+    result = metrics.build_metrics(saved_sweep, comparison_id="official")
+    assert (
+        result["source"]["path_sha256"]
+        == hashlib.sha256((paths / "official.json").read_bytes()).hexdigest()
+    )
+    assert all(run["analytics"] is None for run in result["runs"])
+    assert result["runs"][0]["policy"] == {
+        "sample_count": 3,
+        "median_policy_wall_s": 0.01,
+        "max_policy_wall_s": 2,
+        "policy_calls_over_step_budget": 1,
+    }
+    assert result["runs"][1]["policy"] == {
+        "sample_count": 0,
+        "median_policy_wall_s": None,
+        "max_policy_wall_s": None,
+        "policy_calls_over_step_budget": None,
+    }
+    assert result["runs"][2]["policy"] is None
+    assert SECRET not in json.dumps(result, allow_nan=False)
+    output = metrics._OUTPUT / "official.json"
+    metrics.write_metrics(
+        saved_sweep, output, comparison_id="official", manifest=output.with_name("manifest.json")
+    )
+    assert snapshot(saved_sweep) == source_before
+    assert snapshot(paths) == paths_before
+
+
+@pytest.mark.parametrize("kind", ["missing", "extra", "clock", "counter"])
+def test_untrusted_native_receipt_history_never_becomes_command_derived_metrics(
+    saved_sweep, tmp_path, monkeypatch, kind
+):
+    add_native_receipt_fixture(saved_sweep)
+
+    def damage_receipt(rows):
+        mission = rows[2]["observation"]["mission"]
+        if kind == "missing":
+            mission.pop("flight_analytics")
+        elif kind == "extra":
+            mission["flight_analytics"]["private_payload"] = SECRET
+        elif kind == "clock":
+            mission["flight_analytics"]["observed_sim_s"] += 1
+        else:
+            mission["flight_analytics"]["burn_count"] = 0
+
+    mutate_trace(saved_sweep, 0, damage_receipt)
+    write_summaries(saved_sweep)
+    metrics, _, paths = metric_path_fixture(saved_sweep, tmp_path, monkeypatch)
+    before, published_before = snapshot(saved_sweep), snapshot(paths)
+    result = metrics.build_metrics(saved_sweep, comparison_id="official")
+    assert result["runs"][0]["analytics"] is None
+    assert result["runs"][0]["policy"]["sample_count"] == 4
+    assert SECRET not in json.dumps(result, allow_nan=False)
+    assert snapshot(saved_sweep) == before
+    assert snapshot(paths) == published_before
+
+
+@pytest.mark.parametrize("filename", ["run.json", "trace.jsonl"])
+def test_extra_metrics_refuse_changed_source_receipt_before_any_publication(
+    saved_sweep, tmp_path, monkeypatch, filename
+):
+    metrics, _, paths = metric_path_fixture(saved_sweep, tmp_path, monkeypatch)
+    receipt = saved_sweep / "trial-00000" / filename
+    receipt.write_bytes(receipt.read_bytes() + b"\n")
+    source_before, paths_before = snapshot(saved_sweep), snapshot(paths)
+    output = metrics._OUTPUT / "official.json"
+    with pytest.raises(ValueError):
+        metrics.write_metrics(
+            saved_sweep,
+            output,
+            comparison_id="official",
+            manifest=output.with_name("manifest.json"),
+        )
+    assert not output.parent.exists()
+    assert snapshot(saved_sweep) == source_before
+    assert snapshot(paths) == paths_before
+
+
+def test_extra_metrics_validate_native_public_readings_and_exact_raw_path_digest(
+    saved_sweep, tmp_path, monkeypatch
+):
+    add_native_receipt_fixture(saved_sweep)
+    metrics, data, paths = metric_path_fixture(saved_sweep, tmp_path, monkeypatch)
+    result = metrics.build_metrics(saved_sweep, comparison_id="official")
+    native = result["runs"][0]["analytics"]
+    assert native["totals"]["burn_count"] == 1
+    assert native["totals"]["burn_duration_s"] == 4
+    assert native["samples"][-1][1] == 1
+    digest = hashlib.sha256((paths / "official.json").read_bytes()).hexdigest()
+    assert metrics.validate_metrics(result, data, path_sha256=digest) == result
+    rewritten = hashlib.sha256(json.dumps(data, indent=2).encode()).hexdigest()
+    assert rewritten != digest
+    with pytest.raises(ValueError):
+        metrics.validate_metrics(result, data, path_sha256=rewritten)
+    for mutate in (
+        lambda value: value["source"].update(engine_sha256="0" * 64),
+        lambda value: value["runs"][0]["source_sha256"].update(trace="0" * 64),
+        lambda value: value["runs"][0].update(repetition=2),
+        lambda value: value["runs"][0]["analytics"]["samples"][-1].__setitem__(1, 2),
+        lambda value: value["runs"][0]["analytics"]["totals"].update(burn_count=0),
+    ):
+        invalid = deepcopy(result)
+        mutate(invalid)
+        with pytest.raises(ValueError):
+            metrics.validate_metrics(invalid, data, path_sha256=digest)

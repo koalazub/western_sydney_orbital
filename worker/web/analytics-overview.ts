@@ -64,7 +64,9 @@ type Chart = {
   subtitle: HTMLElement;
   legend: HTMLUListElement;
   readouts: HTMLUListElement;
+  status: HTMLElement;
   note: HTMLElement;
+  description: HTMLElement;
   guidance: HTMLElement;
   insight: HTMLElement;
   insightScope: HTMLElement;
@@ -183,13 +185,16 @@ function makeChart(prefix: string, key: string, title: string): Chart {
   const plot = svg("svg", { class: "metric-chart__plot", viewBox: "0 0 640 260" });
   const legend = html("ul", "metric-chart__legend");
   const readouts = html("ul", "metric-chart__readouts");
+  const status = html("p", "metric-chart__insight-scope");
+  status.id = `${prefix}-${key}-status`;
+  panel.setAttribute("aria-describedby", status.id);
   const note = html("p", "metric-chart__note");
+  const description = html("p", "metric-chart__note");
   const guidance = html("p", "metric-chart__guidance");
   const insight = html("p", "metric-chart__insight");
   const insightScope = html("p", "metric-chart__insight-scope");
-  guidance.id = `${prefix}-${key}-guidance`;
-  insight.id = `${prefix}-${key}-insight`;
-  panel.setAttribute("aria-describedby", `${guidance.id} ${insight.id}`);
+  const method = html("details", "metric-chart__data");
+  method.append(html("summary", "", "Read chart notes"), guidance, insight, insightScope, note, description);
   const data = html("details", "metric-chart__data");
   const summary = html("summary", "", "View data");
   const table = html("div", "overview-data-scroll");
@@ -197,8 +202,8 @@ function makeChart(prefix: string, key: string, title: string): Chart {
   table.setAttribute("role", "region");
   table.setAttribute("aria-label", `${title} data`);
   data.append(summary, table);
-  panel.append(header, guidance, plot, legend, readouts, insight, insightScope, note, data);
-  return { panel, heading, plot, subtitle, legend, readouts, note, guidance, insight, insightScope, data, table, key: `${prefix}-${key}`, title };
+  panel.append(header, plot, legend, readouts, status, method, data);
+  return { panel, heading, plot, subtitle, legend, readouts, status, note, description, guidance, insight, insightScope, data, table, key: `${prefix}-${key}`, title };
 }
 function chartTitle(chart: Chart, title: string, cohort: boolean) {
   chart.title = `${title} · ${cohort ? "cohort median" : "recorded run"}`;
@@ -206,13 +211,16 @@ function chartTitle(chart: Chart, title: string, cohort: boolean) {
   chart.table.setAttribute("aria-label", `${chart.title} data`);
 }
 function newPlot(chart: Chart, description: string, height = 260) {
+  chart.description.textContent = description;
   const plot = svg("svg", {
     class: "metric-chart__plot", viewBox: `0 0 640 ${height}`, role: "img",
-    "aria-labelledby": `${chart.key}-title ${chart.key}-description`,
+    "aria-labelledby": `${chart.key}-title`,
+    "aria-describedby": `${chart.key}-description`,
     "font-family": "inherit",
   });
   plot.style.fontVariantNumeric = "tabular-nums";
-  plot.append(svg("title", { id: `${chart.key}-title` }, chart.title), svg("desc", { id: `${chart.key}-description` }, description));
+  plot.append(svg("title", { id: `${chart.key}-title` }, chart.title),
+    svg("desc", { id: `${chart.key}-description` }, `${chart.subtitle.textContent}. ${chart.status.textContent}`));
   return plot;
 }
 function replacePlot(chart: Chart, plot: SVGSVGElement, points: ChartInspectionPoint[] = []) {
@@ -220,7 +228,7 @@ function replacePlot(chart: Chart, plot: SVGSVGElement, points: ChartInspectionP
   chart.plot.replaceWith(plot);
   chart.plot = plot;
   chart.disposeInspection = points.length ? installChartInspector(chart.panel, plot, points,
-    "Hover for a supplied value. Focus this chart and use the arrow keys to inspect entries.") : undefined;
+    "Use arrow keys to inspect recorded values.") : undefined;
 }
 function renderInsight(chart: Chart, groups: Group[]) {
   const metric = chart.panel.dataset.chart as "fuel" | "time" | "thrust" | "turn";
@@ -240,6 +248,7 @@ function plotGeometry(chart: Chart, bodyHeight: (labelUnits: number) => number) 
     tickBaseline: bottom + 1.4 * labelUnits, titleBaseline: bottom + 3.1 * labelUnits };
 }
 function emptyPlot(chart: Chart, message: string) {
+  chart.status.textContent = message;
   const geometry = plotGeometry(chart, units => Math.max(182, 6 * units));
   const plot = newPlot(chart, message, geometry.height);
   const suffix = " for this selection";
@@ -292,6 +301,7 @@ function activityValue(group: Group, key: string) {
 function renderCohortFuel(chart: Chart, groups: Group[]) {
   chartTitle(chart, "Fuel", true);
   chart.subtitle.textContent = "Cohort median · local fuel estimate, kg";
+  chart.status.textContent = "Full-cohort medians · see arrival counts";
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   chart.note.textContent = `${cohortCaption(groups)} · published cohort medians, including non-arrivals. Local fuel counters are not verified as comparable with real-world or STP fuel mass.`;
   const rows = groups.map(group => ({ group, value: numeric(group.profile!.median_fuel_used_kg) }));
@@ -358,6 +368,7 @@ function renderFuel(chart: Chart, groups: Group[]) {
   }
   dataTable(chart, "Actual recorded fuel samples. Null values remain unavailable.", ["Run", "Time, s", "Fuel, kg"], rows);
   const seeds = [...new Set(groups.flatMap(group => group.runs.map(run => run.seed)))];
+  chart.status.textContent = `${traces.length} fuel traces · seed ${seeds.join(", ")}`;
   chart.note.textContent = `Seed ${seeds.join(", ")} · recorded samples. Repeats stay separate; gaps stay open. Local fuel counters are not verified as comparable with STP fuel mass.`;
   if (!traces.length) { emptyPlot(chart, "Fuel samples unavailable for this selection"); return; }
   const points = traces.flatMap(trace => trace.points.filter((point): point is Point => point !== null));
@@ -434,6 +445,7 @@ function renderDuration(chart: Chart, groups: Group[]) {
   const allCohort = groups.every(group => group.profile !== undefined);
   chartTitle(chart, "Observed duration", allCohort);
   chart.subtitle.textContent = `${allCohort ? "Cohort median" : "Recorded run"} · observed duration, seconds`;
+  chart.status.textContent = allCohort ? "Published physical medians · see arrival counts" : selectionCaption(groups);
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   chart.note.textContent = `${allCohort ? "Full-cohort medians" : "Selected-run observations"} · seconds. Durations may include failures and timeouts, not just arrivals.`;
   dataTable(chart, "Supplied observed flight durations, not completion-time rankings. Cohort medians keep their full-cohort scope; selected runs retain their outcomes.",
@@ -490,6 +502,7 @@ function renderActivity(chart: Chart, groups: Group[], turning: boolean) {
   ];
   chartTitle(chart, turning ? "Turning vs actuation" : "Thrust activity", cohort);
   chart.subtitle.textContent = `${cohort ? "Cohort median" : "Recorded run"} · ${turning ? "physical motion vs angular thrust" : "translation and angular thrust"}, seconds`;
+  chart.status.textContent = cohort ? "Published native medians · see arrival counts" : selectionCaption(groups);
   chart.legend.replaceChildren(); chart.readouts.replaceChildren();
   legendItem(chart.legend, `${metrics[0].label} · solid`, MUTED);
   legendItem(chart.legend, `${metrics[1].label} · dashed outline`, MUTED, "4 3");

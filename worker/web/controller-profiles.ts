@@ -2,11 +2,12 @@
 // measurements and control authority stay in the real native engine.
 import profiles from "../../src/wsorb/controllers/catalog.json";
 import scenario from "../../simulation/scenarios/phobos_escape.json";
-import { CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
+import { CONTROLLER_ANALYTICS_COLUMNS, CONTROLLER_ANALYTICS_DEFINITION, CONTROLLER_SCORE_FORMULA } from "../shared/controller-jobs.ts";
 import { installFlightAnalytics } from "./flight-analytics.ts";
 import { mountDashboard } from "./dashboard-shell.ts";
 import { installPathComparison } from "./path-comparison.ts";
 import type { RoomEngine } from "./room-control.ts";
+import { estimateScore } from "./score-estimate.ts";
 
 type Connection = { origin: string; id: string; key: string };
 type QueueRequest = (payload?: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -17,6 +18,7 @@ type View = {
   results: Array<Record<string, unknown>>;
 };
 type LocalBridge = { status?: string; controllers?: QueueRequest };
+type ResultsSource = { kind: "room"; connection: Connection } | { kind: "local"; bridge: LocalBridge } | null;
 type Options = {
   engine: () => RoomEngine | undefined;
   ready: () => boolean;
@@ -26,7 +28,58 @@ type Options = {
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const number = (value: unknown, places = 2) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(places) : "n/a";
-const practiceScoreLabel = "STP's published success formula · local counters, no STP points";
+const practiceScoreLabel = "Points · current STP formula, local estimate";
+const counter = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
+function terminalStatus(result: Record<string, unknown>) {
+  if (result.state !== "native_terminal" || result.world_metadata_unchanged !== true || result.error_code !== null
+    || !record(result.measurement)) return null;
+  if (result.measurement.status === "success" && result.native_success === true) return "success";
+  if (result.measurement.status === "failed_damage" && result.native_success === false) return "failed_damage";
+  return null;
+}
+function recordedInitialRange(result: Record<string, unknown>) {
+  const analytics = result.analytics;
+  if (result.world_metadata_unchanged !== true || !record(analytics) || analytics.schema_version !== 1
+    || analytics.definition_id !== CONTROLLER_ANALYTICS_DEFINITION
+    || analytics.source_kind !== "native_physics_step_counters_with_sampled_public_series"
+    || !Array.isArray(analytics.columns) || analytics.columns.length !== CONTROLLER_ANALYTICS_COLUMNS.length
+    || !analytics.columns.every((name, index) => name === CONTROLLER_ANALYTICS_COLUMNS[index])
+    || !Array.isArray(analytics.samples) || analytics.samples.length === 0 || analytics.samples.length > 48
+    || !Number.isSafeInteger(analytics.sample_count) || (analytics.sample_count as number) < analytics.samples.length
+    || !record(analytics.totals) || analytics.totals.schema_version !== 1
+    || analytics.totals.definition_id !== CONTROLLER_ANALYTICS_DEFINITION) return null;
+  const observedTime = counter(analytics.totals.observed_sim_s);
+  if (observedTime === null || observedTime < 0) return null;
+  const timeColumn = CONTROLLER_ANALYTICS_COLUMNS.indexOf("time_s");
+  const rangeColumn = CONTROLLER_ANALYTICS_COLUMNS.indexOf("range_m");
+  let previousTime = -1, initialRange: number | null = null;
+  for (const row of analytics.samples) {
+    if (!Array.isArray(row) || row.length !== CONTROLLER_ANALYTICS_COLUMNS.length
+      || row.some(value => value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0))) return null;
+    const time = counter(row[timeColumn]);
+    if (time === null || time <= previousTime || time > observedTime + 1e-6) return null;
+    previousTime = time;
+    // A later retained sample is not the scoring system's initial range.
+    if (time === 0) initialRange = counter(row[rangeColumn]);
+  }
+  return initialRange !== null && initialRange > 0 ? initialRange : null;
+}
+function currentScore(result: Record<string, unknown>) {
+  const status = terminalStatus(result);
+  if (status === null || !record(result.measurement)) return null;
+  const measurement = result.measurement;
+  return estimateScore({ status, time_s: counter(measurement.time_s), damage_j: counter(measurement.damage_j),
+    fuel_used_kg: counter(measurement.fuel_used_kg), range_m: counter(measurement.range_m),
+    // Never borrow a current-world range, route length or legacy score.
+    initial_range_m: recordedInitialRange(result) });
+}
+function scoreUnavailable(result: Record<string, unknown>) {
+  if (result.world_metadata_unchanged !== true) return "Flight context was not preserved.";
+  if (result.state !== "native_terminal") return "No confirmed native terminal result.";
+  if (terminalStatus(result) === "failed_damage" && recordedInitialRange(result) === null) return "No recorded time-zero target range.";
+  if (terminalStatus(result) === null) return "Terminal outcome was not confirmed.";
+  return "A required final counter is missing or invalid.";
+}
 const numericScore = (result: Record<string, unknown>) => {
   if (result.world_metadata_unchanged === false) return null;
   const score = record(result.measurement) ? result.measurement.score : null;
@@ -114,7 +167,7 @@ async function freshTrial(api: RoomEngine) {
 
 function confirmFreshTrial(profileLabel: string): Promise<boolean> {
   const dialog = byId<HTMLDialogElement>("controller-fresh-confirm");
-  byId("controller-fresh-chosen").textContent = `Replace this tab's flight and run ${profileLabel}? The new test uses the far-side L2 practice world, the 20 m/s transit stress field with light attraction off, seed 100 and 500 debris bodies. It is not an official competition flight. The current flight cannot be recovered here.`;
+  byId("controller-fresh-chosen").textContent = `Run ${profileLabel} in a fresh far-side L2 practice flight? This replaces this tab's flight with seed 100, 500 debris bodies and the 20 m/s Across Phobos crossflow, light attraction off. The current flight cannot be recovered here. This is not an official competition flight.`;
   // window.confirm blocks the bridge's page-lease polling. A native HTML dialog
   // keeps that authenticated connection alive while the person decides.
   dialog.returnValue = "cancel";
@@ -133,15 +186,156 @@ export function installControllerProfiles(options: Options) {
   const run = byId<HTMLButtonElement>("run-controller");
   run.disabled = true;
   const stop = byId<HTMLButtonElement>("stop-controller");
+  const outsideStop = byId<HTMLButtonElement>("stop-controller-flight");
+  const watch = byId<HTMLButtonElement>("watch-controller-flight");
+  const setup = byId<HTMLDetailsElement>("controller-setup");
+  const setupButton = byId<HTMLButtonElement>("setup-controller");
   const status = byId("controller-service-status");
   const error = byId("controller-error");
   const table = byId<HTMLTableElement>("controller-results-table");
+  const breakdownTable = byId<HTMLTableElement>("controller-score-breakdown-table");
+  const legacyTable = byId<HTMLTableElement>("controller-legacy-results-table");
   const analytics = installFlightAnalytics();
-  const paths = installPathComparison(byId("dashboard-path-comparison"));
+  const pathContainer = byId("dashboard-path-comparison");
+  const paths = installPathComparison(pathContainer);
+  // This caller already has a visible title. Do not leave a second, hidden
+  // heading in the comparison's heading navigation.
+  pathContainer.querySelector(":scope > h3")?.remove();
+  pathContainer.setAttribute("aria-labelledby", "lab-title");
   let view: View | undefined;
+  let viewSource: ResultsSource = null;
+  let lastJob: { job: Job; source: ResultsSource } | null = null;
+  let trackingJob = false;
   let busy = false;
+  let refreshing = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let autoUpdate = true;
+  let disposed = false;
+  let openingControl: HTMLElement = open;
+  let refreshVersion = 0;
+  let savedSource: ResultsSource = null;
+  let savedCount: number | undefined;
+  let latestResult: Record<string, unknown> | undefined;
+  let dataState: "waiting" | "loaded" | "stale" | "unavailable" = "waiting";
+  const resultsSource = (): ResultsSource => {
+    const room = options.room();
+    if (room) return { kind: "room", connection: { ...room } };
+    const local = options.local();
+    return local ? { kind: "local", bridge: local } : null;
+  };
+  const sameSource = (a: ResultsSource, b: ResultsSource) => {
+    if (a === null || b === null) return a === b;
+    if (a.kind === "room" && b.kind === "room") {
+      return a.connection.origin === b.connection.origin && a.connection.id === b.connection.id && a.connection.key === b.connection.key;
+    }
+    return a.kind === "local" && b.kind === "local" && a.bridge === b.bridge;
+  };
+  const sourceAvailable = (source: ResultsSource) => source?.kind === "room"
+    || source?.kind === "local" && source.bridge.status === "connected" && typeof source.bridge.controllers === "function";
+  const confirmedView = () => sameSource(viewSource, resultsSource()) && sourceAvailable(viewSource) ? view : undefined;
+  const label = (id: unknown) => {
+    const entry = profiles.find(item => item.id === id);
+    return entry ? `${entry.owner} / ${entry.label}` : "Unknown profile";
+  };
+  const jobState = (job: Job) => job.stop_requested ? "Stop requested"
+    : job.status === "running" ? "Running" : job.status === "queued" ? "Queued"
+      : job.status === "stopping" ? "Stopping" : "Runner stalled";
+  function renderRunnerControls() {
+    const current = confirmedView();
+    const active = current?.active;
+    run.disabled = busy || !current?.service.online || !!active || !options.ready();
+    stop.disabled = outsideStop.disabled = busy || !active || active.stop_requested;
+    watch.disabled = busy || !options.ready();
+    setupButton.hidden = !!current?.service.online;
+    byId("controller-run-reason").textContent = busy ? "Waiting for the current request."
+      : !current ? "Check the Python connection before running."
+        : !current.service.online ? "Python runner offline. Set up the runner, then check the connection."
+          : active ? "Wait for Stop to finish before running the next test."
+            : !options.ready() ? "Wait for the game to be ready and keep this tab visible." : "";
+    const flight = byId("controller-flight");
+    const flightScore = byId("controller-flight-score");
+    flightScore.hidden = true;
+    flight.hidden = lastJob === null;
+    if (!lastJob) return;
+    let state: string;
+    if (!current || !sameSource(lastJob.source, resultsSource())) {
+      state = "Last confirmed profile. Status unavailable; refresh the connection.";
+      flight.dataset.state = "unavailable";
+    } else if (active) {
+      state = `${jobState(active)}${current.service.online ? "" : " · Python runner offline"}${autoUpdate ? "" : " · last confirmed, updates paused"}`;
+      flight.dataset.state = active.status;
+    } else {
+      const result = current.results.find(result => result.id === lastJob!.job.id);
+      state = result && terminalStatus(result) === "success" ? "Station region reached"
+        : result && terminalStatus(result) === "failed_damage" ? "Collision damage failure"
+        : result?.state === "stopped" ? "Stopped"
+          : result?.state === "duration_limit" ? "Time budget reached"
+            : result?.state === "wall_budget_limit" ? "Runner time budget reached"
+              : result?.state === "interrupted" ? "Interrupted"
+                : result?.state === "error" ? "Run ended with an error. See receipts."
+                  : result ? "Run ended. See receipts." : "No active job. See receipts for the outcome.";
+      flight.dataset.state = "finished";
+      const estimate = result ? currentScore(result) : null;
+      if (estimate) {
+        flightScore.textContent = `${number(estimate.total)} pts · Local estimate`;
+        flightScore.hidden = false;
+      }
+    }
+    const message = `${label(lastJob.job.profile_id)} · ${state}`;
+    const target = byId("controller-flight-status");
+    if (target.textContent !== message) target.textContent = message;
+    byId("refresh-controller-flight").hidden = !!current && autoUpdate;
+  }
+  function renderLatestResult(state: string, previousConnection: boolean) {
+    const card = byId("controller-latest-result");
+    card.hidden = latestResult === undefined;
+    if (!latestResult) return;
+    const score = currentScore(latestResult);
+    const title = state === "loaded" ? "Latest result" : previousConnection ? "Previous connection result" : "Last saved result";
+    byId("controller-latest-result-heading").textContent = title;
+    byId("controller-latest-result-profile").textContent = label(latestResult.profile_id);
+    byId("controller-latest-result-points").textContent = score ? number(score.total) : "n/a";
+    const note = score ? terminalStatus(latestResult) === "success" ? "Station region reached." : "Damage failure."
+      : scoreUnavailable(latestResult);
+    const connectionNote = state === "loaded" ? "" : " Connection data is not current; refresh results.";
+    byId("controller-latest-result-note").textContent = note + connectionNote;
+    card.dataset.dataState = state;
+    const message = `${title} · ${label(latestResult.profile_id)} · ${score ? `${number(score.total)} points, local estimate.` : `Points unavailable. ${note}`}${connectionNote}`;
+    const announcement = byId("controller-latest-result-announcement");
+    if (announcement.textContent !== message) announcement.textContent = message;
+  }
+  function renderDataStatus() {
+    const previousConnection = savedCount !== undefined && !sameSource(savedSource, resultsSource());
+    const displayedState = previousConnection && dataState === "loaded" ? "stale" : dataState;
+    const message = displayedState === "waiting" ? "Connection data not loaded."
+      : displayedState === "loaded" ? `${savedCount} saved connection ${savedCount === 1 ? "receipt" : "receipts"} loaded. Native analytics stay n/a where unrecorded.`
+        : previousConnection ? "Previous connection data retained, not current. This connection's receipts and native analytics are unavailable."
+          : displayedState === "stale" ? "Connection data stale. Showing the last successful receipts and traces. Native analytics stay n/a where unrecorded."
+            : "Connection data unavailable. Receipts and native analytics have not loaded.";
+    const recovery = displayedState === "stale" || displayedState === "unavailable"
+      ? " Check the Python connection, then use Refresh results. Refresh only reads saved data."
+      : " Refresh results only reads saved data.";
+    const updates = autoUpdate ? "" : " Automatic updates paused.";
+    for (const id of ["controller-results-status", "controller-recent-data-status"]) {
+      const target = byId(id), text = message + recovery + updates;
+      if (target.textContent !== text) target.textContent = text;
+      target.dataset.dataState = displayedState;
+    }
+    renderLatestResult(displayedState, previousConnection);
+  }
+  function unavailableResults() {
+    view = undefined;
+    renderRunnerControls();
+    dataState = savedCount === undefined ? "unavailable" : "stale";
+    // The existing charts and receipts belong to the last accepted source.
+    // A failed read is not evidence of an empty connection or an empty flight.
+    if (savedCount === undefined) {
+      byId("lab-room-empty").hidden = true;
+      byId("room-analytics-cohort-detail").textContent = "Connection receipts are unavailable.";
+      byId("room-analytics-status").textContent = "Native analytics unavailable until connection receipts load.";
+    }
+    renderDataStatus();
+  }
   const request = (): QueueRequest => {
     const room = options.room();
     if (room) return payload => hostedRequest(room, payload);
@@ -150,150 +344,247 @@ export function installControllerProfiles(options: Options) {
     throw new Error("No Python connection for this tab. Connect a local runner or a private hosted room.");
   };
   const selected = () => profiles.find(item => item.id === profile.value)!;
-  const label = (id: unknown) => {
-    const entry = profiles.find(item => item.id === id);
-    return entry ? `${entry.owner} / ${entry.label}` : "Unknown profile";
-  };
   function description() {
     const entry = selected();
     byId("controller-description").textContent = entry.description;
+    byId("controller-implementation").textContent = entry.profile;
+    byId("controller-profile-kind").textContent = entry.target_seeking
+      ? `${entry.experimental ? "Experimental · " : ""}Target-seeking` : "Not target-seeking";
+    byId("controller-profile-source").textContent = entry.source;
+    byId("controller-profile-id").textContent = entry.id;
+    byId("controller-profile-contributor").textContent = entry.contributor;
   }
   function selectOwner() {
-    profile.replaceChildren(...profiles.filter(entry => entry.owner === owner.value).map(entry => new Option(entry.label, entry.id)));
+    profile.replaceChildren(...profiles.filter(entry => entry.owner === owner.value)
+      .sort((a, b) => Number(b.target_seeking) - Number(a.target_seeking))
+      .map(entry => new Option(`${entry.label}${entry.target_seeking ? "" : " · not target-seeking"}`, entry.id)));
     description();
   }
-  for (const name of ["Tom", "Harry", "Bui", "WSO"]) {
-    if (profiles.some(entry => entry.owner === name)) owner.add(new Option(name, name));
-  }
+  const owners = [...new Set(profiles.map(entry => entry.owner))].sort((a, b) => a.localeCompare(b));
+  owner.replaceChildren(...owners.map(name => new Option(name, name)));
+  if (owners.includes("Bui")) owner.value = "Bui";
   selectOwner();
   function renderResults(results: Array<Record<string, unknown>>) {
-    const bodies = Array.from(comparisonGroups(results), group => {
-      const body = document.createElement("tbody");
-      const heading = body.insertRow();
-      const name = document.createElement("th");
-      name.scope = "rowgroup";
-      name.colSpan = 13;
-      name.textContent = group.label;
-      heading.append(name);
-      for (const result of group.results) {
-        const row = body.insertRow();
-        const measurement = record(result.measurement) ? result.measurement : {};
-        const terms = record(measurement.score_breakdown) && measurement.score_breakdown.formula === CONTROLLER_SCORE_FORMULA
-          && numericScore(result) !== null && measurement.score_breakdown.total === numericScore(result)
-          ? measurement.score_breakdown : {};
-        const outcome = result.native_success === true && result.world_metadata_unchanged === true
-          ? `Station region reached${result.error_code ? `; ${result.error_code}` : ""}`
-          : result.error_code ? `${result.state ?? "error"}: ${result.error_code}`
-            : measurement.status === "failed_damage" ? "Collision damage failure" : String(result.state ?? "Unknown");
-        const score = numericScore(result);
-        const scoreText = score === null ? "n/a" : `${number(score)} (legacy, not STP)`;
-        const values = [label(result.profile_id), scoreText, number(result.duration_s, 0), outcome,
-          number(measurement.time_s, 1), number(measurement.range_m), number(measurement.relative_speed_mps), number(measurement.damage_j), number(measurement.fuel_used_kg, 3),
-          number(terms.progress_points), number(terms.collision_penalty_points), number(terms.fuel_penalty_points), number(terms.offset_points)];
-        values.forEach((value, index) => {
-          const cell = document.createElement(index === 0 ? "th" : "td");
-          if (cell instanceof HTMLTableCellElement && index === 0) cell.scope = "row";
-          cell.textContent = value;
-          row.append(cell);
-        });
-      }
-      return body;
+    const outcome = (result: Record<string, unknown>) => terminalStatus(result) === "success" ? "Station region reached"
+      : terminalStatus(result) === "failed_damage" ? "Collision damage failure"
+        : result.state === "duration_limit" ? "Time budget reached"
+          : result.state === "wall_budget_limit" ? "Runner time budget reached"
+            : result.error_code ? `${result.state ?? "error"}: ${result.error_code}` : String(result.state ?? "Unknown");
+    function populate(target: HTMLTableElement, columns: number, valuesFor: (result: Record<string, unknown>) => string[]) {
+      const bodies = Array.from(comparisonGroups(results), group => {
+        const body = document.createElement("tbody");
+        const heading = body.insertRow();
+        const name = document.createElement("th");
+        name.scope = "rowgroup";
+        name.colSpan = columns;
+        name.textContent = group.label;
+        heading.append(name);
+        for (const result of group.results) {
+          const row = body.insertRow();
+          valuesFor(result).forEach((value, index) => {
+            const cell = document.createElement(index === 0 ? "th" : "td");
+            if (index === 0) cell.scope = "row";
+            if (index === 1 && target !== legacyTable) cell.className = "controller-score-points";
+            cell.textContent = value;
+            row.append(cell);
+          });
+        }
+        return body;
+      });
+      for (const body of Array.from(target.tBodies)) body.remove();
+      target.append(...bodies);
+    }
+    populate(table, 6, result => {
+      const measurement = record(result.measurement) ? result.measurement : {};
+      const score = currentScore(result);
+      return [label(result.profile_id), score ? number(score.total) : "n/a", outcome(result),
+        number(measurement.time_s, 1), number(measurement.fuel_used_kg, 3), number(measurement.damage_j)];
     });
-    for (const body of Array.from(table.tBodies)) body.remove();
-    table.append(...bodies);
+    populate(breakdownTable, 7, result => {
+      const score = currentScore(result);
+      return [label(result.profile_id), ...[score?.total, score?.progress_points, score?.collision_penalty_points,
+        score?.fuel_penalty_points, score?.offset_points].map(value => value === undefined ? "n/a" : String(value)),
+        score ? score.progress_basis === "time_ratio" ? "Terminal completion time" : "Recorded remaining-distance ratio" : scoreUnavailable(result)];
+    });
+    populate(legacyTable, 13, result => {
+      const measurement = record(result.measurement) ? result.measurement : {};
+      const terms = record(measurement.score_breakdown) && measurement.score_breakdown.formula === CONTROLLER_SCORE_FORMULA
+        && numericScore(result) !== null && measurement.score_breakdown.total === numericScore(result)
+        ? measurement.score_breakdown : {};
+      const score = numericScore(result);
+      const scoreText = score === null ? "n/a" : `${number(score)} (legacy, not STP)`;
+      return [label(result.profile_id), scoreText, number(result.duration_s, 0), outcome(result),
+        number(measurement.time_s, 1), number(measurement.range_m), number(measurement.relative_speed_mps), number(measurement.damage_j), number(measurement.fuel_used_kg, 3),
+        number(terms.progress_points), number(terms.collision_penalty_points), number(terms.fuel_penalty_points), number(terms.offset_points)];
+    });
+    latestResult = results.at(-1);
     byId("lab-room-results").hidden = results.length === 0;
   }
-  function render(value: Record<string, unknown>) {
-    if (!record(value.service) || typeof value.service.online !== "boolean" || !Array.isArray(value.results)) {
+  function render(value: Record<string, unknown>, source: ResultsSource) {
+    if (!sameSource(source, resultsSource())) {
+      ++refreshVersion;
+      unavailableResults();
+      status.textContent = "Connection changed. Refresh results before using the runner controls.";
+      return;
+    }
+    if (!record(value.service) || typeof value.service.online !== "boolean" || !Array.isArray(value.results) || !value.results.every(record)
+      || value.active !== null && (!record(value.active) || typeof value.active.id !== "string" || typeof value.active.profile_id !== "string"
+        || typeof value.active.stop_requested !== "boolean" || !["queued", "running", "stopping", "stalled"].includes(String(value.active.status)))) {
       throw new Error("Controller service returned an unsupported status.");
     }
     view = value as unknown as View;
+    viewSource = source;
     const active = view.active;
-    const message = !view.service.online ? "Python runner offline. Open connection setup below to connect."
-      : active ? `Runner queue · ${label(active.profile_id)}: ${active.stop_requested ? "stopping" : active.status}.`
+    trackingJob = active !== null;
+    if (active) lastJob = { job: { ...active }, source };
+    const message = active ? `Current job · ${label(active.profile_id)} · ${jobState(active)}.${view.service.online ? "" : " Python runner offline."}`
+      : !view.service.online ? "Python runner offline. Set up the runner, then check the connection."
         : "Python runner connected. Ready to run.";
     if (status.textContent !== message) status.textContent = message;
-    run.disabled = busy || !view.service.online || !!active || !options.ready();
-    stop.disabled = busy || !active || active.stop_requested;
+    renderRunnerControls();
     renderResults(view.results);
     analytics.updateRoomResults(view.results);
+    savedSource = source;
+    savedCount = view.results.length;
+    dataState = "loaded";
+    ++refreshVersion;
+    renderDataStatus();
   }
   byId("controller-score-label").textContent = practiceScoreLabel;
   async function refresh() {
-    try { render(await request()()); }
+    if (refreshing || disposed) return;
+    refreshing = true;
+    const version = ++refreshVersion, source = resultsSource();
+    try {
+      const value = await request()();
+      if (version !== refreshVersion) return;
+      render(value, source);
+    }
     catch (cause) {
-      view = undefined;
-      analytics.updateRoomResults([]);
-      run.disabled = true;
-      stop.disabled = true;
+      if (version !== refreshVersion) return;
+      unavailableResults();
       status.textContent = cause instanceof Error ? cause.message : "Controller service is unavailable.";
     }
+    finally { refreshing = false; schedule(); }
+  }
+  function showError(message: string) {
+    error.textContent = message;
+    byId("controller-flight-error").textContent = message;
   }
   async function requestStop() {
-    if (!view?.active || busy) return;
+    const current = confirmedView();
+    if (!current?.active || busy) return;
     busy = true;
-    error.textContent = "";
-    try { render(await request()({ action: "stop", job_id: view.active.id })); }
-    catch { error.textContent = "Stop was not confirmed. Do not start another controller; inspect the live flight and refresh."; }
-    finally { busy = false; await refresh(); }
+    ++refreshVersion;
+    renderRunnerControls();
+    showError("");
+    const source = resultsSource();
+    try { render(await request()({ action: "stop", job_id: current.active.id }), source); }
+    catch { unavailableResults(); showError("Stop was not confirmed. Inspect the live flight and refresh before another action."); }
+    finally { busy = false; renderRunnerControls(); await refresh(); }
   }
   const changedProfile = async () => { description(); await requestStop(); };
   owner.addEventListener("change", () => { selectOwner(); void changedProfile(); });
   profile.addEventListener("change", () => { void changedProfile(); });
   stop.addEventListener("click", () => { void requestStop(); });
+  outsideStop.addEventListener("click", () => { void requestStop(); });
   run.addEventListener("click", async () => {
     if (busy) return;
     busy = true;
+    ++refreshVersion;
     owner.disabled = profile.disabled = true;
     run.disabled = true;
-    error.textContent = "";
+    renderRunnerControls();
+    showError("");
     try {
       const send = request();
-      render(await send());
+      const source = resultsSource();
+      render(await send(), source);
       if (!view?.service.online || view.active || !options.ready()) throw new Error("Wait for a ready game and idle Python runner before starting.");
       if (!await confirmFreshTrial(label(profile.value))) return;
       const api = options.engine();
       if (!api) throw new Error("The real engine is unavailable. No run was started.");
       const id = selected().id;
       const expected = await freshTrial(api);
-      render(await send({ action: "submit", profile_id: id, seed: 100, duration_s: Number(byId<HTMLSelectElement>("controller-duration").value), fresh: true, expected_context: expected }));
+      render(await send({ action: "submit", profile_id: id, seed: 100, duration_s: Number(byId<HTMLSelectElement>("controller-duration").value), fresh: true, expected_context: expected }), source);
     } catch (cause) {
-      error.textContent = cause instanceof Error ? cause.message : "The test was not confirmed. Refresh before sending another action.";
-    } finally { busy = false; owner.disabled = profile.disabled = false; await refresh(); }
+      showError(cause instanceof Error ? cause.message : "The test was not confirmed. Refresh before sending another action.");
+    } finally { busy = false; owner.disabled = profile.disabled = false; renderRunnerControls(); await refresh(); }
   });
-  async function schedule() {
+  function schedule() {
     clearTimeout(timer);
-    if (!panel.open || !autoUpdate) return;
-    if (!busy) await refresh();
-    if (panel.open && autoUpdate) timer = setTimeout(() => { void schedule(); }, 2000);
+    if (disposed || document.hidden || !autoUpdate || !panel.open && !confirmedView()?.active) return;
+    // One existing status schedule serves both the dialog and a watched job.
+    // It ends on completion, a failed connection read, page hide or Pause updates.
+    timer = setTimeout(() => {
+      if (!busy) void refresh(); else schedule();
+    }, 2000);
   }
   byId("refresh-controller-results").addEventListener("click", () => { void refresh(); });
+  byId("refresh-controller-flight").addEventListener("click", () => { void refresh(); });
+  byId("reconnect-controller").addEventListener("click", () => { void refresh(); });
+  setupButton.addEventListener("click", () => {
+    setup.open = true;
+    setup.querySelector("summary")?.focus({ preventScroll: true });
+    setup.scrollIntoView({ block: "nearest" });
+  });
+  setup.addEventListener("toggle", () => setupButton.setAttribute("aria-expanded", String(setup.open)));
   addEventListener("wsorb:controller-status", () => {
-    if (panel.open && autoUpdate && !busy) void refresh();
+    if (disposed) return;
+    if (!sourceAvailable(resultsSource()) || !sameSource(viewSource, resultsSource())) {
+      unavailableResults();
+      status.textContent = "Python connection unavailable. Reconnect the runner, then check the connection.";
+    } else renderRunnerControls();
+    if (!document.hidden && (panel.open || trackingJob) && autoUpdate && !busy) void refresh();
   });
-  byId<HTMLButtonElement>("pause-controller-updates").addEventListener("click", event => {
+  const toggleUpdates = () => {
     autoUpdate = !autoUpdate;
-    (event.currentTarget as HTMLButtonElement).textContent = autoUpdate ? "Pause updates" : "Resume updates";
-    if (autoUpdate) void schedule(); else clearTimeout(timer);
-  });
-  const show = () => {
+    for (const id of ["pause-controller-updates", "pause-controller-flight-updates"]) byId(id).textContent = autoUpdate ? "Pause updates" : "Resume updates";
+    renderDataStatus();
+    renderRunnerControls();
+    if (autoUpdate) void refresh();
+    schedule();
+  };
+  byId("pause-controller-updates").addEventListener("click", toggleUpdates);
+  byId("pause-controller-flight-updates").addEventListener("click", toggleUpdates);
+  const show = (trigger: HTMLElement) => {
     if (!panel.open) {
-      dashboard.showView("compare");
+      openingControl = trigger;
+      panel.returnValue = "";
+      dashboard.showView("run");
       panel.showModal();
-      panel.querySelector<HTMLButtonElement>('.lab-navigation [data-lab-view="compare"]')?.focus();
+      panel.querySelector<HTMLButtonElement>('.lab-navigation [data-lab-view="run"]')?.focus();
+      renderRunnerControls();
       analytics.openPublished();
       paths.open();
-      void refresh(); void schedule();
+      void refresh(); schedule();
     }
   };
   open.hidden = false;
-  open.addEventListener("click", show);
+  renderRunnerControls();
+  open.addEventListener("click", () => show(open));
   byId("close-controllers").addEventListener("click", () => panel.close());
-  panel.addEventListener("close", () => { clearTimeout(timer); open.focus({ preventScroll: true }); });
+  watch.addEventListener("click", () => { if (!watch.disabled) panel.close("watch"); });
+  byId<HTMLButtonElement>("disconnect-python").addEventListener("click", event => {
+    if (!(event.currentTarget as HTMLButtonElement).hidden && panel.open) panel.close("watch");
+  });
+  panel.addEventListener("close", () => {
+    schedule();
+    const target = panel.returnValue === "watch" ? byId("simulation-canvas") : openingControl;
+    target.focus({ preventScroll: true });
+  });
   window.addEventListener("keydown", event => {
     if (event.code !== "KeyC" || !event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.repeat
       || document.activeElement?.tagName !== "CANVAS") return;
-    event.preventDefault(); event.stopImmediatePropagation(); show();
+    event.preventDefault(); event.stopImmediatePropagation(); show(byId("simulation-canvas"));
   }, { capture: true });
-  addEventListener("pagehide", () => clearTimeout(timer), { once: true });
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(timer);
+    renderRunnerControls();
+    if (!document.hidden && (panel.open || trackingJob)) {
+      unavailableResults();
+      void refresh();
+    }
+  });
+  addEventListener("pagehide", () => { disposed = true; ++refreshVersion; clearTimeout(timer); }, { once: true });
 }

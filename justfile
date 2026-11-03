@@ -255,7 +255,9 @@ hosted-artifact-check:
     nix shell --impure .#game --command node --input-type=module <<'JS'
     import assert from 'node:assert/strict';
     import {createHash} from 'node:crypto';
-    import {readFile} from 'node:fs/promises';
+    import {readFile,lstat} from 'node:fs/promises';
+    import {validateMetricPublication,MAX_METRIC_BYTES} from './worker/web/comparison-model.ts';
+    import {validatePathComparison} from './worker/web/path-comparison-data.ts';
     const base='https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/';
     const expected=JSON.parse(await readFile('worker/public/sim/manifest.json','utf8'));
     const request=path=>fetch(new URL(path,base),{cache:'no-store',signal:AbortSignal.timeout(60000)});
@@ -270,13 +272,48 @@ hosted-artifact-check:
     const sha256=createHash('sha256').update(bytes).digest('hex');
     assert.equal(bytes.length,expected.bytes);
     assert.equal(sha256,expected.sha256);
+    const digest=value=>createHash('sha256').update(value).digest('hex');
     const web_assets=[];
-    for(const name of ['index.html','styles.css','app.js','compare.html','comparison.js','analytics/paths-official.json','analytics/paths-team.json','analytics/paths-official-trials.csv','analytics/paths-manifest.json','analytics/python-flight-theory.txt']) {
+    const metricIds=['official','team'],included=[];
+    const manifestPath='worker/public/analytics/metrics-manifest.json';
+    let metricManifest,hasMetricManifest=false;
+    try {
+      const info=await lstat(manifestPath);
+      assert(info.isFile()&&!info.isSymbolicLink()&&info.size<=65536,'Invalid local metrics manifest');
+      const raw=await readFile(manifestPath);assert(raw.length<=65536,'Metrics manifest exceeds its byte budget');
+      metricManifest=JSON.parse(raw);hasMetricManifest=true;
+    } catch(error) {if(error.code!=='ENOENT')throw error;}
+    const shape=(value,keys)=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
+    if(hasMetricManifest) {
+      assert(shape(metricManifest,['schema','schema_version','artifacts']));
+      assert.equal(metricManifest.schema,'wsorb.comparison_metrics.artifacts');
+      assert.equal(metricManifest.schema_version,1);
+      assert(Array.isArray(metricManifest.artifacts)&&metricManifest.artifacts.length<=metricIds.length);
+      const seen=new Set();
+      for(const entry of metricManifest.artifacts) {
+        assert(shape(entry,['id','path','bytes','sha256']));
+        assert(metricIds.includes(entry.id)&&!seen.has(entry.id)&&entry.path===`${entry.id}.json`);
+        assert(Number.isSafeInteger(entry.bytes)&&entry.bytes>0&&entry.bytes<=MAX_METRIC_BYTES);
+        assert.match(entry.sha256,/^[a-f0-9]{64}$/);seen.add(entry.id);
+        const file=`worker/public/analytics/metrics-${entry.id}.json`,info=await lstat(file);
+        assert(info.isFile()&&!info.isSymbolicLink()&&info.size<=MAX_METRIC_BYTES);
+        const raw=await readFile(file),paths=await readFile(`worker/public/analytics/paths-${entry.id}.json`);
+        assert.equal(raw.length,entry.bytes);assert.equal(digest(raw),entry.sha256);
+        const data=validatePathComparison(JSON.parse(paths));assert(data&&data.id===entry.id);
+        assert(validateMetricPublication(JSON.parse(raw),data,digest(paths)),`Invalid included metrics: ${entry.id}`);
+        included.push(`analytics/metrics-${entry.id}.json`);
+      }
+      included.push('analytics/metrics-manifest.json');
+    }
+    for(const id of metricIds)if(!included.includes(`analytics/metrics-${id}.json`)) {
+      try {await lstat(`worker/public/analytics/metrics-${id}.json`);assert.fail(`Unmanifested metrics: ${id}`);}
+      catch(error) {if(error.code!=='ENOENT')throw error;}
+    }
+    for(const name of ['index.html','styles.css','app.js','compare.html','comparison.js','analytics/paths-official.json','analytics/paths-team.json','analytics/paths-official-trials.csv','analytics/paths-manifest.json',...included,'analytics/python-flight-theory.txt']) {
       const asset=await request(name==='index.html'?'':name);
       assert.equal(asset.status,200);
       const actual=Buffer.from(await asset.arrayBuffer());
       const local=await readFile(`worker/public/${name}`);
-      const digest=value=>createHash('sha256').update(value).digest('hex');
       assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
       web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
     }
@@ -286,7 +323,6 @@ hosted-artifact-check:
       assert.match(asset.headers.get('content-type'),/^image\/svg\+xml(?:;|$)/);
       const actual=Buffer.from(await asset.arrayBuffer());
       const local=await readFile(`worker/public/${name}`);
-      const digest=value=>createHash('sha256').update(value).digest('hex');
       assert.equal(digest(actual),digest(local),`Hosted ${name} differs from the approved local build`);
       web_assets.push({name,bytes:actual.length,sha256:digest(actual)});
     }
@@ -311,6 +347,10 @@ login-wrangler:
 # Owner-controlled release only. Never a dependency of local/check.
 deploy:
     nix shell --impure .#game --command npm --prefix worker run deploy
+
+# Verify saved engine bytes without building, replacing or deploying them.
+engine-artifact-check engine_sha bytes="":
+    nix shell --impure .#game --command node --input-type=module -e 'import{readFileSync}from"node:fs";import{createHash}from"node:crypto";const m=JSON.parse(readFileSync("worker/public/sim/manifest.json"));const b=readFileSync("worker/public/sim/wsorb_bevy_bg.wasm");const sha=createHash("sha256").update(b).digest("hex");if(sha!==process.argv[1]||m.sha256!==sha||m.bytes!==b.length||(process.argv[2]!==""&&String(b.length)!==process.argv[2]))throw Error("Prebuilt engine does not match the approved release");console.log(JSON.stringify({bytes:b.length,sha256:sha,result:"PASS"}));' {{quote(engine_sha)}} {{quote(bytes)}}
 
 # Release browser fixes with an explicitly approved, already-built engine.
 # This does not compile unrelated in-progress native changes.
@@ -368,6 +408,10 @@ path-comparison input id diagnose="false":
     args=(--input {{quote(input)}} --id {{quote(id)}} --output "docs/analytics/path-comparison/{{id}}.json" --manifest docs/analytics/path-comparison/manifest.json)
     if [[ {{quote(diagnose)}} == true ]]; then args+=(--diagnose); fi
     devenv shell uv run --locked python -m wsorb.path_comparison "${args[@]}"
+
+# Publish native receipts and policy timing reductions without changing saved paths.
+comparison-metrics input id:
+    devenv shell uv run --locked python -m wsorb.comparison_metrics --input {{quote(input)}} --id {{quote(id)}} --output {{quote("docs/analytics/path-metrics/" + id + ".json")}} --manifest docs/analytics/path-metrics/manifest.json
 
 # Inspect only a saved observation's public world receipt, never radar or secrets.
 flight-source input trial="trial-00000":

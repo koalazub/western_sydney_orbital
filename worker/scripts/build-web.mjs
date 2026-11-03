@@ -127,15 +127,18 @@ const pathParserBundle = await build({
   format: "esm", platform: "neutral", target: "es2022", minify: true,
 });
 const pathParser = await import(`data:text/javascript;base64,${Buffer.from(pathParserBundle.outputFiles[0].contents).toString("base64")}`);
+const pathPublications = new Map();
 for (const id of ["official", "team"]) {
   const name = `${id}.json`, path = resolve(pathsSource, name);
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.size > 4 * 1024 * 1024) throw new Error("Invalid path publication asset");
   const bytes = await readFile(path);
   const entry = pathsManifest.artifacts.find(item => item.path === name);
-  if (!entry || entry.bytes !== bytes.length || entry.sha256 !== createHash("sha256").update(bytes).digest("hex")) throw new Error(`Path publication hash mismatch: ${id}`);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (!entry || entry.bytes !== bytes.length || entry.sha256 !== sha256) throw new Error(`Path publication hash mismatch: ${id}`);
   const data = pathParser.validatePathComparison(JSON.parse(bytes.toString("utf8")));
   if (!data || data.id !== id) throw new Error(`Unsupported path comparison: ${id}`);
+  pathPublications.set(id, { data, sha256 });
   await writeFile(resolve(output, "analytics", `paths-${id}.json`), bytes);
 }
 const correctedTrialsPath = resolve(pathsSource, "official-trials.csv");
@@ -148,6 +151,62 @@ if (!correctedEntry || correctedEntry.bytes !== correctedTrials.length
 await writeFile(resolve(output, "analytics", "paths-official-trials.csv"), correctedTrials);
 await copyFile(resolve(root, "..", "docs", "python-flight-theory.md"), resolve(output, "analytics", "python-flight-theory.txt"));
 await copyFile(resolve(pathsSource, "manifest.json"), resolve(output, "analytics", "paths-manifest.json"));
+
+// Optional metrics have their own manifest. Validate the exact browser DTO and
+// its join to the unchanged path publication before copying any supplemental bytes.
+const metricsSource = resolve(root, "..", "docs", "analytics", "path-metrics");
+const metricIds = ["official", "team"];
+let metricsAvailable = false;
+try {
+  const info = await lstat(metricsSource);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Metrics publication must be a real directory");
+  metricsAvailable = true;
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+const metricFiles = [];
+let metricsManifestBytes = null;
+if (metricsAvailable) {
+  const metricParserBundle = await build({
+    entryPoints: [resolve(source, "comparison-model.ts")], bundle: true, write: false,
+    format: "esm", platform: "neutral", target: "es2022", minify: true,
+  });
+  const metricParser = await import(`data:text/javascript;base64,${Buffer.from(metricParserBundle.outputFiles[0].contents).toString("base64")}`);
+  const manifestPath = resolve(metricsSource, "manifest.json");
+  const manifestInfo = await lstat(manifestPath);
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.size > 65536) throw new Error("Invalid metrics manifest asset");
+  metricsManifestBytes = await readFile(manifestPath);
+  if (metricsManifestBytes.length > 65536) throw new Error("Metrics manifest exceeds its byte budget");
+  const metricsManifest = JSON.parse(metricsManifestBytes.toString("utf8"));
+  const shape = (value, keys) => value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  if (!shape(metricsManifest, ["schema", "schema_version", "artifacts"])
+    || metricsManifest.schema !== "wsorb.comparison_metrics.artifacts" || metricsManifest.schema_version !== 1
+    || !Array.isArray(metricsManifest.artifacts) || metricsManifest.artifacts.length > metricIds.length) throw new Error("Unsupported metrics manifest");
+  const seen = new Set();
+  for (const entry of metricsManifest.artifacts) {
+    if (!shape(entry, ["id", "path", "bytes", "sha256"]) || !metricIds.includes(entry.id) || seen.has(entry.id)
+      || entry.path !== `${entry.id}.json` || !Number.isSafeInteger(entry.bytes) || entry.bytes < 1 || entry.bytes > metricParser.MAX_METRIC_BYTES
+      || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error("Invalid metrics manifest artifact");
+    seen.add(entry.id);
+    const path = resolve(metricsSource, entry.path), info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > metricParser.MAX_METRIC_BYTES) throw new Error("Invalid metrics publication asset");
+    const bytes = await readFile(path);
+    if (bytes.length !== entry.bytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new Error(`Metrics publication hash mismatch: ${entry.id}`);
+    const paths = pathPublications.get(entry.id);
+    const data = metricParser.validateMetricPublication(JSON.parse(bytes.toString("utf8")), paths.data, paths.sha256);
+    if (!data || data.source.path_sha256 !== paths.sha256) throw new Error(`Metrics publication source mismatch: ${entry.id}`);
+    metricFiles.push({ id: entry.id, bytes });
+  }
+}
+for (const id of metricIds) {
+  const file = metricFiles.find(file => file.id === id), target = resolve(output, "analytics", `metrics-${id}.json`);
+  if (file) await writeFile(target, file.bytes);
+  else await rm(target, { force: true });
+}
+const metricsManifestTarget = resolve(output, "analytics", "metrics-manifest.json");
+if (metricsManifestBytes) await writeFile(metricsManifestTarget, metricsManifestBytes);
+else await rm(metricsManifestTarget, { force: true });
 
 await build({
   entryPoints: [resolve(source, "comparison.ts")], outfile: resolve(output, "comparison.js"),

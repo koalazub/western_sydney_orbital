@@ -75,6 +75,9 @@ def test_cards_and_four_chart_panels_are_the_default_visible_content():
     assert 'html("article", "metric-chart")' in chart
     assert 'html("details", "metric-chart__data")' in chart
     assert 'html("summary", "", "View data")' in chart
+    assert 'html("summary", "", "Read chart notes")' in chart
+    assert "method.open" not in SOURCE
+    assert "method.append" in chart
     assert "data.open" not in SOURCE
     assert "panel.hidden" not in SOURCE
 
@@ -142,9 +145,14 @@ def test_svg_construction_has_unique_names_and_no_pointer_only_interactions():
     plot = section("function newPlot(", "function replacePlot(")
     assert 'svg("svg", {' in plot
     assert 'role: "img"' in plot
-    assert '"aria-labelledby": `${chart.key}-title ${chart.key}-description`' in plot
+    assert '"aria-labelledby": `${chart.key}-title`' in plot
+    assert '"aria-describedby": `${chart.key}-description`' in plot
     assert 'svg("title", { id: `${chart.key}-title` }, chart.title)' in plot
-    assert 'svg("desc", { id: `${chart.key}-description` }, description)' in plot
+    assert (
+        'svg("desc", { id: `${chart.key}-description` }, '
+        "`${chart.subtitle.textContent}. ${chart.status.textContent}`)" in plot
+    )
+    assert "chart.description.textContent = description" in plot
     assert "`analytics-overview-${++instanceCount}`" in SOURCE
     assert 'document.createElementNS("http://www.w3.org/2000/svg", tag)' in SOURCE
     assert "node.textContent = content" in SOURCE
@@ -607,7 +615,7 @@ console.log(JSON.stringify(result));
     }
 
 
-def test_each_chart_has_visible_direction_and_scoped_data_insight():
+def test_each_chart_keeps_scoped_guidance_in_notes_and_a_short_description():
     insight = section("function renderInsight(", "function plotGeometry(")
     assert "deriveMetricInsight(metric, groups)" in insight
     assert "chart.guidance.textContent = insight.guidance" in insight
@@ -615,4 +623,9 @@ def test_each_chart_has_visible_direction_and_scoped_data_insight():
     assert "chart.insightScope.textContent = insight.scope" in insight
     install = section("export function installAnalyticsOverview(", "\nNOT_PRESENT")
     assert "for (const chart of charts) renderInsight(chart, groups)" in install
-    assert 'panel.setAttribute("aria-describedby", `${guidance.id} ${insight.id}`)' in SOURCE
+    chart = section("function makeChart(", "function chartTitle(")
+    assert 'panel.setAttribute("aria-describedby", status.id)' in chart
+    assert (
+        "method.append" in chart and "guidance, insight, insightScope, note, description" in chart
+    )
+    assert "guidance.id" not in chart and "insight.id" not in chart
