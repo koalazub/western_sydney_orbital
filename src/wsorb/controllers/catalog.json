@@ -77,6 +77,28 @@
     "source": "src/wsorb/controllers/official_profile.py"
   },
   {
+    "id": "ali_radar_mvp",
+    "label": "Ali radar MVP",
+    "owner": "Ali",
+    "contributor": "Ali; WSO functional adapter",
+    "description": "Radar-only polyfit tracker, conservative long-range planner and raw-radar emergency check. No camera, certified clearance or docking claim.",
+    "profile": "17 m/s cruise, functional planner plus emergency check",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "examples/ali"
+  },
+  {
+    "id": "ali_mppi",
+    "label": "Ali MPPI candidate",
+    "owner": "Ali",
+    "contributor": "Ali; WSO MPPI adapter",
+    "description": "Compact 3-DOF MPPI with a covariance belief, capsule clearance and time-optimal attitude pivot. Experimental candidate; not validated on the real server.",
+    "profile": "MPPI score cost, 64 x 40 samples",
+    "experimental": true,
+    "target_seeking": true,
+    "source": "examples/ali/controller_mppi.py"
+  },
+  {
     "id": "official_basic_beeline",
     "label": "Published BasicController",
     "owner": "Published",

@@ -64,6 +64,14 @@ def create_controller(controller_id: str, settings: dict | None = None):
         from ._tom import TomController
 
         return TomController(metadata)
+    if controller_id == "ali_radar_mvp":
+        from ._ali import AliMvpController
+
+        return AliMvpController(metadata)
+    if controller_id == "ali_mppi":
+        from ._ali_mppi import AliMppiController
+
+        return AliMppiController(metadata)
     if controller_id in ("ali_official_profile", "official_basic_beeline"):
         from ._official import OfficialController
 

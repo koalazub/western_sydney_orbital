@@ -28,11 +28,73 @@ _MODULES = {
     ),
     "tom": ("tom", ("debris_tracker", "avoidance")),
 }
+_ALI_CORE_BEGIN = "# BEGIN ALI PURE CORE"
+_ALI_CORE_END = "# END ALI PURE CORE"
+_ALI_MPPI_BEGIN = "# BEGIN ALI MPPI CORE"
+_ALI_MPPI_END = "# END ALI MPPI CORE"
 
 
 def require_template_source() -> None:
     if not (ROOT / "examples/tom/UserAPI.py").is_file():
         raise ValueError("Body +Z template requires the source checkout: examples/tom/UserAPI.py")
+
+
+def _load_ali_core() -> dict[str, ModuleType]:
+    """Extract the marked pure section so the submission stays one file."""
+    with _LOCK:
+        return _load_ali_core_locked()
+
+
+def _load_ali_core_locked() -> dict[str, ModuleType]:
+    if "ali" in _LOADED:
+        return dict(_LOADED["ali"])
+    path = ROOT / "examples/ali/controller.py"
+    if not path.is_file():
+        raise ValueError("Ali controller requires the source checkout: examples/ali/controller.py")
+    source = path.read_text(encoding="utf-8")
+    if _ALI_CORE_BEGIN not in source or _ALI_CORE_END not in source:
+        raise ValueError("Ali controller pure-core markers are missing")
+    body = source.split(_ALI_CORE_BEGIN, 1)[1].split(_ALI_CORE_END, 1)[0]
+    package_name = f"{__package__}._source_ali_bounded"
+    module = ModuleType(f"{package_name}.core")
+    module.__file__ = str(path)
+    module.__dict__["np"] = np
+    try:
+        exec(compile(body, str(path), "exec"), module.__dict__)
+    except BaseException:
+        sys.modules.pop(module.__name__, None)
+        raise
+    sys.modules[module.__name__] = module
+    _LOADED["ali"] = {"core": module}
+    return {"core": module}
+
+
+def _load_ali_mppi_core() -> dict[str, ModuleType]:
+    """Extract the MPPI core from its single SDK file."""
+    with _LOCK:
+        if "ali_mppi" in _LOADED:
+            return dict(_LOADED["ali_mppi"])
+        path = ROOT / "examples/ali/controller_mppi.py"
+        if not path.is_file():
+            raise ValueError(
+                "Ali MPPI requires the source checkout: examples/ali/controller_mppi.py"
+            )
+        source = path.read_text(encoding="utf-8")
+        if _ALI_MPPI_BEGIN not in source or _ALI_MPPI_END not in source:
+            raise ValueError("Ali MPPI core markers are missing")
+        body = source.split(_ALI_MPPI_BEGIN, 1)[1].split(_ALI_MPPI_END, 1)[0]
+        package_name = f"{__package__}._source_ali_mppi_bounded"
+        module = ModuleType(f"{package_name}.core")
+        module.__file__ = str(path)
+        module.__dict__["np"] = np
+        try:
+            exec(compile(body, str(path), "exec"), module.__dict__)
+        except BaseException:
+            sys.modules.pop(module.__name__, None)
+            raise
+        sys.modules[module.__name__] = module
+        _LOADED["ali_mppi"] = {"core": module}
+        return {"core": module}
 
 
 def load_math(profile: str) -> dict[str, ModuleType]:
@@ -42,6 +104,10 @@ def load_math(profile: str) -> dict[str, ModuleType]:
     these preloaded modules; the private package has no filesystem search path.
     A wheel without examples must fail honestly rather than substitute an SDK.
     """
+    if profile == "ali":
+        return _load_ali_core()
+    if profile == "ali_mppi":
+        return _load_ali_mppi_core()
     if profile not in _MODULES:
         raise ValueError("Unknown reviewed controller math profile")
     with _LOCK:

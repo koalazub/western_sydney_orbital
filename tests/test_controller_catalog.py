@@ -30,6 +30,8 @@ IDS = (
     "bui_alpha_beta_mvp",
     "tom_kalman_velocity_mvp",
     "ali_official_profile",
+    "ali_radar_mvp",
+    "ali_mppi",
     "official_basic_beeline",
     "userapi_body_z",
 )
@@ -129,7 +131,19 @@ def test_shared_json_catalog_is_exact_detached_safe_and_grouped_by_name():
     assert owners == dict(
         zip(
             IDS,
-            ("WSO", "WSO", "Harry", "Harry", "Bui", "Tom", "Ali", "Published", "Tom"),
+            (
+                "WSO",
+                "WSO",
+                "Harry",
+                "Harry",
+                "Bui",
+                "Tom",
+                "Ali",
+                "Ali",
+                "Ali",
+                "Published",
+                "Tom",
+            ),
             strict=True,
         )
     )
@@ -688,7 +702,7 @@ def test_sources_load_only_allowlisted_math_without_bare_import_or_sdk_side_effe
     added = set(sys.modules) - modules_before
     assert not {"mvp", "config", "avoidance", "debris_tracker", "spaceteams", "cv2"} & added
     assert not any(name.startswith(("spaceteams.", "cv2.", "PIL.")) for name in added)
-    for profile in ("bui", "tom"):
+    for profile in ("bui", "tom", "ali"):
         for module in load_math(profile).values():
             assert module.__name__.startswith(f"wsorb.controllers._source_{profile}_bounded.")
             assert "examples" in Path(module.__file__).parts

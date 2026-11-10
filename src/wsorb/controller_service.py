@@ -51,6 +51,10 @@ _PROFILE_NAMES = {
     "bui": "bui_alpha_beta_mvp",
     "tom": "tom_kalman_velocity_mvp",
     "ali": "ali_official_profile",
+    "ali mvp": "ali_radar_mvp",
+    "ali_mvp": "ali_radar_mvp",
+    "ali mppi": "ali_mppi",
+    "ali_mppi": "ali_mppi",
 }
 MAX_QUEUE_RESPONSE_BYTES = 512 * 1024
 POLL_INTERVAL_S = 1.0
@@ -926,7 +930,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     scope.add_argument("--isolated", action="store_true")
     scope.add_argument("--connection-file", type=Path)
     scope.add_argument("--room-file", type=Path)
-    run.add_argument("--profile", required=True, help="profile ID, or Harry, Tom, Bui or Ali")
+    run.add_argument(
+        "--profile", required=True, help="profile ID, or Harry, Tom, Bui, Ali or Ali MVP"
+    )
     run.add_argument("--run", action="store_true", required=True, help="explicit actuation consent")
     run.add_argument(
         "--await-owner", action="store_true", help="external read-only standby before one run"

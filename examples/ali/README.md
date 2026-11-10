@@ -1,5 +1,40 @@
 # Ali's controller
 
+## Current competition MVP
+
+[`controller.py`](controller.py) is the self-contained SDK entrypoint. Its
+marked pure-core section keeps tracker, planner and emergency state in plain
+mappings and returns new data; the loop only reads the simulator, calls `step`,
+and writes the command and telemetry. The local adapter extracts that marked
+section without importing the SDK.
+
+It uses polyfit velocity tracking, a conservative tracked-rock planner that
+waits for a 10 s activation horizon, and a raw-radar emergency check inside
+150 m and the forward 180°. It records the maximum observed diameter per rock,
+including a small margin, rather than smoothing the radius downward. No camera
+is used.
+
+While the ship is first accelerating, the controller points body +X at the
+commanded burn with bounded side-thruster angular acceleration. Linear thrust
+continues during the pivot, then attitude is held once aligned, so the
+sustained burn uses the rear thruster and later avoidance dodges translate
+without continuous pivoting. Pivoting is cheap against the fuel penalty; the
+new compilation reports a ~220 s belt traverse. The final local verification
+run arrived in 228.8 s with 102.1 kg fuel and 0 damage. The local pivot cost
+about 1.8 kg against the no-pivot baseline; the team's 0.1 kg figure is the
+competition-runtime observation, not a local measurement.
+
+The reviewed local profile is `ali_radar_mvp`:
+
+```sh
+uv run --locked wsorb controllers run --isolated --profile ali_radar_mvp --run --duration-s 300 --wall-budget-s 400
+```
+
+The official-profile material below is the earlier local experiment, not the
+current competition base.
+
+## Official-profile experiment
+
 Ali's named contribution is the **official-profile** controller: the local
 1.31 km competition-reference beeline with fresh-radar avoidance. It is the
 policy that produced the 6/6 local official-cloud comparison.
