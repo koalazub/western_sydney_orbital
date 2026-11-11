@@ -32,13 +32,13 @@ Fuel, speed and avoidance experiments
 - The unusually favourable radar model was identified as a limitation to generalisability; any publication would need to state this limitation and support claims with reproducible tests.
 - No venue, manuscript scope or submission decision was finalised.
 ### Action items
-#### Owner	Action	Timing | status
-Ali |	Provide exact GitHub revision, test prerequisites and a brief code walkthrough | After initial trial
+#### Owner | Action	Timing | Status
+Ali | Provide exact GitHub revision, test prerequisites and a brief code walk-through | After initial trial
 Naqib | server-access contact	Assist with access to the Windows/Tailscale test environment and facilitate an official simulator smoke test | As soon as practical
-All contributors | Post controller revision, official run logs and recordings to Discord	| Before the next scrum
+All contributors | Post controller revision, official run logs and recordings to Discord | Before the next scrum
 Team integration reviewers | Compare small subsystem changes, review candidate branches and queue proven changes for integration | Daily through competition end
-Tom | submission maintainers	Incorporate the selected tested controller into the competition submission base | After results review
-Nic |	Share the giant-asteroid test harness/controller and its conditions	| When ready
+Tom | Incorporate the selected tested controller into the competition submission base | After results review
+Nic | Share the giant-asteroid test harness/controller and its conditions	| When ready
 
 
 ### Open questions
