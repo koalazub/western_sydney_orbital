@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="620" viewBox="0 0 760 620">
+<rect x="0" y="0" width="760" height="620" fill="#ffffff"/>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#222}.small{font-size:12px}.axis{font-size:13px}.title{font-size:20px;font-weight:600}.grid{stroke:#e6e6e6;stroke-width:1}.axisline{stroke:#444;stroke-width:1.2}</style>
+<text class="title" x="90" y="45">Median success time vs fuel</text>
+<text class="small" x="90" y="66">Local official-comparison data · all seeds and repetitions</text>
+<line class="grid" x1="90.0" y1="90" x2="90.0" y2="520"/>
+<text class="small" x="90.0" y="540" text-anchor="middle">120</text>
+<line class="grid" x1="221.8" y1="90" x2="221.8" y2="520"/>
+<text class="small" x="221.8" y="540" text-anchor="middle">140</text>
+<line class="grid" x1="353.5" y1="90" x2="353.5" y2="520"/>
+<text class="small" x="353.5" y="540" text-anchor="middle">160</text>
+<line class="grid" x1="485.3" y1="90" x2="485.3" y2="520"/>
+<text class="small" x="485.3" y="540" text-anchor="middle">180</text>
+<line class="grid" x1="617.1" y1="90" x2="617.1" y2="520"/>
+<text class="small" x="617.1" y="540" text-anchor="middle">200</text>
+<line class="grid" x1="90" y1="520.0" x2="650" y2="520.0"/>
+<text class="small" x="80" y="524.0" text-anchor="end">0</text>
+<line class="grid" x1="90" y1="418.8" x2="650" y2="418.8"/>
+<text class="small" x="80" y="422.8" text-anchor="end">40</text>
+<line class="grid" x1="90" y1="317.6" x2="650" y2="317.6"/>
+<text class="small" x="80" y="321.6" text-anchor="end">80</text>
+<line class="grid" x1="90" y1="216.5" x2="650" y2="216.5"/>
+<text class="small" x="80" y="220.5" text-anchor="end">120</text>
+<line class="grid" x1="90" y1="115.3" x2="650" y2="115.3"/>
+<text class="small" x="80" y="119.3" text-anchor="end">160</text>
+<rect x="90" y="90" width="560" height="430" fill="none" class="axisline"/>
+<text class="axis" x="370.0" y="568" text-anchor="middle">Median success time (s)</text>
+<text class="axis" x="35" y="305.0" text-anchor="middle" transform="rotate(-90 35 305.0)">Median fuel (kg)</text>
+<circle cx="214.7" cy="403.6" r="7" fill="#d95f02" stroke="#fff" stroke-width="2"/>
+<text class="small" x="224.7" y="397.6">Published beeline</text>
+<text class="small" x="224.7" y="413.6">4/6 · 139s · 46kg</text>
+<circle cx="308.7" cy="244.4" r="7" fill="#1f78b4" stroke="#fff" stroke-width="2"/>
+<text class="small" x="318.7" y="238.4">Ali official profile</text>
+<text class="small" x="318.7" y="254.4">6/6 · 153s · 109kg</text>
+<circle cx="530.9" cy="330.3" r="7" fill="#2ca25f" stroke="#fff" stroke-width="2"/>
+<text class="small" x="540.9" y="324.3">WSO body-axis</text>
+<text class="small" x="540.9" y="340.3">4/6 · 187s · 75kg</text>
+<circle cx="356.2" cy="149.8" r="7" fill="#7570b3" stroke="#fff" stroke-width="2"/>
+<text class="small" x="366.2" y="143.8">Basic PD + radar</text>
+<text class="small" x="366.2" y="159.8">6/6 · 160s · 146kg</text>
+</svg>
