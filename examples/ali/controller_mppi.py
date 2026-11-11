@@ -192,12 +192,13 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt):
     sine = np.linalg.norm(cross)
     angle = np.arctan2(sine, float(np.clip(body_x @ desired, -1.0, 1.0)))
     if angle < 1e-3:
-        return -angular_velocity / max(dt, 1e-2)
-    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
-    rate = min(angle / max(dt, 1e-2), np.sqrt(2.0 * max_angular_accel * angle))
-    return np.clip(
-        (axis * rate - angular_velocity) / max(dt, 1e-2), -max_angular_accel, max_angular_accel
-    )
+        result = -angular_velocity / max(dt, 1e-2)
+    else:
+        axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
+        rate = min(angle / max(dt, 1e-2), np.sqrt(2.0 * max_angular_accel * angle))
+        result = (axis * rate - angular_velocity) / max(dt, 1e-2)
+    length = np.linalg.norm(result)
+    return result / length * max_angular_accel if length > max_angular_accel else result
 
 
 # END ALI MPPI CORE
@@ -209,7 +210,7 @@ t0 = (
     .as_datetime()
 )
 state = {"rocks": []}
-last_time, fuel_rate = None, 0.0
+last_time, last_fuel, fuel_rate = None, None, 0.0
 
 while True:
     time.sleep(1.0 / this.GetParam(st.VarType.double, "LoopFreqHz"))
@@ -231,14 +232,15 @@ while True:
     angular_velocity = np.asarray(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame), dtype=float)
     fuel = float(shuttle.GetParam(st.VarType.double, ["Stats", "FuelUsed"]))
     damage = float(shuttle.GetParam(st.VarType.double, ["Stats", "Damage"]))
-    radius = float(shuttle.GetParam(st.VarType.double, "Radius"))
+    radius = float(shuttle.GetParam(st.VarType.double, ["Graphics", "VisualRadius_m"]))
     max_accel = float(shuttle.GetParam(st.VarType.double, ["Thrusters", "MaxAccel_m_s2"]))
     max_angular = float(shuttle.GetParam(st.VarType.double, ["Thrusters", "MaxAngAccel_rad_s2"]))
     rows = GetNearestDebrisLocations(80)
     state = update_belief(state, rows, position, now)
-    fuel_rate = (
-        0.9 * fuel_rate + 0.1 * max(0.0, fuel / max(now, 1e-3)) if fuel_rate == 0.0 else fuel_rate
-    )
+    if last_fuel is not None and now > 0.0:
+        observed = max(0.0, (fuel - last_fuel) / max(dt, 1e-3))
+        fuel_rate = observed if fuel_rate == 0.0 else 0.8 * fuel_rate + 0.2 * observed
+    last_fuel = fuel
     accel_world = plan(
         state,
         position,
