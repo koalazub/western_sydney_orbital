@@ -30,6 +30,32 @@ The reviewed local profile is `ali_radar_mvp`:
 uv run --locked wsorb controllers run --isolated --profile ali_radar_mvp --run --duration-s 300 --wall-budget-s 400
 ```
 
+## MPPI candidate
+
+[`controller_mppi.py`](controller_mppi.py) is the SDK shell and
+[`mppi_core.py`](mppi_core.py) is the separate policy implementation. The shell
+only reads the simulator, calls the core, logs telemetry and writes the command.
+
+The policy uses a 7 m/s cruise target, a burn/coast governor with 0.50/0.30 m/s
+hysteresis, a 48 × 30 MPPI rollout, a control-switch penalty, capsule clearance
+and a critically damped attitude controller aligned with the target trajectory.
+The governor exists to stop the previous continuous micro-burns.
+
+The shell writes `controller_mppi.csv` with position, velocity, command, mode,
+velocity error and alignment. It also emits `st.logger_info` plus
+`st.OnScreenLogMessage` and `st.OnScreenAlert` for the STP log and HUD. Analyse
+a saved log with:
+
+```sh
+uv run --locked python scripts/analyze_mppi_log.py controller_mppi.csv
+```
+
+The local profile is `ali_mppi`:
+
+```sh
+uv run --locked wsorb controllers run --isolated --profile ali_mppi --run --duration-s 60 --wall-budget-s 120
+```
+
 The official-profile material below is the earlier local experiment, not the
 current competition base.
 

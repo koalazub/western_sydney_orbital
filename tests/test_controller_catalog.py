@@ -702,7 +702,7 @@ def test_sources_load_only_allowlisted_math_without_bare_import_or_sdk_side_effe
     added = set(sys.modules) - modules_before
     assert not {"mvp", "config", "avoidance", "debris_tracker", "spaceteams", "cv2"} & added
     assert not any(name.startswith(("spaceteams.", "cv2.", "PIL.")) for name in added)
-    for profile in ("bui", "tom", "ali"):
+    for profile in ("bui", "tom", "ali", "ali_mppi"):
         for module in load_math(profile).values():
             assert module.__name__.startswith(f"wsorb.controllers._source_{profile}_bounded.")
             assert "examples" in Path(module.__file__).parts

@@ -19,7 +19,7 @@ class AliMppiController(ExperimentalController):
     def __init__(self, metadata):
         super().__init__(metadata)
         self.math = load_math("ali_mppi")["core"]
-        self.state = {"rocks": []}
+        self.state = {"rocks": [], "burning": False, "last_control": np.zeros(3)}
         self.last_time = None
         self.last_fuel = 0.0
         self.fuel_rate = 0.0
@@ -52,7 +52,7 @@ class AliMppiController(ExperimentalController):
             sample.quaternion_xyzw,
             sample.rotation_convention,
         )
-        acceleration = self.math.plan(
+        desired_accel = self.math.plan(
             self.state,
             sample.position_world_m,
             sample.velocity_world_mps,
@@ -66,17 +66,35 @@ class AliMppiController(ExperimentalController):
             self.fuel_rate,
             now,
         )
+        nominal_velocity = self.math.cruise_velocity(
+            np.asarray(sample.position_world_m), np.asarray(sample.target_position_world_m)
+        )
+        acceleration, self.state["burning"] = self.math.govern(
+            desired_accel,
+            nominal_velocity,
+            np.asarray(sample.velocity_world_mps),
+            self.state["burning"],
+            MAX_ACCEL_MPS2,
+        )
         if not np.all(np.isfinite(acceleration)):
             raise _Rejected("MPPI produced a non-finite acceleration")
+        desired = self.math.unit(nominal_velocity)
+        alignment = (
+            np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
+            if np.linalg.norm(desired) > 1e-9
+            else 0.0
+        )
         angular = (
             self.math.attitude(
                 body_x,
                 sample.angular_velocity_world_rad_s,
-                self.math.unit(acceleration),
+                desired,
                 COMMAND_CAP_ANGULAR,
                 dt,
             )
-            if np.linalg.norm(acceleration) > 0.0
+            if self.state["burning"]
+            or np.linalg.norm(sample.angular_velocity_world_rad_s) > self.math.RATE_DEADBAND_RAD_S
+            or alignment > self.math.ATTITUDE_DEADBAND_RAD
             else np.zeros(3)
         )
         body = bounded(
@@ -87,14 +105,19 @@ class AliMppiController(ExperimentalController):
             reference_to_body(angular, sample.quaternion_xyzw, sample.rotation_convention),
             COMMAND_CAP_ANGULAR,
         )
+        velocity_error = np.linalg.norm(nominal_velocity - np.asarray(sample.velocity_world_mps))
         self._report["guidance"] = {
             "track_count": len(self.state["rocks"]),
             "mppi_samples": self.math.MPPI_SAMPLES,
             "mppi_steps": self.math.MPPI_STEPS,
+            "mode": "burn" if self.state["burning"] else "coast",
+            "cruise_speed_mps": self.math.CRUISE_SPEED_MPS,
+            "velocity_error_mps": velocity_error,
+            "alignment_angle_rad": alignment,
             "accel_reference_mps2": acceleration.tolist(),
             "angular_accel_body_rad_s2": angular_body.tolist(),
             "fuel_rate_kg_s": self.fuel_rate,
             "capsule_radius_m": SHIP_RADIUS_M,
-            "model": "3-DOF translation MPPI, capsule clearance, time-optimal pivot",
+            "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
         }
         return body, angular_body
