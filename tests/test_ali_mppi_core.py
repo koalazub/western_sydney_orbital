@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from wsorb.controllers._sources import load_math
 
 core = load_math("ali_mppi")["core"]
+ENTRYPOINT = Path(__file__).resolve().parents[1] / "examples/ali/controller_mppi.py"
+
+
+def test_sdk_entrypoint_adds_its_directory_before_importing_the_core():
+    source = ENTRYPOINT.read_text(encoding="utf-8")
+    path_insert = source.index("sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))")
+    core_import = source.index("from mppi_core import")
+    assert path_insert < core_import
 
 
 def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():

@@ -1,7 +1,9 @@
 """SDK entrypoint for Ali's MPPI controller.
 
 The policy lives in `mppi_core.py`; this file only reads the simulator, runs the
-policy, logs telemetry and writes the command.
+policy, logs telemetry and writes the command. STP does not put the script
+directory on `sys.path`, so add it explicitly before importing the core. Upload
+this file and `mppi_core.py` together.
 """
 
 # ruff: noqa: E402
@@ -59,6 +61,8 @@ def SetCommand(accelCommand: npt.NDArray, angAccelCommand: npt.NDArray) -> None:
 #############################################################################################
 # DON'T CHANGE ANY OF THE ABOVE. NECESSARY FOR CORRECTLY JOINING THE COMPETITION SIMULATION #
 #############################################################################################
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mppi_core import (
     ATTITUDE_DEADBAND_RAD,
