@@ -19,10 +19,13 @@ class AliMppiController(ExperimentalController):
     def __init__(self, metadata):
         super().__init__(metadata)
         self.math = load_math("ali_mppi")["core"]
-        self.state = {"rocks": [], "burning": False, "last_control": np.zeros(3)}
+        self.state = {
+            "rocks": [],
+            "burning": False,
+            "last_control": np.zeros(3),
+            "rng": np.random.default_rng(12345),
+        }
         self.last_time = None
-        self.last_fuel = 0.0
-        self.fuel_rate = 0.0
 
     def _calculate(self, sample, rows, now):
         try:
@@ -35,10 +38,7 @@ class AliMppiController(ExperimentalController):
     def _functional_decision(self, sample, rows, now):
         dt = 0.1 if self.last_time is None else max(1e-3, now - self.last_time)
         fuel = float(sample.fuel_used_kg)
-        if self.last_time is not None and now > self.last_time:
-            observed = max(0.0, (fuel - self.last_fuel) / (now - self.last_time))
-            self.fuel_rate = 0.8 * self.fuel_rate + 0.2 * observed
-        self.last_time, self.last_fuel = now, fuel
+        self.last_time = now
         selected = np.asarray(rows, dtype=float)[:80]
         for epoch in np.unique(selected[:, 2, 0]):
             group = selected[selected[:, 2, 0] == epoch]
@@ -63,7 +63,7 @@ class AliMppiController(ExperimentalController):
             dt,
             fuel,
             float(sample.damage_j),
-            self.fuel_rate,
+            float(sample.mass_kg),
             now,
         )
         nominal_velocity = self.math.cruise_velocity(
@@ -71,8 +71,6 @@ class AliMppiController(ExperimentalController):
         )
         acceleration, self.state["burning"] = self.math.govern(
             desired_accel,
-            nominal_velocity,
-            np.asarray(sample.velocity_world_mps),
             self.state["burning"],
             MAX_ACCEL_MPS2,
         )
@@ -116,7 +114,7 @@ class AliMppiController(ExperimentalController):
             "alignment_angle_rad": alignment,
             "accel_reference_mps2": acceleration.tolist(),
             "angular_accel_body_rad_s2": angular_body.tolist(),
-            "fuel_rate_kg_s": self.fuel_rate,
+            "fuel_per_delta_v_kg_per_mps": float(sample.mass_kg) / (80.0 * 9.8),
             "capsule_radius_m": SHIP_RADIUS_M,
             "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
         }

@@ -9,12 +9,17 @@ import numpy as np
 
 ARRIVAL_RADIUS_M = 50.0
 MAX_ANGULAR_ACCEL_RAD_S2 = 0.05
-MPPI_SAMPLES, MPPI_STEPS = 48, 30
+MPPI_SAMPLES, MPPI_STEPS = 48, 40
+PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
-BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
-ATTITUDE_DEADBAND_RAD = np.radians(1.5)
-RATE_DEADBAND_RAD_S = 0.02
-CONTROL_SWITCH_WEIGHT = 0.10
+BURN_START_MPS2, BURN_STOP_MPS2 = 0.15, 0.05
+ATTITUDE_NATURAL_RATE_RAD_S = 0.60
+ATTITUDE_DEADBAND_RAD = np.radians(2.5)
+RATE_DEADBAND_RAD_S = 0.03
+CONTROL_SWITCH_WEIGHT = 0.50
+SAFETY_MARGIN_M = 5.0
+REACTION_TIME_S = 1.5
+MIN_TIME_TO_GO_SPEED_MPS = 1.0
 
 
 def unit(value):
@@ -35,26 +40,20 @@ def cruise_velocity(position, target_position):
     return np.zeros(3) if distance < 1e-9 else CRUISE_SPEED_MPS * delta / distance
 
 
-def controlled_acceleration(wanted_velocity, current_velocity, max_accel):
-    error = wanted_velocity - current_velocity
-    magnitude = np.linalg.norm(error)
-    if magnitude <= BURN_STOP_MPS:
-        return np.zeros(3)
-    return min(1.0, max_accel / magnitude) * error
+def target_direction(position, target_position):
+    return unit(target_position - position)
 
 
-def govern(desired_accel, nominal_velocity, velocity, burning, max_accel):
-    error = np.linalg.norm(nominal_velocity - velocity)
+def govern(desired_accel, burning, max_accel):
     desired_norm = np.linalg.norm(desired_accel)
     if burning:
-        if error < BURN_STOP_MPS and desired_norm < BURN_STOP_MPS:
+        if desired_norm < BURN_STOP_MPS2:
             burning = False
-    elif error > BURN_START_MPS or desired_norm > BURN_START_MPS:
+    elif desired_norm > BURN_START_MPS2:
         burning = True
     if not burning:
         return np.zeros(3), False
-    direction = desired_accel if desired_norm > 1e-9 else nominal_velocity - velocity
-    return max_accel * unit(direction), True
+    return max_accel * unit(desired_accel), True
 
 
 def fit_rock(rock):
@@ -118,7 +117,7 @@ def plan(
     dt,
     fuel,
     damage,
-    fuel_rate,
+    ship_mass_kg,
     now,
 ):
     rocks = state["rocks"]
@@ -130,36 +129,44 @@ def plan(
         nearest = np.argsort(np.linalg.norm(centers - position, axis=1))[:30]
         centers, rock_velocities = centers[nearest], rock_velocities[nearest]
         radii, sigmas = radii[nearest], sigmas[nearest]
-    nominal_velocity = cruise_velocity(position, target_position)
-    nominal = controlled_acceleration(nominal_velocity, velocity, max_accel)
-    noise = np.random.default_rng().normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3))
+    nominal = max_accel * target_direction(position, target_position)
+    rng = state.setdefault("rng", np.random.default_rng(12345))
+    noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3))
     directions = unit(nominal + noise * max_accel)
-    magnitudes = np.random.default_rng().random((MPPI_SAMPLES, MPPI_STEPS, 1)) * max_accel
+    magnitudes = rng.random((MPPI_SAMPLES, MPPI_STEPS, 1)) * max_accel
     controls = directions * magnitudes
+    plan_dt = max(dt, PLAN_DT_S)
     positions = np.broadcast_to(position, (MPPI_SAMPLES, 3)).copy()
     ship_velocities = np.broadcast_to(velocity, (MPPI_SAMPLES, 3)).copy()
     risk = np.zeros(MPPI_SAMPLES)
     for step in range(MPPI_STEPS):
-        positions += ship_velocities * dt + 0.5 * controls[:, step] * dt * dt
-        ship_velocities += controls[:, step] * dt
+        positions += ship_velocities * plan_dt + 0.5 * controls[:, step] * plan_dt * plan_dt
+        ship_velocities += controls[:, step] * plan_dt
         if len(rocks):
-            future = centers + (step + 1) * dt * rock_velocities
+            future = centers + (step + 1) * plan_dt * rock_velocities
             distance = capsule_distance(positions, future, body_x, radius, radius)
-            risk += np.sum(np.maximum(0.0, 3.0 * sigmas - (distance - radii)), axis=1)
+            margin = (
+                SAFETY_MARGIN_M
+                + REACTION_TIME_S * np.linalg.norm(ship_velocities, axis=1)[:, None]
+                + 3.0 * sigmas
+            )
+            risk += np.sum(np.maximum(0.0, margin - (distance - radii)), axis=1)
     time_to_go = np.maximum(
         0.0, np.linalg.norm(positions - target_position, axis=1) - ARRIVAL_RADIUS_M
     )
-    time_to_go = time_to_go / np.maximum(np.linalg.norm(ship_velocities, axis=1), 1e-3)
-    fuel_used = fuel + fuel_rate * np.sum(np.linalg.norm(controls, axis=2), axis=1) * dt
+    time_to_go = time_to_go / np.maximum(
+        np.linalg.norm(ship_velocities, axis=1), MIN_TIME_TO_GO_SPEED_MPS
+    )
+    delta_v = np.sum(np.linalg.norm(controls, axis=2), axis=1) * plan_dt
+    fuel_used = fuel + ship_mass_kg * delta_v / (80.0 * 9.8)
     score = 100.0 * (
         120.0 / np.maximum(now + time_to_go, 1e-3)
         - fuel_used / 75.0
         - 2.0 * damage / 209200.0
         + 0.5
     )
-    terminal_speed_error = np.linalg.norm(ship_velocities - nominal_velocity, axis=1)
     switch = np.linalg.norm(controls[:, 0] - state["last_control"], axis=1)
-    cost = -score + 1000.0 * risk + 0.5 * terminal_speed_error**2 + CONTROL_SWITCH_WEIGHT * switch
+    cost = -score + 1000.0 * risk + CONTROL_SWITCH_WEIGHT * switch
     best = int(np.argmin(cost))
     state["last_control"] = controls[best, 0].copy()
     return controls[best, 0]
@@ -176,10 +183,11 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt):
     if angle < ATTITUDE_DEADBAND_RAD and speed < RATE_DEADBAND_RAD_S:
         return np.zeros(3)
     if angle < ATTITUDE_DEADBAND_RAD:
-        result = -unit(angular_velocity) * max_angular_accel
+        result = -angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
     else:
         axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
-        natural_rate = np.sqrt(max_angular_accel / max(angle, 0.02))
-        result = axis * (natural_rate**2 * angle) - angular_velocity * (2.0 * natural_rate)
+        result = axis * (ATTITUDE_NATURAL_RATE_RAD_S**2 * angle) - angular_velocity * (
+            2.0 * ATTITUDE_NATURAL_RATE_RAD_S
+        )
     length = np.linalg.norm(result)
     return result / length * max_angular_accel if length > max_angular_accel else result
