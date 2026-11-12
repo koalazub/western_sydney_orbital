@@ -36,21 +36,23 @@ def test_capsule_distance_uses_the_oriented_segment():
 
 
 def test_attitude_is_bounded_and_damps_an_aligned_ship():
+    state = {"attitude_hold": False}
     aligned = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.zeros(3),
         np.array([1.0, 0.0, 0.0]),
         0.05,
-        0.1,
+        state,
     )
     assert np.allclose(aligned, np.zeros(3))
 
+    state = {"attitude_hold": False}
     turning = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.zeros(3),
         np.array([0.0, 1.0, 0.0]),
         0.05,
-        0.1,
+        state,
     )
     assert 0.0 < np.linalg.norm(turning) <= 0.05
 
