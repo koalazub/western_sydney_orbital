@@ -22,7 +22,6 @@ class AliMppiController(ExperimentalController):
         self.state = {
             "rocks": [],
             "burning": False,
-            "attitude_hold": False,
             "last_control": np.zeros(3),
             "rng": np.random.default_rng(12345),
         }
@@ -91,7 +90,7 @@ class AliMppiController(ExperimentalController):
                 sample.angular_velocity_world_rad_s,
                 desired,
                 COMMAND_CAP_ANGULAR,
-                self.state,
+                dt,
             )
             if self.state["burning"]
             or np.linalg.norm(sample.angular_velocity_world_rad_s) > self.math.RATE_DEADBAND_RAD_S

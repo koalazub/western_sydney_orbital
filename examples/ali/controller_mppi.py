@@ -68,11 +68,9 @@ MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
 BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
-ATTITUDE_RATE_GAIN = 4.0
+ATTITUDE_NATURAL_RATE_RAD_S = 0.35
 ATTITUDE_DEADBAND_RAD = np.radians(8.0)
 RATE_DEADBAND_RAD_S = 0.06
-ATTITUDE_RELEASE_RAD = np.radians(12.0)
-ATTITUDE_RELEASE_RATE_RAD_S = 0.10
 CONTROL_SWITCH_WEIGHT = 0.50
 SAFETY_MARGIN_M = 2.0
 REACTION_TIME_S = 0.5
@@ -236,7 +234,7 @@ def plan(
     return controls[best, 0]
 
 
-def attitude(body_x, angular_velocity, desired, max_angular_accel, state):
+def attitude(body_x, angular_velocity, desired, max_angular_accel, dt):
     desired = unit(desired)
     if np.linalg.norm(desired) < 1e-9:
         return np.zeros(3)
@@ -245,16 +243,14 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, state):
     angle = np.arctan2(sine, float(np.clip(body_x @ desired, -1.0, 1.0)))
     speed = np.linalg.norm(angular_velocity)
     if angle < ATTITUDE_DEADBAND_RAD and speed < RATE_DEADBAND_RAD_S:
-        state["attitude_hold"] = True
         return np.zeros(3)
-    if state.get("attitude_hold"):
-        if angle < ATTITUDE_RELEASE_RAD and speed < ATTITUDE_RELEASE_RATE_RAD_S:
-            return np.zeros(3)
-        state["attitude_hold"] = False
-    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
-    rate_along = float(angular_velocity @ axis)
-    safe_rate = np.sqrt(2.0 * max_angular_accel * max(angle, 0.0))
-    result = axis * (ATTITUDE_RATE_GAIN * (safe_rate - rate_along))
+    if angle < ATTITUDE_DEADBAND_RAD:
+        result = -angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
+    else:
+        axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
+        result = axis * (ATTITUDE_NATURAL_RATE_RAD_S**2 * angle) - angular_velocity * (
+            2.0 * ATTITUDE_NATURAL_RATE_RAD_S
+        )
     length = np.linalg.norm(result)
     return result / length * max_angular_accel if length > max_angular_accel else result
 
@@ -269,7 +265,6 @@ t0 = (
 state = {
     "rocks": [],
     "burning": False,
-    "attitude_hold": False,
     "last_control": np.zeros(3),
     "rng": np.random.default_rng(12345),
 }
@@ -335,7 +330,7 @@ while True:
         else 0.0
     )
     angular_world = (
-        attitude(body_x, angular_velocity, desired, max_angular, state)
+        attitude(body_x, angular_velocity, desired, max_angular, dt)
         if state["burning"]
         or np.linalg.norm(angular_velocity) > RATE_DEADBAND_RAD_S
         or alignment > ATTITUDE_DEADBAND_RAD
