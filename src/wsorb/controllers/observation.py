@@ -22,7 +22,7 @@ MAX_REPORT_AGE_S = 1.0
 MAX_RADAR_AGE_S = 2.5
 RADAR_CLOCK = "simulation_elapsed_seconds"
 ROLLING_SELECTION = "official_first_200_rolling"
-_TIME_TOLERANCE_S = 1.0e-12
+_TIME_TOLERANCE_S = 1.0e-9
 
 
 @dataclass(frozen=True, slots=True)

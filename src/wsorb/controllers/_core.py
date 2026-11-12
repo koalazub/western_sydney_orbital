@@ -19,7 +19,7 @@ from ..control_contract import (
 )
 from .observation import MAX_RADAR_AGE_S, MAX_REPORT_AGE_S, RADAR_CLOCK, SOURCE_KINDS
 
-_TIME_TOLERANCE_S = 1.0e-12
+_TIME_TOLERANCE_S = 1.0e-9
 
 
 class _Rejected(ValueError):
@@ -55,12 +55,17 @@ class ObserverHistory:
     def covers(self, epoch: float) -> bool:
         return bool(
             self.samples
-            and self.samples[0].elapsed_time_s <= epoch <= self.samples[-1].elapsed_time_s
+            and self.samples[0].elapsed_time_s - _TIME_TOLERANCE_S
+            <= epoch
+            <= self.samples[-1].elapsed_time_s + _TIME_TOLERANCE_S
         )
 
     def at(self, epoch: float) -> tuple[np.ndarray, np.ndarray]:
         if not self.covers(epoch):
             raise _Rejected("Observer history does not cover a radar row epoch")
+        epoch = min(
+            max(epoch, self.samples[0].elapsed_time_s), self.samples[-1].elapsed_time_s
+        )
         previous = self.samples[0]
         for current in self.samples:
             if current.elapsed_time_s == epoch:
