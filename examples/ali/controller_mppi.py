@@ -67,6 +67,7 @@ MAX_ANGULAR_ACCEL_RAD_S2 = 0.05
 MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
+BRAKE_ACCEL_MPS2 = 0.5
 BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
 ATTITUDE_RATE_GAIN = 4.0
 ATTITUDE_BRAKE_SCALE = 0.65
@@ -79,6 +80,10 @@ CONTROL_SWITCH_WEIGHT = 0.50
 SAFETY_MARGIN_M = 2.0
 REACTION_TIME_S = 0.5
 RISK_WEIGHT = 200.0
+EMERGENCY_RANGE_M = 120.0
+EMERGENCY_LOOKAHEAD_S = 5.0
+EMERGENCY_MARGIN_M = 4.0
+EMERGENCY_ESCAPE_MPS = 2.5
 MIN_TIME_TO_GO_SPEED_MPS = 1.0
 
 
@@ -97,7 +102,13 @@ def capsule_distance(points, centers, axis, half_length, radius):
 def cruise_velocity(position, target_position):
     delta = target_position - position
     distance = np.linalg.norm(delta)
-    return np.zeros(3) if distance < 1e-9 else CRUISE_SPEED_MPS * delta / distance
+    if distance < 1e-9:
+        return np.zeros(3)
+    speed = min(
+        CRUISE_SPEED_MPS,
+        np.sqrt(2.0 * BRAKE_ACCEL_MPS2 * max(distance - ARRIVAL_RADIUS_M, 0.0)),
+    )
+    return speed * delta / distance
 
 
 def target_direction(position, target_position):
@@ -119,6 +130,66 @@ def govern(desired_accel, nominal_velocity, velocity, burning, max_accel):
         return np.zeros(3), False
     direction = desired_accel if forward_avoid else error_vec
     return max_accel * unit(direction), True
+
+
+def closest_margin(velocity, relative, rock_velocities, keep_out, horizon):
+    relative_velocity = rock_velocities - velocity
+    denominator = np.einsum("ij,ij->i", relative_velocity, relative_velocity) + 1e-9
+    time = np.clip(
+        -np.einsum("ij,ij->i", relative, relative_velocity) / denominator,
+        0.0,
+        horizon,
+    )
+    miss = np.linalg.norm(relative + time[:, None] * relative_velocity, axis=1)
+    return miss - keep_out
+
+
+def emergency_guard(velocity, rows, now, max_accel):
+    velocity = np.asarray(velocity, dtype=float)
+    relative, rock_velocities, keep_out = [], [], []
+    for row in rows:
+        if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
+            continue
+        position = np.asarray(row[0], dtype=float)
+        line_of_sight = unit(position)
+        rock_velocity = line_of_sight * (float(row[1, 1]) + line_of_sight @ velocity)
+        position = position + (now - float(row[2, 0])) * (rock_velocity - velocity)
+        if np.linalg.norm(position) > EMERGENCY_RANGE_M:
+            continue
+        relative.append(position)
+        rock_velocities.append(rock_velocity)
+        keep_out.append(0.55 * float(row[1, 2]) + EMERGENCY_MARGIN_M)
+    if not relative:
+        return np.zeros(3), False
+    relative = np.array(relative)
+    rock_velocities = np.array(rock_velocities)
+    keep_out = np.array(keep_out)
+    current = closest_margin(velocity, relative, rock_velocities, keep_out, EMERGENCY_LOOKAHEAD_S)
+    if np.min(current) >= 0.0:
+        return np.zeros(3), False
+    threat = int(np.argmin(current))
+    heading = unit(velocity) if np.linalg.norm(velocity) > 1e-6 else np.array([1.0, 0.0, 0.0])
+    lateral = relative[threat] - (relative[threat] @ heading) * heading
+    if np.linalg.norm(lateral) > 1e-6:
+        side = unit(lateral)
+    else:
+        helper = np.array([0.0, 0.0, 1.0]) if abs(heading[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        side = unit(np.cross(heading, helper))
+    away = unit(-relative[threat])
+    options = (
+        velocity + EMERGENCY_ESCAPE_MPS * away,
+        velocity + EMERGENCY_ESCAPE_MPS * side,
+        velocity - EMERGENCY_ESCAPE_MPS * side,
+        velocity,
+    )
+    scores = [
+        np.min(closest_margin(option, relative, rock_velocities, keep_out, EMERGENCY_LOOKAHEAD_S))
+        for option in options
+    ]
+    best = int(np.argmax(scores))
+    if scores[best] <= np.min(current):
+        return np.zeros(3), False
+    return max_accel * unit(options[best] - velocity), True
 
 
 def fit_rock(rock):
@@ -194,7 +265,7 @@ def plan(
         nearest = np.argsort(np.linalg.norm(centers - position, axis=1))[:30]
         centers, rock_velocities = centers[nearest], rock_velocities[nearest]
         radii, sigmas = radii[nearest], sigmas[nearest]
-    nominal = max_accel * target_direction(position, target_position)
+    nominal = max_accel * unit(cruise_velocity(position, target_position) - velocity)
     rng = state.setdefault("rng", np.random.default_rng(12345))
     noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3))
     directions = unit(nominal + noise * max_accel)
@@ -409,6 +480,7 @@ def telemetry_line(record):
         f"err={number('rate_error_rad_s', 3)} off={number('off_axis_rad_s2', 3)} "
         f"cmd={number('command_norm_rad_s2', 3)}/0.050 "
         f"sat={int(bool(record.get('saturated')))} hold={int(bool(record.get('hold')))} "
+        f"emerg={int(bool(record.get('emergency')))} "
         f"v={number('speed_mps', 2)} err={number('velocity_error_mps', 2)} "
         f"range={number('target_range_m', 0)}m "
         f"fuel={number('fuel_kg', 1)} dmg={number('damage_j', 0)} "
@@ -488,6 +560,10 @@ while True:
     accel_world, state["burning"] = govern(
         desired_accel, nominal_velocity, velocity, state["burning"], max_accel
     )
+    emergency_accel, emergency_active = emergency_guard(velocity, rows, now, max_accel)
+    if emergency_active:
+        accel_world = emergency_accel
+        state["burning"] = True
     desired = unit(nominal_velocity)
     alignment = (
         np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
@@ -538,6 +614,19 @@ while True:
         fuel,
         damage,
     )
+    record["emergency"] = bool(emergency_active)
+    raw_ranges = [
+        float(np.linalg.norm(np.asarray(row[0], dtype=float)))
+        for row in rows
+        if np.all(np.isfinite(row))
+    ]
+    track_ranges = [
+        float(np.linalg.norm(np.asarray(rock["position"], dtype=float) - position))
+        for rock in state["rocks"]
+    ]
+    record["nearest_raw_range_m"] = min(raw_ranges) if raw_ranges else None
+    record["nearest_track_range_m"] = min(track_ranges) if track_ranges else None
+    record["line"] = telemetry_line(record)
     if now - last_status >= 0.5:
         last_status = now
         st.logger_info("MPPI " + json.dumps(record, separators=(",", ":"), allow_nan=False))

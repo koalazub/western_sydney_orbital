@@ -77,6 +77,12 @@ class AliMppiController(ExperimentalController):
             self.state["burning"],
             MAX_ACCEL_MPS2,
         )
+        emergency_accel, emergency_active = self.math.emergency_guard(
+            np.asarray(sample.velocity_world_mps), rows, now, MAX_ACCEL_MPS2
+        )
+        if emergency_active:
+            acceleration = emergency_accel
+            self.state["burning"] = True
         if not np.all(np.isfinite(acceleration)):
             raise _Rejected("MPPI produced a non-finite acceleration")
         desired = self.math.unit(nominal_velocity)
@@ -142,6 +148,24 @@ class AliMppiController(ExperimentalController):
             fuel,
             float(sample.damage_j),
         )
+        record["emergency"] = bool(emergency_active)
+        raw_ranges = [
+            float(np.linalg.norm(np.asarray(row[0], dtype=float)))
+            for row in rows
+            if np.all(np.isfinite(row))
+        ]
+        track_ranges = [
+            float(
+                np.linalg.norm(
+                    np.asarray(rock["position"], dtype=float)
+                    - np.asarray(sample.position_world_m, dtype=float)
+                )
+            )
+            for rock in self.state["rocks"]
+        ]
+        record["nearest_raw_range_m"] = min(raw_ranges) if raw_ranges else None
+        record["nearest_track_range_m"] = min(track_ranges) if track_ranges else None
+        record["line"] = self.math.telemetry_line(record)
         self._report["guidance"] = {
             "track_count": len(self.state["rocks"]),
             "mppi_samples": self.math.MPPI_SAMPLES,

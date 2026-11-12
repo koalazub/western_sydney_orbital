@@ -16,6 +16,13 @@ def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():
     assert np.isclose(np.linalg.norm(velocity), 7.0)
     assert np.allclose(velocity, [7.0, 0.0, 0.0])
 
+    braking = core.cruise_velocity(np.zeros(3), np.array([60.0, 0.0, 0.0]))
+    assert np.isclose(np.linalg.norm(braking), np.sqrt(10.0))
+    assert braking[0] > 0.0
+
+    stopped = core.cruise_velocity(np.zeros(3), np.array([49.0, 0.0, 0.0]))
+    assert np.allclose(stopped, np.zeros(3))
+
 
 def test_burn_governor_uses_hysteresis_instead_of_micro_bursts():
     nominal = np.array([7.0, 0.0, 0.0])
@@ -61,6 +68,16 @@ def test_attitude_is_bounded_and_enters_hold_when_aligned():
     )
     assert 0.0 < np.linalg.norm(turning) <= 0.05
     assert turning_state["attitude_hold"] is False
+
+
+def test_emergency_guard_reacts_to_a_closing_rock():
+    row = np.zeros((3, 3))
+    row[0] = [20.0, 0.0, 0.0]
+    row[1] = [15.0, -5.0, 2.0]
+    row[2, 0] = 0.0
+    acceleration, active = core.emergency_guard(np.array([7.0, 0.0, 0.0]), [row], 1.0, 0.5)
+    assert active is True
+    assert np.linalg.norm(acceleration) <= 0.5
 
 
 def test_plan_returns_a_finite_bounded_first_control():
