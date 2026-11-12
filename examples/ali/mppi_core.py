@@ -13,12 +13,14 @@ MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
 BURN_START_MPS2, BURN_STOP_MPS2 = 0.15, 0.05
+BURN_MIN_S, COAST_MIN_S = 0.50, 0.30
 ATTITUDE_NATURAL_RATE_RAD_S = 0.60
 ATTITUDE_DEADBAND_RAD = np.radians(2.5)
 RATE_DEADBAND_RAD_S = 0.03
 CONTROL_SWITCH_WEIGHT = 0.50
-SAFETY_MARGIN_M = 5.0
-REACTION_TIME_S = 1.5
+SAFETY_MARGIN_M = 2.0
+REACTION_TIME_S = 0.5
+RISK_WEIGHT = 200.0
 MIN_TIME_TO_GO_SPEED_MPS = 1.0
 
 
@@ -44,16 +46,25 @@ def target_direction(position, target_position):
     return unit(target_position - position)
 
 
-def govern(desired_accel, burning, max_accel):
+def govern(desired_accel, state, max_accel, now):
     desired_norm = np.linalg.norm(desired_accel)
-    if burning:
+    if desired_norm > 1e-9:
+        state["last_accel"] = desired_accel.copy()
+    if state["burning"]:
+        if now < state["hold_until"]:
+            return state["last_accel"]
         if desired_norm < BURN_STOP_MPS2:
-            burning = False
-    elif desired_norm > BURN_START_MPS2:
-        burning = True
-    if not burning:
-        return np.zeros(3), False
-    return max_accel * unit(desired_accel), True
+            state["burning"] = False
+            state["hold_until"] = now + COAST_MIN_S
+            return np.zeros(3)
+        return desired_accel
+    if now < state["hold_until"]:
+        return np.zeros(3)
+    if desired_norm > BURN_START_MPS2:
+        state["burning"] = True
+        state["hold_until"] = now + BURN_MIN_S
+        return desired_accel
+    return np.zeros(3)
 
 
 def fit_rock(rock):
@@ -148,7 +159,7 @@ def plan(
             margin = (
                 SAFETY_MARGIN_M
                 + REACTION_TIME_S * np.linalg.norm(ship_velocities, axis=1)[:, None]
-                + 3.0 * sigmas
+                + 2.0 * sigmas
             )
             risk += np.sum(np.maximum(0.0, margin - (distance - radii)), axis=1)
     time_to_go = np.maximum(
@@ -166,7 +177,7 @@ def plan(
         + 0.5
     )
     switch = np.linalg.norm(controls[:, 0] - state["last_control"], axis=1)
-    cost = -score + 1000.0 * risk + CONTROL_SWITCH_WEIGHT * switch
+    cost = -score + RISK_WEIGHT * risk + CONTROL_SWITCH_WEIGHT * switch
     best = int(np.argmin(cost))
     state["last_control"] = controls[best, 0].copy()
     return controls[best, 0]
