@@ -74,10 +74,15 @@ def _load_ali_mppi_core() -> dict[str, ModuleType]:
     with _LOCK:
         if "ali_mppi" in _LOADED:
             return dict(_LOADED["ali_mppi"])
-        path = ROOT / "examples/ali/mppi_core.py"
+        path = ROOT / "examples/ali/controller_mppi.py"
         if not path.is_file():
-            raise ValueError("Ali MPPI requires the source checkout: examples/ali/mppi_core.py")
-        body = path.read_text(encoding="utf-8")
+            raise ValueError(
+                "Ali MPPI requires the source checkout: examples/ali/controller_mppi.py"
+            )
+        source = path.read_text(encoding="utf-8")
+        if _ALI_MPPI_BEGIN not in source or _ALI_MPPI_END not in source:
+            raise ValueError("Ali MPPI core markers are missing")
+        body = source.split(_ALI_MPPI_BEGIN, 1)[1].split(_ALI_MPPI_END, 1)[0]
         package_name = f"{__package__}._source_ali_mppi_bounded"
         module = ModuleType(f"{package_name}.core")
         module.__file__ = str(path)

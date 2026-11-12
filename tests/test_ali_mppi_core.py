@@ -12,11 +12,12 @@ core = load_math("ali_mppi")["core"]
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "examples/ali/controller_mppi.py"
 
 
-def test_sdk_entrypoint_adds_its_directory_before_importing_the_core():
+def test_embedded_core_matches_the_analysis_copy():
     source = ENTRYPOINT.read_text(encoding="utf-8")
-    path_insert = source.index("sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))")
-    core_import = source.index("from mppi_core import")
-    assert path_insert < core_import
+    embedded = source.split("# BEGIN ALI MPPI CORE", 1)[1].split("# END ALI MPPI CORE", 1)[0]
+    analysis = (ENTRYPOINT.parent / "mppi_core.py").read_text(encoding="utf-8")
+    marker = "ARRIVAL_RADIUS_M = 50.0"
+    assert embedded[embedded.index(marker) :].strip() == analysis[analysis.index(marker) :].strip()
 
 
 def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():
