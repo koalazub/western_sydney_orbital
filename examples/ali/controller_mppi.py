@@ -68,9 +68,9 @@ MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
 BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
-ATTITUDE_NATURAL_RATE_RAD_S = 0.60
-ATTITUDE_DEADBAND_RAD = np.radians(2.5)
-RATE_DEADBAND_RAD_S = 0.03
+ATTITUDE_NATURAL_RATE_RAD_S = 0.35
+ATTITUDE_DEADBAND_RAD = np.radians(8.0)
+RATE_DEADBAND_RAD_S = 0.06
 CONTROL_SWITCH_WEIGHT = 0.50
 SAFETY_MARGIN_M = 2.0
 REACTION_TIME_S = 0.5
@@ -101,16 +101,19 @@ def target_direction(position, target_position):
 
 
 def govern(desired_accel, nominal_velocity, velocity, burning, max_accel):
-    error = np.linalg.norm(nominal_velocity - velocity)
+    error_vec = nominal_velocity - velocity
+    error = np.linalg.norm(error_vec)
     desired_norm = np.linalg.norm(desired_accel)
+    target_unit = unit(nominal_velocity)
+    forward_avoid = desired_norm > BURN_START_MPS and float(desired_accel @ target_unit) > 0.0
     if burning:
-        if error < BURN_STOP_MPS and desired_norm < BURN_STOP_MPS:
+        if error < BURN_STOP_MPS and not forward_avoid:
             burning = False
-    elif error > BURN_START_MPS or desired_norm > BURN_START_MPS:
+    elif error > BURN_START_MPS or forward_avoid:
         burning = True
     if not burning:
         return np.zeros(3), False
-    direction = desired_accel if desired_norm > 1e-9 else nominal_velocity - velocity
+    direction = desired_accel if forward_avoid else error_vec
     return max_accel * unit(direction), True
 
 
