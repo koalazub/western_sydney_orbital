@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from wsorb.controllers._sources import load_math
@@ -86,3 +88,79 @@ def test_plan_returns_a_finite_bounded_first_control():
     )
     assert np.isfinite(acceleration).all()
     assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
+
+
+def test_attitude_diagnostics_show_the_pd_terms_and_saturation():
+    trace = {}
+    command = core.attitude(
+        np.array([1.0, 0.0, 0.0]),
+        np.zeros(3),
+        np.array([0.0, 1.0, 0.0]),
+        0.05,
+        0.1,
+        trace,
+    )
+    assert trace["angle_deg"] == 90.0
+    assert trace["p_term_rad_s2"] > 0.0
+    assert trace["d_term_rad_s2"] == 0.0
+    assert trace["saturated"] is True
+    assert np.allclose(trace["command_rad_s2"], command)
+
+    damping = {}
+    damped = core.attitude(
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, -0.07, 0.0]),
+        np.array([1.0, 0.0, 0.0]),
+        0.05,
+        0.1,
+        damping,
+    )
+    assert damping["deadband"] is False
+    assert damping["p_term_rad_s2"] == 0.0
+    assert damping["d_term_rad_s2"] < 0.0
+    assert np.allclose(damped, [0.0, 0.049, 0.0])
+
+
+def test_attitude_telemetry_is_finite_json_and_flags_coast_drift():
+    trace = {}
+    core.attitude(
+        np.array([1.0, 0.0, 0.0]),
+        np.zeros(3),
+        np.array([0.0, 1.0, 0.0]),
+        0.05,
+        0.1,
+        trace,
+    )
+    record = core.telemetry_record(
+        1.0,
+        0.1,
+        "coast",
+        "off",
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.0, 0.0, 0.0]),
+        np.zeros(3),
+        trace,
+        1.0,
+        6.0,
+        100.0,
+        2,
+        1.0,
+        0.0,
+    )
+    assert record["schema"] == "wsorb.mppi_attitude"
+    assert record["line"].startswith("MPPI")
+    assert record["burn_align_rad"] is None
+    assert record["warning"] is None or isinstance(record["warning"], str)
+    json.dumps(record, allow_nan=False)
+    assert (
+        core.attitude_warning(
+            {
+                "mode": "coast",
+                "target_align_rad": np.radians(8.0),
+                "rate_rad_s": 0.03,
+            }
+        )
+        == "coast_misaligned_with_residual_rate"
+    )

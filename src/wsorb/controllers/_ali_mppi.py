@@ -84,19 +84,28 @@ class AliMppiController(ExperimentalController):
             if np.linalg.norm(desired) > 1e-9
             else 0.0
         )
-        angular = (
-            self.math.attitude(
-                body_x,
-                sample.angular_velocity_world_rad_s,
-                desired,
-                COMMAND_CAP_ANGULAR,
-                dt,
-            )
-            if self.state["burning"]
-            or np.linalg.norm(sample.angular_velocity_world_rad_s) > self.math.RATE_DEADBAND_RAD_S
-            or alignment > self.math.ATTITUDE_DEADBAND_RAD
-            else np.zeros(3)
+        angular_velocity = np.asarray(sample.angular_velocity_world_rad_s)
+        gate = "off"
+        if self.state["burning"]:
+            gate = "burn"
+        elif np.linalg.norm(angular_velocity) > self.math.RATE_DEADBAND_RAD_S:
+            gate = "rate"
+        elif alignment > self.math.ATTITUDE_DEADBAND_RAD:
+            gate = "alignment"
+        attitude_trace = {}
+        angular = self.math.attitude(
+            body_x,
+            angular_velocity,
+            desired,
+            COMMAND_CAP_ANGULAR,
+            dt,
+            attitude_trace,
         )
+        if gate == "off":
+            angular = np.zeros(3)
+            attitude_trace["command_rad_s2"] = [0.0, 0.0, 0.0]
+            attitude_trace["command_norm_rad_s2"] = 0.0
+            attitude_trace["saturated"] = False
         body = bounded(
             reference_to_body(acceleration, sample.quaternion_xyzw, sample.rotation_convention),
             COMMAND_CAP_MPS2,
@@ -106,6 +115,29 @@ class AliMppiController(ExperimentalController):
             COMMAND_CAP_ANGULAR,
         )
         velocity_error = np.linalg.norm(nominal_velocity - np.asarray(sample.velocity_world_mps))
+        target_range = float(
+            np.linalg.norm(
+                np.asarray(sample.target_position_world_m) - np.asarray(sample.position_world_m)
+            )
+        )
+        record = self.math.telemetry_record(
+            now,
+            dt,
+            "burn" if self.state["burning"] else "coast",
+            gate,
+            body_x,
+            desired,
+            acceleration,
+            body,
+            angular_velocity,
+            attitude_trace,
+            float(velocity_error),
+            float(np.linalg.norm(np.asarray(sample.velocity_world_mps))),
+            target_range,
+            len(self.state["rocks"]),
+            fuel,
+            float(sample.damage_j),
+        )
         self._report["guidance"] = {
             "track_count": len(self.state["rocks"]),
             "mppi_samples": self.math.MPPI_SAMPLES,
@@ -119,5 +151,6 @@ class AliMppiController(ExperimentalController):
             "fuel_per_delta_v_kg_per_mps": float(sample.mass_kg) / (80.0 * 9.8),
             "capsule_radius_m": SHIP_RADIUS_M,
             "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
+            "telemetry": record,
         }
         return body, angular_body

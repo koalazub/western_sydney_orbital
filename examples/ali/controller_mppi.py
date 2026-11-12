@@ -10,7 +10,7 @@ This is a single-file STP submission. The marked core is duplicated in
 # DON'T CHANGE ANY OF THE BELOW. NECESSARY FOR CORRECTLY JOINING THE COMPETITION SIMULATION #
 #############################################################################################
 
-import os
+import json
 import sys
 import time
 import traceback
@@ -234,25 +234,183 @@ def plan(
     return controls[best, 0]
 
 
-def attitude(body_x, angular_velocity, desired, max_angular_accel, dt):
+def _finite(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def angle_between(first, second):
+    first = unit(first)
+    second = unit(second)
+    if np.linalg.norm(first) < 1e-9 or np.linalg.norm(second) < 1e-9:
+        return None
+    return float(np.arccos(np.clip(float(first @ second), -1.0, 1.0)))
+
+
+def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, diagnostics=None):
+    trace = diagnostics if diagnostics is not None else {}
+    trace.update(
+        {
+            "angle_rad": 0.0,
+            "angle_deg": 0.0,
+            "rate_rad_s": 0.0,
+            "balance_rate_rad_s": 0.0,
+            "rate_error_rad_s": 0.0,
+            "p_term_rad_s2": 0.0,
+            "d_term_rad_s2": 0.0,
+            "off_axis_rad_s2": 0.0,
+            "axis_world": [0.0, 0.0, 0.0],
+            "requested_rad_s2": [0.0, 0.0, 0.0],
+            "requested_norm_rad_s2": 0.0,
+            "command_rad_s2": [0.0, 0.0, 0.0],
+            "command_norm_rad_s2": 0.0,
+            "saturated": False,
+            "deadband": False,
+        }
+    )
     desired = unit(desired)
     if np.linalg.norm(desired) < 1e-9:
+        trace["deadband"] = True
         return np.zeros(3)
     cross = np.cross(body_x, desired)
     sine = np.linalg.norm(cross)
     angle = np.arctan2(sine, float(np.clip(body_x @ desired, -1.0, 1.0)))
     speed = np.linalg.norm(angular_velocity)
+    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
+    rate_along = float(angular_velocity @ axis)
+    p_term = 0.0 if angle < ATTITUDE_DEADBAND_RAD else ATTITUDE_NATURAL_RATE_RAD_S**2 * angle
+    d_term = -2.0 * ATTITUDE_NATURAL_RATE_RAD_S * rate_along
+    balance_rate = p_term / (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
+    trace.update(
+        {
+            "angle_rad": float(angle),
+            "angle_deg": float(np.degrees(angle)),
+            "rate_rad_s": float(speed),
+            "balance_rate_rad_s": float(balance_rate),
+            "rate_error_rad_s": float(balance_rate - rate_along),
+            "p_term_rad_s2": float(p_term),
+            "d_term_rad_s2": float(d_term),
+            "axis_world": [float(value) for value in axis],
+        }
+    )
     if angle < ATTITUDE_DEADBAND_RAD and speed < RATE_DEADBAND_RAD_S:
+        trace["deadband"] = True
         return np.zeros(3)
     if angle < ATTITUDE_DEADBAND_RAD:
         result = -angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
     else:
-        axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
-        result = axis * (ATTITUDE_NATURAL_RATE_RAD_S**2 * angle) - angular_velocity * (
-            2.0 * ATTITUDE_NATURAL_RATE_RAD_S
-        )
+        result = axis * p_term - angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
     length = np.linalg.norm(result)
-    return result / length * max_angular_accel if length > max_angular_accel else result
+    trace.update(
+        {
+            "requested_rad_s2": [float(value) for value in result],
+            "requested_norm_rad_s2": float(length),
+            "saturated": bool(length > max_angular_accel),
+            "off_axis_rad_s2": float(np.linalg.norm(result - axis * float(result @ axis))),
+        }
+    )
+    command = result / length * max_angular_accel if length > max_angular_accel else result
+    trace["command_rad_s2"] = [float(value) for value in command]
+    trace["command_norm_rad_s2"] = float(np.linalg.norm(command))
+    return command
+
+
+def telemetry_record(
+    now,
+    dt,
+    mode,
+    gate,
+    body_x_world,
+    target_direction_world,
+    accel_world,
+    accel_body,
+    angular_velocity_world,
+    diagnostics,
+    velocity_error,
+    speed_mps,
+    target_range,
+    track_count,
+    fuel,
+    damage,
+):
+    """Build one frame-labelled record for STP logger_info and local progress."""
+    record = {
+        "schema": "wsorb.mppi_attitude",
+        "schema_version": 1,
+        "time_s": _finite(now),
+        "dt_s": _finite(dt),
+        "mode": mode if mode in ("burn", "coast") else "unknown",
+        "gate": gate if gate in ("burn", "rate", "alignment", "off") else "unknown",
+        "attitude_frame": "world",
+        "accel_frame": "body",
+        "target_align_rad": _finite(angle_between(body_x_world, target_direction_world)),
+        "burn_align_rad": _finite(angle_between(body_x_world, accel_world)),
+        "translation_align_rad": _finite(angle_between(np.array([1.0, 0.0, 0.0]), accel_body)),
+        "accel_body_mps2": [_finite(value) for value in accel_body],
+        "accel_norm_mps2": _finite(np.linalg.norm(accel_body)),
+        "angular_velocity_world_rad_s": [_finite(value) for value in angular_velocity_world],
+        "velocity_error_mps": _finite(velocity_error),
+        "speed_mps": _finite(speed_mps),
+        "target_range_m": _finite(target_range),
+        "track_count": int(track_count),
+        "fuel_kg": _finite(fuel),
+        "damage_j": _finite(damage),
+    }
+    for key, value in diagnostics.items():
+        if key in record or key == "line":
+            continue
+        if isinstance(value, (list, tuple)):
+            record[key] = [_finite(item) for item in value]
+        elif isinstance(value, (bool, np.bool_)):
+            record[key] = bool(value)
+        elif isinstance(value, (int, np.integer)):
+            record[key] = int(value)
+        elif isinstance(value, (float, np.floating)):
+            record[key] = _finite(value)
+        else:
+            record[key] = value
+    record["warning"] = attitude_warning(record)
+    record["line"] = telemetry_line(record)
+    return record
+
+
+def telemetry_line(record):
+    def number(key, digits=1):
+        value = record.get(key)
+        return "?" if value is None else f"{float(value):.{digits}f}"
+
+    def degrees(key):
+        value = record.get(key)
+        return "?" if value is None else f"{np.degrees(float(value)):.1f}"
+
+    return (
+        f"MPPI t={number('time_s', 2)}s mode={record.get('mode', '?')} "
+        f"gate={record.get('gate', '?')} align={degrees('target_align_rad')}deg "
+        f"burn={degrees('burn_align_rad')}deg trans={degrees('translation_align_rad')}deg "
+        f"rate={number('rate_rad_s', 3)} balance={number('balance_rate_rad_s', 3)} "
+        f"p={number('p_term_rad_s2', 3)} d={number('d_term_rad_s2', 3)} "
+        f"off={number('off_axis_rad_s2', 3)} cmd={number('command_norm_rad_s2', 3)}/0.050 "
+        f"sat={int(bool(record.get('saturated')))} db={int(bool(record.get('deadband')))} "
+        f"v={number('speed_mps', 2)} err={number('velocity_error_mps', 2)} "
+        f"range={number('target_range_m', 0)}m "
+        f"fuel={number('fuel_kg', 1)} dmg={number('damage_j', 0)} "
+        f"rocks={record.get('track_count', 0)}"
+    )
+
+
+def attitude_warning(record):
+    if record.get("mode") != "coast":
+        return None
+    align = record.get("target_align_rad")
+    rate = record.get("rate_rad_s")
+    if align is not None and rate is not None and align > np.radians(5.0) and rate > 0.02:
+        return "coast_misaligned_with_residual_rate"
+    return None
 
 
 # END ALI MPPI CORE
@@ -268,14 +426,7 @@ state = {
     "last_control": np.zeros(3),
     "rng": np.random.default_rng(12345),
 }
-last_time, last_status = None, -1.0
-log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "controller_mppi.csv")
-log_file = open(log_path, "w", buffering=1)  # noqa: SIM115
-log_file.write(
-    "time_s,x,y,z,vx,vy,vz,speed,target_range,fuel,damage,"
-    "accel_norm,accel_x,accel_y,accel_z,ang_norm,ang_x,ang_y,ang_z,"
-    "mode,velocity_error,alignment,rocks\n"
-)
+last_time, last_status, last_display, last_alert = None, -np.inf, -np.inf, -np.inf
 
 while True:
     time.sleep(1.0 / this.GetParam(st.VarType.double, "LoopFreqHz"))
@@ -329,13 +480,20 @@ while True:
         if np.linalg.norm(desired) > 1e-9
         else 0.0
     )
-    angular_world = (
-        attitude(body_x, angular_velocity, desired, max_angular, dt)
-        if state["burning"]
-        or np.linalg.norm(angular_velocity) > RATE_DEADBAND_RAD_S
-        or alignment > ATTITUDE_DEADBAND_RAD
-        else np.zeros(3)
-    )
+    gate = "off"
+    if state["burning"]:
+        gate = "burn"
+    elif np.linalg.norm(angular_velocity) > RATE_DEADBAND_RAD_S:
+        gate = "rate"
+    elif alignment > ATTITUDE_DEADBAND_RAD:
+        gate = "alignment"
+    attitude_trace = {}
+    angular_world = attitude(body_x, angular_velocity, desired, max_angular, dt, attitude_trace)
+    if gate == "off":
+        angular_world = np.zeros(3)
+        attitude_trace["command_rad_s2"] = [0.0, 0.0, 0.0]
+        attitude_trace["command_norm_rad_s2"] = 0.0
+        attitude_trace["saturated"] = False
     body_accel = st.frames.FramedVector(accel_world, phobosFrame).ExprIn(shuttleFrame)
     body_angular = st.frames.FramedVector(angular_world, phobosFrame).ExprIn(shuttleFrame)
     SetCommand(body_accel, body_angular)
@@ -344,24 +502,34 @@ while True:
     target_range = np.linalg.norm(target_position - position)
     velocity_error = np.linalg.norm(nominal_velocity - velocity)
     mode = "burn" if state["burning"] else "coast"
-    accel_norm = np.linalg.norm(accel_world)
-    angular_norm = np.linalg.norm(angular_world)
-    log_file.write(
-        f"{now:.3f},"
-        + ",".join(
-            f"{value:.5f}" for value in (*position, *velocity, speed, target_range, fuel, damage)
-        )
-        + f",{accel_norm:.5f},"
-        + ",".join(f"{value:.5f}" for value in (*accel_world, angular_norm, *angular_world))
-        + f",{mode},{velocity_error:.4f},{alignment:.4f},{len(state['rocks'])}\n"
+    record = telemetry_record(
+        now,
+        dt,
+        mode,
+        gate,
+        body_x,
+        desired,
+        accel_world,
+        body_accel,
+        angular_velocity,
+        attitude_trace,
+        velocity_error,
+        speed,
+        target_range,
+        len(state["rocks"]),
+        fuel,
+        damage,
     )
-    if now - last_status >= 1.0:
+    if now - last_status >= 0.5:
         last_status = now
-        message = (
-            f"{mode} t={now:5.1f}s v={speed:5.2f} err={velocity_error:4.2f} "
-            f"fuel={fuel:5.1f} dmg={damage:6.0f} range={target_range:6.0f} "
-            f"a={accel_norm:4.2f}"
+        st.logger_info("MPPI " + json.dumps(record, separators=(",", ":"), allow_nan=False))
+    if now - last_display >= 1.0:
+        last_display = now
+        st.OnScreenLogMessage(record["line"], "MPPI", st.Severity.Info)
+    if record["warning"] is not None and now - last_alert >= 5.0:
+        last_alert = now
+        st.OnScreenAlert(
+            f"MPPI warning {record['warning']} " + record["line"],
+            "MPPI",
+            st.Severity.Info,
         )
-        st.logger_info(message)
-        st.OnScreenLogMessage(message, "MPPI", st.Severity.Info)
-        st.OnScreenAlert(message, "MPPI", st.Severity.Info)
