@@ -14,9 +14,13 @@ MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
 BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
-ATTITUDE_NATURAL_RATE_RAD_S = 0.35
-ATTITUDE_DEADBAND_RAD = np.radians(8.0)
-RATE_DEADBAND_RAD_S = 0.06
+ATTITUDE_RATE_GAIN = 4.0
+ATTITUDE_BRAKE_SCALE = 0.65
+ATTITUDE_TERMINAL_RAD = np.radians(0.5)
+ATTITUDE_HOLD_RAD = np.radians(1.0)
+ATTITUDE_RELEASE_RAD = np.radians(2.0)
+ATTITUDE_HOLD_RATE_RAD_S = 0.01
+ATTITUDE_RELEASE_RATE_RAD_S = 0.02
 CONTROL_SWITCH_WEIGHT = 0.50
 SAFETY_MARGIN_M = 2.0
 REACTION_TIME_S = 0.5
@@ -198,17 +202,16 @@ def angle_between(first, second):
     return float(np.arccos(np.clip(float(first @ second), -1.0, 1.0)))
 
 
-def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, diagnostics=None):
+def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
     trace = diagnostics if diagnostics is not None else {}
     trace.update(
         {
             "angle_rad": 0.0,
             "angle_deg": 0.0,
             "rate_rad_s": 0.0,
-            "balance_rate_rad_s": 0.0,
+            "desired_rate_rad_s": 0.0,
             "rate_error_rad_s": 0.0,
-            "p_term_rad_s2": 0.0,
-            "d_term_rad_s2": 0.0,
+            "along_gain_rad_s2": 0.0,
             "off_axis_rad_s2": 0.0,
             "axis_world": [0.0, 0.0, 0.0],
             "requested_rad_s2": [0.0, 0.0, 0.0],
@@ -216,12 +219,14 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, diagnosti
             "command_rad_s2": [0.0, 0.0, 0.0],
             "command_norm_rad_s2": 0.0,
             "saturated": False,
-            "deadband": False,
+            "hold": False,
+            "released": False,
         }
     )
     desired = unit(desired)
     if np.linalg.norm(desired) < 1e-9:
-        trace["deadband"] = True
+        state["attitude_hold"] = True
+        trace["hold"] = True
         return np.zeros(3)
     cross = np.cross(body_x, desired)
     sine = np.linalg.norm(cross)
@@ -229,40 +234,48 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, diagnosti
     speed = np.linalg.norm(angular_velocity)
     axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, np.array([0.0, 0.0, 1.0])))
     rate_along = float(angular_velocity @ axis)
-    p_term = 0.0 if angle < ATTITUDE_DEADBAND_RAD else ATTITUDE_NATURAL_RATE_RAD_S**2 * angle
-    d_term = -2.0 * ATTITUDE_NATURAL_RATE_RAD_S * rate_along
-    balance_rate = p_term / (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
     trace.update(
         {
             "angle_rad": float(angle),
             "angle_deg": float(np.degrees(angle)),
             "rate_rad_s": float(speed),
-            "balance_rate_rad_s": float(balance_rate),
-            "rate_error_rad_s": float(balance_rate - rate_along),
-            "p_term_rad_s2": float(p_term),
-            "d_term_rad_s2": float(d_term),
             "axis_world": [float(value) for value in axis],
         }
     )
-    if angle < ATTITUDE_DEADBAND_RAD and speed < RATE_DEADBAND_RAD_S:
-        trace["deadband"] = True
+    if state.get("attitude_hold", False):
+        if angle <= ATTITUDE_RELEASE_RAD and speed <= ATTITUDE_RELEASE_RATE_RAD_S:
+            trace["hold"] = True
+            return np.zeros(3)
+        state["attitude_hold"] = False
+        trace["released"] = True
+    if angle <= ATTITUDE_HOLD_RAD and speed <= ATTITUDE_HOLD_RATE_RAD_S:
+        state["attitude_hold"] = True
+        trace["hold"] = True
         return np.zeros(3)
-    if angle < ATTITUDE_DEADBAND_RAD:
-        result = -angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
-    else:
-        result = axis * p_term - angular_velocity * (2.0 * ATTITUDE_NATURAL_RATE_RAD_S)
-    length = np.linalg.norm(result)
+    safe_rate = np.sqrt(
+        2.0 * max_angular_accel * ATTITUDE_BRAKE_SCALE * max(angle - ATTITUDE_TERMINAL_RAD, 0.0)
+    )
+    forced_rate = axis * safe_rate
+    rate_error = forced_rate - angular_velocity
+    requested = ATTITUDE_RATE_GAIN * rate_error
+    length = np.linalg.norm(requested)
+    command = requested / length * max_angular_accel if length > max_angular_accel else requested
+    along_error = float(rate_error @ axis)
     trace.update(
         {
-            "requested_rad_s2": [float(value) for value in result],
+            "desired_rate_rad_s": float(safe_rate),
+            "rate_error_rad_s": float(safe_rate - rate_along),
+            "along_gain_rad_s2": float(ATTITUDE_RATE_GAIN * (safe_rate - rate_along)),
+            "off_axis_rad_s2": float(
+                ATTITUDE_RATE_GAIN * np.linalg.norm(rate_error - axis * along_error)
+            ),
+            "requested_rad_s2": [float(value) for value in requested],
             "requested_norm_rad_s2": float(length),
             "saturated": bool(length > max_angular_accel),
-            "off_axis_rad_s2": float(np.linalg.norm(result - axis * float(result @ axis))),
+            "command_rad_s2": [float(value) for value in command],
+            "command_norm_rad_s2": float(np.linalg.norm(command)),
         }
     )
-    command = result / length * max_angular_accel if length > max_angular_accel else result
-    trace["command_rad_s2"] = [float(value) for value in command]
-    trace["command_norm_rad_s2"] = float(np.linalg.norm(command))
     return command
 
 
@@ -291,7 +304,7 @@ def telemetry_record(
         "time_s": _finite(now),
         "dt_s": _finite(dt),
         "mode": mode if mode in ("burn", "coast") else "unknown",
-        "gate": gate if gate in ("burn", "rate", "alignment", "off") else "unknown",
+        "gate": gate if gate in ("burn", "hold", "rate", "alignment", "off") else "unknown",
         "attitude_frame": "world",
         "accel_frame": "body",
         "target_align_rad": _finite(angle_between(body_x_world, target_direction_world)),
@@ -338,10 +351,10 @@ def telemetry_line(record):
         f"MPPI t={number('time_s', 2)}s mode={record.get('mode', '?')} "
         f"gate={record.get('gate', '?')} align={degrees('target_align_rad')}deg "
         f"burn={degrees('burn_align_rad')}deg trans={degrees('translation_align_rad')}deg "
-        f"rate={number('rate_rad_s', 3)} balance={number('balance_rate_rad_s', 3)} "
-        f"p={number('p_term_rad_s2', 3)} d={number('d_term_rad_s2', 3)} "
-        f"off={number('off_axis_rad_s2', 3)} cmd={number('command_norm_rad_s2', 3)}/0.050 "
-        f"sat={int(bool(record.get('saturated')))} db={int(bool(record.get('deadband')))} "
+        f"rate={number('rate_rad_s', 3)} want={number('desired_rate_rad_s', 3)} "
+        f"err={number('rate_error_rad_s', 3)} off={number('off_axis_rad_s2', 3)} "
+        f"cmd={number('command_norm_rad_s2', 3)}/0.050 "
+        f"sat={int(bool(record.get('saturated')))} hold={int(bool(record.get('hold')))} "
         f"v={number('speed_mps', 2)} err={number('velocity_error_mps', 2)} "
         f"range={number('target_range_m', 0)}m "
         f"fuel={number('fuel_kg', 1)} dmg={number('damage_j', 0)} "

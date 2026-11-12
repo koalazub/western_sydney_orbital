@@ -22,6 +22,7 @@ class AliMppiController(ExperimentalController):
         self.state = {
             "rocks": [],
             "burning": False,
+            "attitude_hold": False,
             "last_control": np.zeros(3),
             "rng": np.random.default_rng(12345),
         }
@@ -88,9 +89,11 @@ class AliMppiController(ExperimentalController):
         gate = "off"
         if self.state["burning"]:
             gate = "burn"
-        elif np.linalg.norm(angular_velocity) > self.math.RATE_DEADBAND_RAD_S:
+        elif self.state.get("attitude_hold", False):
+            gate = "hold"
+        elif np.linalg.norm(angular_velocity) > self.math.ATTITUDE_HOLD_RATE_RAD_S:
             gate = "rate"
-        elif alignment > self.math.ATTITUDE_DEADBAND_RAD:
+        elif alignment > self.math.ATTITUDE_HOLD_RAD:
             gate = "alignment"
         attitude_trace = {}
         angular = self.math.attitude(
@@ -99,6 +102,7 @@ class AliMppiController(ExperimentalController):
             desired,
             COMMAND_CAP_ANGULAR,
             dt,
+            self.state,
             attitude_trace,
         )
         if gate == "off":

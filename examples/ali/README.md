@@ -39,7 +39,7 @@ core, logs telemetry and writes the command.
 
 The policy uses a 7 m/s cruise target, a burn/coast governor with 0.50/0.30 m/s
 hysteresis, a 48 x 40 MPPI rollout, a control-switch penalty, capsule clearance
-and a bounded attitude PD aligned with the target trajectory. The governor exists
+and a braking-curve attitude rate target with a terminal hold. The governor exists
 to stop the previous continuous micro-burns.
 
 The shell emits one JSON attitude record every 0.5 s through `st.logger_info`,

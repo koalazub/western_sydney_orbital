@@ -37,24 +37,30 @@ def test_capsule_distance_uses_the_oriented_segment():
     assert np.isclose(distance[0, 0], 6.0)
 
 
-def test_attitude_is_bounded_and_damps_an_aligned_ship():
+def test_attitude_is_bounded_and_enters_hold_when_aligned():
+    state = {"attitude_hold": False}
     aligned = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.zeros(3),
         np.array([1.0, 0.0, 0.0]),
         0.05,
         0.1,
+        state,
     )
     assert np.allclose(aligned, np.zeros(3))
+    assert state["attitude_hold"] is True
 
+    turning_state = {"attitude_hold": False}
     turning = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.zeros(3),
         np.array([0.0, 1.0, 0.0]),
         0.05,
         0.1,
+        turning_state,
     )
     assert 0.0 < np.linalg.norm(turning) <= 0.05
+    assert turning_state["attitude_hold"] is False
 
 
 def test_plan_returns_a_finite_bounded_first_control():
@@ -90,35 +96,55 @@ def test_plan_returns_a_finite_bounded_first_control():
     assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
 
 
-def test_attitude_diagnostics_show_the_pd_terms_and_saturation():
+def test_attitude_diagnostics_show_the_braking_curve_and_saturation():
     trace = {}
+    state = {"attitude_hold": False}
     command = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.zeros(3),
         np.array([0.0, 1.0, 0.0]),
         0.05,
         0.1,
+        state,
         trace,
     )
     assert trace["angle_deg"] == 90.0
-    assert trace["p_term_rad_s2"] > 0.0
-    assert trace["d_term_rad_s2"] == 0.0
+    assert trace["desired_rate_rad_s"] > 0.0
+    assert trace["rate_error_rad_s"] > 0.0
+    assert trace["hold"] is False
     assert trace["saturated"] is True
     assert np.allclose(trace["command_rad_s2"], command)
 
     damping = {}
+    damping_state = {"attitude_hold": False}
     damped = core.attitude(
         np.array([1.0, 0.0, 0.0]),
         np.array([0.0, -0.07, 0.0]),
         np.array([1.0, 0.0, 0.0]),
         0.05,
         0.1,
+        damping_state,
         damping,
     )
-    assert damping["deadband"] is False
-    assert damping["p_term_rad_s2"] == 0.0
-    assert damping["d_term_rad_s2"] < 0.0
-    assert np.allclose(damped, [0.0, 0.049, 0.0])
+    assert damping["hold"] is False
+    assert damping["desired_rate_rad_s"] == 0.0
+    assert damping["rate_error_rad_s"] < 0.0
+    assert np.allclose(damped, [0.0, 0.05, 0.0])
+
+    release_state = {"attitude_hold": True}
+    release_trace = {}
+    released = core.attitude(
+        np.array([1.0, 0.0, 0.0]),
+        np.zeros(3),
+        np.array([np.cos(np.radians(5.0)), np.sin(np.radians(5.0)), 0.0]),
+        0.05,
+        0.1,
+        release_state,
+        release_trace,
+    )
+    assert release_state["attitude_hold"] is False
+    assert release_trace["released"] is True
+    assert np.linalg.norm(released) > 0.0
 
 
 def test_attitude_telemetry_is_finite_json_and_flags_coast_drift():
@@ -129,6 +155,7 @@ def test_attitude_telemetry_is_finite_json_and_flags_coast_drift():
         np.array([0.0, 1.0, 0.0]),
         0.05,
         0.1,
+        {"attitude_hold": False},
         trace,
     )
     record = core.telemetry_record(

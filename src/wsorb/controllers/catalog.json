@@ -92,7 +92,7 @@
     "label": "Ali MPPI candidate",
     "owner": "Ali",
     "contributor": "Ali; WSO MPPI adapter",
-    "description": "Compact 3-DOF MPPI with a covariance belief, capsule clearance and a bounded attitude PD. Experimental candidate; not validated on the real server.",
+    "description": "Compact 3-DOF MPPI with a covariance belief, capsule clearance and a braking-curve attitude hold. Experimental candidate; not validated on the real server.",
     "profile": "MPPI score cost, 48 x 40 samples",
     "experimental": true,
     "target_seeking": true,
