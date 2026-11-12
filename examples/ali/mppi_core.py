@@ -12,8 +12,7 @@ MAX_ANGULAR_ACCEL_RAD_S2 = 0.05
 MPPI_SAMPLES, MPPI_STEPS = 48, 40
 PLAN_DT_S = 0.25
 CRUISE_SPEED_MPS = 7.0
-BURN_START_MPS2, BURN_STOP_MPS2 = 0.15, 0.05
-BURN_MIN_S, COAST_MIN_S = 0.50, 0.30
+BURN_START_MPS, BURN_STOP_MPS = 0.50, 0.30
 ATTITUDE_NATURAL_RATE_RAD_S = 0.60
 ATTITUDE_DEADBAND_RAD = np.radians(2.5)
 RATE_DEADBAND_RAD_S = 0.03
@@ -46,25 +45,18 @@ def target_direction(position, target_position):
     return unit(target_position - position)
 
 
-def govern(desired_accel, state, max_accel, now):
+def govern(desired_accel, nominal_velocity, velocity, burning, max_accel):
+    error = np.linalg.norm(nominal_velocity - velocity)
     desired_norm = np.linalg.norm(desired_accel)
-    if desired_norm > 1e-9:
-        state["last_accel"] = desired_accel.copy()
-    if state["burning"]:
-        if now < state["hold_until"]:
-            return state["last_accel"]
-        if desired_norm < BURN_STOP_MPS2:
-            state["burning"] = False
-            state["hold_until"] = now + COAST_MIN_S
-            return np.zeros(3)
-        return desired_accel
-    if now < state["hold_until"]:
-        return np.zeros(3)
-    if desired_norm > BURN_START_MPS2:
-        state["burning"] = True
-        state["hold_until"] = now + BURN_MIN_S
-        return desired_accel
-    return np.zeros(3)
+    if burning:
+        if error < BURN_STOP_MPS and desired_norm < BURN_STOP_MPS:
+            burning = False
+    elif error > BURN_START_MPS or desired_norm > BURN_START_MPS:
+        burning = True
+    if not burning:
+        return np.zeros(3), False
+    direction = desired_accel if desired_norm > 1e-9 else nominal_velocity - velocity
+    return max_accel * unit(direction), True
 
 
 def fit_rock(rock):
@@ -168,10 +160,11 @@ def plan(
     time_to_go = time_to_go / np.maximum(
         np.linalg.norm(ship_velocities, axis=1), MIN_TIME_TO_GO_SPEED_MPS
     )
+    plan_horizon = MPPI_STEPS * plan_dt
     delta_v = np.sum(np.linalg.norm(controls, axis=2), axis=1) * plan_dt
     fuel_used = fuel + ship_mass_kg * delta_v / (80.0 * 9.8)
     score = 100.0 * (
-        120.0 / np.maximum(now + time_to_go, 1e-3)
+        120.0 / np.maximum(now + plan_horizon + time_to_go, 1e-3)
         - fuel_used / 75.0
         - 2.0 * damage / 209200.0
         + 0.5

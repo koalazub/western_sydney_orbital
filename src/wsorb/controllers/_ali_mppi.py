@@ -22,8 +22,6 @@ class AliMppiController(ExperimentalController):
         self.state = {
             "rocks": [],
             "burning": False,
-            "hold_until": 0.0,
-            "last_accel": np.zeros(3),
             "last_control": np.zeros(3),
             "rng": np.random.default_rng(12345),
         }
@@ -71,7 +69,13 @@ class AliMppiController(ExperimentalController):
         nominal_velocity = self.math.cruise_velocity(
             np.asarray(sample.position_world_m), np.asarray(sample.target_position_world_m)
         )
-        acceleration = self.math.govern(desired_accel, self.state, MAX_ACCEL_MPS2, now)
+        acceleration, self.state["burning"] = self.math.govern(
+            desired_accel,
+            nominal_velocity,
+            np.asarray(sample.velocity_world_mps),
+            self.state["burning"],
+            MAX_ACCEL_MPS2,
+        )
         if not np.all(np.isfinite(acceleration)):
             raise _Rejected("MPPI produced a non-finite acceleration")
         desired = self.math.unit(nominal_velocity)

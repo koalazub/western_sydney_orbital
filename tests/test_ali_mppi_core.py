@@ -15,20 +15,13 @@ def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():
     assert np.allclose(velocity, [7.0, 0.0, 0.0])
 
 
-def test_burn_governor_respects_the_planner_and_avoids_micro_bursts():
-    state = {"burning": False, "hold_until": 0.0, "last_accel": np.zeros(3)}
-    acceleration = core.govern(np.array([0.5, 0.0, 0.0]), state, 0.5, 0.0)
-    assert state["burning"] and np.isclose(np.linalg.norm(acceleration), 0.5)
+def test_burn_governor_uses_hysteresis_instead_of_micro_bursts():
+    nominal = np.array([7.0, 0.0, 0.0])
+    acceleration, burning = core.govern(np.zeros(3), nominal, np.zeros(3), False, 0.5)
+    assert burning and np.isclose(np.linalg.norm(acceleration), 0.5)
 
-    acceleration = core.govern(np.zeros(3), state, 0.5, 0.1)
-    assert state["burning"] and np.isclose(np.linalg.norm(acceleration), 0.5)
-
-    acceleration = core.govern(np.zeros(3), state, 0.5, 1.0)
-    assert not state["burning"] and np.allclose(acceleration, np.zeros(3))
-
-    state = {"burning": False, "hold_until": 0.0, "last_accel": np.zeros(3)}
-    acceleration = core.govern(np.array([0.01, 0.0, 0.0]), state, 0.5, 0.0)
-    assert not state["burning"]
+    acceleration, burning = core.govern(np.zeros(3), nominal, np.array([6.9, 0.0, 0.0]), True, 0.5)
+    assert not burning and np.allclose(acceleration, np.zeros(3))
 
 
 def test_capsule_distance_uses_the_oriented_segment():
