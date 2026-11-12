@@ -73,6 +73,28 @@ _WORLD_FIELDS = (
     "max_accel_mps2",
     "max_angular_accel_rad_s2",
 )
+FOLLOW_VIEW_COMMAND = {
+    "op": "view",
+    "mode": "orbit",
+    "focus": "Shuttle",
+    "zoom": 1,
+}
+
+
+def follow_view_request(
+    snapshot: Mapping[str, Any], *, local: bool, room: bool
+) -> dict[str, Any] | None:
+    """Request the lander view only for a ready local browser page.
+
+    This is presentation only. It never changes flight control, resets a world or
+    retries. Hosted rooms and the native headless renderer have no browser view.
+    """
+    if room or not local:
+        return None
+    renderer = snapshot.get("renderer")
+    if not isinstance(renderer, Mapping) or renderer.get("ready") is not True:
+        return None
+    return dict(FOLLOW_VIEW_COMMAND)
 
 
 class CheckpointError(RuntimeError):
@@ -1020,6 +1042,22 @@ def run_trial(
                     )
                 result["granted_fence"] = dict(fence)
                 _guard(grant, world, fence, last_time_s=now, expect_running=expect_running)
+                follow_request = follow_view_request(
+                    grant,
+                    local=isinstance(client, LocalSimulation),
+                    room=isinstance(client, RoomSimulation),
+                )
+                if follow_request is None:
+                    result["follow_view"] = "not_requested"
+                else:
+                    try:
+                        client.command(follow_request)
+                    except Exception:
+                        # Camera presentation must never turn a live flight into a
+                        # failed trial or retry a command.
+                        result["follow_view"] = "request_failed"
+                    else:
+                        result["follow_view"] = "requested"
                 # Keep current, not grant, as the decision's original source.
             try:
                 phase = "command"
@@ -1054,8 +1092,14 @@ def run_trial(
             if options.progress and tick >= next_progress:
                 progress = {"policy": policy, **native_measurement(current)}
                 progress.pop("score_label")
+                guidance = (
+                    policy_report.get("guidance") if isinstance(policy_report, Mapping) else None
+                )
+                telemetry = guidance.get("telemetry") if isinstance(guidance, Mapping) else None
+                if isinstance(telemetry, Mapping):
+                    progress["attitude"] = telemetry
                 print(json.dumps(_summary(progress), allow_nan=False), file=sys.stderr)
-                next_progress = tick + 10.0
+                next_progress = tick + 1.0
             time.sleep(max(0.0, min(tick + 1 / options.cadence_hz, deadline) - time.monotonic()))
             phase = "observation"
             current = client.snapshot()

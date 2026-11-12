@@ -33,28 +33,33 @@ uv run --locked wsorb controllers run --isolated --profile ali_radar_mvp --run -
 ## MPPI candidate
 
 [`controller_mppi.py`](controller_mppi.py) is the SDK shell and
-[`mppi_core.py`](mppi_core.py) is the separate policy implementation. The shell
-only reads the simulator, calls the core, logs telemetry and writes the command.
+[`mppi_core.py`](mppi_core.py) is the same marked core kept as a standalone copy
+for analysis and numeric tests. The shell only reads the simulator, calls the
+core, logs telemetry and writes the command.
 
 The policy uses a 7 m/s cruise target, a burn/coast governor with 0.50/0.30 m/s
-hysteresis, a 48 × 30 MPPI rollout, a control-switch penalty, capsule clearance
-and a critically damped attitude controller aligned with the target trajectory.
-The governor exists to stop the previous continuous micro-burns.
+hysteresis, a 48 x 40 MPPI rollout, a control-switch penalty, capsule clearance
+and a bounded attitude PD aligned with the target trajectory. The governor exists
+to stop the previous continuous micro-burns.
 
-The shell writes `controller_mppi.csv` with position, velocity, command, mode,
-velocity error and alignment. It also emits `st.logger_info` plus
-`st.OnScreenLogMessage` and `st.OnScreenAlert` for the STP log and HUD. Analyse
-a saved log with:
-
-```sh
-uv run --locked python scripts/analyze_mppi_log.py controller_mppi.csv
-```
+The shell emits one JSON attitude record every 0.5 s through `st.logger_info`,
+plus a compact line through `st.OnScreenLogMessage`. The record contains
+alignment, body rate, the PD terms, command saturation, the active gate,
+burn-direction error, translation-direction error, track count, range, fuel and
+damage. `st.OnScreenAlert` is reserved for sustained coast drift. The local
+adapter exposes the same record under `guidance.telemetry`, and
+`wsorb controllers run --progress` prints it once per second on stderr. No CSV is
+written.
 
 The local profile is `ali_mppi`:
 
 ```sh
 uv run --locked wsorb controllers run --isolated --profile ali_mppi --run --duration-s 60 --wall-budget-s 120
 ```
+
+A local `--connection-file` run requests the follow view automatically when the
+browser renderer is ready. The request is presentation-only and never changes the
+flight.
 
 The official-profile material below is the earlier local experiment, not the
 current competition base.

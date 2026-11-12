@@ -30,6 +30,7 @@ from wsorb.checkpoint import (
     _validate_trial_world,
     _wait_remaining,
     decision_lease,
+    follow_view_request,
     main,
     native_measurement,
     native_success,
@@ -817,3 +818,17 @@ def test_each_named_profile_runs_its_own_real_stock_world_with_native_leases(pro
         assert result["command_usage"]["max_linear_norm_mps2"] <= 0.5
         assert result["command_usage"]["max_angular_norm_rad_s2"] <= 0.05
         assert client.snapshot()["renderer"]["ready"] is False
+
+
+def test_follow_view_is_only_requested_for_a_ready_local_browser_page():
+    ready = {"renderer": {"ready": True}}
+    assert follow_view_request(ready, local=True, room=False) == {
+        "op": "view",
+        "mode": "orbit",
+        "focus": "Shuttle",
+        "zoom": 1,
+    }
+    assert follow_view_request({"renderer": {"ready": False}}, local=True, room=False) is None
+    assert follow_view_request(ready, local=True, room=True) is None
+    assert follow_view_request(ready, local=False, room=False) is None
+    assert follow_view_request({}, local=True, room=False) is None
