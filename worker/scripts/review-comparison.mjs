@@ -631,9 +631,9 @@ try {
     assert.equal(await evaluate(`document.getElementById('lab-view-run').hidden`), false, "Test profiles must open the runner directly");
     assert.equal(await evaluate(`document.getElementById('lab-view-compare').hidden`), true);
     assert.equal(await evaluate(`document.getElementById('run-controller').disabled`), true);
-    assert.equal(await evaluate(`document.getElementById('controller-owner').value`), "Bui");
+    assert.equal(await evaluate(`document.getElementById('controller-owner').value`), "Ali");
     const owners = await evaluate(`[...document.getElementById('controller-owner').options].map(n=>n.value).toSorted()`);
-    assert.deepEqual(owners, ["Bui", "Harry", "Tom", "WSO"]);
+    assert.deepEqual(owners, ["Ali", "Bui", "Harry", "Published", "Tom", "WSO"]);
     const catalog = JSON.parse(await readFile("src/wsorb/controllers/catalog.json", "utf8"));
     for (const owner of owners) {
       await choose("#controller-owner", owner);

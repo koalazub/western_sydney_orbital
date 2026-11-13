@@ -162,6 +162,10 @@ export function installControllerProfiles(options: Options) {
   world.value = "official";
   const run = byId<HTMLButtonElement>("run-controller");
   run.disabled = true;
+  const quickProfile = byId<HTMLSelectElement>("quick-profile");
+  const quickRun = byId<HTMLButtonElement>("quick-run");
+  const quickStop = byId<HTMLButtonElement>("quick-stop");
+  const quickStatus = byId("quick-status");
   const stop = byId<HTMLButtonElement>("stop-controller");
   const outsideStop = byId<HTMLButtonElement>("stop-controller-flight");
   const watch = byId<HTMLButtonElement>("watch-controller-flight");
@@ -223,6 +227,20 @@ export function installControllerProfiles(options: Options) {
     const current = confirmedView();
     const active = current?.active;
     run.disabled = busy || !current?.service.online || current.service.busy || !!active || !options.ready();
+    quickRun.disabled = run.disabled;
+    quickProfile.disabled = busy || !!active || !!starting;
+    quickStop.hidden = !active;
+    quickStop.disabled = !active || busy || !!starting;
+    const quickWorld = flightWorlds.find(item => item.id === world.value);
+    const quickText = starting ? startupMessage
+      : !options.ready() ? "Waiting for the game to be ready…"
+        : !resultsSource() ? "Open More options to connect Python."
+          : !current ? "Connecting to the Python runner…"
+            : !current.service.online ? "Runner offline. Use More options to start it."
+              : active ? `${label(active.profile_id)} · ${jobState(active)}`
+                : current.service.busy ? "Runner busy. Wait for the current test."
+                  : `Ready · ${quickWorld?.label ?? "Official competition reference"} · seed ${seed.value} · ${duration.value} s`;
+    if (quickStatus.textContent !== quickText) quickStatus.textContent = quickText;
     stop.disabled = outsideStop.disabled = starting ? starting.signal.aborted : busy || !active || active.stop_requested;
     stop.textContent = outsideStop.textContent = starting ? "Cancel startup" : "Stop controller";
     watch.disabled = busy || !options.ready();
@@ -361,10 +379,26 @@ export function installControllerProfiles(options: Options) {
       .map(entry => new Option(`${entry.label}${entry.target_seeking ? "" : " · not target-seeking"}`, entry.id)));
     description();
   }
+  function chooseQuickProfile(identifier: string) {
+    const entry = profiles.find(item => item.id === identifier);
+    if (!entry) return;
+    owner.value = entry.owner;
+    selectOwner();
+    profile.value = entry.id;
+    quickProfile.value = entry.id;
+    description();
+  }
   const owners = [...new Set(profiles.map(entry => entry.owner))].sort((a, b) => a.localeCompare(b));
   owner.replaceChildren(...owners.map(name => new Option(name, name)));
-  if (owners.includes("Bui")) owner.value = "Bui";
-  selectOwner();
+  quickProfile.replaceChildren(...owners.map(name => {
+    const group = document.createElement("optgroup");
+    group.label = name;
+    group.append(...profiles.filter(entry => entry.owner === name)
+      .sort((a, b) => Number(b.target_seeking) - Number(a.target_seeking))
+      .map(entry => new Option(`${entry.label}${entry.target_seeking ? "" : " · not target-seeking"}`, entry.id)));
+    return group;
+  }));
+  chooseQuickProfile(profiles.some(entry => entry.id === "ali_mppi") ? "ali_mppi" : profiles[0].id);
   worldDescription();
   function renderResults(results: Array<Record<string, unknown>>) {
     const outcome = (result: Record<string, unknown>) => terminalStatus(result) === "success" ? "Station region reached"
@@ -495,14 +529,14 @@ export function installControllerProfiles(options: Options) {
     finally { busy = false; renderRunnerControls(); await refresh(); }
   }
   const changedProfile = async () => { description(); await requestStop(); };
-  owner.addEventListener("change", () => { selectOwner(); void changedProfile(); });
-  profile.addEventListener("change", () => { void changedProfile(); });
-  world.addEventListener("change", () => { worldDescription(); void requestStop(); });
-  seed.addEventListener("change", () => { worldDescription(); void requestStop(); });
-  duration.addEventListener("change", () => { void requestStop(); });
+  owner.addEventListener("change", () => { selectOwner(); quickProfile.value = profile.value; void changedProfile(); });
+  profile.addEventListener("change", () => { quickProfile.value = profile.value; void changedProfile(); });
+  world.addEventListener("change", () => { worldDescription(); renderRunnerControls(); void requestStop(); });
+  seed.addEventListener("change", () => { worldDescription(); renderRunnerControls(); void requestStop(); });
+  duration.addEventListener("change", () => { renderRunnerControls(); void requestStop(); });
   stop.addEventListener("click", () => { void requestStop(); });
   outsideStop.addEventListener("click", () => { void requestStop(); });
-  run.addEventListener("click", async () => {
+  async function startRun() {
     if (busy || run.disabled) return;
     busy = true;
     starting = new AbortController();
@@ -543,7 +577,7 @@ export function installControllerProfiles(options: Options) {
       }
       autoUpdate = true;
       for (const id of ["pause-controller-updates", "pause-controller-flight-updates"]) byId(id).textContent = "Pause updates";
-      panel.close("watch");
+      if (panel.open) panel.close("watch");
     } catch (cause) {
       showError(signal.aborted ? "Flight startup cancelled. Check status for any submitted job."
         : cause instanceof Error ? cause.message : "The flight was not confirmed. Refresh before sending another action.");
@@ -552,10 +586,21 @@ export function installControllerProfiles(options: Options) {
       owner.disabled = profile.disabled = world.disabled = seed.disabled = duration.disabled = false;
       renderRunnerControls(); await refresh();
     }
+  }
+  run.addEventListener("click", () => { void startRun(); });
+  quickRun.addEventListener("click", () => { void startRun(); });
+  quickStop.addEventListener("click", () => { void requestStop(); });
+  quickProfile.addEventListener("change", () => {
+    chooseQuickProfile(quickProfile.value);
+    renderRunnerControls();
+    void requestStop();
   });
   function schedule() {
     clearTimeout(timer);
-    if (disposed || document.hidden || !autoUpdate || !panel.open && !confirmedView()?.active) return;
+    // The quick launcher must discover a ready runner without opening the full
+    // panel, so keep polling while this tab still has a Python connection.
+    if (disposed || document.hidden || !autoUpdate
+      || !panel.open && !confirmedView()?.active && !resultsSource()) return;
     // One existing status schedule serves both the dialog and a watched job.
     // It ends on completion, a failed connection read, page hide or Pause updates.
     timer = setTimeout(() => {
@@ -603,11 +648,19 @@ export function installControllerProfiles(options: Options) {
     }
   };
   open.hidden = false;
+  // The engine, room and local bridge announce lifecycle changes. Use them to
+  // enable the quick launcher without a session that only polls forever.
+  addEventListener("wsorb:controller-status", () => {
+    if (disposed) return;
+    void refresh(); schedule();
+  });
   renderRunnerControls();
+  void refresh(); schedule();
   open.addEventListener("click", () => show(open));
   function chooseFlight(linkedSelection: FlightSelection) {
     const entry = profiles.find(entry => entry.id === linkedSelection.profileId)!;
     owner.value = entry.owner; selectOwner(); profile.value = entry.id;
+    quickProfile.value = entry.id;
     world.value = linkedSelection.worldId; seed.value = String(linkedSelection.seed);
     if (!Array.from(duration.options).some(option => Number(option.value) === linkedSelection.duration)) {
       duration.add(new Option(`${linkedSelection.duration} seconds`, String(linkedSelection.duration)));

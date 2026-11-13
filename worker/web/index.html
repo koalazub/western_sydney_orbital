@@ -38,12 +38,20 @@
       The flight HUD shows actual speed/climb in metres per second, terrain-centre clearance in metres and thrust acceleration. Details and Export include force, torque, spin, target range/closing, peaks and estimated fuel/damage. These are local rotating-frame measurements, not STP-equivalent physics.
       Period steps, T changes playback rate, R opens reset confirmation and I opens the inspector. M maximizes; X or Fullscreen enters browser fullscreen. Tab selects game controls and Enter activates them. Space is lift, not button activation. Esc closes panels or releases the view.
       Flight algorithms, predictions and controller scheduling belong in the external Python notebook. The browser runs local physics, sensors and rendering. Notebook pause and step actions affect this local model, not Space Teams Pro. The separate Python adapter calls the real Space Teams Pro SDK only inside its licensed runtime.
-      Shift+C opens Test profiles for reviewed teammate Python code. Python must run on your machine and connect to this tab before Run flight is available. Choose a world and Run flight to follow the lander automatically. With Debug guides on, the orange trail shows actual lander positions, not a predicted route.
+      Choose a profile in the footer and use Run flight for reviewed teammate Python code. Shift+C opens Test profiles for world, seed, time budget and connection setup. Python must run on your machine and connect to this tab before Run flight is available. With Debug guides on, the orange trail shows actual lander positions, not a predicted route.
     </p>
     <p id="viewport-announcement" class="screen-reader-only" role="status"></p>
     </div>
     <footer class="simulation-tools" aria-label="Python flight tools">
-      <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-controls="controller-panel" aria-keyshortcuts="Shift+C" hidden>Test profiles</button>
+      <div id="quick-launch" class="quick-launch" role="group" aria-label="Quick profile run">
+        <label for="quick-profile">Profile
+          <select id="quick-profile" name="quick-profile" aria-label="Controller profile"></select>
+        </label>
+        <button id="quick-run" type="button" disabled>Run flight</button>
+        <button id="quick-stop" type="button" hidden>Stop</button>
+        <span id="quick-status" role="status" aria-atomic="true">Checking Python runner…</span>
+      </div>
+      <button id="open-controllers" class="controller-toggle" type="button" aria-haspopup="dialog" aria-controls="controller-panel" aria-keyshortcuts="Shift+C" hidden>More options</button>
       <a class="comparison-link" href="/compare.html" target="_blank" rel="noopener noreferrer" aria-label="Compare flights, opens in a new tab">Compare flights</a>
       <section id="controller-flight" class="controller-flight" aria-label="Python profile flight" hidden>
         <div class="controller-flight__controls">

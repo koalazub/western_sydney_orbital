@@ -74,7 +74,7 @@ The source entrypoint for each person is indexed in [examples/README.md](../exam
 
 Python runs on a teammate's machine, never on the hosted site. Hosting stays on Cloudflare Free. Use the local game or the [private room relay](#hosted-python-connection) to connect that Python runner to a browser flight.
 
-Open **Test profiles** or press **Shift+C** with the scene focused. Choose a teammate, code profile, world, seed and time budget. **Run flight** stays disabled until the game is ready and the connected Python service confirms it is online and idle. Run queues the selected code on your machine and opens the lander view. **Cancel startup** stops flight preparation before submission; if submission is already confirmed, it requests Stop for that exact job. It does not shut down the Python service.
+Choose a profile in the footer below the scene, then use **Run flight**. **More options** or **Shift+C** opens the full panel for teammate, world, seed, time budget and connection setup. **Run flight** stays disabled until the game is ready and the connected Python service confirms it is online and idle. Run queues the selected code on your machine and opens the lander view. **Cancel startup** stops flight preparation before submission; if submission is already confirmed, it requests Stop for that exact job. It does not shut down the Python service.
 
 The launcher offers the competition hop with the official debris cloud, the historical L2 settings from the saved teammate comparison, and the current Across Phobos practice world. Seeds are whole numbers from 0 to 4294967295. A comparison row's **Fly this code** link fills these choices without starting a flight or Python. It still requires a runner on your machine. New runs use the current local engine and live Python timing, so they can differ from saved runs.
 
@@ -245,7 +245,7 @@ Open the private browser link printed by this command in a new tab, then choose 
 uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run
 ```
 
-Then open **Test profiles**, choose the code and world, and use **Check connection**. **Run flight** becomes available only after the game is ready and Python is online and idle. Room creation and connection alone do not start a controller.
+Then choose the code profile in the footer and use **Run flight**. **Check connection** and the world, seed and time budget are under **More options**. **Run flight** becomes available only after the game is ready and Python is online and idle. Room creation and connection alone do not start a controller.
 
 If **Fly this code** already opened a game with your choices selected, append the private link's `#room=…&key=…` fragment to that tab's existing address instead of opening another game. Keep its query parameters intact and allow Python. The loaded game accepts this fragment without resetting physics or losing the selected profile, world, seed or time budget.
 
@@ -296,7 +296,7 @@ Resilient Stop requests a guarded native release without clearing a newer manual
 
 For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI example is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; their original SDK entrypoints and displays remain in [`examples/`](../examples/).
 
-Select **Test profiles** below the game to choose Bui, Tom, Harry or another catalog owner and a code profile. **Set up Python runner** gives the local and private-room commands. Python always runs on your machine; the hosted site never starts it. **Run flight** requires a ready game and an online, idle Python service. It queues the selected Python adapter and opens the native lander view. The orange trail with Debug guides enabled records actual lander positions. **Watch flight** returns to the scene after reopening the panel. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
+Choose a catalog profile in the footer's quick launcher. **More options** opens teammate, world, seed, time budget and **Set up Python runner**; Python always runs on your machine and the hosted site never starts it. **Run flight** requires a ready game and an online, idle Python service. It queues the selected Python adapter and opens the native lander view. The orange trail with Debug guides enabled records actual lander positions. **Watch flight** returns to the scene after reopening the panel. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
 
 The profile result puts **Points** before the physical diagnostics and shows the current-formula local breakdown when terminal inputs are available. It is not an official receipt. For a damage failure, initial range must come from the actual time-zero row in the existing bounded native analytics. The job's final measurement alone does not contain that range; if the row is missing, failure points remain unavailable. No preset geometry, current-engine assumption or protocol extension fills the gap. Errors and unfinished attempts remain attempts, not zero-point results.
 

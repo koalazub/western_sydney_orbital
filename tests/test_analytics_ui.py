@@ -95,10 +95,12 @@ def test_game_tools_reserve_space_outside_the_native_canvas(page):
     for identity in ("local-python-connection", "python-room"):
         assert footer in page.ids[identity]["parents"]
         assert scene not in page.ids[identity]["parents"]
+    for identity in ("quick-launch", "quick-profile", "quick-run", "quick-stop", "quick-status"):
+        assert footer in page.ids[identity]["parents"]
     assert "grid-template-rows: minmax(0, 1fr) auto" in CSS
     tools = CSS.split(".simulation-tools {", 1)[1].split("}", 1)[0]
     assert "flex-wrap: wrap" in tools and "overflow-y: auto" in tools
-    for selector in (".controller-toggle", ".python-room"):
+    for selector in (".controller-toggle", ".quick-launch", ".python-room"):
         rule = CSS.split(selector + " {", 1)[1].split("}", 1)[0]
         assert "position: absolute" not in rule
         assert "inset-" not in rule and "z-index" not in rule
@@ -195,10 +197,14 @@ def test_every_analytics_control_has_a_native_label_and_no_profile_stop_binding(
         assert "onchange" not in control["attrs"]
     assert 'control.addEventListener("change", render)' in SOURCE
     assert 'cohort.addEventListener("change", renderRoom)' in SOURCE
-    assert 'owner.addEventListener("change", () => { selectOwner(); void changedProfile(); })' in (
-        CONTROLLERS
+    assert (
+        'owner.addEventListener("change", () => { selectOwner(); '
+        "quickProfile.value = profile.value; void changedProfile(); })" in CONTROLLERS
     )
-    assert 'profile.addEventListener("change", () => { void changedProfile(); })' in CONTROLLERS
+    assert (
+        'profile.addEventListener("change", () => { quickProfile.value = profile.value; '
+        "void changedProfile(); })" in CONTROLLERS
+    )
     for forbidden in (
         "requestStop(",
         "freshTrial(",
@@ -483,6 +489,7 @@ def test_download_links_use_only_the_fixed_public_asset_contract(page):
 
 def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(page):
     assert "disabled" in page.ids["run-controller"]["attrs"]
+    assert "disabled" in page.ids["quick-run"]["attrs"]
     assert "run.disabled = true;" in CONTROLLERS
     assert (
         "run.disabled = busy || !current?.service.online || current.service.busy "
@@ -544,8 +551,8 @@ def test_result_hook_preserves_existing_consent_poll_pause_and_focus_behavior(pa
         "before.time_s > 0 && !await confirmFreshTrial(label(chosen.profileId), chosen)",
         "const expected = await freshTrial(api, chosen, signal);",
         "const changedProfile = async () => { description(); await requestStop(); };",
-        "if (disposed || document.hidden || !autoUpdate || "
-        "!panel.open && !confirmedView()?.active) return;",
+        "if (disposed || document.hidden || !autoUpdate",
+        "|| !panel.open && !confirmedView()?.active && !resultsSource()) return;",
         'byId("pause-controller-updates").addEventListener("click", toggleUpdates);',
         "panel.querySelector<HTMLButtonElement>('.lab-navigation "
         '[data-lab-view="run"]\')?.focus();',
@@ -620,11 +627,16 @@ def test_dashboard_opens_profiles_and_keeps_recorded_data_separate():
 
 
 def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_consent(page):
-    assert content(page.ids["open-controllers"]) == "Test profiles"
+    assert content(page.ids["open-controllers"]) == "More options"
+    assert content(page.ids["quick-run"]) == "Run flight"
     assert content(page.ids["run-controller"]) == "Run flight"
     assert content(page.ids["watch-controller-flight"]) == "Watch flight"
     assert "new Set(profiles.map(entry => entry.owner))" in CONTROLLERS
-    assert 'if (owners.includes("Bui")) owner.value = "Bui";' in CONTROLLERS
+    assert (
+        'chooseQuickProfile(profiles.some(entry => entry.id === "ali_mppi") '
+        '? "ali_mppi" : profiles[0].id);' in CONTROLLERS
+    )
+    assert 'quickProfile.addEventListener("change", () => {' in CONTROLLERS
     assert "profiles.filter(entry => entry.owner === owner.value)" in CONTROLLERS
     assert "Number(b.target_seeking) - Number(a.target_seeking)" in CONTROLLERS
     for identity in (
@@ -635,9 +647,9 @@ def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_conse
         "controller-run-reason",
     ):
         assert identity in page.ids
-    submit = CONTROLLERS.split('run.addEventListener("click", async () => {', 1)[1].split(
-        "function schedule()", 1
-    )[0]
+    submit = CONTROLLERS.split("async function startRun() {", 1)[1].split("function schedule()", 1)[
+        0
+    ]
     ordered = [
         "const chosen = selection();",
         "before.time_s > 0 && !await confirmFreshTrial(label(chosen.profileId), chosen)",
@@ -733,9 +745,9 @@ def test_watched_job_keeps_stop_outside_modal_without_claiming_native_running(pa
     assert "api.control(" not in stop
     assert "starting.abort();" in stop
     assert 'confirmation.close("cancel")' in stop
-    submit = CONTROLLERS.split('run.addEventListener("click", async () => {', 1)[1].split(
-        "function schedule()", 1
-    )[0]
+    submit = CONTROLLERS.split("async function startRun() {", 1)[1].split("function schedule()", 1)[
+        0
+    ]
     assert 'stop.textContent = outsideStop.textContent = starting ? "Cancel startup"' in CONTROLLERS
     assert "const signal = starting.signal;" in submit
     assert "if (signal.aborted && record(submitted.active)" in submit
