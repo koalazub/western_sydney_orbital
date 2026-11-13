@@ -434,6 +434,27 @@ export function controllerJobsAction(state: ControllerJobsState, input: unknown,
   if (action.action === "complete") {
     shape(input, ["action", "worker_id", "job_id", "result"]);
     const workerId = uuid(action.worker_id), jobId = uuid(action.job_id);
+    // A completion whose response was lost may be retried with the same
+    // summary. Accept that exact replay without appending a duplicate result;
+    // a different late summary still conflicts rather than overwriting.
+    const recorded = state.results.find(result => result.id === jobId);
+    if (recorded) {
+      const previous: ControllerJob = {
+        id: recorded.id, created_at: 0, profile_id: recorded.profile_id, seed: recorded.seed,
+        ...(recorded.world_id === undefined ? {} : { world_id: recorded.world_id }),
+        duration_s: recorded.duration_s,
+        expected_context: {
+          trial_revision: 0, tuning_revision: 0, manual_interventions: 0,
+          seed: recorded.seed, running: false,
+        },
+        owner_page_id: null, status: "running", stop_requested: false,
+      };
+      const replay = resultSummary(action.result, previous);
+      if (JSON.stringify(replay) !== JSON.stringify(resultSummary(recorded, previous))) {
+        conflict("Controller job already has a different recorded result");
+      }
+      return { state, response: controllerJobsView(state, env.now) };
+    }
     if (!state.active || state.active.job.id !== jobId || state.active.worker_id !== workerId) {
       conflict("No matching controller job assigned to this service");
     }

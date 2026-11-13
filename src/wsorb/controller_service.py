@@ -2,7 +2,9 @@
 
 The persistent service polls authenticated job metadata only until a browser
 submits fresh Run consent. It never configures, resets, pauses or replays a job.
-Each job uses a new native transport and an independent heartbeat HTTP client.
+A completed job's metadata is retried until recorded; no flight command is
+replayed. Each job uses a new native transport and an independent heartbeat
+HTTP client.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import argparse
 import json
 import math
 import signal
+import sys
 import threading
 import time
 import uuid
@@ -59,6 +62,12 @@ _PROFILE_NAMES = {
 MAX_QUEUE_RESPONSE_BYTES = 512 * 1024
 POLL_INTERVAL_S = 1.0
 QUEUE_TIMEOUT_S = 2.0
+# The relay marks a service lost after 15 s without a poll. Tolerate a short
+# burst of transient poll failures, stop before that deadline, and keep the
+# completion retry window independent of the relay's heartbeat.
+HEARTBEAT_GRACE_S = 10.0
+COMPLETION_RETRY_WINDOW_S = 30.0
+COMPLETION_RETRY_MAX_DELAY_S = 5.0
 EXECUTION_KIND = "asynchronous_fenced_leased_API"
 _STATES = frozenset(
     {"native_terminal", "duration_limit", "wall_budget_limit", "stopped", "error", "interrupted"}
@@ -543,7 +552,8 @@ class ControllerQueue:
         )
 
     def _send(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        # One request only. In particular, a completion's unknown outcome is not retried.
+        # One request per call. Completion delivery retries the same summary at
+        # a higher level, and the relay accepts an exact replay as idempotent.
         try:
             with self._http.open(self._request(payload), timeout=QUEUE_TIMEOUT_S) as response:
                 if response.status != 200:
@@ -639,16 +649,60 @@ class JobMonitor:
         self._cancel.set()
 
 
+def _log(event: str, **fields: Any) -> None:
+    """Fixed, credential-free service diagnostics on stderr."""
+    print(json.dumps({"event": event, **fields}, sort_keys=True), file=sys.stderr, flush=True)
+
+
 def _heartbeat(
     queue: ControllerQueue, worker_id: str, monitor: JobMonitor, done: threading.Event
 ) -> None:
+    last_poll = time.monotonic()
     while not done.wait(POLL_INTERVAL_S):
         try:
-            monitor.observe(queue.poll(worker_id))
-        except Exception:
-            monitor.fail_closed()
+            reply = queue.poll(worker_id)
+        except Exception as error:
+            # A single timeout is not a lost service. The relay's own window is
+            # 15 s; stop before it expires, leaving time to deliver the result.
+            if time.monotonic() - last_poll >= HEARTBEAT_GRACE_S:
+                _log(
+                    "controller_heartbeat_lost",
+                    code=getattr(error, "code", "heartbeat_lost"),
+                )
+                monitor.fail_closed()
+        else:
+            last_poll = time.monotonic()
+            monitor.observe(reply)
         if monitor.heartbeat_lost:
             return
+
+
+def _complete_with_retry(
+    queue: ControllerQueue,
+    worker_id: str,
+    job_id: str,
+    summary: dict[str, Any],
+    stopped: threading.Event,
+) -> dict[str, Any]:
+    """Deliver one completion. The relay treats an exact replay as idempotent."""
+    deadline = time.monotonic() + COMPLETION_RETRY_WINDOW_S
+    delay, attempt = 0.5, 0
+    while True:
+        try:
+            return queue.complete(worker_id, job_id, summary)
+        except ControllerServiceError as error:
+            attempt += 1
+            if not error.retryable or time.monotonic() >= deadline:
+                _log(
+                    "controller_completion_failed",
+                    code=error.code,
+                    retryable=error.retryable,
+                    attempts=attempt,
+                )
+                raise
+            _log("controller_completion_retry", code=error.code, attempts=attempt)
+            stopped.wait(delay)
+            delay = min(delay * 2, COMPLETION_RETRY_MAX_DELAY_S)
 
 
 def validate_job_context(job: ControllerJob, context: Mapping[str, Any], *, time_s: Any) -> None:
@@ -852,22 +906,23 @@ def serve(options: CheckpointOptions, *, stopped: threading.Event | None = None)
             daemon=True,
         )
         heartbeat.start()
+        failed_completion = False
         try:
             with diagnostics.diagnostics_context() if options.diagnostics else nullcontext():
                 summary = execute_job(source, job, options, monitor)
+            try:
+                _complete_with_retry(queue, worker_id, job.id, summary, stopped)
+                completed += 1
+            except ControllerServiceError as error:
+                failed_completion = True
+                unconfirmed += 1
+                _log("controller_job_unconfirmed", job_id=job.id, code=error.code)
         finally:
             done.set()
             heartbeat.join(timeout=QUEUE_TIMEOUT_S + POLL_INTERVAL_S)
-        try:
-            queue.complete(worker_id, job.id, summary)
-            completed += 1
-        except ControllerServiceError:
-            # The backend may have received it. Keep the ID seen and never resend.
-            # Do not keep renewing an unconfirmed job forever. Let the real
-            # backend heartbeat expire, then resume metadata polling only. If
-            # completion was not received, the job stays stalled until an
-            # explicit Stop abandons it. Its actuation is never replayed.
-            unconfirmed += 1
+        if failed_completion:
+            # Do not keep renewing a job whose result could not be recorded.
+            # The relay marks it stalled; an explicit Stop can abandon it.
             stopped.wait(16.0)
     return {
         "ok": unconfirmed == 0,

@@ -339,7 +339,9 @@ def test_single_writer_queue_stop_and_matching_completion(owned_backend):
     ]
     assert completed["results"][0]["measurement"]["score"] is None
     assert completed["results"][0]["measurement"]["score_breakdown"] is None
-    assert _complete(owned_backend, worker, job["id"], summary)[0] == 409
+    status, replayed, _ = _complete(owned_backend, worker, job["id"], summary)
+    assert status == 200 and replayed["results"] == completed["results"]
+    assert _complete(owned_backend, worker, job["id"], {**summary, "elapsed_s": 1})[0] == 409
     assert _poll(owned_backend, worker)[:2] == (200, {"job": None, "stop_requested": False})
     if state_route:
         assert _request(owned_backend, route=state_route)[1] == saved_room
@@ -424,7 +426,7 @@ def test_explicit_world_and_uint32_seed_survive_queue_completion_without_replay(
     assert result["world_id"] == world_id and result["seed"] == seed
     assert result["measurement"]["time_s"] == 0 and result["release_state"] == "not_claimed"
     assert _poll(owned_backend, worker)[:2] == (200, {"job": None, "stop_requested": False})
-    assert _complete(owned_backend, worker, job["id"], summary)[0] == 409
+    assert _complete(owned_backend, worker, job["id"], summary)[0] == 200
     _unchanged(client, before)
 
 

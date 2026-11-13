@@ -32,6 +32,7 @@ from wsorb.controller_service import (
     JobMonitor,
     PollReply,
     SeenJobs,
+    _complete_with_retry,
     _heartbeat,
     _interrupt_stops,
     _job_client,
@@ -219,6 +220,93 @@ def test_missing_changed_or_failed_heartbeat_cancels_without_adopting_new_consen
     monitor = JobMonitor(job, threading.Event())
     monitor.fail_closed()
     assert monitor.cancelled() is True and monitor.heartbeat_lost is True
+
+
+def test_heartbeat_tolerates_a_transient_poll_failure_and_stops_after_its_grace(
+    monkeypatch,
+):
+    monkeypatch.setattr("wsorb.controller_service.POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr("wsorb.controller_service.HEARTBEAT_GRACE_S", 0.05)
+    job = parse_job(_job_metadata())
+    reply = PollReply(job, False)
+
+    class RecoveringQueue:
+        def __init__(self):
+            self.calls = 0
+            self.healthy = threading.Event()
+
+        def poll(self, worker_id):
+            self.calls += 1
+            if self.calls <= 2:
+                raise ControllerServiceError("queue_unavailable", "temporary", retryable=True)
+            self.healthy.set()
+            return reply
+
+    queue = RecoveringQueue()
+    monitor = JobMonitor(job, threading.Event())
+    done = threading.Event()
+    thread = threading.Thread(target=_heartbeat, args=(queue, str(uuid.uuid4()), monitor, done))
+    thread.start()
+    assert queue.healthy.wait(timeout=1.0)
+    done.set()
+    thread.join(timeout=1.0)
+    assert monitor.heartbeat_lost is False and queue.calls >= 3
+
+    class FailingQueue:
+        def poll(self, worker_id):
+            raise ControllerServiceError("queue_unavailable", "offline", retryable=True)
+
+    monitor = JobMonitor(job, threading.Event())
+    done = threading.Event()
+    thread = threading.Thread(
+        target=_heartbeat, args=(FailingQueue(), str(uuid.uuid4()), monitor, done)
+    )
+    thread.start()
+    thread.join(timeout=1.0)
+    assert monitor.heartbeat_lost is True and thread.is_alive() is False
+
+
+def test_completion_delivery_retries_retryable_failures_but_never_a_rejected_result(
+    monkeypatch,
+):
+    class NoWait:
+        def wait(self, timeout):
+            return False
+
+    class Queue:
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.calls = 0
+
+        def complete(self, worker_id, job_id, summary):
+            self.calls += 1
+            reply = self.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    queue = Queue(
+        [
+            ControllerServiceError("queue_unavailable", "temporary", retryable=True),
+            {"ok": True},
+        ]
+    )
+    assert _complete_with_retry(queue, str(uuid.uuid4()), str(uuid.uuid4()), {}, NoWait()) == {
+        "ok": True
+    }
+    assert queue.calls == 2
+
+    rejected = ControllerServiceError("queue_rejected", "rejected")
+    queue = Queue([rejected])
+    with pytest.raises(ControllerServiceError, match="rejected"):
+        _complete_with_retry(queue, str(uuid.uuid4()), str(uuid.uuid4()), {}, NoWait())
+    assert queue.calls == 1
+
+    monkeypatch.setattr("wsorb.controller_service.COMPLETION_RETRY_WINDOW_S", 0.0)
+    queue = Queue([ControllerServiceError("queue_unavailable", "temporary", retryable=True)])
+    with pytest.raises(ControllerServiceError, match="temporary"):
+        _complete_with_retry(queue, str(uuid.uuid4()), str(uuid.uuid4()), {}, NoWait())
+    assert queue.calls == 1
 
 
 def test_sigint_requests_event_cancellation_and_restores_the_previous_handler():
@@ -804,6 +892,9 @@ def test_service_has_no_native_configuration_retry_or_policy_worker_thread():
         )
     assert "target=_heartbeat" in inspect.getsource(serve)
     assert "queue.fork()" in inspect.getsource(serve)
+    serve_source = inspect.getsource(serve)
+    assert "_complete_with_retry(queue, worker_id, job.id, summary, stopped)" in serve_source
+    assert serve_source.index("_complete_with_retry(") < serve_source.index("done.set()")
 
 
 @pytest.fixture
@@ -1066,3 +1157,69 @@ def test_real_owned_service_waits_for_consent_then_runs_or_yields_once(
         stopped.set()
         worker.join(timeout=10)
     assert not worker.is_alive() and not errors
+
+
+def test_real_service_retries_a_transient_completion_and_records_once(
+    owned_native_local, tmp_path, monkeypatch
+):
+    """The real relay path, with one lost completion response before success."""
+    source = owned_native_local
+    initial = source.snapshot()
+    path = tmp_path / "service.json"
+    path.write_text(json.dumps({"version": 1, "url": source.url, "token": source._token}))
+    path.chmod(0o600)
+    options = CheckpointOptions(connection_file=path, run=True, wall_budget_s=15)
+    stopped, errors, result = threading.Event(), [], []
+    original = ControllerQueue.complete
+    attempts = []
+
+    def flaky_complete(self, worker_id, job_id, summary):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise ControllerServiceError("queue_unavailable", "temporary", retryable=True)
+        return original(self, worker_id, job_id, summary)
+
+    monkeypatch.setattr(ControllerQueue, "complete", flaky_complete)
+    worker = threading.Thread(
+        target=lambda: result.append(serve(options, stopped=stopped)), daemon=True
+    )
+    queue = ControllerQueue(source)
+    worker.start()
+    try:
+        end = time.monotonic() + 20
+        while not queue.get()["service"]["online"]:
+            assert not errors and time.monotonic() < end
+            time.sleep(0.025)
+        idle = source.snapshot()
+        from wsorb.local_api import control_context
+
+        submitted = _queue_view(
+            queue._send(
+                {
+                    "action": "submit",
+                    "profile_id": "coast",
+                    "seed": 100,
+                    "duration_s": 0.2,
+                    "fresh": True,
+                    "expected_context": control_context(idle),
+                }
+            )
+        )
+        job_id = submitted["active"]["id"]
+        while True:
+            view = queue.get()
+            if view["active"] is None and view["results"]:
+                break
+            assert not errors and time.monotonic() < end
+            time.sleep(0.025)
+        assert [item["id"] for item in view["results"]] == [job_id]
+        assert attempts == [job_id, job_id]
+        assert view["results"][0]["state"] == "duration_limit"
+    finally:
+        stopped.set()
+        worker.join(timeout=10)
+    assert not worker.is_alive() and not errors
+    assert result == [
+        {"ok": True, "state": "stopped", "completed_jobs": 1, "unconfirmed_completions": 0}
+    ]
+    assert initial["observation"]["time_s"] == 0
