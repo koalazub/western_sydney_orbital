@@ -8,7 +8,7 @@ import sys
 
 import numpy as np
 
-from ..control_contract import body_to_reference, bounded, reference_to_body
+from ..control_contract import body_to_reference, bounded
 from ._core import ExperimentalController, _Rejected
 from ._sources import load_math
 
@@ -35,6 +35,10 @@ class AliMppiController(ExperimentalController):
             "attitude_hold": False,
             "last_control": np.zeros(3),
             "rng": np.random.default_rng(12345),
+            "last_velocity": None,
+            "last_accel_world": None,
+            "last_accel_time": None,
+            "angular_velocity_world": np.zeros(3),
             "policy": policy,
         }
         self.last_time = None
@@ -59,24 +63,59 @@ class AliMppiController(ExperimentalController):
         self.state = self.math.update_belief(
             self.state, np.empty((0, 3, 3)), sample.position_world_m, now
         )
-        body_x = body_to_reference(
-            np.array([1.0, 0.0, 0.0]),
-            sample.quaternion_xyzw,
-            sample.rotation_convention,
+        rotation = np.column_stack(
+            [
+                body_to_reference(
+                    vector,
+                    sample.quaternion_xyzw,
+                    sample.rotation_convention,
+                )
+                for vector in np.eye(3)
+            ]
         )
-        desired_accel = self.math.plan(
+        body_x = rotation[:, 0]
+        angular_velocity = np.asarray(sample.angular_velocity_world_rad_s)
+        if (
+            self.state.get("last_velocity") is not None
+            and self.state.get("last_accel_time") is not None
+        ):
+            elapsed = now - self.state["last_accel_time"]
+            applied = self.state.get("last_accel_world")
+            if elapsed > 1e-6 and applied is not None:
+                observed = (
+                    np.asarray(sample.velocity_world_mps) - self.state["last_velocity"]
+                ) / elapsed
+                estimate = observed - np.asarray(applied, dtype=float)
+                if np.all(np.isfinite(estimate)):
+                    estimate = np.clip(estimate, -MAX_ACCEL_MPS2, MAX_ACCEL_MPS2)
+                    if np.linalg.norm(estimate) < 0.02:
+                        estimate = np.zeros(3)
+                    prior = self.state.get("disturbance_world")
+                    self.state["disturbance_world"] = (
+                        estimate
+                        if prior is None
+                        else 0.95 * np.asarray(prior, dtype=float) + 0.05 * estimate
+                    )
+        self.state["last_velocity"] = np.asarray(sample.velocity_world_mps).copy()
+        self.state["last_accel_time"] = now
+        self.state["angular_velocity_world"] = angular_velocity
+        accel_body, angular_body = self.math.plan_coupled(
             self.state,
             sample.position_world_m,
             sample.velocity_world_mps,
             sample.target_position_world_m,
             body_x,
+            rotation,
+            angular_velocity,
             SHIP_RADIUS_M,
             MAX_ACCEL_MPS2,
+            COMMAND_CAP_ANGULAR,
             dt,
             fuel,
             float(sample.damage_j),
             float(sample.mass_kg),
             now,
+            self.state.get("disturbance_world"),
         )
         nominal_velocity = self.math.cruise_velocity(
             np.asarray(sample.position_world_m),
@@ -85,60 +124,42 @@ class AliMppiController(ExperimentalController):
             self.state.get("policy", {}).get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
             MAX_ACCEL_MPS2,
         )
-        acceleration, self.state["burning"] = self.math.govern(
-            desired_accel,
+        governed_world, burning = self.math.govern(
+            rotation @ accel_body,
             nominal_velocity,
             np.asarray(sample.velocity_world_mps),
             self.state["burning"],
             MAX_ACCEL_MPS2,
         )
+        accel_body = rotation.T @ governed_world
+        self.state["burning"] = burning
         emergency_accel, emergency_active = self.math.emergency_guard(
             np.asarray(sample.velocity_world_mps), rows, now, MAX_ACCEL_MPS2
         )
         if emergency_active:
-            acceleration = emergency_accel
+            accel_body = rotation.T @ emergency_accel
             self.state["burning"] = True
-        if not np.all(np.isfinite(acceleration)):
-            raise _Rejected("MPPI produced a non-finite acceleration")
-        desired = self.math.unit(nominal_velocity)
+        accel_world = rotation @ accel_body
+        self.state["last_accel_world"] = accel_world.copy()
+        desired = self.state.get("attitude_desired_world", self.math.unit(nominal_velocity))
         alignment = (
-            np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
+            float(np.arccos(np.clip(body_x @ desired, -1.0, 1.0)))
             if np.linalg.norm(desired) > 1e-9
             else 0.0
         )
-        angular_velocity = np.asarray(sample.angular_velocity_world_rad_s)
-        gate = "off"
-        if self.state["burning"]:
-            gate = "burn"
-        elif self.state.get("attitude_hold", False):
-            gate = "hold"
-        elif np.linalg.norm(angular_velocity) > self.math.ATTITUDE_HOLD_RATE_RAD_S:
-            gate = "rate"
-        elif alignment > self.math.ATTITUDE_HOLD_RAD:
-            gate = "alignment"
-        attitude_trace = {}
-        angular = self.math.attitude(
-            body_x,
-            angular_velocity,
-            desired,
-            COMMAND_CAP_ANGULAR,
-            dt,
-            self.state,
-            attitude_trace,
+        attitude_trace = dict(self.state.get("attitude_trace", {}))
+        attitude_trace["applied_angular_body_rad_s2"] = [float(value) for value in angular_body]
+        gate = (
+            "burn"
+            if self.state["burning"]
+            else "hold"
+            if attitude_trace.get("hold", False)
+            else "off"
         )
-        if gate == "off":
-            angular = np.zeros(3)
-            attitude_trace["command_rad_s2"] = [0.0, 0.0, 0.0]
-            attitude_trace["command_norm_rad_s2"] = 0.0
-            attitude_trace["saturated"] = False
-        body = bounded(
-            reference_to_body(acceleration, sample.quaternion_xyzw, sample.rotation_convention),
-            COMMAND_CAP_MPS2,
-        )
-        angular_body = bounded(
-            reference_to_body(angular, sample.quaternion_xyzw, sample.rotation_convention),
-            COMMAND_CAP_ANGULAR,
-        )
+        body = bounded(accel_body, COMMAND_CAP_MPS2)
+        angular_body = bounded(angular_body, COMMAND_CAP_ANGULAR)
+        self.state["last_accel_body"] = body.copy()
+        self.state["last_alpha_body"] = angular_body.copy()
         velocity_error = np.linalg.norm(nominal_velocity - np.asarray(sample.velocity_world_mps))
         target_range = float(
             np.linalg.norm(
@@ -152,7 +173,7 @@ class AliMppiController(ExperimentalController):
             gate,
             body_x,
             desired,
-            acceleration,
+            accel_world,
             body,
             angular_velocity,
             attitude_trace,
@@ -193,15 +214,20 @@ class AliMppiController(ExperimentalController):
             "mppi_steps": self.math.MPPI_STEPS,
             "mode": "burn" if self.state["burning"] else "coast",
             "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
-            "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
+            "exhaust_velocity_mps": self.state.get("exhaust_velocity_mps", 80.0 * 9.8),
             "time_budget_s": self.state.get("policy", {}).get("time_budget_s"),
             "velocity_error_mps": velocity_error,
             "alignment_angle_rad": alignment,
-            "accel_reference_mps2": acceleration.tolist(),
+            "accel_reference_mps2": accel_world.tolist(),
+            "accel_body_mps2": body.tolist(),
             "angular_accel_body_rad_s2": angular_body.tolist(),
-            "fuel_per_delta_v_kg_per_mps": float(sample.mass_kg) / (80.0 * 9.8),
+            "disturbance_world_mps2": list(
+                np.asarray(self.state.get("disturbance_world", np.zeros(3)), dtype=float)
+            ),
             "capsule_radius_m": SHIP_RADIUS_M,
-            "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
+            "model": (
+                "coupled body-frame translation/attitude MPPI, L1 nozzle fuel, capsule clearance"
+            ),
             "telemetry": record,
         }
         return body, angular_body

@@ -37,7 +37,7 @@ def test_cruise_speed_responds_to_the_time_budget():
     assert float(core.terminal_time(1255.0, 0.0, tight, 0.5)) <= 280.0
 
 
-def test_plan_uses_the_job_budget_and_updates_the_observed_fuel_rate():
+def test_plan_uses_the_job_budget_and_estimates_exhaust_velocity():
     state = {
         "rocks": [],
         "burning": True,
@@ -63,7 +63,42 @@ def test_plan_uses_the_job_budget_and_updates_the_observed_fuel_rate():
     assert np.isfinite(acceleration).all()
     assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
     assert 0.0 < state["cruise_speed_mps"] < 36.0
-    assert state["fuel_rate_kg_s"] > 0.0
+    assert state["exhaust_velocity_mps"] > 0.0
+    assert np.asarray(state["last_accel_body"]).shape == (3,)
+
+
+def test_plan_coupled_returns_bounded_body_and_angular_commands():
+    state = {
+        "rocks": [],
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+        "last_accel_body": np.zeros(3),
+        "last_alpha_body": np.zeros(3),
+    }
+    rotation = core.rotation_from_body_x(np.array([0.0, 0.0, 1.0]))
+    acceleration, angular = core.plan_coupled(
+        state,
+        np.zeros(3),
+        np.zeros(3),
+        np.array([1000.0, 0.0, 0.0]),
+        rotation[:, 0],
+        rotation,
+        np.zeros(3),
+        3.0,
+        0.5,
+        0.05,
+        0.1,
+        0.0,
+        0.0,
+        3388.7,
+        0.0,
+        disturbance_world=np.array([0.0, -0.3, 0.0]),
+    )
+    assert acceleration.shape == (3,) and angular.shape == (3,)
+    assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
+    assert np.linalg.norm(angular) <= 0.05 + 1e-9
+    assert state["plan_diagnostics"]["disturbance_world"] == [0.0, -0.3, 0.0]
+    assert state["plan_diagnostics"]["exhaust_velocity_mps"] > 0.0
+    assert state["plan_diagnostics"]["plan_horizon_s"] > 0.0
 
 
 def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():

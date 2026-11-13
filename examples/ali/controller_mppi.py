@@ -202,10 +202,45 @@ def unit(value):
 
 
 def capsule_distance(points, centers, axis, half_length, radius):
+    points = np.asarray(points, dtype=float)
+    axis = np.asarray(axis, dtype=float)
+    if axis.ndim == 1:
+        axis = np.broadcast_to(axis, (points.shape[0], 3))
     offset = centers[None, :, :] - points[:, None, :]
-    along = np.clip(np.einsum("knd,d->kn", offset, axis), -half_length, half_length)
-    closest = points[:, None, :] + along[:, :, None] * axis
+    along = np.clip(np.einsum("knd,kd->kn", offset, axis), -half_length, half_length)
+    closest = points[:, None, :] + along[:, :, None] * axis[:, None, :]
     return np.linalg.norm(centers[None, :, :] - closest, axis=2) - radius
+
+
+def rotation_from_body_x(body_x):
+    x = unit(np.asarray(body_x, dtype=float))
+    helper = np.array([0.0, 0.0, 1.0]) if abs(float(x[2])) < 0.9 else np.array([0.0, 1.0, 0.0])
+    y = unit(np.cross(helper, x))
+    z = np.cross(x, y)
+    return np.column_stack((x, y, z))
+
+
+def skew(value):
+    value = np.asarray(value, dtype=float)
+    result = np.zeros(value.shape[:-1] + (3, 3))
+    result[..., 0, 1] = -value[..., 2]
+    result[..., 0, 2] = value[..., 1]
+    result[..., 1, 0] = value[..., 2]
+    result[..., 1, 2] = -value[..., 0]
+    result[..., 2, 0] = -value[..., 1]
+    result[..., 2, 1] = value[..., 0]
+    return result
+
+
+def advanced_rotation(rotation, angular_velocity, dt):
+    updated = rotation + np.einsum("nij,njk->nik", skew(angular_velocity * dt), rotation)
+    x = updated[..., 0]
+    x = x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-12)
+    y = updated[..., 1]
+    y = y - np.sum(y * x, axis=-1, keepdims=True) * x
+    y = y / np.maximum(np.linalg.norm(y, axis=-1, keepdims=True), 1e-12)
+    z = np.cross(x, y)
+    return np.stack((x, y, z), axis=-1)
 
 
 def cruise_velocity(
@@ -365,20 +400,30 @@ def update_belief(state, rows, ship_position, now):
     return state
 
 
-def plan(
+def plan_coupled(
     state,
     position,
     velocity,
     target_position,
     body_x,
+    rotation,
+    angular_velocity,
     radius,
     max_accel,
+    max_angular_accel,
     dt,
     fuel,
     damage,
     ship_mass_kg,
     now,
+    disturbance_world=None,
 ):
+    """Score translation and attitude together on the actual body-frame jets.
+
+    The body-frame command costs the L1 nozzle force, not just its vector
+    magnitude. The rollout therefore sees why a main-axis burn is cheaper than
+    a lateral one, and can trade slew time against that fuel saving.
+    """
     rocks = state["rocks"]
     centers = np.array([rock["position"] for rock in rocks]) if rocks else np.empty((0, 3))
     rock_velocities = np.array([rock["velocity"] for rock in rocks]) if rocks else np.empty((0, 3))
@@ -391,23 +436,30 @@ def plan(
     policy = state.setdefault("policy", {})
     values = score_parameters(policy.get("score"), policy.get("arrival_radius_m"))
     budget = policy.get("time_budget_s")
-    last_fuel = state.get("fuel_sample")
-    last_time = state.get("fuel_time")
-    fuel_rate = state.get("fuel_rate_kg_s")
+    rotation = np.asarray(rotation, dtype=float)
+    if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+        rotation = rotation_from_body_x(body_x)
+    body_x = rotation[:, 0]
+    angular_velocity = np.asarray(angular_velocity, dtype=float)
+    if angular_velocity.shape != (3,) or not np.all(np.isfinite(angular_velocity)):
+        angular_velocity = np.zeros(3)
+    last_body = np.asarray(state.get("last_accel_body", np.zeros(3)), dtype=float)
+    last_alpha = np.asarray(state.get("last_alpha_body", np.zeros(3)), dtype=float)
+    last_fuel = state.get("last_fuel_sample")
+    last_time = state.get("last_fuel_time")
+    exhaust = float(state.get("exhaust_velocity_mps", DEFAULT_EXHAUST_VELOCITY_MPS))
     if last_fuel is not None and last_time is not None:
         elapsed = now - last_time
         burned = fuel - last_fuel
-        if elapsed > 1e-6 and burned > 0.0 and state.get("burning"):
-            observed = burned / elapsed
-            if np.isfinite(observed) and observed > 0.0:
-                fuel_rate = observed if fuel_rate is None else 0.8 * fuel_rate + 0.2 * observed
-    state["fuel_sample"], state["fuel_time"] = float(fuel), float(now)
-    if fuel_rate is None or not np.isfinite(fuel_rate) or fuel_rate <= 0.0:
-        fuel_rate = max(
-            1e-6,
-            float(ship_mass_kg) * float(max_accel) / DEFAULT_EXHAUST_VELOCITY_MPS,
-        )
-    state["fuel_rate_kg_s"] = float(fuel_rate)
+        l1 = float(np.sum(np.abs(last_body)))
+        if elapsed > 1e-6 and burned > 1e-9 and l1 > 1e-9 and np.isfinite(burned):
+            observed = float(ship_mass_kg) * l1 * elapsed / burned
+            if np.isfinite(observed) and 100.0 < observed < 100000.0:
+                exhaust = 0.8 * exhaust + 0.2 * observed
+    if not np.isfinite(exhaust) or exhaust <= 0.0:
+        exhaust = DEFAULT_EXHAUST_VELOCITY_MPS
+    state["exhaust_velocity_mps"] = float(exhaust)
+    state["last_fuel_sample"], state["last_fuel_time"] = float(fuel), float(now)
     remaining = max(
         0.0,
         float(np.linalg.norm(target_position - position)) - values["arrival_radius_m"],
@@ -425,39 +477,73 @@ def plan(
         float(np.sqrt(2.0 * max(1e-6, max_accel) * remaining)),
     )
     state["cruise_speed_mps"] = cruise_speed
-    nominal = max_accel * unit(
-        cruise_velocity(
-            position,
-            target_position,
-            cruise_speed,
-            values["arrival_radius_m"],
-            max_accel,
-        )
-        - velocity
+    nominal_velocity = cruise_velocity(
+        position,
+        target_position,
+        cruise_speed,
+        values["arrival_radius_m"],
+        max_accel,
     )
+    desired = unit(nominal_velocity)
+    attitude_trace = {}
+    baseline_world = attitude(
+        body_x,
+        angular_velocity,
+        desired,
+        max(1e-6, float(max_angular_accel)),
+        max(1e-3, float(dt)),
+        state,
+        attitude_trace,
+    )
+    baseline_body = rotation.T @ baseline_world
+    state["attitude_trace"] = attitude_trace
+    state["attitude_desired_world"] = desired
+    if disturbance_world is None:
+        disturbance = state.get("disturbance_world")
+    else:
+        disturbance = disturbance_world
+    disturbance = np.asarray(disturbance, dtype=float) if disturbance is not None else np.zeros(3)
+    if disturbance.shape != (3,) or not np.all(np.isfinite(disturbance)):
+        disturbance = np.zeros(3)
+    nominal_world = max_accel * unit(nominal_velocity - velocity)
+    nominal_body = rotation.T @ nominal_world
     rng = state.setdefault("rng", np.random.default_rng(12345))
-    noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3))
-    directions = unit(nominal + noise * max_accel)
-    magnitudes = rng.random((MPPI_SAMPLES, MPPI_STEPS, 1)) * max_accel
-    controls = directions * magnitudes
+    translation_noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3)) * max_accel
+    translation = nominal_body[None, None, :] + translation_noise
+    translation_norm = np.linalg.norm(translation, axis=-1, keepdims=True)
+    translation = translation / np.maximum(1.0, translation_norm / max(1e-6, max_accel))
+    angular_noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3)) * max(1e-6, max_angular_accel)
+    angular = baseline_body[None, None, :] + angular_noise
+    angular_norm = np.linalg.norm(angular, axis=-1, keepdims=True)
+    angular = angular / np.maximum(1.0, angular_norm / max(1e-6, max_angular_accel))
     remaining_time = now + float(terminal_time(remaining, speed, cruise_speed, max_accel))
     horizon = float(np.clip(0.1 * remaining_time, 8.0, 30.0))
     plan_dt = float(np.clip(horizon / MPPI_STEPS, max(dt, 1e-3), MAX_PLAN_DT_S))
+    rotations = np.broadcast_to(rotation, (MPPI_SAMPLES, 3, 3)).copy()
+    omegas = np.broadcast_to(angular_velocity, (MPPI_SAMPLES, 3)).copy()
     positions = np.broadcast_to(position, (MPPI_SAMPLES, 3)).copy()
     ship_velocities = np.broadcast_to(velocity, (MPPI_SAMPLES, 3)).copy()
     risk = np.zeros(MPPI_SAMPLES)
+    fuel_l1 = np.zeros(MPPI_SAMPLES)
     for step in range(MPPI_STEPS):
-        positions += ship_velocities * plan_dt + 0.5 * controls[:, step] * plan_dt * plan_dt
-        ship_velocities += controls[:, step] * plan_dt
+        accel_world = np.einsum("nij,nj->ni", rotations, translation[:, step])
+        acceleration = accel_world + disturbance
+        positions += ship_velocities * plan_dt + 0.5 * acceleration * plan_dt * plan_dt
+        ship_velocities += acceleration * plan_dt
+        alpha_world = np.einsum("nij,nj->ni", rotations, angular[:, step])
+        omegas += alpha_world * plan_dt
+        rotations = advanced_rotation(rotations, omegas, plan_dt)
         if len(rocks):
             future = centers + (step + 1) * plan_dt * rock_velocities
-            distance = capsule_distance(positions, future, body_x, radius, radius)
+            axis = rotations[:, :, 0]
+            distance = capsule_distance(positions, future, axis, radius, radius)
             margin = (
                 SAFETY_MARGIN_M
                 + REACTION_TIME_S * np.linalg.norm(ship_velocities, axis=1)[:, None]
                 + 2.0 * sigmas
             )
             risk += np.sum(np.maximum(0.0, margin - (distance - radii)), axis=1)
+        fuel_l1 += np.sum(np.abs(translation[:, step]), axis=1) * plan_dt
     sample_remaining = np.maximum(
         0.0,
         np.linalg.norm(positions - target_position, axis=1) - values["arrival_radius_m"],
@@ -469,20 +555,74 @@ def plan(
         max_accel,
     )
     plan_horizon = MPPI_STEPS * plan_dt
-    burn_time = np.sum(np.linalg.norm(controls, axis=2), axis=1) / max(1e-6, max_accel) * plan_dt
-    fuel_used = fuel + float(fuel_rate) * burn_time
+    fuel_used = fuel + float(ship_mass_kg) * fuel_l1 / exhaust
     score = values["points_scale"] * (
         values["nominal_time_s"] / np.maximum(now + plan_horizon + time_to_go, 1e-3)
         - fuel_used / values["nominal_fuel_kg"]
         - values["damage_multiplier"] * damage / values["impact_threshold_j"]
         + values["score_offset"]
     )
-    switch = np.linalg.norm(controls[:, 0] - state["last_control"], axis=1)
+    switch = np.linalg.norm(translation[:, 0] - last_body, axis=1) + 0.5 * np.linalg.norm(
+        angular[:, 0] - last_alpha, axis=1
+    )
     risk_weight = values["points_scale"] * values["damage_multiplier"]
     cost = -score + risk_weight * risk + CONTROL_SWITCH_WEIGHT * switch
     best = int(np.argmin(cost))
-    state["last_control"] = controls[best, 0].copy()
-    return controls[best, 0]
+    accel_body = translation[best, 0].copy()
+    angular_body = angular[best, 0].copy()
+    state["last_accel_body"] = accel_body
+    state["last_alpha_body"] = angular_body
+    state["last_control"] = rotation @ accel_body
+    state["plan_diagnostics"] = {
+        "cruise_speed_mps": float(cruise_speed),
+        "plan_horizon_s": float(plan_horizon),
+        "plan_dt_s": float(plan_dt),
+        "exhaust_velocity_mps": float(exhaust),
+        "disturbance_world": [float(value) for value in disturbance],
+        "attitude_hold": bool(attitude_trace.get("hold", False)),
+        "accel_body": [float(value) for value in accel_body],
+        "angular_body": [float(value) for value in angular_body],
+    }
+    return accel_body, angular_body
+
+
+def plan(
+    state,
+    position,
+    velocity,
+    target_position,
+    body_x,
+    radius,
+    max_accel,
+    dt,
+    fuel,
+    damage,
+    ship_mass_kg,
+    now,
+):
+    """Compatibility wrapper for translation-only callers and numeric checks."""
+    rotation = rotation_from_body_x(body_x)
+    angular_velocity = np.asarray(state.get("angular_velocity_world", np.zeros(3)), dtype=float)
+    accel_body, _ = plan_coupled(
+        state,
+        position,
+        velocity,
+        target_position,
+        body_x,
+        rotation,
+        angular_velocity,
+        radius,
+        max_accel,
+        MAX_ANGULAR_ACCEL_RAD_S2,
+        dt,
+        fuel,
+        damage,
+        ship_mass_kg,
+        now,
+    )
+    world = rotation @ accel_body
+    state["last_control"] = world
+    return world
 
 
 def _finite(value):
@@ -687,6 +827,10 @@ state = {
     "attitude_hold": False,
     "last_control": np.zeros(3),
     "rng": np.random.default_rng(12345),
+    "last_velocity": None,
+    "last_accel_world": None,
+    "last_accel_time": None,
+    "angular_velocity_world": np.zeros(3),
     "policy": {
         "time_budget_s": DEFAULT_TIME_BUDGET_MULTIPLE * DEFAULT_SCORE["nominal_time_s"],
         "arrival_radius_m": ARRIVAL_RADIUS_M,
@@ -711,6 +855,15 @@ while True:
         st.frames.FramedVector(np.array([1.0, 0.0, 0.0]), shuttleFrame).ExprIn(phobosFrame),
         dtype=float,
     )
+    body_y = np.asarray(
+        st.frames.FramedVector(np.array([0.0, 1.0, 0.0]), shuttleFrame).ExprIn(phobosFrame),
+        dtype=float,
+    )
+    body_z = np.asarray(
+        st.frames.FramedVector(np.array([0.0, 0.0, 1.0]), shuttleFrame).ExprIn(phobosFrame),
+        dtype=float,
+    )
+    rotation = np.column_stack((body_x, body_y, body_z))
     angular_velocity = np.asarray(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame), dtype=float)
     fuel = float(shuttle.GetParam(st.VarType.double, ["Stats", "FuelUsed"]))
     damage = float(shuttle.GetParam(st.VarType.double, ["Stats", "Damage"]))
@@ -722,6 +875,43 @@ while True:
         mass = 3388.7
     rows = GetNearestDebrisLocations(80)
     state = update_belief(state, rows, position, now)
+    if state.get("last_velocity") is not None and state.get("last_accel_time") is not None:
+        elapsed = now - state["last_accel_time"]
+        applied = state.get("last_accel_world")
+        if elapsed > 1e-6 and applied is not None:
+            observed = (velocity - state["last_velocity"]) / elapsed
+            estimate = observed - np.asarray(applied, dtype=float)
+            if np.all(np.isfinite(estimate)):
+                estimate = np.clip(estimate, -max_accel, max_accel)
+                if np.linalg.norm(estimate) < 0.02:
+                    estimate = np.zeros(3)
+                prior = state.get("disturbance_world")
+                state["disturbance_world"] = (
+                    estimate
+                    if prior is None
+                    else 0.95 * np.asarray(prior, dtype=float) + 0.05 * estimate
+                )
+    state["last_velocity"] = velocity.copy()
+    state["last_accel_time"] = now
+    state["angular_velocity_world"] = angular_velocity
+    accel_body, angular_body = plan_coupled(
+        state,
+        position,
+        velocity,
+        target_position,
+        body_x,
+        rotation,
+        angular_velocity,
+        radius,
+        max_accel,
+        max_angular,
+        dt,
+        fuel,
+        damage,
+        mass,
+        now,
+        state.get("disturbance_world"),
+    )
     nominal_velocity = cruise_velocity(
         position,
         target_position,
@@ -729,54 +919,27 @@ while True:
         ARRIVAL_RADIUS_M,
         max_accel,
     )
-    desired_accel = plan(
-        state,
-        position,
+    governed_world, burning = govern(
+        rotation @ accel_body,
+        nominal_velocity,
         velocity,
-        target_position,
-        body_x,
-        radius,
+        state["burning"],
         max_accel,
-        dt,
-        fuel,
-        damage,
-        mass,
-        now,
     )
-    accel_world, state["burning"] = govern(
-        desired_accel, nominal_velocity, velocity, state["burning"], max_accel
-    )
+    accel_body = rotation.T @ governed_world
+    state["burning"] = burning
     emergency_accel, emergency_active = emergency_guard(velocity, rows, now, max_accel)
     if emergency_active:
-        accel_world = emergency_accel
+        accel_body = rotation.T @ emergency_accel
         state["burning"] = True
-    desired = unit(nominal_velocity)
-    alignment = (
-        np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
-        if np.linalg.norm(desired) > 1e-9
-        else 0.0
-    )
-    gate = "off"
-    if state["burning"]:
-        gate = "burn"
-    elif state.get("attitude_hold", False):
-        gate = "hold"
-    elif np.linalg.norm(angular_velocity) > ATTITUDE_HOLD_RATE_RAD_S:
-        gate = "rate"
-    elif alignment > ATTITUDE_HOLD_RAD:
-        gate = "alignment"
-    attitude_trace = {}
-    angular_world = attitude(
-        body_x, angular_velocity, desired, max_angular, dt, state, attitude_trace
-    )
-    if gate == "off":
-        angular_world = np.zeros(3)
-        attitude_trace["command_rad_s2"] = [0.0, 0.0, 0.0]
-        attitude_trace["command_norm_rad_s2"] = 0.0
-        attitude_trace["saturated"] = False
-    body_accel = st.frames.FramedVector(accel_world, phobosFrame).ExprIn(shuttleFrame)
-    body_angular = st.frames.FramedVector(angular_world, phobosFrame).ExprIn(shuttleFrame)
-    SetCommand(body_accel, body_angular)
+    accel_world = rotation @ accel_body
+    state["last_accel_world"] = accel_world.copy()
+    state["last_accel_body"] = accel_body.copy()
+    desired = state.get("attitude_desired_world", unit(nominal_velocity))
+    attitude_trace = dict(state.get("attitude_trace", {}))
+    attitude_trace["applied_angular_body_rad_s2"] = [float(value) for value in angular_body]
+    gate = "burn" if state["burning"] else "hold" if attitude_trace.get("hold", False) else "off"
+    SetCommand(accel_body, angular_body)
 
     speed = np.linalg.norm(velocity)
     target_range = np.linalg.norm(target_position - position)
@@ -790,7 +953,7 @@ while True:
         body_x,
         desired,
         accel_world,
-        body_accel,
+        accel_body,
         angular_velocity,
         attitude_trace,
         velocity_error,
