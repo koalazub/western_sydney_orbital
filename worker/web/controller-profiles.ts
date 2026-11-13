@@ -164,7 +164,6 @@ export function installControllerProfiles(options: Options) {
   run.disabled = true;
   const quickProfile = byId<HTMLSelectElement>("quick-profile");
   const quickRun = byId<HTMLButtonElement>("quick-run");
-  const quickStop = byId<HTMLButtonElement>("quick-stop");
   const quickStatus = byId("quick-status");
   const stop = byId<HTMLButtonElement>("stop-controller");
   const outsideStop = byId<HTMLButtonElement>("stop-controller-flight");
@@ -229,8 +228,6 @@ export function installControllerProfiles(options: Options) {
     run.disabled = busy || !current?.service.online || current.service.busy || !!active || !options.ready();
     quickRun.disabled = run.disabled;
     quickProfile.disabled = busy || !!active || !!starting;
-    quickStop.hidden = !active;
-    quickStop.disabled = !active || busy || !!starting;
     const quickWorld = flightWorlds.find(item => item.id === world.value);
     const quickText = starting ? startupMessage
       : !options.ready() ? "Waiting for the game to be ready…"
@@ -589,7 +586,6 @@ export function installControllerProfiles(options: Options) {
   }
   run.addEventListener("click", () => { void startRun(); });
   quickRun.addEventListener("click", () => { void startRun(); });
-  quickStop.addEventListener("click", () => { void requestStop(); });
   quickProfile.addEventListener("change", () => {
     chooseQuickProfile(quickProfile.value);
     renderRunnerControls();

@@ -95,8 +95,9 @@ def test_game_tools_reserve_space_outside_the_native_canvas(page):
     for identity in ("local-python-connection", "python-room"):
         assert footer in page.ids[identity]["parents"]
         assert scene not in page.ids[identity]["parents"]
-    for identity in ("quick-launch", "quick-profile", "quick-run", "quick-stop", "quick-status"):
+    for identity in ("quick-launch", "quick-profile", "quick-run", "quick-status"):
         assert footer in page.ids[identity]["parents"]
+    assert "quick-stop" not in page.ids
     assert "grid-template-rows: minmax(0, 1fr) auto" in CSS
     tools = CSS.split(".simulation-tools {", 1)[1].split("}", 1)[0]
     assert "flex-wrap: wrap" in tools and "overflow-y: auto" in tools
