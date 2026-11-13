@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import sys
+
 import numpy as np
 
 from ..control_contract import body_to_reference, bounded, reference_to_body
@@ -16,15 +20,22 @@ SHIP_RADIUS_M = 3.0
 
 
 class AliMppiController(ExperimentalController):
-    def __init__(self, metadata):
+    def __init__(self, metadata, settings=None):
         super().__init__(metadata)
         self.math = load_math("ali_mppi")["core"]
+        settings = settings if isinstance(settings, dict) else {}
+        policy = {}
+        for key in ("time_budget_s", "arrival_radius_m"):
+            value = settings.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                policy[key] = float(value)
         self.state = {
             "rocks": [],
             "burning": False,
             "attitude_hold": False,
             "last_control": np.zeros(3),
             "rng": np.random.default_rng(12345),
+            "policy": policy,
         }
         self.last_time = None
 
@@ -68,7 +79,11 @@ class AliMppiController(ExperimentalController):
             now,
         )
         nominal_velocity = self.math.cruise_velocity(
-            np.asarray(sample.position_world_m), np.asarray(sample.target_position_world_m)
+            np.asarray(sample.position_world_m),
+            np.asarray(sample.target_position_world_m),
+            self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
+            self.state.get("policy", {}).get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
+            MAX_ACCEL_MPS2,
         )
         acceleration, self.state["burning"] = self.math.govern(
             desired_accel,
@@ -166,12 +181,20 @@ class AliMppiController(ExperimentalController):
         record["nearest_raw_range_m"] = min(raw_ranges) if raw_ranges else None
         record["nearest_track_range_m"] = min(track_ranges) if track_ranges else None
         record["line"] = self.math.telemetry_line(record)
+        if os.environ.get("WSORB_MPPI_DEBUG") == "1":
+            print(
+                json.dumps(record, separators=(",", ":"), allow_nan=False),
+                file=sys.stderr,
+                flush=True,
+            )
         self._report["guidance"] = {
             "track_count": len(self.state["rocks"]),
             "mppi_samples": self.math.MPPI_SAMPLES,
             "mppi_steps": self.math.MPPI_STEPS,
             "mode": "burn" if self.state["burning"] else "coast",
-            "cruise_speed_mps": self.math.CRUISE_SPEED_MPS,
+            "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
+            "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
+            "time_budget_s": self.state.get("policy", {}).get("time_budget_s"),
             "velocity_error_mps": velocity_error,
             "alignment_angle_rad": alignment,
             "accel_reference_mps2": acceleration.tolist(),

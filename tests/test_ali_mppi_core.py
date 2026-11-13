@@ -11,6 +11,61 @@ from wsorb.controllers._sources import load_math
 core = load_math("ali_mppi")["core"]
 
 
+def test_terminal_time_uses_the_braking_profile():
+    assert np.isclose(core.terminal_time(98.0, 0.0, 7.0, 0.5), 28.0)
+    assert core.terminal_time(0.0, 7.0, 7.0, 0.5) == 0.0
+    assert core.terminal_time(10.0, 7.0, 7.0, 0.5) >= 10.0 / 7.0 - 1e-9
+
+
+def test_score_parameters_accept_overrides_and_keep_published_defaults():
+    values = core.score_parameters(
+        {"nominal_time_s": 90.0, "nominal_fuel_kg": -1.0, "score_offset": 0.0},
+        55.0,
+    )
+    assert values["nominal_time_s"] == 90.0
+    assert values["nominal_fuel_kg"] == 75.0
+    assert values["arrival_radius_m"] == 55.0
+    assert values["score_offset"] == 0.0
+
+
+def test_cruise_speed_responds_to_the_time_budget():
+    defaults = core.score_parameters()
+    loose = core.optimal_cruise_speed(1255.0, 0.0, 0.5, defaults, 0.0, 0.0, 2.16, 0.0, 600.0)
+    tight = core.optimal_cruise_speed(1255.0, 0.0, 0.5, defaults, 0.0, 0.0, 2.16, 0.0, 280.0)
+    assert 1.0 <= loose < 36.0 and 1.0 <= tight < 36.0
+    assert tight >= loose
+    assert float(core.terminal_time(1255.0, 0.0, tight, 0.5)) <= 280.0
+
+
+def test_plan_uses_the_job_budget_and_updates_the_observed_fuel_rate():
+    state = {
+        "rocks": [],
+        "burning": True,
+        "last_control": np.zeros(3),
+        "fuel_sample": 1.0,
+        "fuel_time": 0.0,
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+    }
+    acceleration = core.plan(
+        state,
+        np.zeros(3),
+        np.zeros(3),
+        np.array([1305.8, 0.0, 0.0]),
+        np.array([1.0, 0.0, 0.0]),
+        3.0,
+        0.5,
+        0.1,
+        2.0,
+        0.0,
+        3388.7,
+        1.0,
+    )
+    assert np.isfinite(acceleration).all()
+    assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
+    assert 0.0 < state["cruise_speed_mps"] < 36.0
+    assert state["fuel_rate_kg_s"] > 0.0
+
+
 def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():
     velocity = core.cruise_velocity(np.zeros(3), np.array([100.0, 0.0, 0.0]))
     assert np.isclose(np.linalg.norm(velocity), 7.0)
@@ -31,6 +86,13 @@ def test_burn_governor_uses_hysteresis_instead_of_micro_bursts():
 
     acceleration, burning = core.govern(np.zeros(3), nominal, np.array([6.9, 0.0, 0.0]), True, 0.5)
     assert not burning and np.allclose(acceleration, np.zeros(3))
+
+
+def test_governor_stops_a_forward_plan_burn_at_the_target_speed():
+    nominal = np.array([7.0, 0.0, 0.0])
+    acceleration, burning = core.govern(np.array([0.5, 0.0, 0.0]), nominal, nominal, True, 0.5)
+    assert not burning
+    assert np.allclose(acceleration, np.zeros(3))
 
 
 def test_capsule_distance_uses_the_oriented_segment():

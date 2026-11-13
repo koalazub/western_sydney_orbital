@@ -828,7 +828,6 @@ def run_trial(
     if profile is None:
         raise CheckpointError("invalid_policy", "Select one reviewed controller profile.")
     portable = policy in ("baseline", "body-axis")
-    controller = create_controller(policy)
     config = asdict(policy_config(policy)) if portable else {"profile": profile["profile"]}
     origin_wall = time.monotonic()
     deadline = min(math.inf if deadline is None else deadline, origin_wall + options.wall_budget_s)
@@ -865,6 +864,19 @@ def run_trial(
     origin_sim = _number(observation.get("time_s"))
     if origin_sim is None:
         raise CheckpointError("source_contract", "The actual native clock is unavailable.")
+    controller_settings = None
+    if policy == "ali_mppi":
+        geometry = observation.get("geometry")
+        controller_settings = {"time_budget_s": options.duration_s}
+        arrival = geometry.get("arrival_radius_m") if isinstance(geometry, Mapping) else None
+        if (
+            isinstance(arrival, (int, float))
+            and not isinstance(arrival, bool)
+            and math.isfinite(arrival)
+            and arrival > 0
+        ):
+            controller_settings["arrival_radius_m"] = float(arrival)
+    controller = create_controller(policy, controller_settings)
     from .flight_analytics import FlightAnalyticsRecorder
 
     # Never attribute an existing flight's earlier burns to this Run action.

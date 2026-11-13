@@ -7,6 +7,7 @@ Only explicit controller construction loads the selected implementation.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from copy import deepcopy
 from importlib.resources import files
@@ -44,10 +45,21 @@ def create_controller(controller_id: str, settings: dict | None = None):
     allowed = (
         {"position_gain_s2", "velocity_gain_s", "avoidance_range_m", "avoidance_accel_mps2"}
         if controller_id == "basic_pd_radar"
+        else {"time_budget_s", "arrival_radius_m"}
+        if controller_id == "ali_mppi"
         else set()
     )
     if set(settings) - allowed:
         raise ValueError("Unsupported settings for this fixed reviewed controller profile")
+    if controller_id == "ali_mppi":
+        for key, value in settings.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"Ali MPPI {key} must be a positive finite number")
     if controller_id in ("baseline", "body-axis"):
         # Checkpoint also imports this catalog. Defer this import until its
         # module is loaded, and return the original class/report unwrapped.
@@ -71,7 +83,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
     if controller_id == "ali_mppi":
         from ._ali_mppi import AliMppiController
 
-        return AliMppiController(metadata)
+        return AliMppiController(metadata, settings)
     if controller_id in ("ali_official_profile", "official_basic_beeline"):
         from ._official import OfficialController
 

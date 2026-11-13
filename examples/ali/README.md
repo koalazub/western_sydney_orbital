@@ -37,11 +37,20 @@ uv run --locked wsorb controllers run --isolated --profile ali_radar_mvp --run -
 for analysis and numeric tests. The shell only reads the simulator, calls the
 core, logs telemetry and writes the command.
 
-The policy uses a 7 m/s cruise target with a terminal braking profile, a
-burn/coast governor with 0.50/0.30 m/s hysteresis, a 48 x 40 MPPI rollout, a
-control-switch penalty, capsule clearance, a braking-curve attitude rate target
-with a terminal hold, and an omnidirectional raw-radar emergency guard. The
-governor exists to stop the previous continuous micro-burns.
+The policy derives a stable cruise reference from the job's actual time budget
+and the initial target range (about 7 m/s for the 300 s official hop) instead of
+a fixed speed. It uses a braking-profile terminal time, an online fuel-rate
+estimate, a 48 x 40 MPPI rollout with a remaining-time horizon, a burn/coast
+governor with 0.50/0.30 m/s hysteresis, a control-switch penalty, capsule
+clearance, a braking-curve attitude rate target with a terminal hold, and an
+omnidirectional raw-radar emergency guard. The score coefficients are one
+configuration; the run supplies its duration and the native arrival radius. The
+governor stops a forward plan burn once the ship is at the target speed, so the
+rollout cannot hold the engine on against the local gravity.
+
+Body +X is pointed at the stable nominal velocity, so the initial ~90° slew puts
+the main engine on the transfer direction. The actual burn alignment is
+telemetry; it is not fed back as a noisy attitude target.
 
 The shell emits one JSON attitude record every 0.5 s through `st.logger_info`,
 plus a compact line through `st.OnScreenLogMessage`. The record contains

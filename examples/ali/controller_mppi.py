@@ -85,6 +85,115 @@ EMERGENCY_LOOKAHEAD_S = 5.0
 EMERGENCY_MARGIN_M = 4.0
 EMERGENCY_ESCAPE_MPS = 2.5
 MIN_TIME_TO_GO_SPEED_MPS = 1.0
+MIN_CRUISE_SPEED_MPS = 1.0
+MAX_PLAN_DT_S = 0.5
+DEFAULT_EXHAUST_VELOCITY_MPS = 80.0 * 9.8
+DEFAULT_TIME_BUDGET_MULTIPLE = 2.5
+CRUISE_TIME_FRACTION = 0.6
+DEFAULT_SCORE = {
+    "nominal_time_s": 120.0,
+    "nominal_fuel_kg": 75.0,
+    "impact_threshold_j": 209200.0,
+    "arrival_radius_m": ARRIVAL_RADIUS_M,
+    "points_scale": 100.0,
+    "damage_multiplier": 2.0,
+    "score_offset": 0.5,
+}
+
+
+def score_parameters(score=None, arrival_radius=None):
+    """Resolve the published score coefficients once, not at every sample."""
+    values = dict(DEFAULT_SCORE)
+    if isinstance(score, dict):
+        for key in values:
+            value = score.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if not np.isfinite(value) or value < 0.0:
+                continue
+            if key != "score_offset" and value <= 0.0:
+                continue
+            values[key] = float(value)
+    if arrival_radius is not None:
+        try:
+            radius = float(arrival_radius)
+        except (TypeError, ValueError):
+            radius = 0.0
+        if np.isfinite(radius) and radius > 0.0:
+            values["arrival_radius_m"] = radius
+    return values
+
+
+def terminal_time(remaining_m, speed_mps, cruise_mps, accel_mps2):
+    """Braking-profile time estimate, vectorized over samples."""
+    remaining = np.maximum(np.asarray(remaining_m, dtype=float), 0.0)
+    speed = np.maximum(np.asarray(speed_mps, dtype=float), 0.0)
+    cruise = np.maximum(np.asarray(cruise_mps, dtype=float), MIN_CRUISE_SPEED_MPS)
+    cruise = np.maximum(cruise, speed)
+    accel = np.maximum(np.asarray(accel_mps2, dtype=float), 1e-6)
+    accel_distance = np.maximum(0.0, (cruise * cruise - speed * speed) / (2.0 * accel))
+    brake_distance = cruise * cruise / (2.0 * accel)
+    cruise_time = (
+        (cruise - speed) / accel
+        + (remaining - accel_distance - brake_distance) / cruise
+        + cruise / accel
+    )
+    peak = np.sqrt(np.maximum(0.0, accel * remaining + 0.5 * speed * speed))
+    triangular_time = (peak - speed) / accel + peak / accel
+    arrival_time = remaining / np.maximum(speed, 1e-6)
+    result = np.where(remaining >= accel_distance + brake_distance, cruise_time, triangular_time)
+    result = np.where(remaining <= speed * speed / (2.0 * accel), arrival_time, result)
+    return np.maximum(result, 0.0)
+
+
+def optimal_cruise_speed(
+    remaining_m,
+    speed_mps,
+    max_accel_mps2,
+    score,
+    fuel_kg,
+    damage_j,
+    fuel_rate_kg_s,
+    now_s,
+    time_budget_s=None,
+):
+    """Choose the cruise speed that maximizes the score under the job budget.
+
+    Retained for a disturbance-aware rollout. The stable reference policy does
+    not call it: without the local environment acceleration, a lower target can
+    sit in a gravity-balanced regime and burn without accelerating.
+    """
+    remaining = max(0.0, float(remaining_m))
+    if remaining <= 0.0:
+        return 0.0
+    accel = max(1e-6, float(max_accel_mps2))
+    speed = max(0.0, float(speed_mps))
+    values = score_parameters(score)
+    budget = (
+        DEFAULT_TIME_BUDGET_MULTIPLE * values["nominal_time_s"]
+        if time_budget_s is None
+        else float(time_budget_s)
+    )
+    margin = max(5.0, 0.05 * max(budget, 1.0))
+    maximum = max(MIN_CRUISE_SPEED_MPS, np.sqrt(2.0 * accel * remaining))
+    candidates = np.linspace(MIN_CRUISE_SPEED_MPS, maximum, 33)
+    best_speed, best_score = None, -np.inf
+    fuel_rate = max(0.0, float(fuel_rate_kg_s))
+    for candidate in candidates:
+        elapsed = float(terminal_time(remaining, speed, candidate, accel))
+        if now_s + elapsed > budget - margin:
+            continue
+        burn_time = (abs(candidate - speed) + candidate) / accel
+        fuel_used = max(0.0, float(fuel_kg)) + fuel_rate * burn_time
+        value = values["points_scale"] * (
+            values["nominal_time_s"] / max(now_s + elapsed, 1e-3)
+            - fuel_used / values["nominal_fuel_kg"]
+            - values["damage_multiplier"] * max(0.0, float(damage_j)) / values["impact_threshold_j"]
+            + values["score_offset"]
+        )
+        if value > best_score:
+            best_speed, best_score = float(candidate), float(value)
+    return maximum if best_speed is None else best_speed
 
 
 def unit(value):
@@ -99,14 +208,24 @@ def capsule_distance(points, centers, axis, half_length, radius):
     return np.linalg.norm(centers[None, :, :] - closest, axis=2) - radius
 
 
-def cruise_velocity(position, target_position):
+def cruise_velocity(
+    position,
+    target_position,
+    cruise_speed_mps=CRUISE_SPEED_MPS,
+    arrival_radius_m=ARRIVAL_RADIUS_M,
+    brake_accel_mps2=BRAKE_ACCEL_MPS2,
+):
     delta = target_position - position
     distance = np.linalg.norm(delta)
     if distance < 1e-9:
         return np.zeros(3)
     speed = min(
-        CRUISE_SPEED_MPS,
-        np.sqrt(2.0 * BRAKE_ACCEL_MPS2 * max(distance - ARRIVAL_RADIUS_M, 0.0)),
+        max(0.0, float(cruise_speed_mps)),
+        np.sqrt(
+            2.0
+            * max(1e-6, float(brake_accel_mps2))
+            * max(distance - max(0.0, float(arrival_radius_m)), 0.0)
+        ),
     )
     return speed * delta / distance
 
@@ -120,7 +239,11 @@ def govern(desired_accel, nominal_velocity, velocity, burning, max_accel):
     error = np.linalg.norm(error_vec)
     desired_norm = np.linalg.norm(desired_accel)
     target_unit = unit(nominal_velocity)
-    forward_avoid = desired_norm > BURN_START_MPS and float(desired_accel @ target_unit) > 0.0
+    forward_avoid = (
+        desired_norm > BURN_START_MPS
+        and float(desired_accel @ target_unit) > 0.0
+        and error > BURN_STOP_MPS
+    )
     if burning:
         if error < BURN_STOP_MPS and not forward_avoid:
             burning = False
@@ -265,13 +388,61 @@ def plan(
         nearest = np.argsort(np.linalg.norm(centers - position, axis=1))[:30]
         centers, rock_velocities = centers[nearest], rock_velocities[nearest]
         radii, sigmas = radii[nearest], sigmas[nearest]
-    nominal = max_accel * unit(cruise_velocity(position, target_position) - velocity)
+    policy = state.setdefault("policy", {})
+    values = score_parameters(policy.get("score"), policy.get("arrival_radius_m"))
+    budget = policy.get("time_budget_s")
+    last_fuel = state.get("fuel_sample")
+    last_time = state.get("fuel_time")
+    fuel_rate = state.get("fuel_rate_kg_s")
+    if last_fuel is not None and last_time is not None:
+        elapsed = now - last_time
+        burned = fuel - last_fuel
+        if elapsed > 1e-6 and burned > 0.0 and state.get("burning"):
+            observed = burned / elapsed
+            if np.isfinite(observed) and observed > 0.0:
+                fuel_rate = observed if fuel_rate is None else 0.8 * fuel_rate + 0.2 * observed
+    state["fuel_sample"], state["fuel_time"] = float(fuel), float(now)
+    if fuel_rate is None or not np.isfinite(fuel_rate) or fuel_rate <= 0.0:
+        fuel_rate = max(
+            1e-6,
+            float(ship_mass_kg) * float(max_accel) / DEFAULT_EXHAUST_VELOCITY_MPS,
+        )
+    state["fuel_rate_kg_s"] = float(fuel_rate)
+    remaining = max(
+        0.0,
+        float(np.linalg.norm(target_position - position)) - values["arrival_radius_m"],
+    )
+    speed = float(np.linalg.norm(velocity))
+    budget_value = (
+        DEFAULT_TIME_BUDGET_MULTIPLE * values["nominal_time_s"] if budget is None else float(budget)
+    )
+    reference = state.get("cruise_reference_mps")
+    if reference is None:
+        reference = remaining / max(1.0, CRUISE_TIME_FRACTION * budget_value)
+        state["cruise_reference_mps"] = float(reference)
+    cruise_speed = min(
+        max(MIN_CRUISE_SPEED_MPS, float(reference)),
+        float(np.sqrt(2.0 * max(1e-6, max_accel) * remaining)),
+    )
+    state["cruise_speed_mps"] = cruise_speed
+    nominal = max_accel * unit(
+        cruise_velocity(
+            position,
+            target_position,
+            cruise_speed,
+            values["arrival_radius_m"],
+            max_accel,
+        )
+        - velocity
+    )
     rng = state.setdefault("rng", np.random.default_rng(12345))
     noise = rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3))
     directions = unit(nominal + noise * max_accel)
     magnitudes = rng.random((MPPI_SAMPLES, MPPI_STEPS, 1)) * max_accel
     controls = directions * magnitudes
-    plan_dt = max(dt, PLAN_DT_S)
+    remaining_time = now + float(terminal_time(remaining, speed, cruise_speed, max_accel))
+    horizon = float(np.clip(0.1 * remaining_time, 8.0, 30.0))
+    plan_dt = float(np.clip(horizon / MPPI_STEPS, max(dt, 1e-3), MAX_PLAN_DT_S))
     positions = np.broadcast_to(position, (MPPI_SAMPLES, 3)).copy()
     ship_velocities = np.broadcast_to(velocity, (MPPI_SAMPLES, 3)).copy()
     risk = np.zeros(MPPI_SAMPLES)
@@ -287,23 +458,28 @@ def plan(
                 + 2.0 * sigmas
             )
             risk += np.sum(np.maximum(0.0, margin - (distance - radii)), axis=1)
-    time_to_go = np.maximum(
-        0.0, np.linalg.norm(positions - target_position, axis=1) - ARRIVAL_RADIUS_M
+    sample_remaining = np.maximum(
+        0.0,
+        np.linalg.norm(positions - target_position, axis=1) - values["arrival_radius_m"],
     )
-    time_to_go = time_to_go / np.maximum(
-        np.linalg.norm(ship_velocities, axis=1), MIN_TIME_TO_GO_SPEED_MPS
+    time_to_go = terminal_time(
+        sample_remaining,
+        np.linalg.norm(ship_velocities, axis=1),
+        cruise_speed,
+        max_accel,
     )
     plan_horizon = MPPI_STEPS * plan_dt
-    delta_v = np.sum(np.linalg.norm(controls, axis=2), axis=1) * plan_dt
-    fuel_used = fuel + ship_mass_kg * delta_v / (80.0 * 9.8)
-    score = 100.0 * (
-        120.0 / np.maximum(now + plan_horizon + time_to_go, 1e-3)
-        - fuel_used / 75.0
-        - 2.0 * damage / 209200.0
-        + 0.5
+    burn_time = np.sum(np.linalg.norm(controls, axis=2), axis=1) / max(1e-6, max_accel) * plan_dt
+    fuel_used = fuel + float(fuel_rate) * burn_time
+    score = values["points_scale"] * (
+        values["nominal_time_s"] / np.maximum(now + plan_horizon + time_to_go, 1e-3)
+        - fuel_used / values["nominal_fuel_kg"]
+        - values["damage_multiplier"] * damage / values["impact_threshold_j"]
+        + values["score_offset"]
     )
     switch = np.linalg.norm(controls[:, 0] - state["last_control"], axis=1)
-    cost = -score + RISK_WEIGHT * risk + CONTROL_SWITCH_WEIGHT * switch
+    risk_weight = values["points_scale"] * values["damage_multiplier"]
+    cost = -score + risk_weight * risk + CONTROL_SWITCH_WEIGHT * switch
     best = int(np.argmin(cost))
     state["last_control"] = controls[best, 0].copy()
     return controls[best, 0]
@@ -511,6 +687,10 @@ state = {
     "attitude_hold": False,
     "last_control": np.zeros(3),
     "rng": np.random.default_rng(12345),
+    "policy": {
+        "time_budget_s": DEFAULT_TIME_BUDGET_MULTIPLE * DEFAULT_SCORE["nominal_time_s"],
+        "arrival_radius_m": ARRIVAL_RADIUS_M,
+    },
 }
 last_time, last_status, last_display, last_alert = None, -np.inf, -np.inf, -np.inf
 
@@ -542,7 +722,13 @@ while True:
         mass = 3388.7
     rows = GetNearestDebrisLocations(80)
     state = update_belief(state, rows, position, now)
-    nominal_velocity = cruise_velocity(position, target_position)
+    nominal_velocity = cruise_velocity(
+        position,
+        target_position,
+        state.get("cruise_speed_mps", CRUISE_SPEED_MPS),
+        ARRIVAL_RADIUS_M,
+        max_accel,
+    )
     desired_accel = plan(
         state,
         position,
