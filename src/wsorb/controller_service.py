@@ -47,6 +47,7 @@ from .local_api import (
     control_context,
 )
 from .room_api import RoomSimulation, _http_client
+from .scoring import FORMULA as PRACTICE_SCORE_FORMULA
 from .scoring import native_score_breakdown
 
 _PROFILE_NAMES = {
@@ -68,6 +69,9 @@ QUEUE_TIMEOUT_S = 2.0
 HEARTBEAT_GRACE_S = 10.0
 COMPLETION_RETRY_WINDOW_S = 30.0
 COMPLETION_RETRY_MAX_DELAY_S = 5.0
+# A restarted service can arrive before the relay expires the old worker's
+# 15 s lease. Wait for that lease instead of exiting on the first 409.
+SERVICE_LEASE_WAIT_S = 20.0
 EXECUTION_KIND = "asynchronous_fenced_leased_API"
 _STATES = frozenset(
     {"native_terminal", "duration_limit", "wall_budget_limit", "stopped", "error", "interrupted"}
@@ -173,10 +177,18 @@ _SUMMARY_FIELDS = frozenset(
 class ControllerServiceError(RuntimeError):
     """Fixed, credential-free failures. Remote exception text is never public."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        status: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.status = status
 
 
 def _number(value: Any) -> float | None:
@@ -396,10 +408,16 @@ def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
     measurement["status"] = (
         status if isinstance(status, str) and status in _MISSION_STATES else "unknown"
     )
-    measurement["score"] = _number(final.get("score"))
-    measurement["score_breakdown"] = native_score_breakdown(
-        final.get("score_breakdown"), score=measurement["score"]
-    )
+    score = _number(final.get("score"))
+    breakdown = native_score_breakdown(final.get("score_breakdown"), score=score)
+    # Controller history uses the reviewed practice formula. A competition-
+    # preset receipt is a different formula; keep its raw measurements but do
+    # not relabel its score as a practice score. The UI derives its local
+    # practice estimate from those measurements.
+    if breakdown is not None and breakdown["formula"] != PRACTICE_SCORE_FORMULA:
+        score, breakdown = None, None
+    measurement["score"] = score
+    measurement["score_breakdown"] = breakdown
     if trial.get("world_metadata_unchanged") is False:
         # A later receipt may belong to a manual takeover or replacement world.
         # Never attribute that flight's score to the original profile job.
@@ -558,7 +576,9 @@ class ControllerQueue:
             with self._http.open(self._request(payload), timeout=QUEUE_TIMEOUT_S) as response:
                 if response.status != 200:
                     raise ControllerServiceError(
-                        "queue_rejected", "Controller queue rejected the request."
+                        "queue_rejected",
+                        "Controller queue rejected the request.",
+                        status=response.status,
                     )
                 body = response.read(MAX_QUEUE_RESPONSE_BYTES + 1)
         except HTTPError as error:
@@ -568,6 +588,7 @@ class ControllerQueue:
                 "queue_rejected",
                 "Controller queue rejected the request.",
                 retryable=status in (408, 429, 500, 502, 503, 504),
+                status=status,
             ) from None
         except (OSError, URLError, HTTPException):
             raise ControllerServiceError(
@@ -697,10 +718,16 @@ def _complete_with_retry(
                     "controller_completion_failed",
                     code=error.code,
                     retryable=error.retryable,
+                    status=error.status,
                     attempts=attempt,
                 )
                 raise
-            _log("controller_completion_retry", code=error.code, attempts=attempt)
+            _log(
+                "controller_completion_retry",
+                code=error.code,
+                status=error.status,
+                attempts=attempt,
+            )
             stopped.wait(delay)
             delay = min(delay * 2, COMPLETION_RETRY_MAX_DELAY_S)
 
@@ -884,14 +911,26 @@ def serve(options: CheckpointOptions, *, stopped: threading.Event | None = None)
     queue = ControllerQueue(source)
     stopped = threading.Event() if stopped is None else stopped
     worker_id, seen, completed, unconfirmed = str(uuid.uuid4()), SeenJobs(), 0, 0
+    lease_deadline: float | None = None
     while not stopped.is_set():
         try:
             reply = queue.poll(worker_id)
         except ControllerServiceError as error:
+            if error.status == 409:
+                lease_deadline = (
+                    lease_deadline
+                    if lease_deadline is not None
+                    else time.monotonic() + SERVICE_LEASE_WAIT_S
+                )
+                if time.monotonic() >= lease_deadline:
+                    raise
+                stopped.wait(POLL_INTERVAL_S)
+                continue
             if not error.retryable:
                 raise
             stopped.wait(POLL_INTERVAL_S)
             continue
+        lease_deadline = None
         job = seen.take(reply)
         if job is None:
             stopped.wait(POLL_INTERVAL_S)
@@ -916,7 +955,12 @@ def serve(options: CheckpointOptions, *, stopped: threading.Event | None = None)
             except ControllerServiceError as error:
                 failed_completion = True
                 unconfirmed += 1
-                _log("controller_job_unconfirmed", job_id=job.id, code=error.code)
+                _log(
+                    "controller_job_unconfirmed",
+                    job_id=job.id,
+                    code=error.code,
+                    status=error.status,
+                )
         finally:
             done.set()
             heartbeat.join(timeout=QUEUE_TIMEOUT_S + POLL_INTERVAL_S)

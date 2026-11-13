@@ -468,6 +468,18 @@ def test_score_and_native_terms_are_forwarded_signed_without_formula_recalculati
     assert normalized["measurement"]["score_breakdown"]["offset_points"] == -100
 
 
+def test_official_competition_score_is_not_recorded_as_a_practice_score():
+    terms = _score_terms(formula="official_time_damage_fuel_v1")
+    summary = completion_summary(
+        {
+            "state": "native_terminal",
+            "final": {"score": terms["total"], "score_breakdown": terms},
+        }
+    )
+    assert summary["measurement"]["score"] is None
+    assert summary["measurement"]["score_breakdown"] is None
+
+
 def test_score_from_a_replacement_world_is_not_attributed_to_the_original_profile():
     summary = completion_summary(
         {
@@ -1223,3 +1235,53 @@ def test_real_service_retries_a_transient_completion_and_records_once(
         {"ok": True, "state": "stopped", "completed_jobs": 1, "unconfirmed_completions": 0}
     ]
     assert initial["observation"]["time_s"] == 0
+
+
+def test_queue_lease_conflict_reports_http_status(owned_native_local):
+    queue = ControllerQueue(owned_native_local)
+    assert queue.poll(str(uuid.uuid4())).job is None
+    with pytest.raises(ControllerServiceError) as raised:
+        queue.poll(str(uuid.uuid4()))
+    assert raised.value.code == "queue_rejected" and raised.value.status == 409
+
+
+def test_restarted_service_waits_out_the_previous_lease(owned_native_local, tmp_path):
+    source = owned_native_local
+    path = tmp_path / "service.json"
+    path.write_text(json.dumps({"version": 1, "url": source.url, "token": source._token}))
+    path.chmod(0o600)
+    options = CheckpointOptions(connection_file=path, run=True, wall_budget_s=15)
+    queue = ControllerQueue(source)
+
+    first_stopped = threading.Event()
+    first = threading.Thread(target=lambda: serve(options, stopped=first_stopped), daemon=True)
+    first.start()
+    try:
+        end = time.monotonic() + 10
+        while not queue.get()["service"]["online"]:
+            assert first.is_alive() and time.monotonic() < end
+            time.sleep(0.025)
+    finally:
+        first_stopped.set()
+        first.join(timeout=10)
+    assert not first.is_alive()
+
+    second_stopped, errors = threading.Event(), []
+
+    def run_second():
+        try:
+            serve(options, stopped=second_stopped)
+        except BaseException as error:
+            errors.append(type(error).__name__)
+
+    second = threading.Thread(target=run_second, daemon=True)
+    second.start()
+    try:
+        end = time.monotonic() + 25
+        while not queue.get()["service"]["online"]:
+            assert second.is_alive() and not errors and time.monotonic() < end
+            time.sleep(0.05)
+    finally:
+        second_stopped.set()
+        second.join(timeout=10)
+    assert not second.is_alive() and not errors
