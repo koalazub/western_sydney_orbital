@@ -29,7 +29,7 @@ Sources were checked on 3 November 2026 against:
 | Nominal time | 120 s | [`Scoring.py`][scoring], [`COMPETITION_SIM.simconf`][simconf] |
 | Linear command cap | 0.5 m/s² | [`SpaceBuggy` thrusters in `COMPETITION_SIM.simconf`][simconf] |
 | Angular command cap | 0.05 rad/s² | [`SpaceBuggy` thrusters in `COMPETITION_SIM.simconf`][simconf] |
-| Radar sample | 200 of the 500 bodies, `Debris0` through `Debris199` | [`Radar` parameters in `COMPETITION_SIM.simconf`][simconf], [`Radar.py`][radar] |
+| Radar sample | Local official preset: 500 of 500 bodies; published API allows `N` up to 500. The pinned `COMPETITION_SIM.simconf` still sets `Radar/NumDebris` to 200, so verify `len(GetNearestDebrisLocations(500))` in the licensed runtime. | [`Radar` parameters in `COMPETITION_SIM.simconf`][simconf], [`Radar.py`][radar], [competitor Python API][solution-wiki] |
 | Radar noise (1σ) | 2 m position, 0.02 m/s range rate, 5% diameter | [`COMPETITION_SIM.simconf`][simconf] |
 
 The orbital speed used by `SpawnDebris.py` is `sqrt(mu / R)` with Phobos
@@ -170,6 +170,7 @@ current-formula estimate from complete local terminal measurements.
 
 [sim-main]: https://github.com/SimDynamX/STU4-Sim/tree/c010564824c48488104e648781d5e987b402e47a
 [solution-main]: https://github.com/SimDynamX/STU4-Solution/tree/8545c085426a71c39cbe1d544a844b3edb757007
+[solution-wiki]: https://github.com/SimDynamX/STU4-Solution/wiki/3.-Competitor-Python-API
 [simconf]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Sims/COMPETITION_SIM.simconf
 [spawn]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/SpawnDebris.py
 [scoring]: https://github.com/SimDynamX/STU4-Sim/blob/c010564824c48488104e648781d5e987b402e47a/Systems/Scoring.py

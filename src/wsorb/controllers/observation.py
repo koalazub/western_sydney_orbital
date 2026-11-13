@@ -19,9 +19,11 @@ SOURCE_KINDS = frozenset(
     }
 )
 MAX_REPORT_AGE_S = 1.0
-MAX_RADAR_AGE_S = 2.5
+# A 500-row rolling scan at 120 Hz needs 4.17 s to refresh; 5.0 s covers the
+# full cycle with margin for the publication and decision clocks.
+MAX_RADAR_AGE_S = 5.0
 RADAR_CLOCK = "simulation_elapsed_seconds"
-ROLLING_SELECTION = "official_first_200_rolling"
+ROLLING_SELECTION = "official_rolling"
 _TIME_TOLERANCE_S = 1.0e-9
 
 

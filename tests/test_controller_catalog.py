@@ -279,7 +279,7 @@ def test_empty_radar_is_not_a_substitute_for_missing_or_unready_delivery():
         observation(10.0, navigation_time=8.9, rows=[]),
         observation(10.0, navigation_time=10.1, rows=[]),
         observation(10.0, rows=[row(10.1)]),
-        observation(10.0, rows=[row(7.4)]),
+        observation(10.0, rows=[row(4.4)]),
     ],
 )
 def test_producer_rejects_future_and_stale_actual_navigation_and_radar(data):
@@ -292,8 +292,8 @@ def test_rolling_radar_accepts_per_row_epochs_at_or_before_publication():
     data["sensor_health"]["units"][1]["sample_time_s"] = 10.0
     data["radar_selection"] = {
         "schema_version": 1,
-        "selection": "official_first_200_rolling",
-        "sample_limit": 200,
+        "selection": "official_rolling",
+        "sample_limit": 500,
     }
     produced = sample(data)
     assert produced.radar_rolling is True
@@ -326,7 +326,7 @@ def test_generic_lease_uses_original_sample_and_radar_epochs_not_command_now(con
 
 def test_empty_radar_lease_remembers_its_own_publication_time():
     data = observation(10.0, rows=[])
-    data["sensor_health"]["units"][1].update(sample_time_s=8.0, sequence=8000)
+    data["sensor_health"]["units"][1].update(sample_time_s=5.5, sequence=8000)
     controller = create_controller("coast")
     command(controller, data)
     assert controller.report["eligible"] is True

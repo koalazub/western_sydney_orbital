@@ -85,14 +85,19 @@ enum RadarSelection {
     Unknown,
     LegacyFixedSubset,
     NearestNoisyCentersV1,
-    OfficialFirst200RollingV1,
+    #[serde(
+        rename = "official_rolling",
+        alias = "official_first_200_rolling",
+        alias = "official_first200_rolling_v1"
+    )]
+    OfficialRollingV1,
 }
 
 impl RadarSelection {
     fn for_acquisition(distribution: Option<DebrisDistribution>) -> Self {
         match distribution {
             Some(DebrisDistribution::TransitStream) => Self::NearestNoisyCentersV1,
-            Some(DebrisDistribution::OfficialCloud) => Self::OfficialFirst200RollingV1,
+            Some(DebrisDistribution::OfficialCloud) => Self::OfficialRollingV1,
             Some(DebrisDistribution::DirectedStream | DebrisDistribution::ImpactEjecta { .. })
             | None => Self::LegacyFixedSubset,
         }
@@ -100,9 +105,7 @@ impl RadarSelection {
 
     fn candidate_limit(self, sample_limit: usize) -> usize {
         match self {
-            Self::Unknown | Self::LegacyFixedSubset | Self::OfficialFirst200RollingV1 => {
-                sample_limit
-            }
+            Self::Unknown | Self::LegacyFixedSubset | Self::OfficialRollingV1 => sample_limit,
             Self::NearestNoisyCentersV1 => usize::MAX,
         }
     }
@@ -163,7 +166,7 @@ impl RadarFrame {
             RadarSelection::Unknown => "unknown",
             RadarSelection::LegacyFixedSubset => "legacy_fixed_subset",
             RadarSelection::NearestNoisyCentersV1 => "nearest_noisy_centers",
-            RadarSelection::OfficialFirst200RollingV1 => "official_first_200_rolling",
+            RadarSelection::OfficialRollingV1 => "official_rolling",
         }
     }
 
@@ -174,9 +177,7 @@ impl RadarFrame {
             RadarSelection::NearestNoisyCentersV1 => {
                 "native_world_radar_primary_nearest_noisy_centers_v1"
             }
-            RadarSelection::OfficialFirst200RollingV1 => {
-                "native_world_radar_primary_official_first_200_rolling_v1"
-            }
+            RadarSelection::OfficialRollingV1 => "native_world_radar_primary_official_rolling_v1",
         }
     }
 
@@ -187,8 +188,8 @@ impl RadarFrame {
             RadarSelection::NearestNoisyCentersV1 => {
                 "native_world_radar_backup_independent_rng_nearest_noisy_centers_v1"
             }
-            RadarSelection::OfficialFirst200RollingV1 => {
-                "native_world_radar_backup_independent_rng_official_first_200_rolling_v1"
+            RadarSelection::OfficialRollingV1 => {
+                "native_world_radar_backup_independent_rng_official_rolling_v1"
             }
         }
     }

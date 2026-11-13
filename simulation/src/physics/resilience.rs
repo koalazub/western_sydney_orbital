@@ -1043,15 +1043,16 @@ pub(super) fn validate_sensor_state(snapshot: &Snapshot) -> Result<(), String> {
     let rolling = snapshot
         .experiment_settings
         .is_some_and(|experiment| experiment.debris.distribution.is_official_cloud());
+    let radar_row_limit = if rolling {
+        settings().official_cloud.radar.observed_count
+    } else {
+        settings().debris.radar_count
+    };
     for radar in [&state.primary, &state.backup] {
         if let Some(sample) = &radar.sample
             && (!valid_time(sample.sample_time_s)
                 || sample.sequence > radar.acquisition_sequence
-                || sample.rows.len()
-                    > settings()
-                        .debris
-                        .radar_count
-                        .min(snapshot.assets.len().saturating_sub(3))
+                || sample.rows.len() > radar_row_limit.min(snapshot.assets.len().saturating_sub(3))
                 || sample.rows.iter().any(|row| {
                     if !row.iter().flatten().all(|value| value.is_finite()) {
                         return true;

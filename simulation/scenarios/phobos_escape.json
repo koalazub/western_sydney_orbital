@@ -29,7 +29,7 @@
       { "id": "rock3", "weight": 0.15, "radar_diameter_m": 0.01, "scale_min": 40.0, "scale_max": 1000.0, "base_mass_kg": 0.2 },
       { "id": "exploded_tank", "weight": 0.05, "radar_diameter_m": 17.0, "scale_min": 1.0, "scale_max": 1.0, "base_mass_kg": 700.0 }
     ],
-    "radar": { "version": 1, "observed_count": 200, "iteration_hz": 120.0, "publish_every_rows": 50 }
+    "radar": { "version": 1, "observed_count": 500, "iteration_hz": 120.0, "publish_every_rows": 50 }
   },
   "impact_ejecta_defaults": { "source_direction": [-1.0, 0.0, 0.0], "kick_velocity_mps": [-1.0, 0.0, 0.0], "tangential_speed_mps": 7.0, "patch_half_angle_deg": 15.0 },
   "transit_stream": { "version": 1, "transverse_half_width_m": 450.0, "launch_trail_m": 500.0, "target_lead_m": 500.0 },
@@ -120,6 +120,6 @@
     "debris_surface": { "base_color_srgb": [0.69, 0.68, 0.65], "perceptual_roughness": 1.0 }
   },
   "terrain": { "radii_m": [13000.0,11400.0,9100.0], "latitude_segments": 32, "longitude_segments": 64, "relief_amplitude":0.006,"relief_longitude_frequency":7.0,"relief_latitude_frequency":5.0,"relief_longitude_phase":0.3,"crater_rim_fraction":0.88,"crater_rim_width":0.11,"crater_rim_depth":0.025,"craters":[{"center":[-0.078,0.011,-0.996],"width_rad":0.34,"depth":0.15},{"center":[0.35,0.81,-0.46],"width_rad":0.14,"depth":0.12},{"center":[0.78,-0.32,-0.53],"width_rad":0.10,"depth":0.09},{"center":[0.25,0.35,0.9],"width_rad":0.24,"depth":0.08}] },
-  "limits": { "events": 200, "contacts": 4096, "observations": 200, "position_m": 10000000.0, "velocity_mps": 10000.0, "mass_kg": 1.0e15, "radius_m": 100000.0 },
+  "limits": { "events": 200, "contacts": 4096, "observations": 500, "position_m": 10000000.0, "velocity_mps": 10000.0, "mass_kg": 1.0e15, "radius_m": 100000.0 },
   "contacts": { "friction": 0.8, "restitution": 0.05 }
 }

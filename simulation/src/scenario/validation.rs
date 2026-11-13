@@ -171,17 +171,16 @@ fn validate_official_cloud(s: &Scenario) -> Result<(), &'static str> {
 
 fn validate_official_radar(
     radar: OfficialRadarSettings,
-    scenario_radar_count: usize,
+    _scenario_radar_count: usize,
 ) -> Result<(), &'static str> {
     if radar.version != 1
-        || radar.observed_count != 200
+        || radar.observed_count != 500
         || radar.iteration_hz != 120.0
         || radar.publish_every_rows != 50
         || radar.observed_count > crate::model::OFFICIAL_CLOUD_COUNT
         || radar.publish_every_rows > radar.observed_count
-        || scenario_radar_count != radar.observed_count
     {
-        return Err("official radar schedule must observe 200 rows at 120 Hz and publish every 50");
+        return Err("official radar schedule must observe 500 rows at 120 Hz and publish every 50");
     }
     Ok(())
 }
@@ -606,10 +605,10 @@ mod tests {
         );
         assert_eq!(cloud.collision_radius_max_m, 20.0);
         assert_eq!(cloud.classes.len(), 4);
-        assert_eq!(cloud.radar.observed_count, 200);
+        assert_eq!(cloud.radar.observed_count, 500);
         assert_eq!(cloud.radar.iteration_hz, 120.0);
         assert_eq!(cloud.radar.publish_every_rows, 50);
-        for mutate in 0..12 {
+        for mutate in 0..13 {
             let mut invalid = scenario.clone();
             match mutate {
                 0 => invalid.official_cloud.version = 2,
@@ -624,6 +623,7 @@ mod tests {
                 9 => invalid.official_cloud.classes[3].base_mass_kg = 701.0,
                 10 => invalid.official_cloud.radar.publish_every_rows = 49,
                 11 => invalid.official_cloud.radar.iteration_hz = 60.0,
+                12 => invalid.official_cloud.radar.observed_count = 501,
                 _ => unreachable!(),
             }
             assert!(
@@ -631,9 +631,6 @@ mod tests {
                 "mutation {mutate}"
             );
         }
-        let mut invalid = scenario.clone();
-        invalid.debris.radar_count = 199;
-        assert!(validate_official_cloud(&invalid).is_err());
     }
 
     #[test]

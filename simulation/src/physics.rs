@@ -355,6 +355,11 @@ impl Simulation {
             .iter()
             .filter(|asset| asset.kind == EntityKind::Debris)
             .count();
+        let radar_sample_limit = if is_official_cloud_snapshot(&self.state) {
+            config.official_cloud.radar.observed_count
+        } else {
+            config.debris.radar_count
+        };
         let launchpad = self
             .handles
             .get(&EntityId::LandingPad)
@@ -406,9 +411,9 @@ impl Simulation {
             "radar_selection": {
                 "schema_version": 1,
                 "selection": "unknown",
-                "sample_limit": config.debris.radar_count,
+                "sample_limit": radar_sample_limit,
                 "total_physical_body_count": debris_count,
-                "unobserved_count_lower_bound": debris_count.saturating_sub(config.debris.radar_count),
+                "unobserved_count_lower_bound": debris_count.saturating_sub(radar_sample_limit),
             },
             "geometry": {
                 "phobos_enclosing_radius_m": crate::model::phobos_enclosing_radius_m(),
@@ -1764,7 +1769,18 @@ fn validate(s: &Snapshot) -> Result<(), String> {
     let debris_count = s
         .experiment_settings
         .map_or(settings().debris.count, |config| config.debris.count);
-    let radar_count = settings().debris.radar_count.min(debris_count);
+    let official_cloud = s
+        .experiment_settings
+        .is_some_and(|config| config.debris.distribution.is_official_cloud());
+    let radar_count = if official_cloud {
+        settings()
+            .official_cloud
+            .radar
+            .observed_count
+            .min(debris_count)
+    } else {
+        settings().debris.radar_count.min(debris_count)
+    };
     // Every possible unordered pair is bounded by the validated physical count.
     // Keep full contact history, rather than truncating it and double-counting
     // real contacts after restoring a dense population.
@@ -2641,24 +2657,29 @@ mod tests {
     }
 
     #[test]
-    fn official_cloud_radar_rolls_the_first_200_rows_and_publishes_every_50() {
+    fn official_cloud_radar_rolls_all_500_rows_and_publishes_every_50() {
         let mut config = ExperimentSettings::default();
         config.debris.distribution = DebrisDistribution::OfficialCloud;
         let mut sim = Simulation::with_experiment(100, config).unwrap();
         let radar = settings().official_cloud.radar;
-        assert_eq!(radar.observed_count, 200);
+        assert_eq!(radar.observed_count, 500);
         assert_eq!(radar.iteration_hz, 120.0);
         assert_eq!(radar.publish_every_rows, 50);
-        assert_eq!(sim.state.observations.len(), 200);
+        assert_eq!(sim.state.observations.len(), 500);
         assert_eq!(
             sim.observation()["radar_selection"]["selection"],
-            json!("official_first_200_rolling")
+            json!("official_rolling")
+        );
+        assert_eq!(sim.observation()["radar_selection"]["sample_limit"], 500);
+        assert_eq!(
+            sim.observation()["radar_selection"]["unobserved_count_lower_bound"],
+            0
         );
         for (index, row) in sim.state.observations.iter().enumerate() {
             assert!(row.measurement_time_s == 0.0);
             assert!(
-                matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 200),
-                "row {index} is not one of the first 200 actors"
+                matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 500),
+                "row {index} is not one of the 500 actors"
             );
         }
         assert!(sim.state.observations.windows(2).all(|pair| {
@@ -2692,7 +2713,7 @@ mod tests {
         // sorted by noisy distance; exactly 50 rows carry that update's stamps.
         sim.advance(0.4);
         assert!((sim.state.time_s - 0.45).abs() < 1.0e-12);
-        assert_eq!(sim.state.observations.len(), 200);
+        assert_eq!(sim.state.observations.len(), 500);
         assert_eq!(
             sim.state
                 .observations
@@ -2716,7 +2737,7 @@ mod tests {
             sim.state
                 .observations
                 .iter()
-                .all(|row| { matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 200) })
+                .all(|row| { matches!(row.id, EntityId::Debris(id) if id >= 1 && id <= 500) })
         );
         validate(&sim.snapshot()).unwrap();
 
