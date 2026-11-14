@@ -96,7 +96,7 @@ If `devenv up lab simulation` already serves your local game, leave it running a
 
 Check **Controller running**, not just **API connected**. The game must have accepted the controller's command and be running physics. The status panel shows the command time and expiry.
 
-Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
+Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. The reviewed Ali MPPI profile uses that rule: inside 200 m at ≥4 m/s it coasts through the region when the raw-radar emergency is clear, instead of braking for a non-existent arrival-speed gate. The emergency guard and damage threshold still apply. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
 
 For run budgets, sensor failures, standby takeover and isolated CLI runs, see [notebook policies and failures](#notebook-policies-and-failures).
 

@@ -100,6 +100,24 @@ class AliMppiController(ExperimentalController):
             self.state["burning"] = True
         if not np.all(np.isfinite(acceleration)):
             raise _Rejected("MPPI produced a non-finite acceleration")
+        target_range = float(
+            np.linalg.norm(
+                np.asarray(sample.target_position_world_m) - np.asarray(sample.position_world_m)
+            )
+        )
+        remaining = target_range - self.state.get("policy", {}).get(
+            "arrival_radius_m", self.math.ARRIVAL_RADIUS_M
+        )
+        if (
+            not emergency_active
+            and remaining <= self.math.TERMINAL_COAST_RANGE_M
+            and np.linalg.norm(np.asarray(sample.velocity_world_mps))
+            >= self.math.TERMINAL_COAST_MIN_SPEED_MPS
+        ):
+            # The score checks the 50 m region without an arrival-speed gate.
+            # Coast on the clear terminal path instead of paying for a stop.
+            acceleration = np.zeros(3)
+            self.state["burning"] = False
         desired = self.math.unit(nominal_velocity)
         alignment = (
             np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))

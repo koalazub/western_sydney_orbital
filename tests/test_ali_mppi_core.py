@@ -66,17 +66,14 @@ def test_plan_uses_the_job_budget_and_updates_the_observed_fuel_rate():
     assert state["fuel_rate_kg_s"] > 0.0
 
 
-def test_cruise_velocity_is_seven_metres_per_second_toward_the_target():
-    velocity = core.cruise_velocity(np.zeros(3), np.array([100.0, 0.0, 0.0]))
-    assert np.isclose(np.linalg.norm(velocity), 7.0)
-    assert np.allclose(velocity, [7.0, 0.0, 0.0])
+def test_cruise_velocity_holds_the_reference_to_the_arrival_region():
+    for distance in (100.0, 60.0, 51.0):
+        velocity = core.cruise_velocity(np.zeros(3), np.array([distance, 0.0, 0.0]))
+        assert np.isclose(np.linalg.norm(velocity), 7.0)
+        assert np.allclose(velocity, [7.0, 0.0, 0.0])
 
-    braking = core.cruise_velocity(np.zeros(3), np.array([60.0, 0.0, 0.0]))
-    assert np.isclose(np.linalg.norm(braking), np.sqrt(10.0))
-    assert braking[0] > 0.0
-
-    stopped = core.cruise_velocity(np.zeros(3), np.array([49.0, 0.0, 0.0]))
-    assert np.allclose(stopped, np.zeros(3))
+    inside = core.cruise_velocity(np.zeros(3), np.array([49.0, 0.0, 0.0]))
+    assert np.isclose(np.linalg.norm(inside), 7.0)
 
 
 def test_burn_governor_uses_hysteresis_instead_of_micro_bursts():

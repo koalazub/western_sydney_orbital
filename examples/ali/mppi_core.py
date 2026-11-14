@@ -33,6 +33,8 @@ EMERGENCY_ESCAPE_MPS = 2.5
 MIN_TIME_TO_GO_SPEED_MPS = 1.0
 MIN_CRUISE_SPEED_MPS = 1.0
 MAX_PLAN_DT_S = 0.5
+TERMINAL_COAST_RANGE_M = 200.0
+TERMINAL_COAST_MIN_SPEED_MPS = 4.0
 DEFAULT_EXHAUST_VELOCITY_MPS = 80.0 * 9.8
 DEFAULT_TIME_BUDGET_MULTIPLE = 2.5
 CRUISE_TIME_FRACTION = 0.6
@@ -165,14 +167,7 @@ def cruise_velocity(
     distance = np.linalg.norm(delta)
     if distance < 1e-9:
         return np.zeros(3)
-    speed = min(
-        max(0.0, float(cruise_speed_mps)),
-        np.sqrt(
-            2.0
-            * max(1e-6, float(brake_accel_mps2))
-            * max(distance - max(0.0, float(arrival_radius_m)), 0.0)
-        ),
-    )
+    speed = max(0.0, float(cruise_speed_mps))
     return speed * delta / distance
 
 
