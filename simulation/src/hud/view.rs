@@ -235,6 +235,51 @@ pub(super) fn setup(
                     ),
                 ],
             ),
+            (
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(0),
+                    right: px(0),
+                    top: px(0),
+                    bottom: px(0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(MODAL_SCRIM),
+                ZIndex(3),
+                Overlay::Terminal,
+                Visibility::Hidden,
+                children![
+                    (
+                        Node {
+                            width: px(560),
+                            max_width: percent(94),
+                            ..panel_style()
+                        },
+                        BackgroundColor(PANEL),
+                        children![
+                            (text("", HERO_SIZE_PX, TEXT), Readout::TerminalTitle),
+                            (text("", COPY_SIZE_PX, TEXT), Readout::TerminalScore),
+                            (text("", CAPTION_SIZE_PX, MUTED), Readout::TerminalBreakdown),
+                            (text("", COPY_SIZE_PX, TEXT), Readout::TerminalResources),
+                            text(
+                                "Score is the current published formula on local counters, not an STP receipt. Arrival means entry to the 50 m station region, not docking.",
+                                CAPTION_SIZE_PX,
+                                MUTED,
+                            ),
+                            (
+                                button_row(),
+                                children![
+                                    button("Reset flight", HudAction::AskReset, Readout::Static),
+                                    button("Export results", HudAction::Export, Readout::Static),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
         ],
     )).id();
     commands.entity(root).insert_child(0, top_row);

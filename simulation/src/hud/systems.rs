@@ -554,6 +554,7 @@ pub(super) fn update_overlays(
         modal.open = hud.reset_confirm_open;
     }
     let mut hidden_focus = None;
+    let terminal = crate::snapshot().mission.status.is_terminal();
     for (entity, mut node, mut visibility, overlay, modal_group, mut position) in &mut overlays {
         let was_shown = node.display != Display::None;
         let shown = match overlay {
@@ -569,6 +570,7 @@ pub(super) fn update_overlays(
             Overlay::Details => hud.panel.details_open(),
             Overlay::Controls => hud.panel == SidePanel::Controls,
             Overlay::Reset => hud.reset_confirm_open,
+            Overlay::Terminal => terminal && !hud.reset_confirm_open,
             Overlay::Inspector => hud.panel == SidePanel::Inspector,
         };
         node.display = if shown { Display::Flex } else { Display::None };
@@ -607,9 +609,10 @@ pub(super) fn update_overlays(
                 Overlay::Debris => SidePanel::Debris,
                 Overlay::Launch | Overlay::LaunchpadPreview => SidePanel::Launch,
                 Overlay::Details | Overlay::Inspector | Overlay::Reset => SidePanel::Controls,
+                Overlay::Terminal => SidePanel::Flight,
             });
         }
-        let needs_modal_group = matches!(overlay, Overlay::Reset) && hud.reset_confirm_open;
+        let needs_modal_group = shown && matches!(overlay, Overlay::Reset | Overlay::Terminal);
         if needs_modal_group != modal_group {
             if needs_modal_group {
                 commands.entity(entity).insert(TabGroup::modal());
@@ -932,6 +935,10 @@ pub(super) fn update_readouts(
             ),
             Readout::Notebook => "Notebook · new tab".into(),
             Readout::Mission => mission_readout(&snapshot),
+            Readout::TerminalTitle => terminal_title(&snapshot),
+            Readout::TerminalScore => terminal_score(&snapshot),
+            Readout::TerminalBreakdown => terminal_breakdown(&snapshot),
+            Readout::TerminalResources => terminal_resources(&snapshot),
             Readout::Environment => environment_readout(&snapshot),
             Readout::CameraMode => format!("{} | {}", camera_status.mode, focus_label(focus)),
             Readout::Focus => format!("Focus: {}", focus_label(focus)),
@@ -1166,7 +1173,7 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         snapshot
             .mission
             .score
-            .map(|score| format!(" | legacy SI total {:.0}, not STP", score))
+            .map(|score| format!(" | local current-formula estimate {score:.2}, not STP"))
             .unwrap_or_default()
     } else {
         String::new()
@@ -1189,6 +1196,57 @@ fn mission_readout(snapshot: &Snapshot) -> String {
         snapshot.active_contacts.len(),
         snapshot.assets.len(),
         terminal_score,
+        snapshot.manual_interventions,
+    )
+}
+
+fn terminal_title(snapshot: &Snapshot) -> String {
+    match snapshot.mission.status {
+        crate::domain::MissionStatus::Success => "Mission complete".into(),
+        crate::domain::MissionStatus::FailedDamage => "Mission failed — damage threshold".into(),
+        crate::domain::MissionStatus::Running => "Mission running".into(),
+    }
+}
+
+fn terminal_score(snapshot: &Snapshot) -> String {
+    if let Some(breakdown) = snapshot.mission.score_breakdown {
+        return format!(
+            "{:.2} points · local current-formula estimate, not an STP receipt",
+            breakdown.total
+        );
+    }
+    snapshot
+        .mission
+        .score
+        .map(|score| format!("{score:.2} points · native local score, not an STP receipt"))
+        .unwrap_or_else(|| "Score unavailable for this terminal state.".into())
+}
+
+fn terminal_breakdown(snapshot: &Snapshot) -> String {
+    let Some(breakdown) = snapshot.mission.score_breakdown else {
+        return "No score breakdown was recorded.".into();
+    };
+    format!(
+        "Progress {:.2} − damage {:.2} − fuel {:.2} + offset {:.2} = {:.2}\nNominal time {:.0} s · nominal fuel {:.1} kg · impact threshold {:.0} J",
+        breakdown.progress_points,
+        breakdown.collision_penalty_points,
+        breakdown.fuel_penalty_points,
+        breakdown.offset_points,
+        breakdown.total,
+        breakdown.nominal_time_s,
+        breakdown.nominal_fuel_kg,
+        breakdown.impact_threshold_j,
+    )
+}
+
+fn terminal_resources(snapshot: &Snapshot) -> String {
+    format!(
+        "Time {:.2} s · Fuel used {:.3} kg · Damage {:.0} J\nArrival range {:.1} m · Arrival speed {:.2} m/s · Recorded interventions {}",
+        snapshot.time_s,
+        snapshot.mission.fuel_used_kg,
+        snapshot.mission.damage,
+        snapshot.mission.target_distance_m,
+        snapshot.mission.relative_speed_mps,
         snapshot.manual_interventions,
     )
 }
@@ -1582,6 +1640,33 @@ mod interaction_tests {
             assert!(help.contains("Mission ended") && help.contains("Reset"));
             assert!(!help.contains("launches"));
         }
+    }
+
+    #[test]
+    fn terminal_results_overlay_reports_score_and_resources() {
+        let mut snapshot = crate::physics::Simulation::new_default().snapshot();
+        snapshot.mission.status = crate::domain::MissionStatus::Success;
+        snapshot.time_s = 195.2;
+        snapshot.mission.fuel_used_kg = 53.06;
+        snapshot.mission.damage = 0.0;
+        snapshot.mission.target_distance_m = 49.9;
+        snapshot.mission.relative_speed_mps = 2.5;
+        snapshot.manual_interventions = 1;
+        snapshot.mission.score = Some(40.7);
+        assert_eq!(terminal_title(&snapshot), "Mission complete");
+        let score = terminal_score(&snapshot);
+        assert!(score.contains("40.70") && score.contains("not an STP receipt"));
+        let resources = terminal_resources(&snapshot);
+        assert!(resources.contains("195.20 s"));
+        assert!(resources.contains("53.060 kg"));
+        assert!(resources.contains("49.9 m"));
+        assert!(resources.contains("2.50 m/s"));
+        assert!(resources.contains("interventions 1"));
+        snapshot.mission.status = crate::domain::MissionStatus::FailedDamage;
+        assert_eq!(
+            terminal_title(&snapshot),
+            "Mission failed — damage threshold"
+        );
     }
 
     #[test]

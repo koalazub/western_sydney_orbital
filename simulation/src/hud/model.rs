@@ -288,6 +288,10 @@ pub(super) enum Readout {
     Binding(crate::controls::Action),
     Notebook,
     Mission,
+    TerminalTitle,
+    TerminalScore,
+    TerminalBreakdown,
+    TerminalResources,
     Environment,
     CameraMode,
     Focus,
@@ -324,6 +328,7 @@ pub(super) enum Overlay {
     Details,
     Controls,
     Reset,
+    Terminal,
     Inspector,
 }
 
@@ -345,6 +350,7 @@ pub(super) const BUTTON_PADDING_X_PX: f32 = 7.0;
 pub(super) const BUTTON_PADDING_Y_PX: f32 = 4.0;
 pub(super) const COPY_SIZE_PX: u32 = 12;
 pub(super) const CAPTION_SIZE_PX: u32 = 11;
+pub(super) const HERO_SIZE_PX: u32 = 24;
 
 #[derive(Clone, Copy)]
 pub(super) struct FocusItem<'a> {

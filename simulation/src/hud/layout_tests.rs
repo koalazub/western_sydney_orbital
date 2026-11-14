@@ -1150,6 +1150,7 @@ fn check_instruments_disclosure(app: &mut App, camera: Entity, window: Entity) {
                     | Overlay::Details
                     | Overlay::Controls
                     | Overlay::Reset
+                    | Overlay::Terminal
                     | Overlay::Inspector => false,
                 };
                 matches.then_some(entity)
