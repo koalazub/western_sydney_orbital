@@ -16,11 +16,105 @@ evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
 import benchmark  # noqa: E402
 import capture  # noqa: E402
+import seeds  # noqa: E402
 
 
 class OfficialBenchmarkTests(unittest.TestCase):
     def config(self):
-        return json.loads((BENCHMARK / "campaign.json").read_text())
+        config = json.loads((BENCHMARK / "campaign.json").read_text())
+        bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
+        config["seeds"] = bank["seeds"][: config["seed_count"]]
+        return config
+
+    def bank_fixture(self, root):
+        bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
+        location = root / "bank.json"
+        evidence.write_json(location, bank)
+        return location, bank
+
+    def test_seed_bank_reuses_prefix_and_extends_once_for_every_controller(self):
+        config = self.config()
+        with tempfile.TemporaryDirectory() as temporary:
+            location, original = self.bank_fixture(Path(temporary))
+            self.assertEqual(original["seeds"][0], 100)
+            before = location.read_bytes()
+            first, _ = seeds.select_seeds(location, config, 20)
+            self.assertEqual(first["seeds"], original["seeds"][:20])
+            self.assertEqual(location.read_bytes(), before)
+            self.assertEqual(first["appended_count"], 0)
+            target = len(original["seeds"]) + 9
+            expanded, bank = seeds.select_seeds(location, config, target)
+            self.assertEqual(bank["seeds"][: len(original["seeds"])], original["seeds"])
+            self.assertEqual(expanded["seeds"][:20], first["seeds"])
+            self.assertEqual(len(set(expanded["seeds"])), target)
+            self.assertEqual(expanded["appended_count"], 9)
+            frozen = json.dumps(first)
+            repeat, _ = seeds.select_seeds(location, config, target)
+            self.assertEqual(repeat["seeds"], expanded["seeds"])
+            self.assertEqual(repeat["bank_sha256"], expanded["bank_sha256"])
+            self.assertEqual(repeat["appended_count"], 0)
+            self.assertEqual(json.dumps(first), frozen)
+            config.update(seed_count=target, seeds=expanded["seeds"])
+            runs = evidence.schedule(config, "seeded")
+            for controller in config["controllers"]:
+                values = [r["seed"] for r in runs if r["controller"]["id"] == controller["id"]]
+                self.assertEqual(values, [s for seed in expanded["seeds"] for s in (seed, seed)])
+
+    def test_seed_extension_is_stable_across_incremental_preparations(self):
+        config = self.config()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            direct, original = self.bank_fixture(root)
+            base_count = len(original["seeds"])
+            incremental = root / "incremental.json"
+            incremental.write_bytes(direct.read_bytes())
+            full, _ = seeds.select_seeds(direct, config, base_count + 9)
+            seeds.select_seeds(incremental, config, base_count + 3)
+            stages, _ = seeds.select_seeds(incremental, config, base_count + 9)
+            self.assertEqual(full["seeds"], stages["seeds"])
+
+    def test_seed_bank_rejects_missing_duplicate_reordered_and_changed_scenarios(self):
+        config = self.config()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(FileNotFoundError):
+                seeds.select_seeds(root / "missing.json", config, 20)
+            location, original = self.bank_fixture(root)
+            for invalid in ([], [True], [-1], [2**32], [100, 100]):
+                bank = dict(original, seeds=invalid)
+                evidence.write_json(location, bank)
+                with self.assertRaises(ValueError):
+                    seeds.select_seeds(location, config, 20)
+            bank = dict(original, seeds=list(reversed(original["seeds"])))
+            evidence.write_json(location, bank)
+            with self.assertRaises(ValueError):
+                seeds.select_seeds(location, config, 20)
+            evidence.write_json(location, original)
+            changed = dict(config, mission_sha256="another-mission")
+            with self.assertRaises(ValueError):
+                seeds.select_seeds(location, changed, 20)
+            for invalid_count in (0, -1, True, 1.5):
+                with self.assertRaises(ValueError):
+                    seeds.select_seeds(location, config, invalid_count)
+
+    def test_saved_seed_extensions_cannot_be_replaced_or_reordered(self):
+        config = self.config()
+        with tempfile.TemporaryDirectory() as temporary:
+            location, original = self.bank_fixture(Path(temporary))
+            _, expanded = seeds.select_seeds(location, config, len(original["seeds"]) + 2)
+            expanded["seeds"][-2:] = expanded["seeds"][-2:][::-1]
+            evidence.write_json(location, expanded)
+            with self.assertRaises(ValueError):
+                seeds.select_seeds(location, config, len(expanded["seeds"]))
+
+    def test_concurrent_seed_bank_update_fails_without_replacing_history(self):
+        config = self.config()
+        with tempfile.TemporaryDirectory() as temporary:
+            location, original = self.bank_fixture(Path(temporary))
+            before = location.read_bytes()
+            with seeds.bank_lock(location), self.assertRaises(OSError):
+                seeds.select_seeds(location, config, len(original["seeds"]) + 1)
+            self.assertEqual(location.read_bytes(), before)
 
     def test_pairs_rotate_without_changing_matching_or_repetitions(self):
         config = self.config()
@@ -67,15 +161,25 @@ class OfficialBenchmarkTests(unittest.TestCase):
 
     def test_score_reconciles_observed_official_11_november_receipt(self):
         # Original native scorer return in pilot dfdb53bb, not a practice-model score.
-        receipt = dict(outcome="success", inputs=dict(
-            time_s=166.40587000000002, nominalTime_s=120, damageTaken_J=0,
-            maxDamage_J=209200, fuelUsed_kg=103.36057751696077, nominalFuel_kg=75))
-        self.assertAlmostEqual(evidence.score_components(receipt)["calculated_score"],
-                               -15.70126262502879)
+        receipt = dict(
+            outcome="success",
+            inputs=dict(
+                time_s=166.40587000000002,
+                nominalTime_s=120,
+                damageTaken_J=0,
+                maxDamage_J=209200,
+                fuelUsed_kg=103.36057751696077,
+                nominalFuel_kg=75,
+            ),
+        )
+        self.assertAlmostEqual(
+            evidence.score_components(receipt)["calculated_score"], -15.70126262502879
+        )
 
     def test_report_retains_missing_and_never_promotes_repeated_runs_to_scenarios(self):
         config = self.config()
         config["controllers"] = config["controllers"][:2]
+        config["seed_count"] = 30
         attempts = evidence.schedule(config, "pilot")
         for i, run in enumerate(attempts):
             run["run_id"] = f"run-{i}"
@@ -88,7 +192,13 @@ class OfficialBenchmarkTests(unittest.TestCase):
             folder.mkdir()
             evidence.write_json(
                 folder / "receipt.json",
-                dict(outcome="wall_timeout", official_score=None, inputs=None),
+                dict(
+                    outcome="wall_timeout",
+                    official_score=None,
+                    inputs=None,
+                    wall_s=60,
+                    evidence_bytes=100,
+                ),
             )
             (folder / "events.jsonl").write_text(
                 '{"kind":"telemetry","seq":0,"damage_J":0}\n'
@@ -102,6 +212,9 @@ class OfficialBenchmarkTests(unittest.TestCase):
             incidents = json.loads((folder / "incidents.json").read_text())
             self.assertIn("damage_increase", {i["kind"] for i in incidents})
             self.assertTrue(all(i["suspected_cause"] is None for i in incidents))
+            cost = json.loads((root / "cost_estimate.json").read_text())
+            self.assertEqual(cost["seeded_scenarios"], 30)
+            self.assertEqual(cost["seeded_bytes"], 12000)
 
     def test_missing_score_is_unavailable_even_with_complete_inputs(self):
         self.assertIsNone(evidence.score_components(dict(outcome="failed_start")))

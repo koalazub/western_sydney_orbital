@@ -46,8 +46,11 @@ def schedule(config, mode):
         blocks = [None] * 5
     elif mode == "seeded":
         blocks = config["seeds"]
-        if len(blocks) != 20 or len(set(blocks)) != 20:
-            raise ValueError("Seeded campaigns require 20 distinct predeclared seeds")
+        count = config.get("seed_count", 20)
+        if type(count) is not int or count < 1 or len(blocks) != count:
+            raise ValueError("Seeded campaigns require seed_count predeclared seeds")
+        if len(set(blocks)) != len(blocks):
+            raise ValueError("Seeded campaign seeds must be distinct")
         if any(type(seed) is not int or not 0 <= seed < 2**32 for seed in blocks):
             raise ValueError("Seeds must be uint32 integers")
     elif mode == "pilot":
@@ -289,6 +292,10 @@ def delivery_summary(events):
 def analyze(root):
     root = Path(root)
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
+    selection_path = root / "seed_selection.json"
+    selection = (
+        json.loads(selection_path.read_text(encoding="utf-8")) if selection_path.exists() else {}
+    )
     rows, timelines = [], []
     for attempt in campaign["attempts"]:
         folder = root / attempt["run_id"]
@@ -315,6 +322,8 @@ def analyze(root):
             mode=campaign["mode"],
             block=attempt["block"],
             seed=attempt["seed"],
+            seed_bank_id=selection.get("bank_id"),
+            seed_set_sha256=selection.get("selected_seeds_sha256"),
             repetition=attempt["repetition"],
             outcome=receipt["outcome"],
             termination_reason=receipt.get("termination_reason"),
@@ -423,10 +432,12 @@ def analyze(root):
     if estimate["mean_wall_s"] is not None:
         n = len(campaign["config"]["controllers"])
         estimate["baseline_wall_hours"] = n * 10 * estimate["mean_wall_s"] / 3600
-        estimate["seeded_wall_hours"] = n * 40 * estimate["mean_wall_s"] / 3600
+        seed_count = campaign["config"].get("seed_count", 20)
+        estimate["seeded_scenarios"] = seed_count
+        estimate["seeded_wall_hours"] = n * seed_count * 2 * estimate["mean_wall_s"] / 3600
         if estimate["mean_bytes"] is not None:
             estimate["baseline_bytes"] = n * 10 * estimate["mean_bytes"]
-            estimate["seeded_bytes"] = n * 40 * estimate["mean_bytes"]
+            estimate["seeded_bytes"] = n * seed_count * 2 * estimate["mean_bytes"]
     write_json(root / "cost_estimate.json", estimate)
     lines = [
         "# Official STP campaign",

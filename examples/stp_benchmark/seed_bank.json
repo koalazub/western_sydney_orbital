@@ -1,0 +1,12 @@
+{
+  "schema": "wsorb.official_stp.seed_bank.v1",
+  "id": "stu4-phobos-2026-11-11-saved-field-v1",
+  "scenario": {
+    "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+    "mission_sha256": "910199b2a122c115667b4adb7cc3ca8aaef4b9ac1d1f71c5ef157194b7e20958",
+    "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+    "seed_scope": "saved_field_impulses_and_radar_noise"
+  },
+  "extension_algorithm": "sha256-index-v1",
+  "seeds": [100, 1729, 3253, 4999, 7919, 104729, 130363, 155921, 196613, 262147, 327673, 393241, 458879, 524309, 589859, 655373, 720899, 786433, 851971, 917519, 983063]
+}

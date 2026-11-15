@@ -24,6 +24,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from evidence import SCHEMA, analyze, digest, schedule, write_json
+from seeds import select_seeds
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -125,11 +126,12 @@ def dependency_records(mission, install, user_root, package):
     return found
 
 
-def prepare(config_path, output, mode):
+def prepare(config_path, output, mode, seed_count=None):
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     if config.get("schema") != SCHEMA:
         raise ValueError("Unsupported campaign schema")
-    attempts = schedule(config, mode)
+    if seed_count is not None and mode != "seeded":
+        raise ValueError("--seed-count applies only to seeded campaigns")
     output = Path(output).resolve()
     if not output.is_relative_to(REPO / "runs"):
         raise ValueError(
@@ -137,6 +139,19 @@ def prepare(config_path, output, mode):
         )
     # Fresh evidence root only: never overwrite or resume an interrupted attempt.
     output.mkdir(parents=True, exist_ok=False)
+    seed_selection, seed_bank = None, None
+    if mode == "seeded":
+        if not config.get("seed_bank"):
+            raise ValueError(
+                "New seeded campaigns require the shared saved seed_bank configuration"
+            )
+        count = seed_count if seed_count is not None else config.get("seed_count", 20)
+        seed_selection, seed_bank = select_seeds(path(config["seed_bank"]), config, count)
+        if "seeds" in config and config["seeds"] != seed_selection["seeds"]:
+            raise ValueError("Inline seeds differ from the saved bank; remove the inline override")
+        config["seed_count"] = count
+        config["seeds"] = seed_selection["seeds"]
+    attempts = schedule(config, mode)
     write_json(output / "preparation.json", dict(started_utc=utc(), config=config, mode=mode))
     install, user_root = path(config["install"]), path(config["user_root"])
     package = path(config["package"])
@@ -155,6 +170,9 @@ def prepare(config_path, output, mode):
         raise ValueError("sample_period_s must be positive")
     snapshot = output / "snapshot"
     snapshot.mkdir()
+    if seed_bank is not None:
+        write_json(snapshot / "seed_bank.json", seed_bank)
+        write_json(output / "seed_selection.json", seed_selection)
     frozen_package = snapshot / "STU4-Sim"
     shutil.copytree(package, frozen_package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
     for controller in config["controllers"]:
@@ -194,6 +212,7 @@ def prepare(config_path, output, mode):
     ]
     provenance = dict(
         schema=SCHEMA,
+        seed_selection=seed_selection,
         created_utc=utc(),
         configuration=config,
         package_revision=config["package_revision"],
@@ -609,6 +628,8 @@ def execute(root, attempt):
                     spawner=attempt["seed"] if attempt["seed"] is not None else 100,
                     radar=attempt["seed"] if attempt["seed"] is not None else 100,
                 ),
+                seed_selection="../seed_selection.json" if attempt["seed"] is not None else None,
+                seed_index=attempt["block"] if attempt["seed"] is not None else None,
                 seed_scope="saved field initial impulses and radar noise; fixed debris layout",
                 settings=attempt["controller"].get("environment", {}),
                 limits=limits,
@@ -879,6 +900,11 @@ def main():
     plan.add_argument("--config", type=Path, default=HERE / "campaign.json")
     plan.add_argument("--mode", choices=["pilot", "baseline", "seeded"], required=True)
     plan.add_argument("--output", type=Path, required=True)
+    plan.add_argument(
+        "--seed-count",
+        type=int,
+        help="Seeded scenarios per controller; reuse saved seeds and append if needed",
+    )
     run = commands.add_parser("run")
     run.add_argument("campaign", type=Path)
     run.add_argument("--max-attempts", type=int)
@@ -888,7 +914,7 @@ def main():
     stop.add_argument("campaign", type=Path)
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare(args.config, args.output, args.mode)
+        prepare(args.config, args.output, args.mode, args.seed_count)
     elif args.command == "run":
         run_campaign(args.campaign, args.max_attempts)
     elif args.command == "stop":

@@ -21,6 +21,10 @@ build/
 # Local sweep outputs and raw evidence. Curated results live in docs/analytics.
 runs/
 
+# Seed bank writes are locked and atomic; the JSON bank itself is versioned.
+/examples/stp_benchmark/seed_bank.json.lock
+/examples/stp_benchmark/seed_bank.json.tmp
+
 # Test and lint caches
 .pytest_cache/
 .ruff_cache/

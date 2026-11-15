@@ -6,6 +6,60 @@ server-only headless operation is not a validated competition flight. No local
 WASM controller adapters are used. The current checked-in Tom controller is the
 reference; completed flights establish the new baseline, not the scores in minutes.
 
+## Quick use guide
+
+### Add a controller
+
+1. Put the official STP entrypoint and all supporting modules in
+   `examples/<name>/`. Keep the native connection boilerplate and thruster-command
+   interface. Dependencies must work in STP's Windows Python **3.12** environment.
+2. Add an entry to the `controllers` array in [`campaign.json`](campaign.json):
+
+   ```json
+   {
+     "id": "new_controller",
+     "directory": "examples/new_controller",
+     "entrypoint": "Controller.py",
+     "environment": {}
+   }
+   ```
+
+3. Check the candidate in a separate short diagnostic campaign first. In a local
+   configuration copy, set `reference` to its new ID, `diagnostic_rerun` to `true`
+   and `limits.simulation_s` to `40`. Prepare with `--config <copy> --mode pilot`
+   and a new output directory. This schedules two fresh candidate flights; inspect
+   `delivery.json` for native command readback, applied impulses and simulator
+   motion. A short diagnostic is not a scored baseline run.
+4. Keep `reference` set to `tom` in comparison campaigns. Prepare a new campaign
+   whenever controller code or settings change; prepared sources are frozen.
+
+The runner selects and launches each controller automatically. No manual copying
+into the installed simulator is needed, and only one controller commands each flight.
+
+### Run a campaign
+
+Use the native Windows UV commands below, from the repository root:
+
+1. **Prepare:** choose the configuration, mode and a new directory under `runs/`.
+   Preparation freezes the mission, controller sources, settings and complete
+   schedule; it starts no simulations.
+2. **Run:** explicitly start that prepared campaign. The runner launches fresh
+   SpaceCRAFT sessions at **1×**, captures evidence and cleans up each process tree.
+3. **Analyze:** generate outcomes, official scores, independent score reconciliation,
+   comparisons against Tom and incident timelines. Read `report.md` in the output
+   directory, with `attempts.csv` and each attempt's native evidence beside it.
+
+| Mode | Schedule |
+| --- | --- |
+| `pilot` | Two fresh flights of the configured reference controller; Tom by default. |
+| `baseline` | Five consecutive two-run pairs per controller: **10 flights each**. |
+| `seeded` | The first 20 saved perturbation/noise seeds by default, two flights per seed: **40 flights each**. Increase with `--seed-count N`. |
+
+Controller-pair order rotates between blocks. Failed and interrupted attempts stay
+recorded; they are never silently retried or replaced. Use the runner's `stop`
+command for a clean stop. Full campaigns require an explicit start, and time-scale
+acceleration remains future work.
+
 ## Runtime and mission
 
 STP 0.54.2 Windows is installed at `K:\Work\SPT-Sim`, release build
@@ -63,7 +117,7 @@ campaign cannot restart; prepare a new root and run IDs. An initial delivery che
 can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 
 After inspecting the pilot, prepare `--mode baseline` for five fresh two-run pairs
-per controller, or `--mode seeded` for the 20 predeclared seeds and two consecutive
+per controller, or `--mode seeded` for the saved seed prefix and two consecutive
 runs per controller/seed. Controller-pair order rotates between blocks. Commands
 to run full campaigns are intentionally manual. The default four profiles are Tom,
 Bui, Ali MVP and Ali MPPI. Harry has no official STP entrypoint. WSO requires its
@@ -74,6 +128,51 @@ freezes exact source hashes plus the checkout revision; historical submission
 identity is not inferred. Controllers are never tuned by this framework.
 
 ## Experimental seeds
+
+### Shared seed bank
+
+[`seed_bank.json`](seed_bank.json) is the versioned, ordered bank shared by all
+new seeded campaigns. **Native seed 100 is first**, followed by all 20 previously
+declared seeds. `seed_count` defaults to 20, so a normal seeded campaign uses
+seed 100 and the next 19 entries. Baseline and ordinary pilot flights retain the
+unchanged competition seed 100.
+
+Every preparation starts at the beginning of the bank; flights do not consume
+seeds or move a global cursor. All controllers receive the same selected prefix,
+with two consecutive runs per seed. Failed attempts keep their original seed.
+Adding a controller or creating a new campaign reuses the same scenarios.
+
+To request more scenarios, set `seed_count` in the configuration or pass
+`--seed-count N` when preparing a seeded campaign. For example, from the repository
+root with `$stpPython` set as above:
+
+```powershell
+uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py prepare --mode seeded --seed-count 30 --output runs/stp-seeded-030-001
+```
+
+This prepares **60 flights per controller** and launches nothing. If the bank has
+21 saved seeds, preparation appends nine unique seeds before freezing the schedule.
+Later campaigns reuse those same 30 values. Requests for fewer seeds select a
+shorter prefix and never shorten or rewrite the bank. Extension uses stable SHA-256
+generation by bank ID and index, so incremental extensions and different machines
+produce the same sequence. Concurrent bank updates are locked and writes are atomic.
+
+Each campaign saves the full bank snapshot in `snapshot/seed_bank.json` and its
+exact selection, bank hash and selected-seed hash in `seed_selection.json` and
+provenance. Attempts record their seed index; report rows include bank identity
+and selection hash. Existing prepared campaigns remain unchanged when the bank grows.
+Keep and share bank extensions with the controller configuration through version
+control. A missing or altered original prefix, invalid/duplicate seed, changed
+extension or different mission/scorer/scope is rejected rather than silently
+creating a replacement history. Older configuration copies with inline `seeds`
+should adopt the bank fields from `campaign.json` for new preparations.
+
+Compare the same seed and repetition under the same pinned mission/scorer and
+scheduling settings. Equal seeds do not guarantee identical asynchronous STP
+execution; the paired repetitions still measure repeatability. A newly added seed
+needs runs from each controller, including Tom, before a matched comparison exists.
+
+### What the seeds control
 
 The official mission loads a saved debris field (`DoSpawning=false`). Its spawner
 applies seeded initial random impulses; the radar also seeds its noise. Seeded
