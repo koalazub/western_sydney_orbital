@@ -45,21 +45,53 @@ def create_controller(controller_id: str, settings: dict | None = None):
     allowed = (
         {"position_gain_s2", "velocity_gain_s", "avoidance_range_m", "avoidance_accel_mps2"}
         if controller_id == "basic_pd_radar"
-        else {"time_budget_s", "arrival_radius_m"}
+        else {
+            "time_budget_s",
+            "arrival_radius_m",
+            "cruise_fraction",
+            "cruise_speed_mps",
+            "main_engine_gate_rad",
+            "coast_range_m",
+            "coast_speed_mps",
+            "emergency_range_m",
+            "emergency_lookahead_s",
+            "emergency_margin_m",
+            "emergency_escape_mps",
+            "plan_steering",
+            "plan_risk_threshold",
+            "risk_weight",
+            "switch_weight",
+            "attitude_brake_scale",
+        }
         if controller_id == "ali_mppi"
         else set()
     )
     if set(settings) - allowed:
         raise ValueError("Unsupported settings for this fixed reviewed controller profile")
     if controller_id == "ali_mppi":
+        positive = {
+            "time_budget_s",
+            "arrival_radius_m",
+            "cruise_fraction",
+            "cruise_speed_mps",
+            "coast_speed_mps",
+            "risk_weight",
+            "switch_weight",
+            "attitude_brake_scale",
+        }
         for key, value in settings.items():
+            if key == "plan_steering":
+                if type(value) is not bool:
+                    raise ValueError("Ali MPPI plan_steering must be a boolean")
+                continue
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
                 or not math.isfinite(value)
-                or value <= 0
+                or value < 0
+                or (value == 0 and key in positive)
             ):
-                raise ValueError(f"Ali MPPI {key} must be a positive finite number")
+                raise ValueError(f"Ali MPPI {key} must be a non-negative finite number")
     if controller_id in ("baseline", "body-axis"):
         # Checkpoint also imports this catalog. Defer this import until its
         # module is loaded, and return the original class/report unwrapped.

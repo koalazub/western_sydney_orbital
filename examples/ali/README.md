@@ -32,31 +32,40 @@ uv run --locked wsorb controllers run --isolated --profile ali_radar_mvp --run -
 
 ## MPPI candidate
 
-[`controller_mppi.py`](controller_mppi.py) is the SDK shell and
-[`mppi_core.py`](mppi_core.py) is the same marked core kept as a standalone copy
-for analysis and numeric tests. The shell only reads the simulator, calls the
-core, logs telemetry and writes the command.
+[`controller_mppi.py`](controller_mppi.py) is the single-file STP submission.
+The marked core is loaded by the local adapter and numeric tests; the shell only
+reads the simulator, calls the core, logs telemetry and writes the command. The
+competitor region is currently 231 lines under a temporary 250-line guard while
+the policy settings are parameterized; the original 200-line target is the later
+optimization checkpoint.
 
-The policy derives a stable cruise reference from the job's actual time budget
-and the initial target range (about 7 m/s for the 300 s official hop) instead of
-a fixed speed. It uses a braking-profile terminal time, an online fuel-rate
-estimate, a 48 x 40 MPPI rollout with a remaining-time horizon, a burn/coast
+The policy derives a cruise reference from the job's actual time budget and the
+initial target range. The settings are data: `cruise_fraction` (default 0.5) is a
+starting point for `wsorb tune`, not a fixed answer. The core uses a mass-flow
+fuel estimate, a 48 x 40 MPPI rollout with a remaining-time horizon, a burn/coast
 governor with 0.50/0.30 m/s hysteresis, a control-switch penalty, capsule
 clearance, a braking-curve attitude rate target with a terminal hold, and an
 omnidirectional raw-radar emergency guard. The score coefficients are one
-configuration; the run supplies its duration and the native arrival radius. The
-governor stops a forward plan burn once the ship is at the target speed, so the
-rollout cannot hold the engine on against the local gravity.
+configuration; the run supplies its duration and the native arrival radius.
+Plan steering is off by default; when enabled, it follows the MPPI direction
+only if the predicted capsule risk exceeds `plan_risk_threshold`.
 
 Body +X is pointed at the stable nominal velocity, so the initial ~90° slew puts
-the main engine on the transfer direction. The actual burn alignment is
-telemetry; it is not fed back as a noisy attitude target.
+the main engine on the transfer direction. `main_engine_gate_rad` can hold
+translation until the main engine is within that angle of the path. It is off by
+default because the local score rewards thrusting during the slew; under the
+prior guard, a 15° gate on seed 101 scored 36.45 vs 54.14 without it, so it
+remains opt-in for visual or STP-specific runs.
 
 Scoring checks only the 50 m region, not arrival speed. The terminal controller
-coasts inside 200 m at >=4 m/s when the raw-radar emergency is clear instead of
-spending fuel to stop. The current local official 300 s run: 193.55 s, 49.95 m,
-6.78 m/s, 31.66 kg, 0 J, 69.78 points. This is a local practice estimate, not an
-STP receipt.
+coasts inside `coast_range_m` at >=`coast_speed_mps` when the raw-radar emergency
+is clear instead of spending fuel to stop. The current safe default is
+`cruise_fraction=0.5` with a 180 m / 7 s / 6 m / 3.5 m/s emergency guard: the
+official 300 s fuzz over seeds 100-107 is 44.44-72.90 points (mean 64.63), all
+eight native successes and no damage. Seed 100 is 162.5 s, 49.7 m, 8.25 m/s,
+38.47 kg, 0 J, 72.58 points. Held-out seeds 200-203 are 45.51-72.81 points (mean
+59.07); seed 200 is 45.74 points with 3,027 J of damage, inside the official
+209,200 J limit. This is a local practice estimate, not an STP receipt.
 
 The shell emits one JSON attitude record every 0.5 s through `st.logger_info`,
 plus a compact line through `st.OnScreenLogMessage`. The record contains
@@ -72,6 +81,42 @@ The local profile is `ali_mppi`:
 ```sh
 uv run --locked wsorb controllers run --isolated --profile ali_mppi --run --duration-s 60 --wall-budget-s 120
 ```
+
+Fuzz the reviewed profile across seeds on separate owned native engines:
+
+```sh
+uv run --locked wsorb fuzz --seeds 100-107 --workers 4
+```
+
+Each seed gets a fresh official 300 s world and its own headless server. The
+command prints one row per seed and the min/mean/max points; it writes the
+per-seed JSON report under `runs/`. There is no fixed pass threshold by default:
+exit status is zero only when every seed reports native success and a usable
+score. `--threshold` is available only when a caller wants a reporting floor.
+
+To search policy settings against the native score, use the max-min objective:
+
+```sh
+uv run --locked wsorb tune \
+  --grid '{"cruise_fraction":[0.48,0.5,0.52]}' \
+  --seeds 100-103 --validation-seeds 200-203 --workers 4
+```
+
+`wsorb tune` ranks candidates by the worst seed score, requires native success
+and the official damage limit, and validates the best candidate on held-out
+seeds. It writes the ranked settings and per-seed measurements under `runs/`.
+
+The first max-min tune pass on the two binding seeds chose `cruise_fraction=0.48`
+over 0.5 and 0.52: worst-seed 59.33 vs 53.54 and 51.74, all with zero damage. The
+full 100-107 run at 0.48 was better (59.83-74.52, mean 69.89, zero damage), but
+the held-out seed 200 took 60,575 J of debris damage and scored -49.23, so 0.48
+was rejected. The emergency-guard search then found 180 m / 7 s / 6 m /
+3.5 m/s: seeds 100-107 scored 44.44-72.90 (mean 64.63) with no damage, and
+held-out seeds 200-203 scored 45.51-72.81 (mean 59.07); seed 200 scored 45.74
+with 3,027 J, inside the official damage limit. This is the current default. The
+47 figure is not the objective; the search uses the worst seed score with native
+success and the official damage limit. A 9.3 m/s trial also damaged seed 102, so
+it was not kept.
 
 A local `--connection-file` run requests the follow view automatically when the
 browser renderer is ready. The request is presentation-only and never changes the

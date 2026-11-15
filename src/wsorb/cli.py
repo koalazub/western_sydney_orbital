@@ -117,6 +117,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "controllers", help="list, run, compare or serve reviewed Python profiles", add_help=False
     )
     subparsers.add_parser(
+        "fuzz", help="run reviewed profiles across seeds on owned native engines", add_help=False
+    )
+    subparsers.add_parser(
+        "tune", help="search controller policy settings against native seed scores", add_help=False
+    )
+    subparsers.add_parser(
         "scoreboard",
         help="publish measured teammate scoreboard and analytics assets",
         add_help=False,
@@ -370,6 +376,14 @@ def main(argv: list[str] | None = None) -> int:
         from wsorb.controller_service import main as controllers_main
 
         return controllers_main(arguments[1:])
+    if arguments and arguments[0] == "fuzz":
+        from wsorb.fuzz import main as fuzz_main
+
+        return fuzz_main(arguments[1:])
+    if arguments and arguments[0] == "tune":
+        from wsorb.tune import main as tune_main
+
+        return tune_main(arguments[1:])
     if arguments and arguments[0] == "checkpoint":
         from wsorb.checkpoint import main as checkpoint_main
 
