@@ -55,6 +55,11 @@ losing its settings. Room creation never starts Python. Keep its link and file p
 
 ## Keep the boundary clear
 
+For reproducible flights in the official Windows STP runtime, see the
+[official campaign runner](stp_benchmark/README.md). It uses fresh SpaceCRAFT
+sessions, pinned competition sources and native scoring receipts; the local
+profile sweep remains a separate practice experiment.
+
 - `examples/<person>/` is a runnable or shareable entrypoint.
 - `src/wsorb/` is shared reviewed implementation.
 - `examples/flight_sweep.py` and the comparison JSON files are cross-team
