@@ -180,7 +180,8 @@ def prepare(config_path, output, mode):
         "Scoring",
         "SpawnDebris",
     }
-    if {s["Nametag"] for s in systems if s["Active"]} != allowed:
+    active = [s["Nametag"] for s in systems if s["Active"]]
+    if set(active) != allowed or len(active) != len(allowed):
         raise ValueError("Unexpected active systems; review command ownership before running")
     if mission["DataManager"]["SimEntity"]["DoSpawning"]:
         raise ValueError("Use a saved debris mission; runtime spawning blocks original controllers")
@@ -216,11 +217,11 @@ def prepare(config_path, output, mode):
         ),
         scheduling="normal; no -det; original Python loop pacing; Unreal Chaos",
         observation=(
-            "Python call profiler; read-only sequential SDK state samples; "
+            "Local Python 3.12 monitoring; native actuator readback; SDK state samples; "
             "original source unchanged"
         ),
         limitations=[
-            "Profiler, camera, GUI and logging affect wall scheduling",
+            "Monitoring, camera, GUI and logging affect wall scheduling",
             "No native collision identity/time stream has been established",
             "Scorer does not terminate the simulation; runner stops after its first receipt",
             "Fixed saved field; experimental seeds vary initial impulses and radar noise",
@@ -434,7 +435,7 @@ class Receiver:
             if not secrets.compare_digest(hello.get("token", ""), self.token):
                 return
             role = hello["role"]
-            if role not in {"controller", "scorer", "radar", "spawner"}:
+            if role not in {"controller", "scorer", "radar", "spawner", "actuator"}:
                 return
             connection.settimeout(None)
             for line in stream:
@@ -490,6 +491,7 @@ def attempt_mission(root, attempt, receiver, config):
             "Scoring": "scorer",
             "Radar": "radar",
             "SpawnDebris": "spawner",
+            "JetSelectionActuator": "actuator",
         }.get(system["Nametag"])
         if role is None:
             continue
@@ -549,7 +551,7 @@ def execute(root, attempt):
     receipt = dict(
         schema=SCHEMA,
         run_id=attempt["run_id"],
-        outcome="failed_start",
+        outcome="in_progress",
         official_score=None,
         inputs=None,
         termination_reason="preparing",
@@ -620,6 +622,8 @@ def execute(root, attempt):
             job = WindowsJob()
             with (folder / "launcher.log").open("wb") as output:
                 process = job.launch(command, install / "SpaceCRAFT", env, output)
+                receipt["termination_reason"] = "running"
+                write_json(folder / "receipt.json", receipt)
 
                 def completed():
                     receiver.events.put(dict(kind="launcher_exit", code=process.wait()))
@@ -633,6 +637,10 @@ def execute(root, attempt):
                 seen_native_uuid = None
                 while True:
                     now = time.monotonic()
+                    if (root / "STOP").exists():
+                        receipt.update(outcome="aborted", termination_reason="owner_stop_request")
+                        record(dict(kind="aborted", reason="owner_stop_request", monotonic_s=now))
+                        break
                     deadline = started + limits["wall_s"]
                     if "controller" not in connected or "scorer" not in connected:
                         deadline = min(deadline, started + limits["startup_s"])
@@ -643,9 +651,11 @@ def execute(root, attempt):
                             last_controller + limits["controller_stall_s"],
                         )
                     try:
-                        event = receiver.events.get(timeout=max(0, deadline - now))
+                        event = receiver.events.get(timeout=max(0, min(0.25, deadline - now)))
                     except queue.Empty:
                         now = time.monotonic()
+                        if now < deadline:
+                            continue
                         if now >= started + limits["wall_s"]:
                             reason = "wall_timeout"
                         elif "controller" not in connected or "scorer" not in connected:
@@ -680,6 +690,9 @@ def execute(root, attempt):
                         for key in ("native_logs", "native_output"):
                             native_directories.add(event[key])
                         print(f"{attempt['run_id']} {event['role']} connected", flush=True)
+                        if event["role"] == "controller":
+                            last_controller = time.monotonic()
+                        last_progress = time.monotonic()
                     if kind == "command":
                         last_controller = time.monotonic()
                     if kind == "scorer_progress":
@@ -725,7 +738,11 @@ def execute(root, attempt):
             receipt.update(outcome="aborted", termination_reason="owner_interrupt")
             raise
         except Exception:
-            receipt.update(termination_reason="runner_exception", error=traceback.format_exc())
+            receipt.update(
+                outcome="runner_exception",
+                termination_reason="runner_exception",
+                error=traceback.format_exc(),
+            )
             record(dict(kind="exception", error=traceback.format_exc()))
         finally:
             cleanup_errors = []
@@ -795,6 +812,8 @@ def run_campaign(root, max_attempts=None):
     if os.name != "nt":
         raise RuntimeError("Use native Windows, not WSL")
     root = Path(root).resolve()
+    if (root / "STOP").exists():
+        raise ValueError("Campaign stopped by owner; prepare a fresh campaign to restart")
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
     provenance = json.loads((root / "provenance.json").read_text(encoding="utf-8"))
     if campaign["config"] != provenance["configuration"]:
@@ -840,6 +859,7 @@ def run_campaign(root, max_attempts=None):
                     "controller_stall",
                     "simulator_stall",
                     "exception",
+                    "aborted",
                 }:
                     print(
                         "Campaign halted for investigation; no attempt retried or replaced",
@@ -864,11 +884,21 @@ def main():
     run.add_argument("--max-attempts", type=int)
     report = commands.add_parser("analyze")
     report.add_argument("campaign", type=Path)
+    stop = commands.add_parser("stop")
+    stop.add_argument("campaign", type=Path)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.config, args.output, args.mode)
     elif args.command == "run":
         run_campaign(args.campaign, args.max_attempts)
+    elif args.command == "stop":
+        root = args.campaign.resolve()
+        if not (root / "campaign.json").is_file():
+            raise ValueError("Not a prepared campaign")
+        (root / "STOP").write_text(utc() + "\n", encoding="utf-8")
+        print(
+            "Stop requested; runner will close its process tree and preserve evidence", flush=True
+        )
     else:
         print(json.dumps(analyze(args.campaign), indent=2))
 

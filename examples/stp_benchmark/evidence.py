@@ -75,7 +75,7 @@ def score_components(receipt):
     if any(inputs.get(k) is None for k in required):
         return None
     damage = 2 * inputs["damageTaken_J"] / inputs["maxDamage_J"]
-    fuel = max(inputs["fuelUsed_kg"] / inputs["nominalFuel_kg"] - 1, 0)
+    fuel = max(inputs["fuelUsed_kg"] / inputs["nominalFuel_kg"], 0)
     if receipt["outcome"] == "success":
         if inputs.get("time_s") is None or inputs.get("nominalTime_s") is None:
             return None
@@ -222,6 +222,70 @@ def csv_table(path, rows):
         writer.writerows(rows)
 
 
+def delivery_summary(events):
+    """Separate writer calls, native actuator readback, effects and observed motion."""
+    writes = [e for e in events if e.get("kind") == "command_written"]
+    applied = [e for e in events if e.get("kind") == "actuator_applied"]
+
+    def nonzero(vector):
+        return vector is not None and any(abs(v) > 1e-9 for v in vector)
+
+    def same(left, right):
+        return (
+            left is not None
+            and right is not None
+            and len(left) == len(right)
+            and all(abs(a - b) <= 1e-8 for a, b in zip(left, right, strict=True))
+        )
+
+    matched = []
+    for event in applied:
+        received = event.get("received", {})
+        vector = received.get("linear_body_m_s2")
+        if not nonzero(vector):
+            continue
+        read_time = received.get("linear_read_monotonic_s", -math.inf)
+        writer = next(
+            (
+                w
+                for w in reversed(writes)
+                if w.get("monotonic_s", math.inf) <= read_time
+                and same(w.get("linear_body_m_s2"), vector)
+            ),
+            None,
+        )
+        if writer is not None:
+            matched.append(
+                dict(
+                    writer_seq=writer.get("seq"),
+                    actuator_seq=event.get("seq"),
+                    read_after_write_s=read_time - writer["monotonic_s"],
+                )
+            )
+    positions = [e["position_resident_m"] for e in applied if e.get("position_resident_m")]
+    velocities = [e["velocity_resident_m_s"] for e in applied if e.get("velocity_resident_m_s")]
+
+    def change(values):
+        if len(values) < 2:
+            return None
+        return math.sqrt(sum((a - b) ** 2 for a, b in zip(values[-1], values[0], strict=True)))
+
+    displacement = change(positions)
+    impulses = sum(nonzero(e.get("linear_impulse_body_kg_m_s")) for e in applied)
+    return dict(
+        command_writes=len(writes),
+        native_actuator_samples=len(applied),
+        matched_nonzero_readbacks=len(matched),
+        matches=matched,
+        native_nonzero_impulse_samples=impulses,
+        command_delivery_verified=bool(matched) and impulses > 0,
+        observed_displacement_m=displacement,
+        observed_velocity_change_m_s=change(velocities),
+        simulator_motion_observed=(displacement is not None and displacement > 0.1),
+        note="Motion also includes gravity and contacts; exact thrust attribution is not inferred.",
+    )
+
+
 def analyze(root):
     root = Path(root)
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
@@ -231,6 +295,7 @@ def analyze(root):
         path = folder / "receipt.json"
         receipt = json.loads(path.read_text()) if path.exists() else dict(outcome="not_started")
         events = read_events(folder / "events.jsonl")
+        delivery = delivery_summary(events)
         parts = score_components(receipt)
         official = receipt.get("official_score")
         discrepancy = None
@@ -239,8 +304,9 @@ def analyze(root):
         issue = incidents(events, receipt, campaign["config"]["thresholds"])
         if folder.exists():
             write_json(folder / "incidents.json", issue)
+            write_json(folder / "delivery.json", delivery)
         timelines.extend(dict(run_id=attempt["run_id"], **item) for item in issue)
-        inputs = receipt.get("inputs", {})
+        inputs = receipt.get("inputs") or {}
         samples = [e for e in events if e.get("kind") == "telemetry"]
         last = samples[-1] if samples else {}
         row = dict(
@@ -265,6 +331,8 @@ def analyze(root):
             wall_s=receipt.get("wall_s"),
             bytes=receipt.get("evidence_bytes"),
             measurements_source="scoring_event" if inputs else "partial_last_telemetry",
+            command_delivery_verified=delivery["command_delivery_verified"],
+            simulator_motion_observed=delivery["simulator_motion_observed"],
             **(parts or {}),
         )
         rows.append(row)

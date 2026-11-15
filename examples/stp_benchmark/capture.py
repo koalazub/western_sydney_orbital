@@ -1,7 +1,8 @@
 """Observational launch adapter for original STP Python systems (Python 3.12).
 
 The original sources/argv, SDK calls, loop pacing and commands are retained.
-Profiling adds measurable overhead and is declared in every manifest.
+Monitoring is local to the original system's code objects; imported plotting and
+numeric libraries are not profiled. Overhead is declared in every manifest.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from types import CodeType
 
 
 def plain(value):
@@ -65,6 +67,11 @@ def run(spec_path):
     profile_errors = []
     score_pending = None
     score_result = None
+    actuator_read = {}
+    monitoring = sys.monitoring
+    tool_id = 3
+    monitoring.use_tool_id(tool_id, "wsorb-stp-evidence")
+    monitored_codes = []
 
     def sample(namespace):
         st = sys.modules["spaceteams"]
@@ -144,6 +151,34 @@ def run(spec_path):
         if event == "return" and name == "GetNearestDebrisLocations":
             latest_sensor = plain(arg)
             sensor_acquired = time.monotonic()
+        if role == "actuator" and event == "return" and name == "IfHas_GetParam":
+            key = frame.f_locals.get("key")
+            if key == ["JetSelection", "CommandedAccel"]:
+                actuator_read["linear_body_m_s2"] = plain(arg)
+                actuator_read["linear_read_monotonic_s"] = time.monotonic()
+            elif key == ["JetSelection", "CommandedAngAccel"]:
+                actuator_read["angular_body_rad_s2"] = plain(arg)
+                actuator_read["angular_read_monotonic_s"] = time.monotonic()
+        if role == "actuator" and event == "c_call" and name == "sleep":
+            now = time.monotonic()
+            if actuator_read and now - last_sample >= spec["sample_period_s"]:
+                en = namespace["en"]
+                resident_frame = namespace["resFrame"]
+                emit(
+                    "actuator_applied",
+                    received=actuator_read.copy(),
+                    clamped_linear_body_m_s2=namespace.get("accCommand"),
+                    clamped_angular_body_rad_s2=namespace.get("angAccCommand"),
+                    linear_impulse_body_kg_m_s=namespace.get("linearImpulse"),
+                    angular_impulse_body_kg_m2_s=namespace.get("angularImpulse"),
+                    impulse_counter=namespace.get("impulseCounter"),
+                    step_fuel_kg=namespace.get("fuelUsage"),
+                    velocity_resident_m_s=en.getLocVelAcc().vel_WRT_ExprIn(resident_frame),
+                    position_resident_m=en.getLocVelAcc().loc_WRT_ExprIn(resident_frame),
+                    effect_calls_returned=True,
+                    reads_are_atomic=False,
+                )
+                last_sample = now
         if event == "c_call" and name == "CaptureImageBlocking":
             emit("camera_requested")
         if event == "c_return" and name == "CaptureImageBlocking":
@@ -206,7 +241,12 @@ def run(spec_path):
         if role == "scorer" and event == "c_call" and name == "sleep":
             emit("scorer_progress", scorer_time_s=namespace.get("sim_elapsed_time"))
 
-    def profiler(frame, event, arg):
+    def disable():
+        monitoring.set_events(tool_id, 0)
+        for code in monitored_codes:
+            monitoring.set_local_events(tool_id, code, 0)
+
+    def observed(frame, event, arg):
         try:
             observe(frame, event, arg)
         except Exception:
@@ -219,18 +259,78 @@ def run(spec_path):
                     emit("hook_error", error=profile_errors[-1])
                 except OSError:
                     connection.close()
-            sys.setprofile(None)
+            disable()
+
+    target_functions = {
+        "SetCommand",
+        "GetNearestDebrisLocations",
+        "IfHas_GetParam",
+        "YouWon",
+        "YouLost",
+        "FullScoreWin",
+        "FullScoreLoss",
+    }
+
+    def register_code(code):
+        if code.co_name == "<module>":
+            monitoring.set_local_events(tool_id, code, monitoring.events.CALL)
+            monitored_codes.append(code)
+        elif code.co_name in target_functions:
+            monitoring.set_local_events(
+                tool_id, code, monitoring.events.PY_START | monitoring.events.PY_RETURN
+            )
+            monitored_codes.append(code)
+        for constant in code.co_consts:
+            if isinstance(constant, CodeType):
+                register_code(constant)
+
+    def on_start(code, offset):
+        frame = sys._getframe(1)
+        if os.path.normcase(code.co_filename) != original_file:
+            return monitoring.DISABLE
+        if code.co_name == "<module>":
+            register_code(code)
+            # Discovery ends at the original module. Imported code receives no global events.
+            monitoring.set_events(tool_id, 0)
+        else:
+            observed(frame, "call", None)
+
+    def on_return(code, offset, result):
+        observed(sys._getframe(1), "return", result)
+
+    native_calls = {"connect_to_sim", "sleep", "CaptureImageBlocking"}
+
+    def on_call(code, offset, function, first_arg):
+        if getattr(function, "__name__", "") not in native_calls:
+            return monitoring.DISABLE
+        observed(sys._getframe(1), "c_call", function)
+
+    def on_c_return(code, offset, function, first_arg):
+        if getattr(function, "__name__", "") in native_calls:
+            observed(sys._getframe(1), "c_return", function)
 
     sys.path.insert(0, str(Path(source).parent))
     sys.argv[0] = source
-    sys.setprofile(profiler)
+    monitoring.register_callback(tool_id, monitoring.events.PY_START, on_start)
+    monitoring.register_callback(tool_id, monitoring.events.PY_RETURN, on_return)
+    monitoring.register_callback(tool_id, monitoring.events.CALL, on_call)
+    monitoring.register_callback(tool_id, monitoring.events.C_RETURN, on_c_return)
+    monitoring.set_events(tool_id, monitoring.events.PY_START)
     try:
         runpy.run_path(source, run_name="__main__")
     except BaseException:
-        sys.setprofile(None)
+        disable()
         emit("exception", error=traceback.format_exc())
         raise
     finally:
-        sys.setprofile(None)
+        disable()
+        for event in (
+            monitoring.events.PY_START,
+            monitoring.events.PY_RETURN,
+            monitoring.events.CALL,
+            monitoring.events.C_RETURN,
+        ):
+            monitoring.register_callback(tool_id, event, None)
+        monitoring.free_tool_id(tool_id)
         emit("process_finished")
         connection.close()

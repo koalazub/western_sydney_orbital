@@ -56,14 +56,22 @@ class OfficialBenchmarkTests(unittest.TestCase):
             initial_distanceToShip=1000,
         )
         win = evidence.score_components(dict(outcome="success", inputs=inputs))
-        self.assertAlmostEqual(win["calculated_score"], 70)
+        self.assertAlmostEqual(win["calculated_score"], -30)
         loss = evidence.score_components(dict(outcome="failure", inputs=inputs))
-        self.assertAlmostEqual(loss["calculated_score"], -40)
+        self.assertAlmostEqual(loss["calculated_score"], -140)
         inputs["time_s"] = 0
         self.assertAlmostEqual(
             evidence.score_components(dict(outcome="success", inputs=inputs))["time_points"], 0
         )
         self.assertIsNone(evidence.score_components(dict(outcome="wall_timeout", inputs=inputs)))
+
+    def test_score_reconciles_observed_official_11_november_receipt(self):
+        # Original native scorer return in pilot dfdb53bb, not a practice-model score.
+        receipt = dict(outcome="success", inputs=dict(
+            time_s=166.40587000000002, nominalTime_s=120, damageTaken_J=0,
+            maxDamage_J=209200, fuelUsed_kg=103.36057751696077, nominalFuel_kg=75))
+        self.assertAlmostEqual(evidence.score_components(receipt)["calculated_score"],
+                               -15.70126262502879)
 
     def test_report_retains_missing_and_never_promotes_repeated_runs_to_scenarios(self):
         config = self.config()
@@ -79,7 +87,8 @@ class OfficialBenchmarkTests(unittest.TestCase):
             folder = root / "run-0"
             folder.mkdir()
             evidence.write_json(
-                folder / "receipt.json", dict(outcome="wall_timeout", official_score=None)
+                folder / "receipt.json",
+                dict(outcome="wall_timeout", official_score=None, inputs=None),
             )
             (folder / "events.jsonl").write_text(
                 '{"kind":"telemetry","seq":0,"damage_J":0}\n'
@@ -106,6 +115,9 @@ class OfficialBenchmarkTests(unittest.TestCase):
                 folder = Path(temporary)
                 source = folder / "original.py"
                 source.write_text(
+                    "import sys\n"
+                    "assert sys.getprofile() is None\n"
+                    "assert sys.monitoring.get_events(3) == 0\n"
                     "sim_elapsed_time = 123.5\n"
                     "distanceToShip = 49.5\n"
                     "initial_distanceToShip = 1310\n"
@@ -142,6 +154,30 @@ class OfficialBenchmarkTests(unittest.TestCase):
         finally:
             sys.argv[:] = original_argv
             receiver.close()
+
+    def test_delivery_requires_native_readback_and_impulse_not_just_writer_calls(self):
+        writer = dict(kind="command_written", seq=1, monotonic_s=10, linear_body_m_s2=[0.5, 0, 0])
+        self.assertFalse(evidence.delivery_summary([writer])["command_delivery_verified"])
+        actuator = dict(
+            kind="actuator_applied",
+            seq=2,
+            received=dict(linear_body_m_s2=[0.5, 0, 0], linear_read_monotonic_s=10.01),
+            linear_impulse_body_kg_m_s=[1, 0, 0],
+            position_resident_m=[0, 0, 0],
+            velocity_resident_m_s=[0, 0, 0],
+        )
+        result = evidence.delivery_summary([writer, actuator])
+        self.assertTrue(result["command_delivery_verified"])
+        self.assertFalse(result["simulator_motion_observed"])
+        moved = dict(
+            actuator, seq=3, position_resident_m=[1, 0, 0], velocity_resident_m_s=[0.1, 0, 0]
+        )
+        result = evidence.delivery_summary([writer, actuator, moved])
+        self.assertTrue(result["simulator_motion_observed"])
+        wrong = dict(
+            actuator, received=dict(linear_body_m_s2=[0, 0.5, 0], linear_read_monotonic_s=10.01)
+        )
+        self.assertFalse(evidence.delivery_summary([writer, wrong])["command_delivery_verified"])
 
     @unittest.skipUnless(os.name == "nt", "Native Windows job test")
     def test_cleanup_owns_and_terminates_descendants(self):

@@ -33,6 +33,14 @@ original native connection arguments. The attempt is enclosed in a Windows job
 before its first instruction. Cleanup kills only that job and its descendants.
 A repository-wide file lock prevents two copies of this runner commanding flights.
 
+Controller placement does not require editing the installed solution. STP accepts
+the mission's explicit Python `Source` paths; the runner selects one fresh copy of
+the requested controller and retains the native launch arguments. If installing a
+controller manually for an ordinary interactive flight, the stock mission expects
+`%USERPROFILE%\AppData\Local\SimDynamX\STPro\Assets\Repos\STU4-Solution\Controller.py`.
+Back up that existing solution first, and copy **all** supporting modules from the
+person's folder beside `Controller.py`. Manual copying is unnecessary for campaigns.
+
 ```powershell
 $stpPython = "$env:USERPROFILE\AppData\Local\SimDynamX\STPro\Versions\v0.54.2\py\Scripts\python.exe"
 uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py prepare --mode pilot --output runs/stp-pilot-001
@@ -47,6 +55,12 @@ attempt remains partial; analyze it without rerunning it. `run --max-attempts 1`
 allows a bounded diagnostic start. Startup errors, evidence failures and stalls halt
 the campaign for investigation. A subsequent explicit `run` runs only previously
 unstarted scheduled IDs, never a failed ID.
+
+To stop cleanly from a second terminal, use `benchmark.py stop runs/stp-pilot-001`
+with the same UV/native-Python prefix. This requests job cleanup and final evidence
+capture. Use it instead of force-stopping the enclosing terminal process. A stopped
+campaign cannot restart; prepare a new root and run IDs. An initial delivery check
+can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 
 After inspecting the pilot, prepare `--mode baseline` for five fresh two-run pairs
 per controller, or `--mode seeded` for the 20 predeclared seeds and two consecutive
@@ -93,15 +107,30 @@ scheduling mode. Each run ID contains:
   for overshoot/progress/command reversals/stale sensors/decision overruns, original
   exceptions and stalls. Sequence windows link preceding and subsequent evidence
   and the terminal receipt. Suspected causes stay null; missing data is explicit.
+- `delivery.json`: completed writer calls matched to the **native actuator's**
+  unmodified command reads, nonzero applied impulses and observed simulator motion.
+  Writer calls alone never establish command delivery. Motion includes gravity and
+  contact effects; exact acceleration attribution is not inferred from a flight.
 
-Scoring is observed with a Python call profiler around **unchanged** original
+Scoring is observed with Python 3.12 code-local monitoring around **unchanged** original
 sources. It captures `YouWon`/`YouLost` arguments and the original score return,
 then emits the receipt after the native alert call returns. The runner stops after
 the first receipt; it never re-reads later counters as scoring inputs. It independently
-reconciles the pinned scorer formula (time or distance term, damage, excess fuel,
+reconciles the pinned scorer formula (time or distance term, damage, total fuel,
 and 50-point offset). Scorer time deliberately differs from mission-start time.
 
-The profiler and sequential SDK sampling add overhead to all observed baseline
+The 11 November scorer penalizes `fuelUsed_kg / nominalFuel_kg` from the first
+kilogram. It does **not** subtract a one-tank allowance, unlike the old installed
+scorer. Both the official return and independently calculated score are retained.
+
+Keep baseline campaigns at **1× time scale**. The original Python loops are paced
+in wall time, so accelerated simulation changes update density per simulation
+second. Faster seeded campaigns need separate matched 1× validation and must be
+labelled experimental; changing the clock alone does not preserve controller or
+physics behavior. Normal scheduling remains required; `-det` is not a Python
+lockstep guarantee.
+
+Code-local monitoring and sequential SDK sampling add overhead to all observed baseline
 runs. Decision duration means loop-sleep return to `SetCommand`, including native
 queries/camera/UI, not isolated optimizer CPU time. Original controller loop sleeps
 are preserved; the runner adds no fixed readiness delays. Readiness and completion
