@@ -48,8 +48,8 @@
     "label": "Alpha-beta + sidestep",
     "owner": "Bui",
     "contributor": "Bui; WSO bounded native adapter",
-    "description": "Original alpha-beta tracking and cruise/sidestep guidance with a reviewed 0.25 m/s² hold plus 0.25 m/s² sidestep profile. Experimental best effort, not certified avoidance or docking.",
-    "profile": "17 m/s cruise, 0.25 + 0.25 bounded burns",
+    "description": "Earlier alpha-beta tracking and cruise/sidestep guidance with a reviewed 0.25 m/s² hold plus 0.25 m/s² sidestep profile, retained for local comparison. It is not Bui's current self-contained 7 m/s controller in controllers/bui/Controller.py. Experimental best effort, not certified avoidance or docking.",
+    "profile": "Earlier alpha-beta adapter, 17 m/s cruise, 0.25 + 0.25 bounded burns",
     "experimental": true,
     "target_seeking": true,
     "source": "controllers/bui/mvp"
