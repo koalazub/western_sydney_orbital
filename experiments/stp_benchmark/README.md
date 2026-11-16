@@ -70,7 +70,7 @@ acceleration remains future work.
 Prepare both campaign directories first, then give both paths to `run`, in order:
 
 ```powershell
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --continue-on-controller-error --status-file runs/full/queue_status.json
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --continue-on-controller-error --status-file runs/full/queue_status.json
 ```
 
 This runs each campaign sequentially and writes its analysis at completion.
@@ -89,7 +89,7 @@ evidence stay under the prepared `runs/` directories.
 Check the entire queue from a second PowerShell terminal:
 
 ```powershell
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py status runs/full
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py status runs/full
 ```
 
 For one campaign, pass `runs/full/baseline` or `runs/full/seeded` instead. Status is
@@ -100,8 +100,8 @@ queue directory is recognized by its `queue_status.json` file.
 Stop the whole queue cleanly, then resume the same prepared schedule:
 
 ```powershell
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py stop runs/full
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --resume --continue-on-controller-error --status-file runs/full/queue_status.json
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py stop runs/full
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --resume --continue-on-controller-error --status-file runs/full/queue_status.json
 ```
 
 Wait for the old runner to exit before resuming. Resume obtains the exclusive
@@ -149,9 +149,9 @@ person's folder beside `Controller.py`. Manual copying is unnecessary for campai
 
 ```powershell
 $stpPython = "$env:USERPROFILE\AppData\Local\SimDynamX\STPro\Versions\v0.54.2\py\Scripts\python.exe"
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py prepare --mode pilot --output runs/stp-pilot-001
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py run runs/stp-pilot-001
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py analyze runs/stp-pilot-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --mode pilot --output runs/stp-pilot-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-pilot-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py analyze runs/stp-pilot-001
 ```
 
 `pilot` schedules two fresh Tom attempts. `prepare` launches nothing and freezes
@@ -206,7 +206,7 @@ To request more scenarios, set `seed_count` in the configuration or pass
 root with `$stpPython` set as above:
 
 ```powershell
-uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py prepare --mode seeded --seed-count 30 --output runs/stp-seeded-030-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --mode seeded --seed-count 30 --output runs/stp-seeded-030-001
 ```
 
 This prepares **60 flights per controller** and launches nothing. If the bank has

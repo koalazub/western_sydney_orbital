@@ -22,8 +22,8 @@ build/
 runs/
 
 # Seed bank writes are locked and atomic; the JSON bank itself is versioned.
-/examples/stp_benchmark/seed_bank.json.lock
-/examples/stp_benchmark/seed_bank.json.tmp
+/experiments/stp_benchmark/seed_bank.json.lock
+/experiments/stp_benchmark/seed_bank.json.tmp
 
 # Test and lint caches
 .pytest_cache/

@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-BENCHMARK = Path(__file__).resolve().parents[1] / "examples" / "stp_benchmark"
+BENCHMARK = Path(__file__).resolve().parents[1] / "experiments" / "stp_benchmark"
 sys.path.insert(0, str(BENCHMARK))
 spec = importlib.util.spec_from_file_location("official_stp_evidence", BENCHMARK / "evidence.py")
 evidence = importlib.util.module_from_spec(spec)
