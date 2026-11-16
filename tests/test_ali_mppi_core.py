@@ -397,6 +397,40 @@ def test_repeated_collisions_flip_the_detour_side_and_escalate_speed_safety():
     assert np.isclose(core.safe_cruise(state, 8.0, 120_000.0, core.DEFAULT_POLICY), 6.4)
 
 
+def test_default_beeline_skips_unused_mppi_sampling(monkeypatch):
+    calls = []
+
+    def fake_plan(*args, **kwargs):
+        calls.append(1)
+        return np.zeros(3)
+
+    monkeypatch.setattr(core, "plan", fake_plan)
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+    }
+    core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        [],
+        0.0,
+        0.1,
+    )
+    assert calls == []
+    state["policy"]["plan_steering"] = True
+    core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        [],
+        0.1,
+        0.1,
+    )
+    assert calls == [1]
+
+
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
     tracker = core.KalmanTracker()
     for time in (0.0, 1.0, 2.0, 3.0):

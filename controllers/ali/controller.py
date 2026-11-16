@@ -424,10 +424,7 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy):
     return options[selected]
 
 
-def plan(state, position, velocity, target_position, body_x, radius, max_accel, dt, fuel, damage, ship_mass_kg, now, rows):
-    policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
-    radius_target = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
-    remaining = max(0.0, float(np.linalg.norm(target_position - position)) - radius_target)
+def prepare_cruise(state, remaining, max_accel, damage, ship_mass_kg, policy):
     budget = policy.get("time_budget_s")
     budget = 2.5 * DEFAULT_SCORE["nominal_time_s"] if budget is None else float(budget)
     fixed_speed = policy.get("cruise_speed_mps")
@@ -435,6 +432,14 @@ def plan(state, position, velocity, target_position, body_x, radius, max_accel, 
     cruise_speed = min(max(MIN_CRUISE_SPEED_MPS, float(reference)), float(np.sqrt(2.0 * max(1e-6, max_accel) * remaining)))
     state["cruise_speed_mps"], state["fuel_rate_kg_s"] = cruise_speed, max(1e-6, float(ship_mass_kg) * float(max_accel) / (80.0 * 9.8))
     state["cruise_speed_mps"] = cruise_speed = safe_cruise(state, cruise_speed, damage, policy)
+    return cruise_speed
+
+
+def plan(state, position, velocity, target_position, body_x, radius, max_accel, dt, fuel, damage, ship_mass_kg, now, rows):
+    policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
+    radius_target = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
+    remaining = max(0.0, float(np.linalg.norm(target_position - position)) - radius_target)
+    cruise_speed = prepare_cruise(state, remaining, max_accel, damage, ship_mass_kg, policy)
     goal = np.asarray(state.get("steer_target", target_position), float)
     nominal = max_accel * unit(cruise_velocity(position, goal, cruise_speed) - velocity)
     tracks = state.get("tracks", [])[:30]
@@ -526,7 +531,11 @@ def step(state, obs, rows, now, dt, to_body=None):
     steer_target = detour_target(target, collision) if collision is not None and remaining > policy["coast_range_m"] else target
     state["steer_target"] = steer_target
     tracks = update_estimates(state, rows, position, velocity, now, policy)
-    desired_accel = plan(state, position, velocity, target, body_x, float(obs["radius"]), max_accel, dt, float(obs["fuel"]), damage, float(obs["mass"]), now, rows)
+    if policy["plan_steering"] and policy["avoidance"] == "mppi":
+        desired_accel = plan(state, position, velocity, target, body_x, float(obs["radius"]), max_accel, dt, float(obs["fuel"]), damage, float(obs["mass"]), now, rows)
+    else:
+        prepare_cruise(state, max(0.0, remaining - radius), max_accel, damage, float(obs["mass"]), policy)
+        desired_accel = np.zeros(3)
     v_des = cruise_velocity(position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS), radius)
     if policy["avoidance"] == "avoider":
         nominal, desired_accel = avoid_velocity(v_des, tracks, position, velocity, state, policy), np.zeros(3)
