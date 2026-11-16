@@ -24,6 +24,75 @@ import seeds  # noqa: E402
 
 
 class OfficialBenchmarkTests(unittest.TestCase):
+    def test_commit_match_checks_all_support_files_and_tolerates_only_line_endings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Controller.py").write_bytes(b"import helper\r\n")
+            (root / "helper.py").write_bytes(b"value = 1\n")
+            blobs = {
+                "controllers/tom/Controller.py": b"import helper\n",
+                "controllers/tom/helper.py": b"value = 1\n",
+            }
+
+            def read(command, **kwargs):
+                if "ls-tree" in command:
+                    return SimpleNamespace(stdout="\0".join(blobs).encode() + b"\0")
+                return SimpleNamespace(stdout=blobs[command[-1].split(":", 1)[1]])
+
+            files = {name: evidence.digest(root / name) for name in ("Controller.py", "helper.py")}
+            with patch.object(evidence.subprocess, "run", side_effect=read):
+                match = evidence.commit_match(root, "a" * 40, "controllers/tom", root, files)
+                self.assertEqual(match, "line_endings_only")
+                (root / "helper.py").write_bytes(b"value = 2\n")
+                self.assertEqual(
+                    evidence.commit_match(root, "a" * 40, "controllers/tom", root, files),
+                    "modified",
+                )
+
+    def test_dataset_labels_bind_author_method_and_verified_commit_to_frozen_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "snapshot/controllers/tom"
+            snapshot.mkdir(parents=True)
+            (snapshot / "Controller.py").write_text("pass\n")
+            config = self.config()
+            config["controllers"] = [config["controllers"][0]]
+            campaign = dict(config=config, mode="pilot", attempts=[])
+            provenance = dict(
+                repository_revision="a" * 40,
+                snapshot_hashes={
+                    "controllers/tom/Controller.py": evidence.digest(snapshot / "Controller.py")
+                },
+            )
+            evidence.write_json(root / "provenance.json", provenance)
+            with patch.object(evidence, "commit_match", return_value="exact"):
+                identity = evidence.controller_versions(root, campaign)["tom"]
+                self.assertEqual(identity["controller_source_commit"], "a" * 40)
+                evidence.write_json(
+                    root / "dataset_labels.json",
+                    dict(
+                        tom=dict(
+                            author="Tom Kirkpatrick",
+                            method="Kalman",
+                            source_bundle_sha256=identity["controller_source_sha256"],
+                        )
+                    ),
+                )
+                labelled = evidence.controller_versions(root, campaign)["tom"]
+                self.assertIn(
+                    "Tom Kirkpatrick — Kalman — aaaaaaaaaaaa", labelled["controller_label"]
+                )
+                self.assertEqual(labelled["controller_author"], "Tom Kirkpatrick")
+            with patch.object(evidence, "commit_match", return_value="modified"):
+                modified = evidence.controller_versions(root, campaign)["tom"]
+                self.assertIsNone(modified["controller_source_commit"])
+                self.assertEqual(modified["controller_checkout_commit"], "a" * 40)
+                self.assertIn("unverified commit", modified["controller_label"])
+            provenance["snapshot_hashes"]["controllers/tom/Controller.py"] = "b" * 64
+            evidence.write_json(root / "provenance.json", provenance)
+            with self.assertRaisesRegex(ValueError, "does not match frozen source bundle"):
+                evidence.controller_versions(root, campaign)
+
     def test_read_only_status_counts_terminal_attempts_and_shows_active_telemetry(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

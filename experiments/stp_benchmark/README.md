@@ -259,6 +259,38 @@ wait indefinitely in that mode. Experimental results stay separate from baseline
 
 ## Evidence and analysis
 
+### Dataset labels and source versions
+
+Declare `author` and `method` on each controller configuration, for example
+`Tom Kirkpatrick` / `Kalman`, `Tom Kirkpatrick` / `Polyfit`, or `Ali El Ali` / `MPPI`.
+Update the method when selecting a new implementation; the controller ID alone
+does not establish its method. Keep the reviewed implementation and metadata in
+the same new preparation.
+
+Preparation and analysis write `controller_versions.json`. Analysis carries its
+labels into attempt CSVs, summaries, matched comparisons and the Markdown report.
+A label includes author, method, a verified 12-character source commit and a
+separate 12-character SHA-256 identifier for the complete frozen controller bundle.
+Full values are retained in metadata/CSV fields. These SHA-256 identifiers are
+file-content hashes, not commit hashes.
+
+The source commit is the preparation checkout revision only when every frozen
+controller file matches that commit, allowing CRLF/LF differences explicitly.
+Git is used read-only to inspect committed blobs; no checkout or repository writes
+occur. The bundle includes supporting files, so a helper-only change changes its
+identity. Modified sources or unavailable local commit history produce an
+`unverified commit` label, with the checkout commit recorded separately. No remote
+history is fetched and no commit is invented. Author/method remain declared labels,
+not automatic classification of arbitrary incoming code.
+
+For an existing frozen dataset, `dataset_labels.json` can supply author/method
+without changing its campaign or provenance. It maps the original controller IDs
+to `author`, `method` and the exact `source_bundle_sha256` from
+`controller_versions.json`. A different bundle is rejected. Re-analyze after the
+running campaign finishes to refresh derived reports; do not change raw receipts,
+frozen sources or prepared configuration merely to add display labels. Archived
+datasets whose author/method are unavailable remain explicitly unspecified.
+
 All raw evidence stays under ignored `runs/`. `campaign.json` contains the complete
 predeclared schedule. `provenance.json` contains the STP build, binary/SDK hashes,
 dependency versions, transitive config/data hashes, source snapshots, machine and

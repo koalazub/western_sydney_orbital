@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import statistics
+import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -316,9 +317,117 @@ def delivery_summary(events):
     )
 
 
+def commit_match(repo, revision, directory, snapshot, files):
+    """Read committed blobs only; never infer source identity from checkout HEAD alone."""
+    if not revision or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+        return "unavailable"
+    try:
+        relative = Path(directory)
+        if relative.is_absolute():
+            relative = relative.resolve().relative_to(repo.resolve())
+        prefix = relative.as_posix().rstrip("/") + "/"
+
+        def read(*args):
+            return subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            ).stdout
+
+        paths = read("ls-tree", "-r", "--name-only", "-z", revision, "--", prefix)
+        committed = {
+            p.removeprefix(prefix)
+            for p in paths.decode().split("\0")
+            if p
+            and "__pycache__" not in Path(p).parts
+            and Path(p).name != "controller_log.txt"
+            and not Path(p).name.startswith("cam_")
+        }
+        if committed != set(files):
+            return "modified"
+        status = "exact"
+        for name in files:
+            original = read("show", f"{revision}:{prefix}{name}")
+            frozen = (snapshot / name).read_bytes()
+            if original == frozen:
+                continue
+            if b"\0" not in original + frozen and original.replace(
+                b"\r\n", b"\n"
+            ) == frozen.replace(b"\r\n", b"\n"):
+                status = "line_endings_only"
+            else:
+                return "modified"
+        return status
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "unavailable"
+
+
+def controller_versions(root, campaign):
+    root = Path(root)
+    provenance_path = root / "provenance.json"
+    provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {}
+    labels_path = root / "dataset_labels.json"
+    labels = json.loads(labels_path.read_text()) if labels_path.exists() else {}
+    result = {}
+    for controller in campaign["config"]["controllers"]:
+        identity = controller["id"]
+        prefix = f"controllers/{identity}/"
+        files = {
+            name.removeprefix(prefix): value
+            for name, value in provenance.get("snapshot_hashes", {}).items()
+            if name.startswith(prefix)
+        }
+        bundle = (
+            hashlib.sha256(
+                json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if files
+            else None
+        )
+        metadata = labels.get(identity, controller)
+        if identity in labels and (not bundle or metadata.get("source_bundle_sha256") != bundle):
+            raise ValueError(f"Dataset label does not match frozen source bundle: {identity}")
+        author = metadata.get("author", "Unknown author")
+        method = metadata.get("method", "Unspecified method")
+        snapshot = root / "snapshot" / "controllers" / identity
+        intact = bool(files) and all(
+            (snapshot / name).is_file() and digest(snapshot / name) == value
+            for name, value in files.items()
+        )
+        checkout = provenance.get("repository_revision")
+        match = (
+            commit_match(
+                Path(__file__).resolve().parents[2],
+                checkout,
+                controller["directory"],
+                snapshot,
+                files,
+            )
+            if intact
+            else "unavailable"
+        )
+        source_commit = checkout if match in {"exact", "line_endings_only"} else None
+        version = source_commit[:12] if source_commit else "unverified commit"
+        label = f"{author} — {method} — {version}"
+        if bundle:
+            label += f" — source {bundle[:12]}"
+        result[identity] = dict(
+            controller_label=label,
+            controller_author=author,
+            controller_method=method,
+            controller_source_commit=source_commit,
+            controller_checkout_commit=checkout,
+            controller_commit_match=match,
+            controller_source_sha256=bundle,
+        )
+    return result
+
+
 def analyze(root):
     root = Path(root)
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
+    versions = controller_versions(root, campaign)
     selection_path = root / "seed_selection.json"
     selection = (
         json.loads(selection_path.read_text(encoding="utf-8")) if selection_path.exists() else {}
@@ -346,6 +455,7 @@ def analyze(root):
         row = dict(
             run_id=attempt["run_id"],
             controller=attempt["controller"]["id"],
+            **versions[attempt["controller"]["id"]],
             mode=campaign["mode"],
             block=attempt["block"],
             seed=attempt["seed"],
@@ -379,6 +489,7 @@ def analyze(root):
     for name, group in groups.items():
         counts = dict(Counter(r["outcome"] for r in group))
         summaries[name] = dict(
+            **versions[name],
             scheduled=len(group),
             outcomes=counts,
             attempted=sum(r["outcome"] != "not_started" for r in group),
@@ -412,7 +523,9 @@ def analyze(root):
             comparisons.append(
                 dict(
                     controller=row["controller"],
+                    controller_label=row["controller_label"],
                     reference=reference,
+                    reference_label=versions[reference]["controller_label"],
                     block=row["block"],
                     seed=row["seed"],
                     repetition=row["repetition"],
@@ -437,6 +550,8 @@ def analyze(root):
         seed_comparisons.append(
             dict(
                 controller=name,
+                controller_label=versions[name]["controller_label"],
+                reference_label=versions[reference]["controller_label"],
                 block=block,
                 seed=group[0]["seed"],
                 complete_pair=complete,
@@ -449,6 +564,7 @@ def analyze(root):
     csv_table(root / "matched.csv", comparisons)
     csv_table(root / "scenario_comparisons.csv", seed_comparisons)
     write_json(root / "summary.json", summaries)
+    write_json(root / "controller_versions.json", versions)
     write_json(root / "failure_timelines.json", timelines)
     completed = [r for r in rows if r["wall_s"] is not None]
     estimate = dict(
@@ -486,8 +602,8 @@ def analyze(root):
     ]
     for name, item in summaries.items():
         lines.append(
-            f"| {name} | {item['outcomes']} | {item['success_rate']:.1%} | "
-            f"{item['scored_coverage']:.1%} |"
+            f"| {item['controller_label']} ({name}) | {item['outcomes']} | "
+            f"{item['success_rate']:.1%} | {item['scored_coverage']:.1%} |"
         )
     lines += [
         "",

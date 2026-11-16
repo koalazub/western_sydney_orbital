@@ -11,8 +11,8 @@
   "execution_order": "coverage_first",
   "repetitions": 1,
   "controllers": [
-    {"id": "tom", "directory": "controllers/tom", "entrypoint": "Controller.py", "environment": {}},
-    {"id": "ali_mppi", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}}
+    {"id": "tom", "author": "Tom Kirkpatrick", "method": "Kalman", "directory": "controllers/tom", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "ali_mppi", "author": "Ali El Ali", "method": "MPPI", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}}
   ],
   "seed_bank": "experiments/stp_benchmark/seed_bank.json",
   "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",

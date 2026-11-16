@@ -173,3 +173,105 @@ outputs include `attempts.csv`, `summary.json`, `matched.csv`,
 The result is a comparison of these frozen controller versions on this pinned
 native mission and seed set. Do not pool earlier 600-second campaigns, pilots,
 WASM practice flights or historical meeting scores into its outcome rates.
+
+## Follow-up: four controller versions across two campaigns
+
+Plan updated: 16 November 2026, 21:18 AEDT. The next campaign is intended to
+evaluate Tom's updated polyfit controller and Bui's controller, subject to those
+versions being ready. The current campaign remains evidence for Tom's Kalman
+version and the frozen MPPI version. It is not evidence for the incoming Tom code.
+
+| Analysis label | Source campaign | Version evidence | State |
+| --- | --- | --- | --- |
+| Tom Kirkpatrick — Kalman — commit 0cd42198f94b — source ab2d62f26073 | `runs/tom-mppi-300s-single-pass-002` | All frozen controller files match the preparation commit exactly; tracker confirmed to use Kalman | Running campaign at plan update |
+| Ali El Ali — MPPI — commit 0cd42198f94b — source d1a6dd9a0b69 | `runs/tom-mppi-300s-single-pass-002` | All frozen controller files match the preparation commit exactly | Running campaign at plan update |
+| Tom — Polyfit — pending hash | New campaign, not yet prepared | Confirm polyfit implementation, then freeze intended incoming version and all supporting files | Pending code/version confirmation |
+| Bui — pending hash | New campaign, not yet prepared | Confirm native entrypoint and supporting modules run, then freeze intended version | Pending readiness |
+
+The two recorded entrypoint SHA-256 values are:
+
+```text
+Tom Kalman: 2852e380cbf1acf8b6c191b23e57d05e77b87749626f73d2a0d38d170b87ea1b
+Ali MPPI:   5700423526bcc33880e74300da57980c604bbff8d66ffa00d866e835a4a56154
+```
+
+These identify entrypoint files only. Supporting modules are part of the version:
+retain the complete `snapshot_hashes` map from each campaign's `provenance.json`.
+In particular, the frozen Tom `debris_tracker.py` SHA-256 is
+`747d0b3626fa7a43c7ab27c463b64a97f6c15bef1f6181a0bbee9d3701a2e97f`.
+A helper-only change is a new controller version even if the entrypoint hash is
+unchanged. Do not identify a controller version solely by its author's name,
+filename, branch or latest checkout.
+
+The two existing versions have now been verified against source commit
+`0cd42198f94b73ebfe9ab6e840745f02b8266494`. This is the commit from which the
+preparation snapshot was taken, not a claim that every controller was originally
+authored in that commit. The labels distinguish commit IDs from SHA-256 content
+hashes. Both controllers can legitimately share one source commit.
+
+The complete frozen-folder fingerprints are:
+
+```text
+Tom Kalman: ab2d62f260733dd69987ae52e47287cbb57c31148c139183547d6f0a7545b40d
+Ali MPPI:   d1a6dd9a0b6967af88afdf133327d754311ebfb39ba9831fdcc9d6fb3b733b91
+```
+
+Supplemental labels are saved in the campaign's `dataset_labels.json`, bound to
+these fingerprints. `controller_versions.json` records full author/method,
+source and checkout commits, verification status and fingerprint. Campaign
+configuration, frozen sources and raw receipts are unchanged. Re-analysis adds
+the labels to CSVs and reports. Future preparations declare `author` and `method`
+in each controller entry and verify the source commit from their own frozen files.
+If verification fails or history is unavailable, label the commit unverified and
+retain the exact content fingerprint rather than assuming the current HEAD matches.
+
+### Conditions for combining results
+
+Combine for comparison as four separate controller-version rows; do not merge
+Tom Kalman and Tom polyfit into one Tom success rate or score distribution.
+Keep campaign path, run ID, source hashes, seed and outcome attached to every row.
+The new configuration should use distinct controller IDs such as `tom_polyfit`
+and `bui`, with Tom polyfit as its reference. The display labels must also include
+the frozen version identifier. Do not modify the running campaign's configuration,
+snapshot, controller IDs or receipts to add display labels.
+
+Before treating flights as matched, check the pinned package, mission/scorer and
+binary/dependency hashes, saved field, seed bank selection and scope, radar seed,
+1× playback, scheduling, instrumentation/sample period, stopping rules and all
+limits. Use the same 22 seeds, one pass and 300-second budget in the next campaign.
+Keep the same machine and runtime conditions as far as practicable. If conditions
+differ materially, present separate cohorts rather than a pooled ranking.
+
+The existing `analyze` command reads one campaign at a time. Its `matched.csv`
+and `scenario_comparisons.csv` compare controllers within that campaign only;
+concatenating those files does not produce every cross-campaign comparison.
+A combined analysis must read original campaign identities, receipts, provenance
+and events, and join controller-version outcomes by the actual seed, not by row
+position or block number. Do not mix in earlier campaigns or use an incoming
+checkout to relabel frozen sources.
+
+Show all four versions on all 22 seeds with missing/incomplete outcomes visible.
+For each pairwise result, show the eligible matched-seed count. Score differences
+require two native scores; timeout-distance differences require two budget
+timeouts with available readings and comparable observation horizons. The failed
+MPPI startup on seed 327673 remains an infrastructure outcome and cannot provide
+a matched physical or score result. No failed attempt is silently substituted.
+
+Existing MPPI and Tom Kalman measurements can be reused if the conditions match;
+neither must be rerun just to add Tom polyfit and Bui. However, controller version
+and campaign time are then partly confounded: this is a matched-scenario comparison
+across sessions, not four controllers interleaved in one session. State that limit.
+
+### Handover at 11 pm
+
+Treat 11 pm AEDT on 16 November as a proposed code-readiness handover, not a
+completion deadline or an automatic launch. Verify and freeze the intended Tom
+polyfit and Bui versions after the incoming changes arrive. Prepare a new campaign
+with a new output directory, then start it after the current queue releases its
+flight lock. Do not prepare before the intended versions are confirmed.
+
+At the same 22-seed single-pass design, Tom polyfit plus Bui is another 44 flights.
+Full-budget flight time alone is about 3 hours 40 minutes at 1×, plus startup and
+cleanup. If Bui is not ready, defer its campaign or run it later with the same
+conditions and its own version label; do not substitute an older version under
+the proposed label.

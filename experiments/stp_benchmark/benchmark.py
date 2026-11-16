@@ -23,7 +23,7 @@ from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from pathlib import Path
 
-from evidence import SCHEMA, analyze, digest, read_events, schedule, write_json
+from evidence import SCHEMA, analyze, controller_versions, digest, read_events, schedule, write_json
 from seeds import select_seeds
 
 HERE = Path(__file__).resolve().parent
@@ -260,6 +260,7 @@ def prepare(config_path, output, mode, seed_count=None):
         preparation_only=True,
     )
     write_json(output / "campaign.json", campaign)
+    write_json(output / "controller_versions.json", controller_versions(output, campaign))
     print(f"Prepared {len(attempts)} attempts at {output}; no STP sessions launched", flush=True)
 
 
