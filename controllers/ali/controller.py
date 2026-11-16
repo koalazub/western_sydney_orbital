@@ -67,8 +67,64 @@ MPPI_SAMPLES, MPPI_STEPS = 48, 40
 CRUISE_SPEED_MPS, MIN_CRUISE_SPEED_MPS = 7.0, 1.0
 TERMINAL_COAST_RANGE_M, TERMINAL_COAST_MIN_SPEED_MPS = 200.0, 4.0
 ATTITUDE_HOLD_RAD, ATTITUDE_HOLD_RATE_RAD_S = np.radians(1.0), 0.01
-DEFAULT_SCORE = dict(nominal_time_s=120.0, nominal_fuel_kg=75.0, impact_threshold_j=209200.0, points_scale=100.0, damage_multiplier=2.0, score_offset=0.5)
-DEFAULT_POLICY = dict(cruise_fraction=0.5, cruise_speed_mps=14.0, main_engine_gate_rad=0.0, coast_range_m=200.0, coast_speed_mps=4.0, emergency_range_m=180.0, emergency_lookahead_s=7.0, emergency_margin_m=6.0, emergency_escape_mps=3.5, plan_steering=True, plan_risk_threshold=0.01, risk_weight=200.0, switch_weight=0.5, attitude_brake_scale=0.65, tracker="line", guard_source="raw", risk_inflation=False, risk_k_sigma=1.5, risk_max_inflate=10.0, mppi_fixed_samples=False, avoidance="mppi", governor="full", governor_gain=2.0, governor_start_err=0.3, governor_stop_err=0.1, attitude_control=True, avoider_margin=6.0, avoider_horizon=15.0, avoider_k_sigma=1.5, avoider_max_inflate=10.0, avoider_lag_s=0.5, avoider_w_aim=1.5, avoider_switch_margin=0.3, collision_damage_j=1.0, collision_jump_mps=0.75, collision_escape_s=0.6, collision_detour_s=120.0, collision_offset_m=25.0, collision_safe_damage_j=104600.0, collision_slow_fraction=0.8)
+DEFAULT_SCORE = {
+    "nominal_time_s": 120.0,
+    "nominal_fuel_kg": 75.0,
+    "impact_threshold_j": 209200.0,
+    "points_scale": 100.0,
+    "damage_multiplier": 2.0,
+    "score_offset": 0.5,
+}
+DEFAULT_POLICY = {
+
+    "cruise_fraction": 0.5,
+    "cruise_speed_mps": 8.0,
+    "main_engine_gate_rad": 0.0,
+    "coast_range_m": 200.0,
+    "coast_speed_mps": 4.0,
+
+    "emergency_range_m": 180.0,
+    "emergency_lookahead_s": 7.0,
+    "emergency_margin_m": 6.0,
+    "emergency_escape_mps": 3.5,
+
+    "plan_steering": True,
+    "plan_risk_threshold": 0.01,
+    "risk_weight": 200.0,
+    "switch_weight": 0.5,
+
+    "attitude_brake_scale": 0.65,
+
+    "tracker": "line",
+    "guard_source": "tracks",
+    "risk_inflation": False,
+    "risk_k_sigma": 1.5,
+    "risk_max_inflate": 10.0,
+    "mppi_fixed_samples": False,
+
+    "avoidance": "mppi",
+    "governor": "full",
+    "governor_gain": 2.0,
+    "governor_start_err": 0.3,
+    "governor_stop_err": 0.1,
+    "attitude_control": True,
+
+    "avoider_margin": 6.0,
+    "avoider_horizon": 15.0,
+    "avoider_k_sigma": 1.5,
+    "avoider_max_inflate": 10.0,
+    "avoider_lag_s": 0.5,
+    "avoider_w_aim": 1.5,
+    "avoider_switch_margin": 0.3,
+
+    "collision_damage_j": 1.0,
+    "collision_jump_mps": 0.75,
+    "collision_escape_s": 0.6,
+    "collision_detour_s": 120.0,
+    "collision_offset_m": 25.0,
+    "collision_safe_damage_j": 104600.0,
+    "collision_slow_fraction": 0.8,
+}
 
 def unit(value):
     length = np.linalg.norm(value, axis=-1, keepdims=True)
@@ -192,8 +248,12 @@ def update_estimates(state, rows, position, velocity, now, policy):
         tracker.update(position, velocity, rows)
         state["tracks"] = sorted(tracker.snapshot(now, position), key=lambda track: np.linalg.norm(track["p"] - position))[:160]
     else:
-        update_tracks(state, rows, position, now)
-        state["tracks"] = state.get("rocks", [])
+        update_tracks(state, rows, position, velocity, now)
+        tracks = []
+        for rock in state.get("rocks", []):
+            dt = max(0.0, float(now) - float(rock["t"]))
+            tracks.append({"p": np.asarray(rock["p"], float) + np.asarray(rock["v"], float) * dt, "v": np.asarray(rock["v"], float).copy(), "r": float(rock["r"]), "t": float(now), "sp": float(rock["s"]), "sv": 0.0})
+        state["tracks"] = tracks
     return state["tracks"]
 
 
@@ -282,8 +342,9 @@ def safe_cruise(state, speed, damage, policy):
     return speed
 
 
-def update_tracks(state, rows, position, now):
+def update_tracks(state, rows, position, velocity, now):
     rocks = state.setdefault("rocks", [])
+    velocity = np.asarray(velocity, float)
     for row in rows:
         if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
             continue
@@ -292,7 +353,9 @@ def update_tracks(state, rows, position, now):
         gaps = [np.linalg.norm(rock["p"] + rock["v"] * (at - rock["t"]) - measured) for rock in rocks]
         index = int(np.argmin(gaps)) if gaps else -1
         if index < 0 or gaps[index] >= max(15.0, 2.0 * rocks[index]["s"]):
-            rocks.append({"p": measured.copy(), "v": np.zeros(3), "r": radius, "t": at, "s": 0.5, "q": [(at, measured.copy())]})
+            los = unit(row[0])
+            radial = float(row[1, 1]) + los @ velocity
+            rocks.append({"p": measured.copy(), "v": radial * los, "r": radius, "t": at, "s": 0.5, "q": [(at, measured.copy())]})
         elif at > rocks[index]["t"]:
             rock = rocks[index]
             rock.update(p=measured.copy(), r=max(rock["r"], radius), t=at)
@@ -300,9 +363,9 @@ def update_tracks(state, rows, position, now):
             if len(rock["q"]) >= 4 and rock["q"][-1][0] - rock["q"][0][0] >= 1.0:
                 times = np.array([sample[0] for sample in rock["q"]])
                 points = np.array([sample[1] for sample in rock["q"]])
-                design = np.column_stack((np.ones(len(times)), times - times[0]))
+                design = np.column_stack((np.ones(len(times)), times - times[-1]))
                 coef, *_ = np.linalg.lstsq(design, points, rcond=None)
-                rock["p"], rock["v"] = coef
+                rock["p"], rock["v"] = coef[0], coef[1]
                 rock["s"] = float(np.sqrt(np.sum((points - design @ coef) ** 2) / max(1, len(times) - 2)))
     state["rocks"] = sorted((rock for rock in rocks if now - rock["t"] <= 5.0), key=lambda rock: np.linalg.norm(rock["p"] - position))[:160]
 

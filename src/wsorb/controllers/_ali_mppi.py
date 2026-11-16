@@ -123,7 +123,7 @@ class AliMppiController(ExperimentalController):
             "collision_detour": bool(record.get("collision_detour", False)),
             "collision_offset_m": record.get("collision_offset_m"),
             "tracker": policy.get("tracker", "line"),
-            "guard_source": policy.get("guard_source", "raw"),
+            "guard_source": policy.get("guard_source", "tracks"),
             "avoidance": policy.get("avoidance", "mppi"),
             "governor": policy.get("governor", "full"),
             "risk_inflation": bool(policy.get("risk_inflation", False)),
