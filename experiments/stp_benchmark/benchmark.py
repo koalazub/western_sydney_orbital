@@ -423,6 +423,22 @@ class WindowsJob:
                     self.port = None
 
 
+def next_evidence_event(events, deadline):
+    # Check before dequeueing: a busy stream must not bypass wall/stall deadlines.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise queue.Empty
+    return events.get(timeout=min(0.25, remaining))
+
+
+def event_error_outcome(kind):
+    if kind == "exception":
+        return "exception"
+    if kind in {"sensor_error", "hook_error", "stream_closed"}:
+        return "evidence_failure"
+    return None
+
+
 class Receiver:
     def __init__(self):
         self.events = queue.Queue()
@@ -701,7 +717,7 @@ def execute(root, attempt):
                             last_controller + limits["controller_stall_s"],
                         )
                     try:
-                        event = receiver.events.get(timeout=max(0, min(0.25, deadline - now)))
+                        event = next_evidence_event(receiver.events, deadline)
                     except queue.Empty:
                         now = time.monotonic()
                         if now < deadline:
@@ -770,9 +786,10 @@ def execute(root, attempt):
                             }
                         )
                         break
-                    if kind in {"exception", "hook_error", "stream_closed"}:
+                    error_outcome = event_error_outcome(kind)
+                    if error_outcome is not None:
                         receipt.update(
-                            outcome="exception" if kind == "exception" else "evidence_failure",
+                            outcome=error_outcome,
                             termination_reason=kind,
                             error=event,
                         )

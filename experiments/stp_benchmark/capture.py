@@ -34,6 +34,20 @@ def plain(value):
     return str(value)
 
 
+def controller_mode(namespace):
+    """Read optional policy diagnostics without requiring one controller's layout."""
+    governor = namespace.get("governor")
+    for attribute in ("burning", "firing"):
+        burning = getattr(governor, attribute, None)
+        if burning is not None:
+            return "burn" if burning else "coast"
+    for name in ("record", "tel"):
+        diagnostic = namespace.get(name)
+        if isinstance(diagnostic, dict) and diagnostic.get("mode") is not None:
+            return diagnostic["mode"]
+    return None
+
+
 def run(spec_path):
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     source = str(Path(spec["source"]).resolve())
@@ -98,10 +112,6 @@ def run(spec_path):
         sensor_age = None
         if radar_origin is not None and sensor_times:
             sensor_age = max((sim_now - radar_origin).total_seconds() - t for t in sensor_times)
-        mode = namespace.get("tel", {}).get("mode")
-        governor = namespace.get("governor")
-        if governor is not None:
-            mode = "burn" if governor.firing else "coast"
         emit(
             "telemetry",
             sim_s=sim_s,
@@ -120,7 +130,7 @@ def run(spec_path):
             sensor_timestamps_since_radar_origin_s=sensor_times,
             sensor_age_s=sensor_age,
             radar_origin_tai=radar_origin.isoformat() if radar_origin else None,
-            mode=mode,
+            mode=controller_mode(namespace),
             avoidance=getattr(namespace.get("avoider"), "last_info", None),
             missing_data=["Native contact events/identities", "Fuel by maneuver"],
             reads_are_atomic=False,

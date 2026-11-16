@@ -396,19 +396,22 @@ def controller_versions(root, campaign):
             for name, value in files.items()
         )
         checkout = provenance.get("repository_revision")
+        origin = controller.get("source_commit", checkout)
         match = (
             commit_match(
                 Path(__file__).resolve().parents[2],
-                checkout,
-                controller["directory"],
+                origin,
+                controller.get("source_directory", controller["directory"]),
                 snapshot,
                 files,
             )
             if intact
             else "unavailable"
         )
-        source_commit = checkout if match in {"exact", "line_endings_only"} else None
+        source_commit = origin if match in {"exact", "line_endings_only"} else None
         version = source_commit[:12] if source_commit else "unverified commit"
+        if source_commit is None and controller.get("source_commit"):
+            version += f" (origin {origin[:12]}, {match})"
         label = f"{author} — {method} — {version}"
         if bundle:
             label += f" — source {bundle[:12]}"
@@ -418,6 +421,8 @@ def controller_versions(root, campaign):
             controller_method=method,
             controller_source_commit=source_commit,
             controller_checkout_commit=checkout,
+            controller_origin_commit=origin,
+            controller_source_changes=controller.get("source_changes"),
             controller_commit_match=match,
             controller_source_sha256=bundle,
         )
@@ -454,6 +459,8 @@ def analyze(root):
         last = samples[-1] if samples else {}
         row = dict(
             run_id=attempt["run_id"],
+            experiment_id=campaign["config"].get("experiment_id"),
+            execution_batch=campaign["config"].get("execution_batch"),
             controller=attempt["controller"]["id"],
             **versions[attempt["controller"]["id"]],
             mode=campaign["mode"],
@@ -474,6 +481,8 @@ def analyze(root):
             damage_increase_observed=any(i["kind"] == "damage_increase" for i in issue),
             native_collision_count=None,
             telemetry_samples=len(samples),
+            last_telemetry_sim_s=last.get("sim_s"),
+            last_relative_speed_m_s=last.get("relative_speed_m_s"),
             wall_s=receipt.get("wall_s"),
             bytes=receipt.get("evidence_bytes"),
             measurements_source="scoring_event" if inputs else "partial_last_telemetry",
@@ -594,6 +603,8 @@ def analyze(root):
         "# Official STP campaign",
         "",
         f"Mode: {campaign['mode']}. Reference: {reference}.",
+        f"Experiment: {campaign['config'].get('experiment_id', 'unspecified')}. "
+        f"Execution batch: {campaign['config'].get('execution_batch', 'unspecified')}.",
         f"Execution order: {execution_order}.",
         f"Flights per controller per block: {repetitions}.",
         "",

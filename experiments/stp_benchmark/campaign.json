@@ -1,5 +1,8 @@
 {
   "schema": "wsorb.official_stp.benchmark.v1",
+  "experiment_id": "20261116T192404-HY",
+  "execution_batch": "restart-002",
+  "supersedes_execution": "runs/stp-20261116T192404-HY-restart-001",
   "install": "K:/Work/SPT-Sim",
   "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
   "package": "runs/stp-packages/stu4-0d753a28/SimDynamX-STU4-Sim-0d753a2",
@@ -11,8 +14,9 @@
   "execution_order": "coverage_first",
   "repetitions": 1,
   "controllers": [
-    {"id": "tom", "author": "Tom Kirkpatrick", "method": "Kalman", "directory": "controllers/tom", "entrypoint": "Controller.py", "environment": {}},
-    {"id": "ali_mppi", "author": "Ali El Ali", "method": "MPPI", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}}
+    {"id": "tom", "author": "Tom Kirkpatrick", "method": "Polyfit (legacy entrypoint in kalman folder)", "source_commit": "570b175cac663e4e0cf59aa4d5d5c5ef31021d24", "directory": "controllers/tom/kalman", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "tom_polyfit", "author": "Tom Kirkpatrick", "method": "Polyfit (current entrypoint)", "source_commit": "570b175cac663e4e0cf59aa4d5d5c5ef31021d24", "directory": "controllers/tom/polyfit", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "ali_mppi", "author": "Ali El Ali", "method": "MPPI", "source_commit": "570b175cac663e4e0cf59aa4d5d5c5ef31021d24", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}}
   ],
   "seed_bank": "experiments/stp_benchmark/seed_bank.json",
   "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",

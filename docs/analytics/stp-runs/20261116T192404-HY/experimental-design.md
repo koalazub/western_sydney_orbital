@@ -1,8 +1,63 @@
-# Tom baseline vs MPPI: single-pass experimental design
+# Current-main Tom entrypoints vs Ali MPPI: single-pass experimental design
 
 Prepared: 16 November 2026, 19:24:04 AEDT (Australia/Sydney, UTC+11).
 
-Status: design for a new campaign; no flight results are reported here.
+Status: the same experiment is being restarted after an interrupted execution;
+final results have not been reviewed. The current execution plan below supersedes
+the initial two-controller and proposed four-version plans retained as history.
+
+## Current execution plan: restart-001
+
+Experiment ID: `20261116T192404-HY`. Execution batch: `restart-001`.
+Use unchanged controller files from current main commit
+`570b175cac663e4e0cf59aa4d5d5c5ef31021d24`, merged into `analysis/harry`.
+The restart is **22 seeds × three controllers × one pass = 66 flights**, with
+the existing 300-second observed simulated-time limit, 1× playback and watchdogs.
+Bui is deferred. No local controller fixes, tuning or restoration of old code
+are part of this execution.
+
+| ID | Author and implementation label | Entrypoint |
+| --- | --- | --- |
+| `tom` (reference) | Tom Kirkpatrick — Polyfit (legacy entrypoint in kalman folder) | `controllers/tom/kalman/Controller.py` |
+| `tom_polyfit` | Tom Kirkpatrick — Polyfit (current entrypoint) | `controllers/tom/polyfit/Controller.py` |
+| `ali_mppi` | Ali El Ali — MPPI | `controllers/ali/controller.py` |
+
+Both current-main Tom entrypoints contain a position-history velocity estimate
+using `np.polyfit(..., 1)`; neither imports or instantiates the retained
+`DebrisTracker` Kalman implementation. Therefore the `kalman` directory name does
+not determine the analysis method label. The actual Kalman controller from the
+earlier batch remains recorded there; it is not silently substituted into this
+current-main restart. The latest main also resolves the missing unused-helper
+import in the newer Polyfit entrypoint, so no local import edit is needed.
+
+These are whole-controller comparisons, not an isolated estimator experiment.
+The incoming MPPI version differs from the earlier batch. Labels record author,
+implementation, explicit source commit and complete frozen-folder fingerprint.
+Supporting modules and README files are included in the fingerprint. Preparation
+verifies committed source content while preserving checkout/merge revision
+separately from the pinned source origin.
+
+The interrupted execution `runs/tom-mppi-300s-single-pass-002` stays saved with
+its original labels and outcomes. The restart uses
+`runs/stp-20261116T192404-HY-restart-001`, created by `prepare`. Configuration
+records the same `experiment_id`, new `execution_batch` and `supersedes_execution`
+pointing to that interrupted batch. The restart is the planned primary dataset
+for final analysis. Earlier flights remain visible as exploratory/operational
+history; do not pool duplicate seed/controller attempts into restart statistics
+or substitute an earlier success for a restarted failure.
+
+```powershell
+$stpPython = "$env:USERPROFILE\AppData\Local\SimDynamX\STPro\Versions\v0.54.2\py\Scripts\python.exe"
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --config experiments/stp_benchmark/campaign.json --mode seeded --seed-count 22 --output runs/stp-20261116T192404-HY-restart-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-20261116T192404-HY-restart-001 --continue-on-controller-error
+```
+
+At 1×, 66 full-budget flights represent about **5 hours 30 minutes** of flight time
+before startup/cleanup overhead; this is not a promised wall-time duration. Flights
+run sequentially. Started attempts are retained on errors; resume only unstarted
+IDs. A restart does not justify suppressing timeout, crash or evidence-failure counts.
+
+## Earlier design and subsequent amendments
 
 ## Question
 

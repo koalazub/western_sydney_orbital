@@ -65,9 +65,18 @@ class OfficialBenchmarkTests(unittest.TestCase):
                 },
             )
             evidence.write_json(root / "provenance.json", provenance)
-            with patch.object(evidence, "commit_match", return_value="exact"):
+            with patch.object(evidence, "commit_match", return_value="exact") as matcher:
                 identity = evidence.controller_versions(root, campaign)["tom"]
                 self.assertEqual(identity["controller_source_commit"], "a" * 40)
+                config["controllers"][0].update(
+                    source_commit="b" * 40, source_directory="examples/tom"
+                )
+                pinned = evidence.controller_versions(root, campaign)["tom"]
+                self.assertEqual(pinned["controller_source_commit"], "b" * 40)
+                self.assertEqual(pinned["controller_checkout_commit"], "a" * 40)
+                self.assertEqual(matcher.call_args.args[1:3], ("b" * 40, "examples/tom"))
+                config["controllers"][0].pop("source_commit")
+                config["controllers"][0].pop("source_directory")
                 evidence.write_json(
                     root / "dataset_labels.json",
                     dict(
@@ -172,6 +181,10 @@ class OfficialBenchmarkTests(unittest.TestCase):
 
     def config(self):
         config = json.loads((BENCHMARK / "campaign.json").read_text())
+        config["controllers"] = [c for c in config["controllers"] if c["id"] != "tom_polyfit"]
+        for controller in config["controllers"]:
+            for field in ("source_commit", "source_directory", "source_changes"):
+                controller.pop(field, None)
         # Retain the historical two-pass fixtures for backward compatibility checks.
         config.pop("repetitions", None)
         bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
@@ -179,11 +192,11 @@ class OfficialBenchmarkTests(unittest.TestCase):
         return config
 
     def test_current_campaign_is_one_pass_with_matched_controller_seed_coverage(self):
-        config = self.config()
-        config["repetitions"] = json.loads((BENCHMARK / "campaign.json").read_text())["repetitions"]
+        config = json.loads((BENCHMARK / "campaign.json").read_text())
+        config["seeds"] = self.config()["seeds"]
         runs = evidence.schedule(config, "seeded")
         self.assertEqual(config["repetitions"], 1)
-        self.assertEqual(len(runs), 44)
+        self.assertEqual(len(runs), 66)
         self.assertEqual({r["repetition"] for r in runs}, {0})
         for controller in config["controllers"]:
             self.assertTrue(
@@ -195,8 +208,10 @@ class OfficialBenchmarkTests(unittest.TestCase):
         for block, seed in enumerate(config["seeds"]):
             group = [r for r in runs if r["block"] == block]
             self.assertEqual({r["seed"] for r in group}, {seed})
-            self.assertCountEqual([r["controller"]["id"] for r in group], ["tom", "ali_mppi"])
-            self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % 2]["id"])
+            self.assertCountEqual(
+                [r["controller"]["id"] for r in group], ["tom", "tom_polyfit", "ali_mppi"]
+            )
+            self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % 3]["id"])
 
     def test_invalid_repetitions_are_rejected(self):
         for value in (0, -1, True, 1.5, "1"):
