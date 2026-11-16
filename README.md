@@ -13,6 +13,16 @@ This repository contains the team's Python controllers, a local practice simulat
 
 Use the repository's pinned Nix flake environment and [Just recipes](justfile). Setup, controls, troubleshooting and SDK handoff instructions live in the [flight lab guide](docs/flight-lab.md).
 
+## Repository layout
+
+- `controllers/` — current runnable or shareable STP entrypoints, one folder per person. Shared controller math and adapters live in `src/wsorb/`.
+- `src/wsorb/` — shared reviewable Python: flight policy, scoring, transport, controller adapters and the local harness.
+- `simulation/` — the Bevy/Rapier practice game, HUD, camera and physics.
+- `worker/` — the Cloudflare worker and thin browser platform adapter.
+- `docs/` — flight lab, competition notes, minutes, notebook and published analytics.
+- `experiments/` — cross-team sweep scripts and comparison configurations.
+- `tests/`, `scripts/`, `nix/` — regression tests, operational scripts and pinned toolchain files.
+
 ## Competition experiments
 
 For competition-focused practice, select **Competition reference · 1.31 km hop** with **Official debris cloud**. This ports the official relative geometry and 500-body debris distribution into the local model.
