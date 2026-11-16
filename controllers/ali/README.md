@@ -6,9 +6,13 @@ the local adapter and numeric tests load the same region.
 
 The runtime profile is `ali_mppi`. The policy is settings-driven: cruise
 reference, terminal coast, emergency guard, MPPI plan steering, main-engine gate,
-risk/switch weights, attitude brake scale and collision response. `wsorb fuzz`
-reports the score distribution; `wsorb tune` searches the settings with a
-worst-seed objective and held-out validation.
+risk/switch weights, attitude brake scale and collision response. The core also
+keeps the reviewed estimator and guidance alternatives as settings: `tracker`
+(`line`/`kalman`), `guard_source` (`raw`/`tracks`), `risk_inflation`,
+`mppi_fixed_samples`, `avoidance` (`mppi`/`avoider`), `governor`
+(`full`/`proportional`) and `attitude_control`. This lets the same seeds rerun
+the review ablations. `wsorb fuzz` reports the score distribution; `wsorb tune`
+searches the settings with a worst-seed objective and held-out validation.
 
 Collision handling uses two independent triggers: any increase in accumulated
 damage, or an unexplained velocity change beyond the last command plus a small
@@ -26,8 +30,14 @@ uv run --locked wsorb tune --grid '{"cruise_fraction":[0.48,0.5,0.52]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 304 lines. The original 200-line target remains a guideline,
-not a hard limit; the numeric test keeps a 350-line regression guard.
+The marked core is 515 lines. The original 200-line target remains a guideline,
+not a hard limit; the numeric test keeps a 600-line regression guard. The
+current default is the line-fit tracker, raw-radar guard, MPPI steering off, no
+risk inflation, no fixed samples, MPPI beeline, full governor, attitude control
+on and a fixed 14 m/s cruise. On seeds `100-107, 200-203` this produced 12/12
+arrivals, zero damage, and `63.11 / 76.92 / 82.49` min/mean/max points. The
+Kalman, track-guard, inflation, fixed-sample, avoider and proportional-governor
+modes remain opt-in for seed studies.
 
 Retired Ali entrypoints are kept for reproduction, not submission, in
 [`docs/history/controllers/ali/`](../../docs/history/controllers/ali/README.md):
