@@ -20,7 +20,7 @@ ASSETS = ROOT / "worker/public/sim"
 def node():
     executable = shutil.which("node")
     if executable is None:
-        pytest.skip("Use the existing devenv Node.js environment to run the platform probe")
+        pytest.skip("Use the Nix development shell Node.js runtime for the platform probe")
     completed = subprocess.run(
         [executable, "--version"], capture_output=True, text=True, check=True, timeout=10
     )

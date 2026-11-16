@@ -34,7 +34,7 @@ def _(mo):
     From the repository root, open:
 
     ```sh
-    devenv up lab
+    nix run .#lab
     ```
 
     Saved inspection and report rebuilding need no engine build. Run `just build`
@@ -225,7 +225,7 @@ def _(mo):
     starts a simulator, and leaves datasets unchanged. Outside this notebook:
 
     ```sh
-    devenv shell uv run --locked --extra lab python experiments/flight_sweep.py \
+    nix develop --command uv run --locked --extra lab python experiments/flight_sweep.py \
       --analyze-only --output runs/EXISTING_SWEEP --trial trial-00002
     ```
 

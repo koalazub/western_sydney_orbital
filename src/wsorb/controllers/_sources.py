@@ -37,8 +37,7 @@ _ALI_MPPI_END = "# END ALI MPPI CORE"
 def require_template_source() -> None:
     if not (ROOT / "docs/history/controllers/tom/UserAPI.py").is_file():
         raise ValueError(
-            "Body +Z template requires the source checkout: "
-            "docs/history/controllers/tom/UserAPI.py"
+            "Body +Z template requires the source checkout: docs/history/controllers/tom/UserAPI.py"
         )
 
 
@@ -81,9 +80,7 @@ def _load_ali_mppi_core() -> dict[str, ModuleType]:
             return dict(_LOADED["ali_mppi"])
         path = ROOT / "controllers/ali/controller.py"
         if not path.is_file():
-            raise ValueError(
-                "Ali MPPI requires the source checkout: controllers/ali/controller.py"
-            )
+            raise ValueError("Ali MPPI requires the source checkout: controllers/ali/controller.py")
         source = path.read_text(encoding="utf-8")
         if _ALI_MPPI_BEGIN not in source or _ALI_MPPI_END not in source:
             raise ValueError("Ali MPPI core markers are missing")

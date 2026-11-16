@@ -127,11 +127,11 @@ The archived score fields, physical measurements and artifact checksums stay unc
 
 For one watched flight, choose **Fly this code** on a hosted comparison row. The game opens with that profile, world, seed and time budget selected, but it does not start Python. Python runs on your machine. The hosted site stays on Cloudflare Free and uses the existing authenticated room relay.
 
-Follow the [private-room setup](flight-lab.md#hosted-python-connection): inside `devenv shell`, create a room with `uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json`, append its private fragment to the selected game's address, allow Python, and start `uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run` on your machine. Keep the query parameters so the profile, world, seed and time budget stay selected. Keep the room link and file private. You can also use the [local game and runner](flight-lab.md#choose-a-teammate-profile).
+Follow the [private-room setup](flight-lab.md#hosted-python-connection): inside the Nix development shell, create a room with `uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json`, append its private fragment to the selected game's address, allow Python, and start `uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run` on your machine. Keep the query parameters so the profile, world, seed and time budget stay selected. Keep the room link and file private. You can also use the [local game and runner](flight-lab.md#choose-a-teammate-profile).
 
 **Run flight** becomes available after the game is ready and Python confirms it is online and idle. It queues the selected Python code and opens the lander view. Historical `wso_official_profile` links explicitly select `ali_official_profile`. This is a new live run on the current local engine, so asynchronous control timing can produce a different result from the saved fixed-step sweep.
 
-For a new matched sweep, run these from the repository root inside `devenv shell`:
+For a new matched sweep, run these from the repository root inside the Nix development shell:
 
 ```sh
 just build

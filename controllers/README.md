@@ -16,18 +16,18 @@ profile registry is `src/wsorb/controllers/catalog.json`.
 ## Switch between them
 
 Python runs on a teammate's machine, not on the hosted site. Hosting stays on
-Cloudflare Free. Run these commands from the repository root inside `devenv shell`.
+Cloudflare Free. Run these commands from the repository root inside the Nix development shell (`nix develop` or direnv).
 After `just setup` and `just build`, start the local game:
 
 ```sh
 WSORB_LAB=1 just local
 ```
 
-In a second terminal, enter `devenv shell` in the same checkout and start the
+In a second terminal, enter `nix develop` in the same checkout and start the
 private runner once:
 
 ```sh
-uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run
+uv run --locked wsorb controllers serve --connection-file .wsorb/wsorb-local.json --run
 ```
 
 Open **Test profiles** or press **Shift+C**. Choose a teammate, profile, world,
@@ -40,8 +40,8 @@ Changing a selection requests Stop; it does not start another profile.
 For the hosted game, create a room and run the same Python service on your machine:
 
 ```sh
-uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
-uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run
+uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json
+uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run
 ```
 
 Open the printed private game link and allow Python before using **Run flight**.

@@ -14,7 +14,7 @@ from typing import NoReturn
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK_PATH = (PROJECT_ROOT / "docs/labs/flight_lab.py").resolve()
 DEFAULT_PORT = 2718
-DEFAULT_TOKEN_FILE = Path(".devenv/wsorb-marimo.token")
+DEFAULT_TOKEN_FILE = Path(".wsorb/wsorb-marimo.token")
 MAX_TOKEN_BYTES = 44
 PUBLIC_DIRECTORIES = ("worker/public", "worker/web", "dist")
 

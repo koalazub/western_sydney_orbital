@@ -11,7 +11,7 @@ This repository contains the team's Python controllers, a local practice simulat
 - Inspect recorded flights in [Compare flights](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html). It needs neither Python nor WebGPU.
 - Check the [competition reference and local differences](docs/competition-reference.md) and [scoring notes](docs/scoring.md) before interpreting results.
 
-Use the repository's pinned Nix/devenv environment and [Just recipes](justfile). Setup, controls, troubleshooting and SDK handoff instructions live in the [flight lab guide](docs/flight-lab.md).
+Use the repository's pinned Nix flake environment and [Just recipes](justfile). Setup, controls, troubleshooting and SDK handoff instructions live in the [flight lab guide](docs/flight-lab.md).
 
 ## Competition experiments
 

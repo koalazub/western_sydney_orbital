@@ -494,7 +494,7 @@ def _(inspect, suppress):
 @app.cell
 def _(CHECKPOINT_RUN_LIMIT_S, MAX_CONTROLLER_RUN_S, lab_slider, mo):
     connection_file = mo.ui.text(
-        value=".devenv/wsorb-local.json",
+        value=".wsorb/wsorb-local.json",
         label="Private connection file",
         full_width=True,
     )
