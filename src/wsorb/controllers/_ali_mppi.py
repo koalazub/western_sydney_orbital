@@ -122,6 +122,13 @@ class AliMppiController(ExperimentalController):
             "collision_impact_j": self.state.get("last_impact_j"),
             "collision_detour": bool(record.get("collision_detour", False)),
             "collision_offset_m": record.get("collision_offset_m"),
+            "tracker": policy.get("tracker", "line"),
+            "guard_source": policy.get("guard_source", "raw"),
+            "avoidance": policy.get("avoidance", "mppi"),
+            "governor": policy.get("governor", "full"),
+            "risk_inflation": bool(policy.get("risk_inflation", False)),
+            "fixed_samples": bool(policy.get("mppi_fixed_samples", False)),
+            "attitude_control": bool(policy.get("attitude_control", True)),
             "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
             "telemetry": record,
         }

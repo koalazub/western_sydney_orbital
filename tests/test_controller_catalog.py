@@ -739,14 +739,19 @@ def test_native_profiles_never_infer_missing_clock_or_sensor_provenance(controll
         {"collision_offset_m": -1.0},
         {"collision_slow_fraction": 0.0},
         {"collision_slow_fraction": 1.1},
+        {"tracker": "linear"},
+        {"guard_source": "trackers"},
+        {"avoidance": "mppi2"},
+        {"governor": "bang"},
+        {"risk_inflation": 1},
     ],
 )
-def test_ali_mppi_rejects_invalid_collision_settings(settings):
+def test_ali_mppi_rejects_invalid_settings(settings):
     with pytest.raises(ValueError, match="Ali MPPI"):
         create_controller("ali_mppi", settings)
 
 
-def test_ali_mppi_accepts_collision_settings():
+def test_ali_mppi_accepts_collision_and_estimator_settings():
     controller = create_controller(
         "ali_mppi",
         {
@@ -755,10 +760,22 @@ def test_ali_mppi_accepts_collision_settings():
             "collision_offset_m": 20.0,
             "collision_safe_damage_j": 50000.0,
             "collision_slow_fraction": 0.7,
+            "tracker": "kalman",
+            "guard_source": "tracks",
+            "risk_inflation": True,
+            "mppi_fixed_samples": True,
+            "avoidance": "avoider",
+            "governor": "proportional",
+            "attitude_control": False,
+            "governor_gain": 2.0,
+            "avoider_horizon": 15.0,
         },
     )
     assert controller.state["policy"]["collision_escape_s"] == 0.4
     assert controller.state["policy"]["collision_slow_fraction"] == 0.7
+    assert controller.state["policy"]["tracker"] == "kalman"
+    assert controller.state["policy"]["avoidance"] == "avoider"
+    assert controller.state["policy"]["governor"] == "proportional"
 
 
 def test_catalog_import_is_lightweight_and_factory_has_no_arbitrary_script_settings():

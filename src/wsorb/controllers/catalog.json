@@ -56,11 +56,11 @@
   },
   {
     "id": "tom_kalman_velocity_mvp",
-    "label": "Kalman + velocity governor",
+    "label": "Earlier Kalman + velocity governor",
     "owner": "Tom",
     "contributor": "Tom; WSO bounded native adapter",
-    "description": "Original nearest-50 Kalman tracker and velocity candidates/cost/hysteresis. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
-    "profile": "17 m/s cruise, gain 2, 0.5 m/s² governor",
+    "description": "Earlier nearest-50 Kalman tracker and velocity candidates/cost/hysteresis adapter, retained for local comparison. It is not Tom's current 8 m/s no-Kalman entrypoint in controllers/tom/Controller.py. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
+    "profile": "Earlier Kalman adapter, 17 m/s cruise, gain 2, 0.5 m/s² governor",
     "experimental": true,
     "target_seeking": true,
     "source": "controllers/tom"
@@ -92,8 +92,8 @@
     "label": "Ali MPPI candidate",
     "owner": "Ali",
     "contributor": "Ali; WSO MPPI adapter",
-    "description": "Compact 3-DOF MPPI with raw-radar capsule clearance, terminal coast, an emergency guard, damage/velocity collision detection, a lateral escape impulse and a parallel-route offset. Experimental candidate; not validated on the real server.",
-    "profile": "MPPI score cost, 48 x 40 samples",
+    "description": "14 m/s public-radar beeline with terminal coast, emergency guard, collision recovery, and selectable line-fit/Kalman tracking, MPPI or avoider guidance, and full or proportional governors. Experimental candidate; not validated on the real server.",
+    "profile": "14 m/s default; MPPI 48 x 40, Kalman/avoider/proportional modes opt-in",
     "experimental": true,
     "target_seeking": true,
     "source": "controllers/ali/controller.py"

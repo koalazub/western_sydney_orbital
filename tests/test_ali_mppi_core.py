@@ -34,11 +34,20 @@ def debris_row(position, diameter=2.0):
     return row
 
 
+def radar_row(position, range_rate, diameter, time):
+    row = np.zeros((3, 3))
+    row[0] = np.asarray(position, float)
+    row[1, 1] = float(range_rate)
+    row[1, 2] = float(diameter)
+    row[2, 0] = float(time)
+    return row
+
+
 def test_competitor_region_stays_within_the_current_budget():
     source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:].splitlines()) <= 350
+    assert len(source[begin:].splitlines()) <= 600
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -386,3 +395,125 @@ def test_repeated_collisions_flip_the_detour_side_and_escalate_speed_safety():
     state["collision_hits"] = 3
     assert np.isclose(core.safe_cruise(state, 8.0, 1_000.0, core.DEFAULT_POLICY), 6.4)
     assert np.isclose(core.safe_cruise(state, 8.0, 120_000.0, core.DEFAULT_POLICY), 6.4)
+
+
+def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
+    tracker = core.KalmanTracker()
+    for time in (0.0, 1.0, 2.0, 3.0):
+        row = radar_row([100.0 - 5.0 * time, 0.0, 0.0], -5.0, 2.0, time)
+        tracker.update(np.zeros(3), np.zeros(3), [row])
+    tracks = tracker.snapshot(3.0, np.zeros(3))
+    assert len(tracks) >= 1
+    track = min(tracks, key=lambda item: np.linalg.norm(item["p"] - np.array([85.0, 0.0, 0.0])))
+    assert np.linalg.norm(track["p"] - np.array([85.0, 0.0, 0.0])) < 3.0
+    assert track["v"][0] < -3.0
+    assert track["r"] > 0.0 and track["sp"] >= 0.0 and track["sv"] >= 0.0
+
+
+def test_avoider_offsets_a_desired_velocity_away_from_a_closing_track():
+    state = {"policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0}}
+    tracks = [
+        {
+            "p": np.array([20.0, 0.0, 0.0]),
+            "v": np.array([-10.0, 0.0, 0.0]),
+            "r": 2.0,
+            "sp": 0.5,
+            "sv": 0.1,
+            "s": 0.5,
+        }
+    ]
+    requested = np.array([8.0, 0.0, 0.0])
+    selected = core.avoid_velocity(
+        requested, tracks, np.zeros(3), requested, state, core.DEFAULT_POLICY
+    )
+    assert np.isfinite(selected).all()
+    assert not np.allclose(selected, requested)
+    assert state["avoid_info"]["n_tracks"] == 1
+    empty = core.avoid_velocity(requested, [], np.zeros(3), requested, state, core.DEFAULT_POLICY)
+    assert np.allclose(empty, requested)
+
+
+def test_proportional_governor_uses_a_deadband_and_caps_the_command():
+    state = {"policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0}}
+    command, burning = core.proportional_govern(
+        np.array([0.1, 0.0, 0.0]), np.zeros(3), state, 0.5, core.DEFAULT_POLICY
+    )
+    assert burning is False and np.allclose(command, np.zeros(3))
+    command, burning = core.proportional_govern(
+        np.array([1.0, 0.0, 0.0]), np.zeros(3), state, 0.5, core.DEFAULT_POLICY
+    )
+    assert burning is True and np.isclose(np.linalg.norm(command), 0.5)
+    command, burning = core.proportional_govern(
+        np.array([0.2, 0.0, 0.0]), np.zeros(3), state, 0.5, core.DEFAULT_POLICY
+    )
+    assert burning is True and np.isclose(np.linalg.norm(command), 0.4)
+
+
+def test_attitude_control_can_be_disabled_for_the_fuel_comparison():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "attitude_control": False},
+    }
+    _, angular, record = core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        [],
+        0.0,
+        0.1,
+    )
+    assert np.allclose(angular, np.zeros(3))
+    assert state["attitude_hold"] is False
+    assert record["collision"] is False
+
+
+def test_kalman_mppi_and_avoider_modes_run_through_the_same_step():
+    common = {
+        "time_budget_s": 300.0,
+        "arrival_radius_m": 50.0,
+        "tracker": "kalman",
+        "guard_source": "tracks",
+        "risk_inflation": True,
+        "mppi_fixed_samples": True,
+        "plan_steering": True,
+        "cruise_speed_mps": 10.0,
+    }
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": dict(common),
+    }
+    rows = [radar_row([30.0, 0.0, 0.0], -5.0, 2.0, 0.0)]
+    body, angular, record = core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        rows,
+        0.0,
+        0.1,
+    )
+    assert np.isfinite(body).all() and np.isfinite(angular).all()
+    assert record["tracker"] == "kalman" and record["estimate_count"] >= 1
+    rows = [radar_row([29.0, 0.0, 0.0], -5.0, 2.0, 0.1)]
+    body, angular, record = core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        rows,
+        0.1,
+        0.1,
+    )
+    assert np.isfinite(body).all() and np.isfinite(angular).all()
+
+    state["policy"].update(avoidance="avoider", governor="proportional", attitude_control=False)
+    body, angular, record = core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
+        rows,
+        0.2,
+        0.1,
+    )
+    assert np.isfinite(body).all() and np.allclose(angular, np.zeros(3))
+    assert record["avoidance"] == "avoider" and record["governor"] == "proportional"

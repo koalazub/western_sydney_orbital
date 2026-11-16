@@ -62,6 +62,25 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "risk_weight",
             "switch_weight",
             "attitude_brake_scale",
+            "tracker",
+            "guard_source",
+            "risk_inflation",
+            "risk_k_sigma",
+            "risk_max_inflate",
+            "mppi_fixed_samples",
+            "avoidance",
+            "governor",
+            "governor_gain",
+            "governor_start_err",
+            "governor_stop_err",
+            "attitude_control",
+            "avoider_margin",
+            "avoider_horizon",
+            "avoider_k_sigma",
+            "avoider_max_inflate",
+            "avoider_lag_s",
+            "avoider_w_aim",
+            "avoider_switch_margin",
             "collision_damage_j",
             "collision_jump_mps",
             "collision_escape_s",
@@ -85,16 +104,32 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "risk_weight",
             "switch_weight",
             "attitude_brake_scale",
+            "governor_gain",
+            "avoider_margin",
+            "avoider_horizon",
+            "avoider_lag_s",
+            "avoider_w_aim",
             "collision_jump_mps",
             "collision_escape_s",
             "collision_detour_s",
             "collision_offset_m",
             "collision_slow_fraction",
         }
+        booleans = {"plan_steering", "risk_inflation", "mppi_fixed_samples", "attitude_control"}
+        choices = {
+            "tracker": ("line", "kalman"),
+            "guard_source": ("raw", "tracks"),
+            "avoidance": ("mppi", "avoider"),
+            "governor": ("full", "proportional"),
+        }
         for key, value in settings.items():
-            if key == "plan_steering":
+            if key in booleans:
                 if type(value) is not bool:
-                    raise ValueError("Ali MPPI plan_steering must be a boolean")
+                    raise ValueError(f"Ali MPPI {key} must be a boolean")
+                continue
+            if key in choices:
+                if value not in choices[key]:
+                    raise ValueError(f"Ali MPPI {key} must be one of {choices[key]}")
                 continue
             if (
                 isinstance(value, bool)
