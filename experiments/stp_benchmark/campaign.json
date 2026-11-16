@@ -12,7 +12,7 @@
   "repetitions": 1,
   "controllers": [
     {"id": "tom", "directory": "controllers/tom", "entrypoint": "Controller.py", "environment": {}},
-    {"id": "ali_mppi", "directory": "controllers/ali", "entrypoint": "controller_mppi.py", "environment": {}}
+    {"id": "ali_mppi", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}}
   ],
   "seed_bank": "experiments/stp_benchmark/seed_bank.json",
   "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",
