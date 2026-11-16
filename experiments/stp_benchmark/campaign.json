@@ -9,11 +9,10 @@
   "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
   "reference": "tom",
   "execution_order": "coverage_first",
+  "repetitions": 1,
   "controllers": [
-    {"id": "tom", "directory": "examples/tom", "entrypoint": "Controller.py", "environment": {}},
-    {"id": "bui", "directory": "examples/bui", "entrypoint": "Controller.py", "environment": {}},
-    {"id": "ali_mvp", "directory": "examples/ali", "entrypoint": "controller.py", "environment": {}},
-    {"id": "ali_mppi", "directory": "examples/ali", "entrypoint": "controller_mppi.py", "environment": {}}
+    {"id": "tom", "directory": "controllers/tom", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "ali_mppi", "directory": "controllers/ali", "entrypoint": "controller_mppi.py", "environment": {}}
   ],
   "seed_bank": "experiments/stp_benchmark/seed_bank.json",
   "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",
@@ -23,7 +22,7 @@
   "seed_scope": "saved_field_impulses_radar_fixed_100",
   "sample_period_s": 0.1,
   "limits": {
-    "simulation_s": 600,
+    "simulation_s": 300,
     "wall_s": 720,
     "startup_s": 120,
     "stall_s": 20,
