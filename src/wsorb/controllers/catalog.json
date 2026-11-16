@@ -56,11 +56,11 @@
   },
   {
     "id": "tom_kalman_velocity_mvp",
-    "label": "Kalman + velocity governor",
+    "label": "Earlier Kalman + velocity governor",
     "owner": "Tom",
     "contributor": "Tom; WSO bounded native adapter",
-    "description": "Original nearest-50 Kalman tracker and velocity candidates/cost/hysteresis. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
-    "profile": "17 m/s cruise, gain 2, 0.5 m/s² governor",
+    "description": "Earlier nearest-50 Kalman tracker and velocity candidates/cost/hysteresis adapter, retained for local comparison. It is not Tom's current 8 m/s no-Kalman entrypoint in controllers/tom/Controller.py. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
+    "profile": "Earlier Kalman adapter, 17 m/s cruise, gain 2, 0.5 m/s² governor",
     "experimental": true,
     "target_seeking": true,
     "source": "controllers/tom"
