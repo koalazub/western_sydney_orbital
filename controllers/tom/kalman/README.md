@@ -10,8 +10,8 @@ reviewed bounded adapter in
 [`src/wsorb/controllers/_tom.py`](../../../src/wsorb/controllers/_tom.py). That
 adapter reproduces the earlier Kalman tracker and 17 m/s cruise and uses
 [`debris_tracker.py`](debris_tracker.py) and [`avoidance.py`](avoidance.py).
-The STP snapshot does not import those modules. Select the profile in
-**Controller profiles**, or run it through the sweep harness.
+The STP snapshot imports the tracker and avoidance modules beside it. Select the
+profile in **Controller profiles**, or run it through the sweep harness.
 
 The stock body +Z template is preserved at
 [`docs/history/controllers/tom/UserAPI.py`](../../../docs/history/controllers/tom/UserAPI.py),
