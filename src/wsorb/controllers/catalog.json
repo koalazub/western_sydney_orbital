@@ -92,7 +92,7 @@
     "label": "Ali MPPI candidate",
     "owner": "Ali",
     "contributor": "Ali; WSO MPPI adapter",
-    "description": "Compact 3-DOF MPPI with raw-radar capsule clearance, terminal coast, an emergency guard and a braking-curve attitude hold. Experimental candidate; not validated on the real server.",
+    "description": "Compact 3-DOF MPPI with raw-radar capsule clearance, terminal coast, an emergency guard, damage/velocity collision detection, a lateral escape impulse and a parallel-route offset. Experimental candidate; not validated on the real server.",
     "profile": "MPPI score cost, 48 x 40 samples",
     "experimental": true,
     "target_seeking": true,

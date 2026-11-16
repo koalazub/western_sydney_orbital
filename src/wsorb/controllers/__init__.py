@@ -62,6 +62,13 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "risk_weight",
             "switch_weight",
             "attitude_brake_scale",
+            "collision_damage_j",
+            "collision_jump_mps",
+            "collision_escape_s",
+            "collision_detour_s",
+            "collision_offset_m",
+            "collision_safe_damage_j",
+            "collision_slow_fraction",
         }
         if controller_id == "ali_mppi"
         else set()
@@ -78,6 +85,11 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "risk_weight",
             "switch_weight",
             "attitude_brake_scale",
+            "collision_jump_mps",
+            "collision_escape_s",
+            "collision_detour_s",
+            "collision_offset_m",
+            "collision_slow_fraction",
         }
         for key, value in settings.items():
             if key == "plan_steering":
@@ -92,6 +104,8 @@ def create_controller(controller_id: str, settings: dict | None = None):
                 or (value == 0 and key in positive)
             ):
                 raise ValueError(f"Ali MPPI {key} must be a non-negative finite number")
+            if key == "collision_slow_fraction" and not 0.0 < value <= 1.0:
+                raise ValueError("Ali MPPI collision_slow_fraction must be in (0, 1]")
     if controller_id in ("baseline", "body-axis"):
         # Checkpoint also imports this catalog. Defer this import until its
         # module is loaded, and return the original class/report unwrapped.

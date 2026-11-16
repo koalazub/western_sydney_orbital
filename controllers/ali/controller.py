@@ -68,11 +68,96 @@ CRUISE_SPEED_MPS, MIN_CRUISE_SPEED_MPS = 7.0, 1.0
 TERMINAL_COAST_RANGE_M, TERMINAL_COAST_MIN_SPEED_MPS = 200.0, 4.0
 ATTITUDE_HOLD_RAD, ATTITUDE_HOLD_RATE_RAD_S = np.radians(1.0), 0.01
 DEFAULT_SCORE = dict(nominal_time_s=120.0, nominal_fuel_kg=75.0, impact_threshold_j=209200.0, points_scale=100.0, damage_multiplier=2.0, score_offset=0.5)
-DEFAULT_POLICY = dict(cruise_fraction=0.5, cruise_speed_mps=None, main_engine_gate_rad=0.0, coast_range_m=200.0, coast_speed_mps=4.0, emergency_range_m=180.0, emergency_lookahead_s=7.0, emergency_margin_m=6.0, emergency_escape_mps=3.5, plan_steering=False, plan_risk_threshold=0.01, risk_weight=200.0, switch_weight=0.5, attitude_brake_scale=0.65)
+DEFAULT_POLICY = dict(cruise_fraction=0.5, cruise_speed_mps=None, main_engine_gate_rad=0.0, coast_range_m=200.0, coast_speed_mps=4.0, emergency_range_m=180.0, emergency_lookahead_s=7.0, emergency_margin_m=6.0, emergency_escape_mps=3.5, plan_steering=False, plan_risk_threshold=0.01, risk_weight=200.0, switch_weight=0.5, attitude_brake_scale=0.65, collision_damage_j=1.0, collision_jump_mps=0.75, collision_escape_s=0.6, collision_detour_s=120.0, collision_offset_m=25.0, collision_safe_damage_j=104600.0, collision_slow_fraction=0.8)
 
 def unit(value):
     length = np.linalg.norm(value, axis=-1, keepdims=True)
     return np.divide(value, length, out=np.zeros_like(value), where=length > 1e-9)
+
+
+def collision_check(state, velocity, damage, dt, policy):
+    energy = max(0.0, float(damage) - float(state.setdefault("last_damage", damage)))
+    previous_velocity = state.get("last_velocity", velocity)
+    previous_accel = state.get("last_accel", np.zeros(3))
+    change = np.asarray(velocity, float) - previous_velocity - previous_accel * dt
+    state["last_damage"], state["last_velocity"] = float(damage), np.asarray(velocity, float).copy()
+    jump = np.linalg.norm(change) if dt <= 1.0 else 0.0
+    hit = energy > policy["collision_damage_j"] or jump > policy["collision_jump_mps"]
+    return hit, energy, change
+
+
+def collision_route(state, position, velocity, target, body_x, rows, now, energy, change, max_accel, policy):
+    hits = int(state.get("collision_hits", 0)) + 1
+    state["collision_hits"] = hits
+    route = unit(np.asarray(target, float) - position)
+    valid = [np.asarray(row[0], float) for row in rows if np.all(np.isfinite(row))]
+    closest = min(valid, key=np.linalg.norm, default=None)
+    if np.linalg.norm(change) > 0.05:
+        escape = unit(change)
+    elif closest is not None and np.linalg.norm(closest) > 1e-6:
+        escape = unit(-closest)
+    else:
+        escape = -unit(velocity)
+    if np.linalg.norm(escape) < 1e-9:
+        escape = -route if np.linalg.norm(route) > 1e-9 else unit(body_x)
+    lateral = escape - float(escape @ route) * route
+    if np.linalg.norm(lateral) < 1e-6:
+        lateral = np.cross(route, body_x)
+    if np.linalg.norm(lateral) < 1e-6:
+        lateral = np.cross(route, [0.0, 0.0, 1.0])
+    if np.linalg.norm(lateral) < 1e-6:
+        lateral = np.array([0.0, 1.0, 0.0])
+    side = unit(lateral)
+    if closest is not None and abs(float(closest @ side)) > 1e-6:
+        side = -np.sign(float(closest @ side)) * side
+    previous_side = state.get("collision_side")
+    if hits % 2 == 0 and previous_side is not None:
+        alternate = -previous_side
+        if closest is None or float(closest @ alternate) <= 0.0:
+            side = alternate
+    state["collision_side"] = side.copy()
+    impulse_s = float(policy["collision_escape_s"]) * (1.0 + 0.5 * (hits - 1))
+    speed = max(float(np.linalg.norm(velocity)), 1.0)
+    time_to_go = float(np.linalg.norm(np.asarray(target, float) - position)) / speed
+    desired_offset = float(max_accel) * impulse_s * time_to_go
+    offset = min(float(policy["collision_offset_m"]), desired_offset)
+    if desired_offset > offset and time_to_go > 1e-6:
+        impulse_s = offset / (float(max_accel) * time_to_go)
+    state["collision"] = {
+        "point": np.asarray(position, float).copy(),
+        "escape": escape,
+        "side": side,
+        "offset": float(offset),
+        "impulse_s": impulse_s,
+        "until": float(now) + float(policy["collision_detour_s"]),
+        "hits": hits,
+        "impact_j": float(energy),
+        "impact_mps": float(np.linalg.norm(change)),
+        "time": float(now),
+    }
+    state["collision_escape_until"] = float(now) + impulse_s
+    state["last_impact_j"], state["last_impact_mps"] = float(energy), float(np.linalg.norm(change))
+    return state["collision"]
+
+
+def active_collision(state, now):
+    collision = state.get("collision")
+    if collision is None:
+        return None
+    if now >= collision["until"]:
+        state.pop("collision", None)
+        return None
+    return collision
+
+
+def detour_target(target, collision):
+    return np.asarray(target, float) + collision["side"] * float(collision["offset"])
+
+
+def safe_cruise(state, speed, damage, policy):
+    if float(damage) > float(policy["collision_safe_damage_j"]) or int(state.get("collision_hits", 0)) >= 3:
+        return speed * float(np.clip(policy["collision_slow_fraction"], 0.5, 1.0))
+    return speed
 
 
 def update_tracks(state, rows, position, now):
@@ -159,7 +244,9 @@ def plan(state, position, velocity, target_position, body_x, radius, max_accel, 
     reference = state.setdefault("cruise_reference_mps", float(fixed_speed) if fixed_speed else remaining / max(1.0, policy["cruise_fraction"] * budget))
     cruise_speed = min(max(MIN_CRUISE_SPEED_MPS, float(reference)), float(np.sqrt(2.0 * max(1e-6, max_accel) * remaining)))
     state["cruise_speed_mps"], state["fuel_rate_kg_s"] = cruise_speed, max(1e-6, float(ship_mass_kg) * float(max_accel) / (80.0 * 9.8))
-    nominal = max_accel * unit(cruise_velocity(position, target_position, cruise_speed) - velocity)
+    state["cruise_speed_mps"] = cruise_speed = safe_cruise(state, cruise_speed, damage, policy)
+    goal = np.asarray(state.get("steer_target", target_position), float)
+    nominal = max_accel * unit(cruise_velocity(position, goal, cruise_speed) - velocity)
     rocks = state.get("rocks", [])[:30]
     rng = state.setdefault("rng", np.random.default_rng(12345))
     controls = unit(nominal + rng.normal(size=(MPPI_SAMPLES, MPPI_STEPS, 3)) * max_accel) * (rng.random((MPPI_SAMPLES, MPPI_STEPS, 1)) * max_accel)
@@ -229,25 +316,38 @@ def step(state, obs, rows, now, dt, to_body=None):
     max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
     policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
     radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
+    damage = float(obs["damage"])
+    # Damage or an unexplained velocity step is a contact receipt. The response is
+    # a short lateral impulse onto a capped parallel route, not a heading reversal.
+    hit, energy, change = collision_check(state, velocity, damage, dt, policy)
+    collision = active_collision(state, now)
+    if hit:
+        collision = collision_route(state, position, velocity, target, body_x, rows, now, energy, change, max_accel, policy)
+    remaining = float(np.linalg.norm(target - position))
+    steer_target = detour_target(target, collision) if collision is not None and remaining > policy["coast_range_m"] else target
+    state["steer_target"] = steer_target
     if policy["plan_steering"]:
         update_tracks(state, rows, position, now)
-    desired_accel = plan(state, position, velocity, target, body_x, float(obs["radius"]), max_accel, dt, float(obs["fuel"]), float(obs["damage"]), float(obs["mass"]), now, rows)
+    desired_accel = plan(state, position, velocity, target, body_x, float(obs["radius"]), max_accel, dt, float(obs["fuel"]), damage, float(obs["mass"]), now, rows)
     if not policy["plan_steering"] or state.get("risk", 0.0) <= policy["plan_risk_threshold"]:
         desired_accel = np.zeros(3)
-    nominal = cruise_velocity(position, target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS), radius)
+    nominal = cruise_velocity(position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS), radius)
     acceleration, burning = govern(desired_accel, nominal, velocity, state.get("burning", False), max_accel)
     emergency_accel, emergency_active = emergency_guard(velocity, rows, now, max_accel, policy)
-    if emergency_active:
+    escaping = collision is not None and now < state.get("collision_escape_until", -np.inf)
+    if escaping:
+        acceleration, burning = max_accel * unit(collision["side"]), True
+    elif emergency_active:
         acceleration, burning = emergency_accel, True
-    elif np.linalg.norm(target - position) - radius <= policy["coast_range_m"] and np.linalg.norm(velocity) >= policy["coast_speed_mps"]:
+    elif remaining - radius <= policy["coast_range_m"] and np.linalg.norm(velocity) >= policy["coast_speed_mps"]:
         acceleration, burning = np.zeros(3), False
     state["burning"] = burning
-    desired = unit(nominal)
+    desired = unit(collision["side"] if escaping else nominal)
     alignment = np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0))) if np.linalg.norm(desired) > 1e-9 else 0.0
-    if policy["main_engine_gate_rad"] > 0.0 and burning and not emergency_active and alignment > policy["main_engine_gate_rad"]:
+    if policy["main_engine_gate_rad"] > 0.0 and burning and not emergency_active and not escaping and alignment > policy["main_engine_gate_rad"]:
         acceleration = np.zeros(3)
     angular_velocity = np.asarray(obs["angular_velocity"], float)
-    gate = "alignment" if burning and not np.any(acceleration) else "burn" if burning else "hold" if state.get("attitude_hold") else "rate" if np.linalg.norm(angular_velocity) > ATTITUDE_HOLD_RATE_RAD_S else "alignment" if alignment > ATTITUDE_HOLD_RAD else "off"
+    gate = "collision" if escaping else "alignment" if burning and not np.any(acceleration) else "burn" if burning else "hold" if state.get("attitude_hold") else "rate" if np.linalg.norm(angular_velocity) > ATTITUDE_HOLD_RATE_RAD_S else "alignment" if alignment > ATTITUDE_HOLD_RAD else "off"
     trace = {}
     angular = attitude(body_x, angular_velocity, desired, max_angular, dt, state, trace)
     if gate == "off":
@@ -256,8 +356,11 @@ def step(state, obs, rows, now, dt, to_body=None):
     to_body = to_body or (lambda value: value)
     body_accel = np.asarray(to_body(acceleration), float)
     body_angular = np.asarray(to_body(angular), float)
-    record = telemetry(now, "burn" if burning else "coast", gate, body_x, desired, acceleration, body_accel, trace, float(np.linalg.norm(velocity)), float(np.linalg.norm(target - position)), float(obs["fuel"]), float(obs["damage"]), len(rows), emergency_active)
+    record = telemetry(now, "burn" if burning else "coast", gate, body_x, desired, acceleration, body_accel, trace, float(np.linalg.norm(velocity)), remaining, float(obs["fuel"]), damage, len(rows), emergency_active)
     record["nearest_raw_range_m"] = min((float(np.linalg.norm(np.asarray(row[0], float))) for row in rows if np.all(np.isfinite(row))), default=None)
+    record.update(collision=bool(collision), collision_detour=bool(collision is not None and not escaping and remaining > policy["coast_range_m"]), collision_hits=int(state.get("collision_hits", 0)), collision_impact_j=finite(state.get("last_impact_j", 0.0)), collision_impact_mps=finite(state.get("last_impact_mps", 0.0)), collision_offset_m=finite(collision["offset"]) if collision is not None else None)
+    record["line"] += f" coll={int(record['collision'])} hits={record['collision_hits']} off={record['collision_offset_m'] or 0.0:.0f}"
+    state["last_accel"] = acceleration.copy()
     return body_accel, body_angular, record
 
 

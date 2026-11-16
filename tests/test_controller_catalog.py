@@ -732,6 +732,35 @@ def test_native_profiles_never_infer_missing_clock_or_sensor_provenance(controll
     np.testing.assert_array_equal(angular, np.zeros(3))
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"collision_escape_s": 0.0},
+        {"collision_offset_m": -1.0},
+        {"collision_slow_fraction": 0.0},
+        {"collision_slow_fraction": 1.1},
+    ],
+)
+def test_ali_mppi_rejects_invalid_collision_settings(settings):
+    with pytest.raises(ValueError, match="Ali MPPI"):
+        create_controller("ali_mppi", settings)
+
+
+def test_ali_mppi_accepts_collision_settings():
+    controller = create_controller(
+        "ali_mppi",
+        {
+            "collision_escape_s": 0.4,
+            "collision_detour_s": 30.0,
+            "collision_offset_m": 20.0,
+            "collision_safe_damage_j": 50000.0,
+            "collision_slow_fraction": 0.7,
+        },
+    )
+    assert controller.state["policy"]["collision_escape_s"] == 0.4
+    assert controller.state["policy"]["collision_slow_fraction"] == 0.7
+
+
 def test_catalog_import_is_lightweight_and_factory_has_no_arbitrary_script_settings():
     package = Path(str(files("wsorb.controllers")))
     tree = ast.parse((package / "__init__.py").read_text())

@@ -117,6 +117,11 @@ class AliMppiController(ExperimentalController):
             "angular_accel_body_rad_s2": angular_body.tolist(),
             "fuel_per_delta_v_kg_per_mps": float(sample.mass_kg) / (80.0 * 9.8),
             "capsule_radius_m": SHIP_RADIUS_M,
+            "collision_hits": int(self.state.get("collision_hits", 0)),
+            "collision_active": bool(self.state.get("collision")),
+            "collision_impact_j": self.state.get("last_impact_j"),
+            "collision_detour": bool(record.get("collision_detour", False)),
+            "collision_offset_m": record.get("collision_offset_m"),
             "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
             "telemetry": record,
         }
