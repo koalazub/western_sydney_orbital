@@ -27,7 +27,7 @@ reference; completed flights establish the new baseline, not the scores in minut
 3. Check the candidate in a separate short diagnostic campaign first. In a local
    configuration copy, set `reference` to its new ID, `diagnostic_rerun` to `true`
    and `limits.simulation_s` to `40`. Prepare with `--config <copy> --mode pilot`
-   and a new output directory. This schedules two fresh candidate flights; inspect
+   and a new output directory. This schedules one fresh candidate flight; inspect
    `delivery.json` for native command readback, applied impulses and simulator
    motion. A short diagnostic is not a scored baseline run.
 4. Keep `reference` set to `tom` in comparison campaigns. Prepare a new campaign
@@ -51,15 +51,21 @@ Use the native Windows UV commands below, from the repository root:
 
 | Mode | Schedule |
 | --- | --- |
-| `pilot` | Two fresh flights of the configured reference controller; Tom by default. |
-| `baseline` | Five two-run blocks per controller: **10 flights each**, distributed across passes. |
-| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **44 flights each**. Override with `--seed-count N`. |
+| `pilot` | One fresh flight of the configured reference controller; Tom by default. |
+| `baseline` | Five blocks per controller: **5 flights each**. |
+| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **22 flights each**, **44 total** for Tom and MPPI. Override with `--seed-count N`. |
+
+The current configuration sets `repetitions: 1` and a **300 s simulated-time limit**.
+Each controller flies each seeded scenario once. Set `repetitions` to another
+positive integer in a configuration copy if repeated measurements are needed.
+Older frozen configurations without this field retain their two-pass interpretation;
+existing prepared schedules and evidence are unchanged.
 
 The default `execution_order` is `coverage_first`: every controller runs once on
-seed 100, then once on each remaining seed, before the second pass repeats those
-same combinations. Controller order rotates between seed blocks. This spreads
+seed 100, then once on each remaining seed. If multiple repetitions are configured,
+later passes repeat those same combinations. Controller order rotates between seed blocks. This spreads
 early results across contributors; repetitions retain their original matching
-indices. `execution_order: "paired"` selects consecutive two-run pairs if needed.
+indices. `execution_order: "paired"` groups configured repetitions consecutively if needed.
 Failed and interrupted attempts stay
 recorded; they are never silently retried or replaced. Use the runner's `stop`
 command for a clean stop. Full campaigns require an explicit start, and time-scale
@@ -154,7 +160,7 @@ uv run --no-project --python $stpPython python experiments/stp_benchmark/benchma
 uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py analyze runs/stp-pilot-001
 ```
 
-`pilot` schedules two fresh Tom attempts. `prepare` launches nothing and freezes
+`pilot` schedules one fresh Tom attempt with the current configuration. `prepare` launches nothing and freezes
 sources, dependencies and the full schedule. All roots must be new. Existing
 attempt folders are never overwritten, silently retried or replaced. An interrupted
 attempt remains partial; analyze it without rerunning it. `run --max-attempts 1`
@@ -169,11 +175,11 @@ campaign can continue with `run --resume`, preserving started attempts and runni
 only unstarted IDs. An initial delivery check
 can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 
-After inspecting the pilot, prepare `--mode baseline` for five fresh two-run pairs
-per controller, or `--mode seeded` for the saved seed prefix and two runs per
-controller/seed, separated into coverage passes. Controller order rotates between blocks. Commands
-to run full campaigns are intentionally manual. The default four profiles are Tom,
-Bui, Ali MVP and Ali MPPI. Harry has no official STP entrypoint. WSO requires its
+After inspecting the pilot, prepare `--mode baseline` for five fresh flights
+per controller, or `--mode seeded` for the saved seed prefix and one run per
+controller/seed. Controller order rotates between blocks. Commands
+to run full campaigns are intentionally manual. The current two profiles are Tom
+and Ali MPPI. Harry has no official STP entrypoint. WSO requires its
 own explicitly established clock/configuration and is not silently enabled.
 Additional official entrypoints can declare their directory, entrypoint, extra
 support files and existing environment settings in the configuration. Preparation
@@ -198,7 +204,7 @@ seed adapter pins both original source hashes before changing any copied script.
 
 Every preparation starts at the beginning of the bank; flights do not consume
 seeds or move a global cursor. All controllers receive the same selected prefix,
-with two runs per seed in separate passes. Failed attempts keep their original seed.
+with one run per seed in the current single-pass configuration. Failed attempts keep their original seed.
 Adding a controller or creating a new campaign reuses the same scenarios.
 
 To request more scenarios, set `seed_count` in the configuration or pass
@@ -209,7 +215,7 @@ root with `$stpPython` set as above:
 uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --mode seeded --seed-count 30 --output runs/stp-seeded-030-001
 ```
 
-This prepares **60 flights per controller** and launches nothing. If the bank has
+This prepares **30 flights per controller** with the current configuration and launches nothing. If the bank has
 22 saved seeds, preparation appends eight unique seeds before freezing the schedule.
 Later campaigns reuse those same 30 values. Requests for fewer seeds select a
 shorter prefix and never shorten or rewrite the bank. Extension uses stable SHA-256
@@ -228,7 +234,7 @@ should adopt the bank fields from `campaign.json` for new preparations.
 
 Compare the same seed and repetition under the same pinned mission/scorer and
 scheduling settings. Equal seeds do not guarantee identical asynchronous STP
-execution; the paired repetitions still measure repeatability. A newly added seed
+execution; a single pass does not measure within-seed repeatability. A newly added seed
 needs runs from each controller, including Tom, before a matched comparison exists.
 
 ### What the seeds control
@@ -316,8 +322,9 @@ Analysis produces `attempts.csv`, `summary.json`, `matched.csv`,
 `scenario_comparisons.csv`, `failure_timelines.json`, `report.md` and
 `cost_estimate.json`. All scheduled outcomes and scored coverage remain visible.
 Distributions retain values, extrema, means and medians. Matched comparisons use
-the same block/repetition; complete two-run means form each seeded scenario
-comparison. Repetitions are repeatability measurements, not extra independent
+the same block/repetition; a seeded scenario comparison requires scores from both
+controllers for every configured repetition. In a single pass this is the direct
+score difference; multiple repetitions are averaged. Repetitions are repeatability measurements, not extra independent
 scenarios. Collision incidence remains unavailable; damage-increase incidence is
 reported separately. Pilot duration/storage extrapolations include a warning when
 attempts did not complete; do not launch full campaigns automatically.

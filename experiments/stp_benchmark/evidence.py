@@ -55,7 +55,16 @@ def order_attempts(config, attempts, execution_order=None):
     return sorted(attempts, key=key)
 
 
+def repetition_count(config):
+    # Older frozen campaigns predate this setting and always scheduled two passes.
+    count = config.get("repetitions", 2)
+    if type(count) is not int or count < 1:
+        raise ValueError("repetitions must be a positive integer")
+    return count
+
+
 def schedule(config, mode):
+    repetitions = repetition_count(config)
     controllers = config["controllers"]
     ids = [c["id"] for c in controllers]
     if not ids or len(ids) != len(set(ids)) or config["reference"] not in ids:
@@ -80,7 +89,7 @@ def schedule(config, mode):
     for block, seed in enumerate(blocks):
         offset = block % len(controllers)
         for controller in controllers[offset:] + controllers[:offset]:
-            for repetition in range(2):
+            for repetition in range(repetitions):
                 attempts.append(
                     dict(block=block, seed=seed, repetition=repetition, controller=controller)
                 )
@@ -415,13 +424,16 @@ def analyze(root):
                     reference_outcome=ref["outcome"],
                 )
             )
-    # A seed is one scenario. Average the two repeat measurements before comparing scenarios.
+    # A seed is one scenario. Require every configured repetition before reducing it.
+    repetitions = repetition_count(campaign["config"])
     matched_blocks = defaultdict(list)
     for comparison in comparisons:
         matched_blocks[(comparison["controller"], comparison["block"])].append(comparison)
     seed_comparisons = []
     for (name, block), group in matched_blocks.items():
-        complete = len(group) == 2 and all(g["both_scored"] for g in group)
+        complete = {g["repetition"] for g in group} == set(range(repetitions)) and all(
+            g["both_scored"] for g in group
+        )
         seed_comparisons.append(
             dict(
                 controller=name,
@@ -449,13 +461,15 @@ def analyze(root):
     )
     if estimate["mean_wall_s"] is not None:
         n = len(campaign["config"]["controllers"])
-        estimate["baseline_wall_hours"] = n * 10 * estimate["mean_wall_s"] / 3600
+        estimate["baseline_wall_hours"] = n * 5 * repetitions * estimate["mean_wall_s"] / 3600
         seed_count = campaign["config"].get("seed_count", 20)
         estimate["seeded_scenarios"] = seed_count
-        estimate["seeded_wall_hours"] = n * seed_count * 2 * estimate["mean_wall_s"] / 3600
+        estimate["seeded_wall_hours"] = (
+            n * seed_count * repetitions * estimate["mean_wall_s"] / 3600
+        )
         if estimate["mean_bytes"] is not None:
-            estimate["baseline_bytes"] = n * 10 * estimate["mean_bytes"]
-            estimate["seeded_bytes"] = n * seed_count * 2 * estimate["mean_bytes"]
+            estimate["baseline_bytes"] = n * 5 * repetitions * estimate["mean_bytes"]
+            estimate["seeded_bytes"] = n * seed_count * repetitions * estimate["mean_bytes"]
     write_json(root / "cost_estimate.json", estimate)
     execution_order = campaign.get(
         "execution_order", campaign["config"].get("execution_order", "paired")
@@ -465,6 +479,7 @@ def analyze(root):
         "",
         f"Mode: {campaign['mode']}. Reference: {reference}.",
         f"Execution order: {execution_order}.",
+        f"Flights per controller per block: {repetitions}.",
         "",
         "| Controller | Outcomes | Success / scheduled | Scored coverage |",
         "| --- | --- | --- | --- |",
@@ -477,8 +492,9 @@ def analyze(root):
     lines += [
         "",
         "Raw score and component distributions: summary.json and attempts.csv.",
-        "Matched repetitions: matched.csv; complete two-run scenario means: "
-        "scenario_comparisons.csv. Missing scores are never replaced with zero.",
+        "Matched flights: matched.csv; scenario score differences averaged over all "
+        "configured repetitions: scenario_comparisons.csv. "
+        "Missing scores are never replaced with zero.",
         "Distinct seeds are scenarios; repeats measure repeatability. Baseline blocks "
         "share one saved field and are not independent scenarios.",
         "Damage increases are observed intervals, not identified collisions. Native "

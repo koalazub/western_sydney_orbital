@@ -1,5 +1,6 @@
 """Focused stdlib tests runnable in the native STP Python 3.12 environment."""
 
+import csv
 import importlib.util
 import json
 import os
@@ -102,9 +103,79 @@ class OfficialBenchmarkTests(unittest.TestCase):
 
     def config(self):
         config = json.loads((BENCHMARK / "campaign.json").read_text())
+        # Retain the historical two-pass fixtures for backward compatibility checks.
+        config.pop("repetitions", None)
         bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
         config["seeds"] = bank["seeds"][: config["seed_count"]]
         return config
+
+    def test_current_campaign_is_one_pass_with_matched_controller_seed_coverage(self):
+        config = self.config()
+        config["repetitions"] = json.loads((BENCHMARK / "campaign.json").read_text())["repetitions"]
+        runs = evidence.schedule(config, "seeded")
+        self.assertEqual(config["repetitions"], 1)
+        self.assertEqual(len(runs), 44)
+        self.assertEqual({r["repetition"] for r in runs}, {0})
+        for block, seed in enumerate(config["seeds"]):
+            group = [r for r in runs if r["block"] == block]
+            self.assertEqual({r["seed"] for r in group}, {seed})
+            self.assertCountEqual([r["controller"]["id"] for r in group], ["tom", "ali_mppi"])
+            self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % 2]["id"])
+
+    def test_invalid_repetitions_are_rejected(self):
+        for value in (0, -1, True, 1.5, "1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                evidence.schedule(dict(self.config(), repetitions=value), "seeded")
+
+    def test_scenario_analysis_requires_all_configured_flights_and_retains_timeouts(self):
+        for repetitions in (1, 2):
+            with self.subTest(repetitions=repetitions), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = dict(self.config(), repetitions=repetitions, seed_count=1, seeds=[100])
+                attempts = evidence.schedule(config, "seeded")
+                for i, attempt in enumerate(attempts):
+                    attempt["run_id"] = f"run-{i}"
+                    folder = root / attempt["run_id"]
+                    folder.mkdir()
+                    evidence.write_json(
+                        folder / "receipt.json",
+                        dict(
+                            outcome="success",
+                            official_score=10 if attempt["controller"]["id"] == "tom" else 15,
+                            wall_s=300,
+                            evidence_bytes=100,
+                        ),
+                    )
+                evidence.write_json(
+                    root / "campaign.json", dict(mode="seeded", config=config, attempts=attempts)
+                )
+                summary = evidence.analyze(root)
+                self.assertEqual(summary["tom"]["scheduled"], repetitions)
+
+                def comparison(root=root):
+                    with (root / "scenario_comparisons.csv").open(newline="") as stream:
+                        return next(csv.DictReader(stream))
+
+                self.assertEqual(comparison()["complete_pair"], "True")
+                self.assertEqual(float(comparison()["mean_score_delta"]), 5)
+                cost = json.loads((root / "cost_estimate.json").read_text())
+                self.assertEqual(cost["seeded_bytes"], 2 * repetitions * 100)
+                self.assertAlmostEqual(cost["seeded_wall_hours"], 2 * repetitions * 300 / 3600)
+
+                # A missing score must not be imputed or form a complete scenario.
+                candidate = next(a for a in attempts if a["controller"]["id"] == "ali_mppi")
+                folder = root / candidate["run_id"]
+                evidence.write_json(
+                    folder / "receipt.json", dict(outcome="simulation_limit", official_score=None)
+                )
+                (folder / "events.jsonl").write_text(
+                    '{"kind":"telemetry","sim_s":300,"range_m":123}\n'
+                )
+                summary = evidence.analyze(root)
+                self.assertEqual(summary["ali_mppi"]["outcomes"]["simulation_limit"], 1)
+                self.assertEqual(summary["ali_mppi"]["distributions"]["range_m"]["values"], [123])
+                self.assertEqual(comparison()["complete_pair"], "False")
+                self.assertEqual(comparison()["mean_score_delta"], "")
 
     def test_resume_keeps_started_attempts_and_only_schedules_unstarted_ids(self):
         with tempfile.TemporaryDirectory() as temporary:
