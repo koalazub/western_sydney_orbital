@@ -26,7 +26,7 @@ _MODULES = {
             "guidance",
         ),
     ),
-    "tom": ("tom", ("debris_tracker", "avoidance")),
+    "tom": ("tom/kalman", ("debris_tracker", "avoidance")),
 }
 _ALI_CORE_BEGIN = "# BEGIN ALI PURE CORE"
 _ALI_CORE_END = "# END ALI PURE CORE"
