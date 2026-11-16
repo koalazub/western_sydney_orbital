@@ -116,6 +116,13 @@ class OfficialBenchmarkTests(unittest.TestCase):
         self.assertEqual(config["repetitions"], 1)
         self.assertEqual(len(runs), 44)
         self.assertEqual({r["repetition"] for r in runs}, {0})
+        for controller in config["controllers"]:
+            self.assertTrue(
+                (
+                    BENCHMARK.parents[1] / controller["directory"] / controller["entrypoint"]
+                ).is_file(),
+                f"Missing entrypoint for {controller['id']}",
+            )
         for block, seed in enumerate(config["seeds"]):
             group = [r for r in runs if r["block"] == block]
             self.assertEqual({r["seed"] for r in group}, {seed})
