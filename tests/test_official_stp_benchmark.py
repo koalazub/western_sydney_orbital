@@ -1,9 +1,12 @@
 """Focused stdlib tests runnable in the native STP Python 3.12 environment."""
 
+import ast
 import csv
+import datetime
 import importlib.util
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -24,6 +27,407 @@ import seeds  # noqa: E402
 
 
 class OfficialBenchmarkTests(unittest.TestCase):
+    def test_matched_addition_uses_frozen_settings_and_never_reschedules_existing_controllers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bank, _ = self.bank_fixture(root)
+            base_config = dict(
+                self.config(), seed_count=1, seeds=[100], repetitions=1, seed_bank=str(bank)
+            )
+            base = root / "runs/base"
+            base.mkdir(parents=True)
+            evidence.write_json(base / "campaign.json", dict(mode="seeded", config=base_config))
+            evidence.write_json(
+                base / "provenance.json", dict(configuration=base_config, snapshot_hashes={})
+            )
+            before = (base / "campaign.json").read_bytes()
+            incoming = json.loads((BENCHMARK / "campaign.json").read_text())
+            incoming["limits"]["simulation_s"] = 999
+            source = root / "incoming.json"
+            evidence.write_json(source, incoming)
+
+            def inspect(config, mode):
+                self.assertEqual([c["id"] for c in config["controllers"]], ["bui"])
+                self.assertEqual(config["limits"], base_config["limits"])
+                self.assertEqual(config["seeds"], [100])
+                self.assertEqual(config["reference"], "bui")
+                self.assertEqual(config["extends_campaign"], str(base.resolve()))
+                self.assertNotIn("supersedes_execution", config)
+                raise RuntimeError("configuration inspected before native preparation")
+
+            with (
+                patch.object(benchmark, "REPO", root),
+                patch.object(benchmark, "schedule", side_effect=inspect),
+                self.assertRaisesRegex(RuntimeError, "configuration inspected"),
+            ):
+                benchmark.prepare(
+                    source, root / "runs/bui", "seeded", controller_ids=["bui"], match_campaign=base
+                )
+            self.assertEqual((base / "campaign.json").read_bytes(), before)
+            with self.assertRaisesRegex(ValueError, "only new controller IDs"):
+                benchmark.prepare(
+                    source,
+                    root / "runs/reject-old",
+                    "seeded",
+                    controller_ids=["tom"],
+                    match_campaign=base,
+                )
+            with self.assertRaisesRegex(ValueError, "complete seed selection"):
+                benchmark.prepare(
+                    source,
+                    root / "runs/reject-seeds",
+                    "seeded",
+                    seed_count=2,
+                    controller_ids=["bui"],
+                    match_campaign=base,
+                )
+
+    def test_combined_analysis_preserves_sources_and_pairs_new_controller_with_saved_seed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = dict(self.config(), seed_count=1, seeds=[100], repetitions=1)
+
+            def make_source(name, selected, outcomes):
+                folder = root / name
+                folder.mkdir()
+                effective = json.loads(json.dumps(config))
+                effective.update(
+                    controllers=selected, reference=selected[0]["id"], execution_batch=name
+                )
+                attempts = evidence.schedule(effective, "seeded")
+                snapshots = {}
+                for i, attempt in enumerate(attempts):
+                    attempt["run_id"] = f"{name}-{i}"
+                    snapshot = (
+                        folder
+                        / "snapshot/controllers"
+                        / attempt["controller"]["id"]
+                        / "Controller.py"
+                    )
+                    snapshot.parent.mkdir(parents=True)
+                    snapshot.write_text("pass\n")
+                    snapshots[snapshot.relative_to(folder / "snapshot").as_posix()] = (
+                        evidence.digest(snapshot)
+                    )
+                    run = folder / attempt["run_id"]
+                    run.mkdir()
+                    outcome, score = outcomes[i]
+                    evidence.write_json(
+                        run / "receipt.json", dict(outcome=outcome, official_score=score)
+                    )
+                evidence.write_json(
+                    folder / "campaign.json",
+                    dict(mode="seeded", config=effective, attempts=attempts),
+                )
+                evidence.write_json(
+                    folder / "provenance.json",
+                    dict(
+                        configuration=effective,
+                        repository_revision=None,
+                        snapshot_hashes=snapshots,
+                        binaries={"sdk": "same"},
+                        python="3.12",
+                        python_dependencies={},
+                        machine={"hostname": "same"},
+                        scheduling="normal",
+                        dependencies={str(folder / "snapshot/mission"): {"sha256": "same"}},
+                    ),
+                )
+                return folder
+
+            base = make_source(
+                "base", config["controllers"], [("success", 10), ("simulation_limit", None)]
+            )
+            bui_controller = dict(
+                id="bui",
+                author="Bui",
+                method="Alpha-beta",
+                directory="controllers/bui",
+                entrypoint="Controller.py",
+            )
+            bui = make_source("bui", [bui_controller], [("success", 15)])
+
+            def source_hashes():
+                return {
+                    str(p): evidence.digest(p)
+                    for source in (base, bui)
+                    for p in source.rglob("*")
+                    if p.is_file()
+                }
+
+            before = source_hashes()
+            summary = evidence.combine_campaigns([base, bui], root / "combined")
+            self.assertEqual(source_hashes(), before)
+            self.assertEqual(summary["tom"]["outcomes"], {"success": 1})
+            self.assertEqual(summary["ali_mppi"]["outcomes"], {"simulation_limit": 1})
+            self.assertEqual(summary["bui"]["controller_author"], "Bui")
+            with (root / "combined/matched.csv").open(newline="") as stream:
+                paired = next(row for row in csv.DictReader(stream) if row["controller"] == "bui")
+            self.assertEqual(float(paired["score_delta"]), 5)
+            self.assertEqual(paired["seed"], "100")
+            self.assertTrue((root / "combined/analysis_sources.json").is_file())
+
+            metadata_path = bui / "provenance.json"
+            original = json.loads(metadata_path.read_text())
+            mismatch = dict(original, binaries={"sdk": "changed"})
+            evidence.write_json(metadata_path, mismatch)
+            with self.assertRaisesRegex(ValueError, "binaries"):
+                evidence.combine_campaigns([base, bui], root / "invalid")
+            self.assertFalse((root / "invalid").exists())
+
+    def test_atomic_json_retries_transient_windows_sharing_and_preserves_previous_on_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "manifest.json"
+            evidence.write_json(target, {"version": 1})
+            sharing = PermissionError("Windows reader temporarily denies replacement")
+            sharing.winerror = 32
+            original_replace = Path.replace
+            attempts = 0
+
+            def replace(source, destination):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise sharing
+                return original_replace(source, destination)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=replace):
+                evidence.write_json(target, {"version": 2})
+            self.assertEqual(json.loads(target.read_text()), {"version": 2})
+            self.assertEqual(attempts, 2)
+            with (
+                patch.object(Path, "replace", side_effect=sharing),
+                patch.object(evidence.time, "monotonic", side_effect=[0, 2]),
+                self.assertRaises(PermissionError),
+            ):
+                evidence.write_json(target, {"version": 3})
+            self.assertEqual(json.loads(target.read_text()), {"version": 2})
+            self.assertEqual(list(root.iterdir()), [target])
+
+    def test_busy_evidence_stream_cannot_bypass_a_watchdog_deadline(self):
+        events = queue.Queue()
+        events.put({"kind": "command"})
+        with patch.object(benchmark.time, "monotonic", return_value=10):
+            with self.assertRaises(queue.Empty):
+                benchmark.next_evidence_event(events, deadline=10)
+            self.assertEqual(events.qsize(), 1)
+            self.assertEqual(benchmark.next_evidence_event(events, deadline=11)["kind"], "command")
+
+    def test_sensor_capture_failure_halts_even_when_controller_exceptions_may_continue(self):
+        outcome = benchmark.event_error_outcome("sensor_error")
+        self.assertEqual(outcome, "evidence_failure")
+        self.assertTrue(
+            benchmark.must_halt(
+                dict(
+                    outcome=outcome,
+                    cleanup="owned_process_tree_exited",
+                    error=dict(role="controller"),
+                ),
+                continue_controller_errors=True,
+            )
+        )
+        self.assertIsNone(benchmark.event_error_outcome("telemetry"))
+
+    def test_receiver_distinguishes_cleanup_disconnects_from_runtime_failures(self):
+        class ResetStream:
+            def readline(self, limit):
+                return json.dumps(dict(token="test-token", role="controller")) + "\n"
+
+            def __iter__(self):
+                raise ConnectionResetError("simulator connection closed")
+
+        for cleanup_started in (False, True):
+            with self.subTest(cleanup_started=cleanup_started):
+                receiver = object.__new__(benchmark.Receiver)
+                receiver.events = queue.Queue()
+                receiver.closed = False
+                receiver.cleanup_started = cleanup_started
+                receiver.token = "test-token"
+                connection = SimpleNamespace(
+                    settimeout=lambda value: None,
+                    makefile=lambda *args, **kwargs: ResetStream(),
+                    close=lambda: None,
+                )
+                receiver.read(connection)
+                error = receiver.events.get_nowait()
+                closed = receiver.events.get_nowait()
+                self.assertEqual(error["kind"], "hook_error")
+                self.assertEqual(error["phase"], "cleanup" if cleanup_started else "flight")
+                self.assertEqual(closed["phase"], error["phase"])
+                issue = evidence.incidents(
+                    [error], {"outcome": "simulation_limit"}, self.config()["thresholds"]
+                )
+                self.assertEqual(
+                    issue[0]["kind"], "cleanup_stream_error" if cleanup_started else "hook_error"
+                )
+
+    def test_execute_halts_on_sensor_error_and_preserves_native_logs_without_duplicate_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.config()
+            config.update(install=str(root / "install"), user_root=str(root / "user"))
+            evidence.write_json(root / "campaign.json", dict(config=config))
+            logs = root / "user/Logs/run"
+            logs.mkdir(parents=True)
+            native_log = logs / "controller.log"
+            native_log.write_text("before")
+            events = queue.Queue()
+            for role in ("controller", "scorer"):
+                events.put(
+                    dict(
+                        kind="connected",
+                        role=role,
+                        native_run_uuid="test",
+                        native_logs=str(logs),
+                        native_output=str(logs),
+                    )
+                )
+            events.put(dict(kind="sensor_error", role="controller", error="sample failed"))
+            receiver = SimpleNamespace(
+                events=events, close=lambda: None, begin_cleanup=lambda: None
+            )
+            process = SimpleNamespace(wait=lambda **kwargs: 0, returncode=0)
+
+            def launch(*args):
+                native_log.write_text("after: native evidence")
+                (logs.parent / "startup.log").write_text("startup diagnostic")
+                return process
+
+            def mission(*args):
+                path = root / "attempt/mission.simconf"
+                path.write_text("{}")
+                return path, []
+
+            job = SimpleNamespace(launch=launch, active=lambda: 1, close=lambda: None)
+            attempt = dict(run_id="attempt", controller=config["controllers"][0], seed=None)
+            with (
+                patch.object(benchmark, "Receiver", return_value=receiver),
+                patch.object(benchmark, "WindowsJob", return_value=job),
+                patch.object(benchmark, "attempt_mission", side_effect=mission),
+            ):
+                receipt = benchmark.execute(root, attempt)
+            self.assertEqual(receipt["outcome"], "evidence_failure")
+            self.assertEqual(receipt["termination_reason"], "sensor_error")
+            self.assertEqual(receipt["cleanup"], "owned_process_tree_exited")
+            copies = list((root / "attempt").rglob("controller.log"))
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(copies[0].read_text(), "after: native evidence")
+            self.assertTrue((root / "attempt/native_startup/0/startup.log").is_file())
+
+    def test_state_capture_supports_actual_current_governors_and_mppi_record(self):
+        class Vector(list):
+            def __sub__(self, other):
+                return Vector(a - b for a, b in zip(self, other, strict=True))
+
+        def body(position, velocity):
+            return SimpleNamespace(
+                GetBodyFixedFrame=lambda: None,
+                getLocVelAcc=lambda: SimpleNamespace(
+                    loc_WRT_ExprIn=lambda frame: Vector(position),
+                    vel_WRT_ExprIn=lambda frame: Vector(velocity),
+                ),
+                getRotation=lambda: SimpleNamespace(Quat_WRT=lambda frame: [0, 0, 0, 1]),
+                getAngVelocity=lambda: SimpleNamespace(WRT_ExprIn=lambda frame: [0, 0, 0]),
+                GetParam=lambda kind, key: 5 if key[-1] == "FuelUsed" else 0,
+            )
+
+        start = datetime.datetime(2026, 11, 16, tzinfo=datetime.UTC)
+
+        def stamp(value):
+            return SimpleNamespace(as_datetime=lambda: value)
+
+        shuttle, target = body([0, 0, 0], [2, 0, 0]), body([100, 0, 0], [0, 0, 0])
+        fake_sdk = SimpleNamespace(
+            VarType=SimpleNamespace(timestamp=0, double=1),
+            SimGlobals=SimpleNamespace(
+                SimClock=SimpleNamespace(
+                    GetTimeNow=lambda: stamp(start + datetime.timedelta(seconds=4))
+                ),
+                GetSimEntity=lambda: SimpleNamespace(GetParam=lambda *args: stamp(start)),
+            ),
+            shuttle=shuttle,
+            target=target,
+            phobos=shuttle,
+        )
+        fake_numpy = SimpleNamespace(
+            linalg=SimpleNamespace(norm=lambda values: sum(x * x for x in values) ** 0.5)
+        )
+        cases = []
+        for directory in ("tom/kalman", "tom/polyfit", "bui"):
+            path = BENCHMARK.parents[1] / "controllers" / directory / "Controller.py"
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if not any(isinstance(n, ast.ClassDef) and n.name == "BurnGovernor" for n in tree.body):
+                path = path.with_name("avoidance.py")
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            governor = next(
+                n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BurnGovernor"
+            )
+            namespace = {}
+            exec(
+                compile(ast.Module(body=[governor], type_ignores=[]), str(path), "exec"), namespace
+            )
+            instance = namespace["BurnGovernor"]()
+            setattr(instance, "burning" if hasattr(instance, "burning") else "firing", True)
+            cases.append((directory, instance, {}, "burn"))
+        cases.extend(
+            [
+                ("mppi", None, {"mode": "coast"}, "coast"),
+                ("old_governor", SimpleNamespace(firing=False), {}, "coast"),
+                ("missing_optional_diagnostics", object(), {}, None),
+            ]
+        )
+        for name, governor, diagnostic, expected_mode in cases:
+            with self.subTest(controller=name), tempfile.TemporaryDirectory() as temporary:
+                receiver = benchmark.Receiver()
+                original_argv = sys.argv.copy()
+                try:
+                    folder = Path(temporary)
+                    source = folder / "controller.py"
+                    source.write_text(
+                        "import spaceteams as st\n"
+                        "shuttle, target, phobos = st.shuttle, st.target, st.phobos\n"
+                        "governor, record = st.governor, st.record\n"
+                        "mode = st.policy_phase\n"
+                        "def GetNearestDebrisLocations(count):\n"
+                        "    return [[[100,0,0],[100,0,1],[4,0,0]]] * st.radar_count\n"
+                        "def SetCommand(accelCommand, angAccelCommand):\n    pass\n"
+                        "GetNearestDebrisLocations(1)\nSetCommand([0.5,0,0], [0,0,0])\n",
+                        encoding="utf-8",
+                    )
+                    fake_sdk.governor, fake_sdk.record = governor, diagnostic
+                    fake_sdk.policy_phase = "avoid" if name == "bui" else None
+                    fake_sdk.radar_count = 500 if name == "bui" else 1
+                    spec = folder / "spec.json"
+                    evidence.write_json(
+                        spec,
+                        dict(
+                            source=str(source),
+                            role="controller",
+                            port=receiver.port,
+                            token=receiver.token,
+                            sample_period_s=0.1,
+                        ),
+                    )
+                    with patch.dict(sys.modules, spaceteams=fake_sdk, numpy=fake_numpy):
+                        capture.run(spec)
+                    records = []
+                    while not records or records[-1]["kind"] != "process_finished":
+                        records.append(receiver.events.get(timeout=5))
+                    self.assertFalse(
+                        [r for r in records if r["kind"] in {"sensor_error", "hook_error"}]
+                    )
+                    telemetry = next(r for r in records if r["kind"] == "telemetry")
+                    self.assertEqual(telemetry["mode"], expected_mode)
+                    self.assertEqual(telemetry["controller_phase"], fake_sdk.policy_phase)
+                    self.assertEqual(len(telemetry["radar_measurements"]), fake_sdk.radar_count)
+                    self.assertEqual(telemetry["range_m"], 100)
+                    self.assertEqual(telemetry["relative_speed_m_s"], 2)
+                    self.assertEqual(telemetry["sim_s"], 4)
+                finally:
+                    sys.argv[:] = original_argv
+                    receiver.close()
+
     def test_commit_match_checks_all_support_files_and_tolerates_only_line_endings(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -181,7 +585,7 @@ class OfficialBenchmarkTests(unittest.TestCase):
 
     def config(self):
         config = json.loads((BENCHMARK / "campaign.json").read_text())
-        config["controllers"] = [c for c in config["controllers"] if c["id"] != "tom_polyfit"]
+        config["controllers"] = [c for c in config["controllers"] if c["id"] in {"tom", "ali_mppi"}]
         for controller in config["controllers"]:
             for field in ("source_commit", "source_directory", "source_changes"):
                 controller.pop(field, None)
@@ -196,7 +600,7 @@ class OfficialBenchmarkTests(unittest.TestCase):
         config["seeds"] = self.config()["seeds"]
         runs = evidence.schedule(config, "seeded")
         self.assertEqual(config["repetitions"], 1)
-        self.assertEqual(len(runs), 66)
+        self.assertEqual(len(runs), 88)
         self.assertEqual({r["repetition"] for r in runs}, {0})
         for controller in config["controllers"]:
             self.assertTrue(
@@ -209,9 +613,9 @@ class OfficialBenchmarkTests(unittest.TestCase):
             group = [r for r in runs if r["block"] == block]
             self.assertEqual({r["seed"] for r in group}, {seed})
             self.assertCountEqual(
-                [r["controller"]["id"] for r in group], ["tom", "tom_polyfit", "ali_mppi"]
+                [r["controller"]["id"] for r in group], ["tom", "tom_polyfit", "ali_mppi", "bui"]
             )
-            self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % 3]["id"])
+            self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % 4]["id"])
 
     def test_invalid_repetitions_are_rejected(self):
         for value in (0, -1, True, 1.5, "1"):
@@ -260,11 +664,19 @@ class OfficialBenchmarkTests(unittest.TestCase):
                     folder / "receipt.json", dict(outcome="simulation_limit", official_score=None)
                 )
                 (folder / "events.jsonl").write_text(
-                    '{"kind":"telemetry","sim_s":300,"range_m":123}\n'
+                    '{"kind":"telemetry","sim_s":300,"range_m":123,"relative_speed_m_s":2.5}\n'
                 )
                 summary = evidence.analyze(root)
                 self.assertEqual(summary["ali_mppi"]["outcomes"]["simulation_limit"], 1)
                 self.assertEqual(summary["ali_mppi"]["distributions"]["range_m"]["values"], [123])
+                with (root / "attempts.csv").open(newline="") as stream:
+                    reading = next(
+                        row
+                        for row in csv.DictReader(stream)
+                        if row["run_id"] == candidate["run_id"]
+                    )
+                self.assertEqual(float(reading["last_telemetry_sim_s"]), 300)
+                self.assertEqual(float(reading["last_relative_speed_m_s"]), 2.5)
                 self.assertEqual(comparison()["complete_pair"], "False")
                 self.assertEqual(comparison()["mean_score_delta"], "")
 

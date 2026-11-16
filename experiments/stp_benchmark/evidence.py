@@ -6,12 +6,36 @@ import csv
 import hashlib
 import json
 import math
+import os
 import statistics
 import subprocess
+import tempfile
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 SCHEMA = "wsorb.official_stp.benchmark.v1"
+
+MATCHED_SETTINGS = (
+    "experiment_id",
+    "schema",
+    "package_revision",
+    "package",
+    "mission",
+    "mission_sha256",
+    "scorer_sha256",
+    "seed_scope",
+    "seed_bank_id",
+    "seed_count",
+    "seeds",
+    "sample_period_s",
+    "limits",
+    "thresholds",
+    "execution_order",
+    "diagnostic_rerun",
+    "install",
+    "user_root",
+)
 
 
 def digest(path):
@@ -20,9 +44,26 @@ def digest(path):
 
 def write_json(path, value):
     path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    text = json.dumps(value, indent=2, allow_nan=False) + "\n"
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError as error:
+                # Bounded replacement-readiness poll; readers may briefly deny delete sharing.
+                if (
+                    getattr(error, "winerror", None) not in {5, 32, 33}
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read_events(path):
@@ -172,7 +213,12 @@ def incidents(events, receipt, thresholds):
     for event in events:
         kind = event.get("kind")
         if kind in {"exception", "hook_error", "sensor_error", "truncated_record"}:
-            add(kind, event, event)
+            incident_kind = (
+                "cleanup_stream_error"
+                if (kind == "hook_error" and event.get("phase") == "cleanup")
+                else kind
+            )
+            add(incident_kind, event, event)
         if kind == "command":
             duration = event.get("decision_duration_s")
             if duration is not None and duration > thresholds["decision_overrun_s"]:
@@ -429,7 +475,47 @@ def controller_versions(root, campaign):
     return result
 
 
-def analyze(root):
+def require_matched_conditions(base_root, base, base_provenance, root, campaign, provenance):
+    """Controller identities may differ; the declared native flight conditions may not."""
+    differences = [
+        field
+        for field in MATCHED_SETTINGS
+        if base["config"].get(field) != campaign["config"].get(field)
+    ]
+    if repetition_count(base["config"]) != repetition_count(campaign["config"]):
+        differences.append("repetitions")
+    if base["mode"] != "seeded" or campaign["mode"] != "seeded":
+        differences.append("seeded mode required")
+
+    def dependencies(directory, records):
+        snapshot = (Path(directory) / "snapshot").resolve()
+        result = {}
+        for name, value in records.items():
+            path = Path(name)
+            key = (
+                "snapshot/" + path.relative_to(snapshot).as_posix()
+                if path.is_absolute() and path.is_relative_to(snapshot)
+                else name
+            )
+            result[key] = value
+        return result
+
+    for key in ("binaries", "python", "python_dependencies", "machine", "scheduling"):
+        if (
+            key not in base_provenance
+            or key not in provenance
+            or base_provenance[key] != provenance[key]
+        ):
+            differences.append(key)
+    if dependencies(base_root, base_provenance.get("dependencies", {})) != dependencies(
+        root, provenance.get("dependencies", {})
+    ):
+        differences.append("native dependencies")
+    if differences:
+        raise ValueError("Campaign conditions differ: " + ", ".join(differences))
+
+
+def campaign_rows(root, write_derived=True):
     root = Path(root)
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
     versions = controller_versions(root, campaign)
@@ -450,15 +536,19 @@ def analyze(root):
         if parts is not None and official is not None:
             discrepancy = abs(parts["calculated_score"] - official) > 1e-8
         issue = incidents(events, receipt, campaign["config"]["thresholds"])
-        if folder.exists():
+        if write_derived and folder.exists():
             write_json(folder / "incidents.json", issue)
             write_json(folder / "delivery.json", delivery)
-        timelines.extend(dict(run_id=attempt["run_id"], **item) for item in issue)
+        timelines.extend(
+            dict(run_id=attempt["run_id"], source_campaign=str(root.resolve()), **item)
+            for item in issue
+        )
         inputs = receipt.get("inputs") or {}
         samples = [e for e in events if e.get("kind") == "telemetry"]
         last = samples[-1] if samples else {}
         row = dict(
             run_id=attempt["run_id"],
+            source_campaign=str(root.resolve()),
             experiment_id=campaign["config"].get("experiment_id"),
             execution_batch=campaign["config"].get("execution_batch"),
             controller=attempt["controller"]["id"],
@@ -483,6 +573,7 @@ def analyze(root):
             telemetry_samples=len(samples),
             last_telemetry_sim_s=last.get("sim_s"),
             last_relative_speed_m_s=last.get("relative_speed_m_s"),
+            last_controller_phase=last.get("controller_phase"),
             wall_s=receipt.get("wall_s"),
             bytes=receipt.get("evidence_bytes"),
             measurements_source="scoring_event" if inputs else "partial_last_telemetry",
@@ -491,6 +582,11 @@ def analyze(root):
             **(parts or {}),
         )
         rows.append(row)
+    return campaign, versions, rows, timelines
+
+
+def summarize(root, campaign, versions, rows, timelines):
+    root = Path(root)
     groups = defaultdict(list)
     for row in rows:
         groups[row["controller"]].append(row)
@@ -631,3 +727,58 @@ def analyze(root):
     ]
     (root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return summaries
+
+
+def analyze(root):
+    return summarize(root, *campaign_rows(root))
+
+
+def combine_campaigns(roots, output):
+    """Build a derived comparison without altering any source campaign or replaying flights."""
+    roots = [Path(root).resolve() for root in roots]
+    if not roots or len(roots) != len(set(roots)):
+        raise ValueError("Provide distinct source campaigns")
+    output = Path(output).resolve()
+    if any(output == root or output.is_relative_to(root) for root in roots):
+        raise ValueError("Combined analysis must be outside source campaigns")
+    sources = []
+    controllers, versions, rows, timelines = [], {}, [], []
+    first, first_provenance = None, None
+    for root in roots:
+        campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
+        provenance = json.loads((root / "provenance.json").read_text(encoding="utf-8"))
+        if provenance.get("configuration") != campaign["config"]:
+            raise ValueError(f"Prepared configuration changed: {root}")
+        if first is None:
+            first, first_provenance = campaign, provenance
+        require_matched_conditions(roots[0], first, first_provenance, root, campaign, provenance)
+        ids = {controller["id"] for controller in campaign["config"]["controllers"]}
+        if ids & set(versions):
+            raise ValueError("Controller IDs overlap; keep distinct versions separately labelled")
+        _, source_versions, source_rows, source_timelines = campaign_rows(root, write_derived=False)
+        controllers.extend(campaign["config"]["controllers"])
+        versions.update(source_versions)
+        rows.extend(source_rows)
+        timelines.extend(source_timelines)
+        sources.append(
+            dict(
+                directory=str(root),
+                campaign_sha256=digest(root / "campaign.json"),
+                provenance_sha256=digest(root / "provenance.json"),
+                execution_batch=campaign["config"].get("execution_batch"),
+                capture_sha256=provenance.get("snapshot_hashes", {}).get("capture.py"),
+            )
+        )
+    config = dict(first["config"], controllers=controllers, execution_batch="combined-analysis")
+    combined = dict(first, config=config)
+    output.mkdir(parents=True, exist_ok=False)
+    write_json(
+        output / "analysis_sources.json",
+        dict(
+            experiment_id=config.get("experiment_id"),
+            sources=sources,
+            note="Read-only source campaigns; controller versions remain distinct. "
+            "Cross-session instrumentation hashes are recorded, not assumed identical.",
+        ),
+    )
+    return summarize(output, combined, versions, rows, timelines)

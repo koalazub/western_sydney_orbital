@@ -1,4 +1,4 @@
-# Current-main Tom entrypoints vs Ali MPPI: single-pass experimental design
+# Controller comparison: single-pass experimental design
 
 Prepared: 16 November 2026, 19:24:04 AEDT (Australia/Sydney, UTC+11).
 
@@ -6,9 +6,58 @@ Status: the same experiment is being restarted after an interrupted execution;
 final results have not been reviewed. The current execution plan below supersedes
 the initial two-controller and proposed four-version plans retained as history.
 
-## Current execution plan: restart-001
+## Current addition: Bui, with existing results preserved
 
-Experiment ID: `20261116T192404-HY`. Execution batch: `restart-001`.
+The experiment remains `20261116T192404-HY`. Add Bui's updated self-contained
+controller from main commit `faad3e0442ec7f8e7202a0f19d0136ea815e28c6` as **22 new
+flights**, one per seed, matched to the frozen `restart-002` configuration.
+Implementation label: **Bui — Alpha-beta (avoid/hold/correction)**. Preserve the
+exact entrypoint and supporting source hashes; make compatibility adjustments
+only in the harness. Its SDK globals and command signatures fit the existing
+adapter, its governor exposes `burning`, and it requests up to 500 radar rows.
+Capture its policy phase separately from its burn/coast state.
+
+The combined view has **88 scheduled controller/seed slots**: the original 66,
+plus Bui's 22. The base execution is currently halted after six successes, two
+budget timeouts, two controller exceptions and one simulator/evidence failure;
+55 original slots remain unstarted. Preserve all 11 started attempts, not just
+successes. No started failure is replaced by a new success, and no original
+controller is automatically rerun to add Bui.
+
+The existing Tom Polyfit source has recorded `OnScreenLogMessage` argument errors
+on seeds 100 and 3253. The simulator/evidence stop followed a native ApplyGravity
+loading timeout. These records remain visible; they are not corrected or erased
+by adding Bui. The old queue's recovery request was declined and it remains
+halted. Adding Bui does not silently resume those 55 original flights.
+
+Although the new main restores a real Kalman entrypoint and updates MPPI, reuse
+of existing results retains the three versions actually frozen in `restart-002`
+at commit `570b175...`. Those old method labels must not change to match today's
+checkout. Bui's addition gets its own frozen provenance under
+`runs/stp-20261116T192404-HY-bui-001`, with `extends_campaign` pointing to the base.
+The selected seeds, mission/scorer, limits, repetition count and sampling period
+are inherited from that base; native asset, binary, interpreter and machine
+conditions must also match. This extends the same experiment across sessions.
+
+```powershell
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --mode seeded --controllers bui --match-campaign runs/stp-20261116T192404-HY-restart-002 --output runs/stp-20261116T192404-HY-bui-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-20261116T192404-HY-bui-001 --continue-on-controller-error
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py analyze runs/stp-20261116T192404-HY-restart-002 runs/stp-20261116T192404-HY-bui-001 --output runs/stp-20261116T192404-HY-combined-001
+```
+
+The combined analysis reads both source campaigns without changing their files.
+It retains original run IDs, source campaign paths and controller version labels,
+and pairs by the common seed/repetition. Scores require both matched native
+receipts; unavailable outcomes remain explicit. The combined output directory
+must be new. Incomplete original coverage is not a complete four-controller
+reliability result. Capture hashes are recorded; added policy-phase diagnostics
+and separate-session scheduling are disclosed rather than assumed identical.
+At the full budget, Bui's 22 flights alone represent 1 hour 50 minutes of simulated
+flight time before startup/cleanup overhead. Native diagnostics remain separate.
+
+## Existing execution plan: restart-002 (preserved)
+
+Experiment ID: `20261116T192404-HY`. Execution batch: `restart-002`.
 Use unchanged controller files from current main commit
 `570b175cac663e4e0cf59aa4d5d5c5ef31021d24`, merged into `analysis/harry`.
 The restart is **22 seeds × three controllers × one pass = 66 flights**, with
@@ -39,23 +88,49 @@ separately from the pinned source origin.
 
 The interrupted execution `runs/tom-mppi-300s-single-pass-002` stays saved with
 its original labels and outcomes. The restart uses
-`runs/stp-20261116T192404-HY-restart-001`, created by `prepare`. Configuration
+`runs/stp-20261116T192404-HY-restart-002`, created by `prepare`. Configuration
 records the same `experiment_id`, new `execution_batch` and `supersedes_execution`
-pointing to that interrupted batch. The restart is the planned primary dataset
+pointing to `restart-001`, which in turn points to that interrupted batch.
+`restart-001` was stopped cleanly on its first flight after state sampling failed
+because the harness expected the old `governor.firing` attribute; both new Tom
+controllers expose `burning`. Its records remain saved as aborted history and
+are not included as physical outcomes in the primary comparison.
+The corrected restart is the planned primary dataset
 for final analysis. Earlier flights remain visible as exploratory/operational
 history; do not pool duplicate seed/controller attempts into restart statistics
 or substitute an earlier success for a restarted failure.
 
 ```powershell
 $stpPython = "$env:USERPROFILE\AppData\Local\SimDynamX\STPro\Versions\v0.54.2\py\Scripts\python.exe"
-uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --config experiments/stp_benchmark/campaign.json --mode seeded --seed-count 22 --output runs/stp-20261116T192404-HY-restart-001
-uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-20261116T192404-HY-restart-001 --continue-on-controller-error
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --config experiments/stp_benchmark/campaign.json --mode seeded --seed-count 22 --output runs/stp-20261116T192404-HY-restart-002
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-20261116T192404-HY-restart-002 --continue-on-controller-error
 ```
 
 At 1×, 66 full-budget flights represent about **5 hours 30 minutes** of flight time
 before startup/cleanup overhead; this is not a promised wall-time duration. Flights
 run sequentially. Started attempts are retained on errors; resume only unstarted
 IDs. A restart does not justify suppressing timeout, crash or evidence-failure counts.
+
+### Harness compatibility corrections
+
+Controller source files remain unchanged. The capture adapter now reads Tom's
+`burning` attribute, retains compatibility with older `firing` governors, and
+reads MPPI's `record["mode"]`. Missing optional mode diagnostics remain null.
+A state-sampling error is an evidence failure and halts the queue, even when
+continuation after controller exceptions is enabled. Watchdogs check deadlines
+before consuming queued records, so a busy log stream cannot postpone wall or
+stall limits. Atomic JSON writes use unique temporary files and a bounded
+replacement-readiness poll for Windows sharing failures; persistent failures
+still propagate. Native logs already copied successfully are not duplicated by
+the startup-diagnostic fallback; unrelated startup logs remain preserved.
+Socket-close errors after deliberate cleanup starts are retained with a cleanup
+phase and classified as cleanup-stream incidents, separate from runtime failures.
+
+Analysis exports the actual last telemetry time and relative speed alongside
+the remaining-distance reading. The 300-second limit still stops on observed
+time samples, not an exact native simulation boundary; the boundary limitation
+described below remains applicable. A short diagnostic of each controller is
+kept separate from the 66-flight primary dataset.
 
 ## Earlier design and subsequent amendments
 

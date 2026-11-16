@@ -53,7 +53,7 @@ Use the native Windows UV commands below, from the repository root:
 | --- | --- |
 | `pilot` | One fresh flight of the configured reference controller; Tom by default. |
 | `baseline` | Five blocks per controller: **5 flights each**. |
-| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **22 flights each**, **66 total** for the two current-main Tom entrypoints and Ali MPPI. Override with `--seed-count N`. |
+| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **22 flights each**, **88 total** for the four configured current controllers. Override with `--seed-count N`. |
 
 The current configuration sets `repetitions: 1` and a **300 s simulated-time limit**.
 Each controller flies each seeded scenario once. Set `repetitions` to another
@@ -178,10 +178,11 @@ can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 After inspecting the pilot, prepare `--mode baseline` for five fresh flights
 per controller, or `--mode seeded` for the saved seed prefix and one run per
 controller/seed. Controller order rotates between blocks. Commands
-to run full campaigns are intentionally manual. The current three profiles are Tom's
-legacy entrypoint in the `kalman` folder, Tom's current `polyfit` entrypoint and Ali
-MPPI. Both current-main Tom entrypoints actually use `np.polyfit`; unused Kalman
-support files do not establish that an entrypoint uses Kalman. Harry has no official STP entrypoint. WSO requires its
+to run full campaigns are intentionally manual. The current configuration lists
+Tom Kalman, Tom Polyfit, Ali MPPI and Bui Alpha-beta. Existing frozen campaigns
+retain their own source versions and method labels; the earlier `restart-002`
+Tom entrypoint in the `kalman` folder actually used Polyfit. Harry has no official
+STP entrypoint. WSO requires its
 own explicitly established clock/configuration and is not silently enabled.
 Additional official entrypoints can declare their directory, entrypoint, extra
 support files and existing environment settings in the configuration. Preparation
@@ -260,6 +261,40 @@ recorded per attempt. `DoSpawning=true` is refused because the original controll
 wait indefinitely in that mode. Experimental results stay separate from baseline.
 
 ## Evidence and analysis
+
+### Add a controller to the existing experiment
+
+Use `--controllers` to select only the new controller and `--match-campaign` to
+inherit the original seeded campaign's complete conditions and exact seed prefix:
+
+```powershell
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py prepare --mode seeded --controllers bui --match-campaign runs/stp-20261116T192404-HY-restart-002 --output runs/stp-20261116T192404-HY-bui-001
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py run runs/stp-20261116T192404-HY-bui-001 --continue-on-controller-error
+```
+
+This schedules only **22 Bui flights**, with `coverage_first`, one pass and the
+original 300-second limit. It leaves every original attempt, ID, outcome and
+frozen controller version unchanged. Already-started failed flights are not
+retried; unstarted original flights stay in the original campaign. Controller
+IDs already present in the base are rejected. The new main checkout does not
+replace old frozen controller sources. Conditions are checked against native
+binary, asset, interpreter and machine provenance before preparation completes.
+
+Combine their saved results by seed without rerunning or rewriting either source:
+
+```powershell
+uv run --no-project --python $stpPython python experiments/stp_benchmark/benchmark.py analyze runs/stp-20261116T192404-HY-restart-002 runs/stp-20261116T192404-HY-bui-001 --output runs/stp-20261116T192404-HY-combined-001
+```
+
+The combined output directory must be new. Source campaign/flight IDs and version
+labels remain in `attempts.csv`; `analysis_sources.json` records their provenance
+and capture hashes. The original campaign's reference remains the comparison
+baseline. Seed sets, limits and native conditions must match; overlapping
+controller IDs are rejected rather than pooled across versions. Missing flights
+and scores stay missing, and the four-controller view includes unstarted original
+attempts. Cross-session instrument versions are recorded explicitly. An addition
+is part of the same experiment and is not a new randomized interleaving of all
+controllers within a session. Reports generated before completion are partial.
 
 ### Dataset labels and source versions
 
@@ -348,6 +383,15 @@ are preserved; the runner adds no fixed readiness delays. Readiness and completi
 come from authenticated loopback records, process exit and bounded deadlines.
 Extra instrumented reruns must use a separate campaign with `diagnostic_rerun=true`.
 Baseline and experimental/diagnostic results must not be pooled.
+
+The capture adapter supports current `governor.burning`, historical
+`governor.firing` and MPPI's `record["mode"]`. Missing optional diagnostics stay
+null; state-sampling errors halt as evidence failures. Wall/stall watchdogs are
+enforced even when records are continuously queued. JSON replacement briefly
+polls readiness for transient Windows sharing locks, then propagates persistent
+failures. Native logs already copied successfully are excluded from the
+startup-log fallback to avoid duplicate storage. Last-sample time and relative
+speed are exported alongside remaining distance in `attempts.csv`.
 
 State reads are not atomic. Radar timestamps retain their source clock; sensor age
 is calculated only when the radar process supplies its actual origin. Native contact

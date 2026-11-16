@@ -131,6 +131,7 @@ def run(spec_path):
             sensor_age_s=sensor_age,
             radar_origin_tai=radar_origin.isoformat() if radar_origin else None,
             mode=controller_mode(namespace),
+            controller_phase=namespace.get("mode"),
             avoidance=getattr(namespace.get("avoider"), "last_info", None),
             missing_data=["Native contact events/identities", "Fuel by maneuver"],
             reads_are_atomic=False,

@@ -23,7 +23,17 @@ from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from pathlib import Path
 
-from evidence import SCHEMA, analyze, controller_versions, digest, read_events, schedule, write_json
+from evidence import (
+    SCHEMA,
+    analyze,
+    combine_campaigns,
+    controller_versions,
+    digest,
+    read_events,
+    require_matched_conditions,
+    schedule,
+    write_json,
+)
 from seeds import select_seeds
 
 HERE = Path(__file__).resolve().parent
@@ -126,12 +136,53 @@ def dependency_records(mission, install, user_root, package):
     return found
 
 
-def prepare(config_path, output, mode, seed_count=None):
+def prepare(config_path, output, mode, seed_count=None, controller_ids=None, match_campaign=None):
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     if config.get("schema") != SCHEMA:
         raise ValueError("Unsupported campaign schema")
     if seed_count is not None and mode != "seeded":
         raise ValueError("--seed-count applies only to seeded campaigns")
+    base, base_provenance, base_root = None, None, None
+    if controller_ids is not None:
+        if not controller_ids:
+            raise ValueError("--controllers must select at least one controller")
+        requested = set(controller_ids)
+        selected = [
+            controller for controller in config["controllers"] if controller["id"] in requested
+        ]
+        if len(controller_ids) != len(requested) or {c["id"] for c in selected} != requested:
+            raise ValueError("--controllers requires distinct configured controller IDs")
+        config["controllers"] = selected
+        if config["reference"] not in requested:
+            config["reference"] = selected[0]["id"]
+    if match_campaign is not None:
+        if not controller_ids or mode != "seeded":
+            raise ValueError("--match-campaign requires --controllers and seeded mode")
+        base_root = Path(match_campaign).resolve()
+        base = json.loads((base_root / "campaign.json").read_text(encoding="utf-8"))
+        base_provenance = json.loads((base_root / "provenance.json").read_text(encoding="utf-8"))
+        if base["mode"] != "seeded" or base_provenance["configuration"] != base["config"]:
+            raise ValueError("Base must be an unchanged prepared seeded campaign")
+        existing = {c["id"] for c in base["config"]["controllers"]}
+        if existing & set(controller_ids):
+            raise ValueError(
+                "Append only new controller IDs; existing attempts remain in the base campaign"
+            )
+        if seed_count is not None and seed_count != base["config"]["seed_count"]:
+            raise ValueError(
+                "Matched additions must use the base campaign's complete seed selection"
+            )
+        selected = config["controllers"]
+        config = dict(
+            base["config"],
+            controllers=selected,
+            reference=selected[0]["id"],
+            extends_campaign=str(base_root),
+            execution_batch=Path(output).name,
+        )
+        config.pop("supersedes_execution", None)
+        if hashes(base_root / "snapshot") != base_provenance["snapshot_hashes"]:
+            raise ValueError("Base snapshot changed; cannot append matched controller flights")
     output = Path(output).resolve()
     if not output.is_relative_to(REPO / "runs"):
         raise ValueError(
@@ -247,6 +298,10 @@ def prepare(config_path, output, mode, seed_count=None):
             "Fixed saved field; seeds vary initial impulses; original radar seed remains 100",
         ],
     )
+    if base is not None:
+        require_matched_conditions(
+            base_root, base, base_provenance, output, dict(config=config, mode=mode), provenance
+        )
     write_json(output / "provenance.json", provenance)
     for attempt in attempts:
         attempt["run_id"] = str(uuid.uuid4())
@@ -449,6 +504,7 @@ class Receiver:
         self.server.listen()
         self.connections = []
         self.closed = False
+        self.cleanup_started = False
         self.server.settimeout(0.25)  # Bounded socket readiness poll, not a fixed delay.
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
@@ -485,13 +541,30 @@ class Receiver:
                 self.events.put(record)
         except Exception:
             if not self.closed:
-                self.events.put(dict(kind="hook_error", role=role, error=traceback.format_exc()))
+                self.events.put(
+                    dict(
+                        kind="hook_error",
+                        role=role,
+                        error=traceback.format_exc(),
+                        phase="cleanup" if self.cleanup_started else "flight",
+                    )
+                )
         finally:
             connection.close()
             if role and not self.closed:
-                self.events.put(dict(kind="stream_closed", role=role))
+                self.events.put(
+                    dict(
+                        kind="stream_closed",
+                        role=role,
+                        phase="cleanup" if self.cleanup_started else "flight",
+                    )
+                )
+
+    def begin_cleanup(self):
+        self.cleanup_started = True
 
     def close(self):
+        self.begin_cleanup()
         self.closed = True
         self.server.close()
         for connection in self.connections:
@@ -813,6 +886,8 @@ def execute(root, attempt):
             record(dict(kind="exception", error=traceback.format_exc()))
         finally:
             cleanup_errors = []
+            if receiver:
+                receiver.begin_cleanup()
             if job:
                 try:
                     receipt["owned_processes_before_cleanup"] = job.active()
@@ -832,11 +907,13 @@ def execute(root, attempt):
                 while not receiver.events.empty():
                     record(receiver.events.get_nowait())
             # Snapshot native logs/output before another attempt can trigger STP retention.
+            copied_native_directories = []
             for index, directory in enumerate(sorted(native_directories)):
                 origin = Path(directory)
                 if origin.is_dir():
                     try:
                         shutil.copytree(origin, folder / "native" / f"{index}-{origin.name}")
+                        copied_native_directories.append(origin.resolve())
                     except Exception:
                         cleanup_errors.append(traceback.format_exc())
                 else:
@@ -848,6 +925,11 @@ def execute(root, attempt):
                     continue
                 for native_file in base.rglob("*"):
                     if not native_file.is_file():
+                        continue
+                    if any(
+                        native_file.resolve().is_relative_to(directory)
+                        for directory in copied_native_directories
+                    ):
                         continue
                     try:
                         metadata = (native_file.stat().st_mtime_ns, native_file.stat().st_size)
@@ -1178,6 +1260,14 @@ def main():
     plan.add_argument("--mode", choices=["pilot", "baseline", "seeded"], required=True)
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument(
+        "--controllers", nargs="+", help="Prepare only these configured controller IDs"
+    )
+    plan.add_argument(
+        "--match-campaign",
+        type=Path,
+        help="Append new controllers using an existing seeded campaign's frozen conditions",
+    )
+    plan.add_argument(
         "--seed-count",
         type=int,
         help="Seeded scenarios per controller; reuse saved seeds and append if needed",
@@ -1197,14 +1287,24 @@ def main():
         help="Resume stopped/interrupted campaigns without retrying started attempts",
     )
     report = commands.add_parser("analyze")
-    report.add_argument("campaign", type=Path)
+    report.add_argument("campaign", type=Path, nargs="+")
+    report.add_argument(
+        "--output", type=Path, help="New output directory for a combined comparison"
+    )
     stop = commands.add_parser("stop")
     stop.add_argument("campaign", type=Path)
     status = commands.add_parser("status")
     status.add_argument("directory", type=Path, help="Prepared campaign or full queue directory")
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare(args.config, args.output, args.mode, args.seed_count)
+        prepare(
+            args.config,
+            args.output,
+            args.mode,
+            args.seed_count,
+            args.controllers,
+            args.match_campaign,
+        )
     elif args.command == "run":
         if not run_queue(
             args.campaign,
@@ -1222,7 +1322,15 @@ def main():
             "Stop requested; runner will close its process tree and preserve evidence", flush=True
         )
     else:
-        print(json.dumps(analyze(args.campaign), indent=2))
+        if args.output is not None:
+            if not args.output.resolve().is_relative_to(REPO / "runs"):
+                parser.error("Combined analysis must stay under runs/")
+            result = combine_campaigns(args.campaign, args.output)
+        elif len(args.campaign) == 1:
+            result = analyze(args.campaign[0])
+        else:
+            parser.error("Multiple campaigns require a new --output directory")
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
