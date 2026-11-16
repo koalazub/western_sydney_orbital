@@ -37,6 +37,24 @@ def read_events(path):
     return records
 
 
+def order_attempts(config, attempts, execution_order=None):
+    order = execution_order or config.get("execution_order", "coverage_first")
+    if order not in {"coverage_first", "paired"}:
+        raise ValueError(f"Unknown execution order: {order}")
+    indices = {controller["id"]: i for i, controller in enumerate(config["controllers"])}
+
+    def key(attempt):
+        block, repetition = attempt["block"], attempt["repetition"]
+        rotated = (indices[attempt["controller"]["id"]] - block) % len(indices)
+        return (
+            (repetition, block, rotated)
+            if order == "coverage_first"
+            else (block, rotated, repetition)
+        )
+
+    return sorted(attempts, key=key)
+
+
 def schedule(config, mode):
     controllers = config["controllers"]
     ids = [c["id"] for c in controllers]
@@ -66,7 +84,7 @@ def schedule(config, mode):
                 attempts.append(
                     dict(block=block, seed=seed, repetition=repetition, controller=controller)
                 )
-    return attempts
+    return order_attempts(config, attempts)
 
 
 def score_components(receipt):
@@ -439,10 +457,14 @@ def analyze(root):
             estimate["baseline_bytes"] = n * 10 * estimate["mean_bytes"]
             estimate["seeded_bytes"] = n * seed_count * 2 * estimate["mean_bytes"]
     write_json(root / "cost_estimate.json", estimate)
+    execution_order = campaign.get(
+        "execution_order", campaign["config"].get("execution_order", "paired")
+    )
     lines = [
         "# Official STP campaign",
         "",
         f"Mode: {campaign['mode']}. Reference: {reference}.",
+        f"Execution order: {execution_order}.",
         "",
         "| Controller | Outcomes | Success / scheduled | Scored coverage |",
         "| --- | --- | --- | --- |",

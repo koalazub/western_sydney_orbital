@@ -3,11 +3,14 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 BENCHMARK = Path(__file__).resolve().parents[1] / "examples" / "stp_benchmark"
 sys.path.insert(0, str(BENCHMARK))
@@ -20,11 +23,148 @@ import seeds  # noqa: E402
 
 
 class OfficialBenchmarkTests(unittest.TestCase):
+    def test_read_only_status_counts_terminal_attempts_and_shows_active_telemetry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaign = dict(
+                mode="seeded",
+                attempts=[
+                    dict(run_id="finished", controller=dict(id="tom"), seed=100, repetition=0),
+                    dict(run_id="active", controller=dict(id="bui"), seed=100, repetition=0),
+                    dict(run_id="unstarted", controller=dict(id="tom"), seed=1729, repetition=0),
+                ],
+            )
+            evidence.write_json(root / "campaign.json", campaign)
+            for run_id, outcome in (("finished", "success"), ("active", "in_progress")):
+                (root / run_id).mkdir()
+                evidence.write_json(root / run_id / "receipt.json", dict(outcome=outcome))
+            (root / "active" / "events.jsonl").write_text(
+                '{"kind":"telemetry","sim_s":12,"range_m":1234}\n'
+            )
+            before = (root / "campaign.json").read_bytes()
+            result = benchmark.campaign_status(root)["campaigns"][0]
+            self.assertEqual(result["completed"], 1)
+            self.assertEqual(result["remaining"], 2)
+            self.assertEqual(result["outcomes"], {"success": 1})
+            self.assertEqual(result["active"]["controller"], "bui")
+            self.assertEqual(result["active"]["telemetry"]["range_m"], 1234)
+            self.assertEqual((root / "campaign.json").read_bytes(), before)
+
+    def test_unattended_continuation_requires_controller_exception_and_verified_cleanup(self):
+        receipt = dict(
+            outcome="exception", cleanup="owned_process_tree_exited", error=dict(role="controller")
+        )
+        self.assertTrue(benchmark.must_halt(receipt))
+        self.assertFalse(benchmark.must_halt(receipt, continue_controller_errors=True))
+        for role in ("actuator", "scorer", "radar", "spawner", None):
+            self.assertTrue(benchmark.must_halt(dict(receipt, error=dict(role=role)), True))
+        self.assertTrue(benchmark.must_halt(dict(receipt, cleanup_errors=["failed"]), True))
+        self.assertTrue(benchmark.must_halt(dict(receipt, cleanup="failed_or_incomplete"), True))
+        for outcome in ("evidence_failure", "controller_stall", "simulator_stall", "aborted"):
+            self.assertTrue(benchmark.must_halt(dict(receipt, outcome=outcome), True))
+        for outcome in ("success", "failure", "simulation_limit", "wall_timeout"):
+            self.assertFalse(benchmark.must_halt(dict(receipt, outcome=outcome), True))
+
+    def test_queue_stops_before_next_campaign_after_infrastructure_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaigns = [root / "baseline", root / "seeded"]
+            status_path = root / "status.json"
+            with (
+                patch.object(benchmark, "keep_awake") as awake,
+                patch.object(benchmark, "run_campaign", return_value=False) as run,
+            ):
+                self.assertFalse(
+                    benchmark.run_queue(
+                        campaigns, continue_controller_errors=True, status_file=status_path
+                    )
+                )
+                run.assert_called_once_with(campaigns[0], None, True, resume=False)
+                awake.return_value.__exit__.assert_called_once()
+            status = json.loads(status_path.read_text())
+            self.assertEqual(status["state"], "halted")
+            self.assertEqual(status["finished_campaigns"], [])
+
+    def test_queue_finishes_both_campaigns_and_saves_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaigns = [root / "baseline", root / "seeded"]
+            status_path = root / "status.json"
+            with (
+                patch.object(benchmark, "keep_awake"),
+                patch.object(benchmark, "run_campaign", return_value=True) as run,
+            ):
+                self.assertTrue(benchmark.run_queue(campaigns, status_file=status_path))
+                self.assertEqual([call.args[0] for call in run.call_args_list], campaigns)
+            status = json.loads(status_path.read_text())
+            self.assertEqual(status["state"], "finished")
+            self.assertEqual(len(status["finished_campaigns"]), 2)
+
     def config(self):
         config = json.loads((BENCHMARK / "campaign.json").read_text())
         bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
         config["seeds"] = bank["seeds"][: config["seed_count"]]
         return config
+
+    def test_resume_keeps_started_attempts_and_only_schedules_unstarted_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempts = [dict(run_id=name) for name in ("success", "aborted", "partial", "next")]
+            campaign = dict(config=self.config(), attempts=attempts)
+            for name, outcome in (
+                ("success", "success"),
+                ("aborted", "aborted"),
+                ("partial", "in_progress"),
+            ):
+                (root / name).mkdir()
+                evidence.write_json(root / name / "receipt.json", dict(outcome=outcome))
+            successful = (root / "success" / "receipt.json").read_bytes()
+            with self.assertRaises(ValueError):
+                benchmark.pending_attempts(root, campaign)
+            self.assertEqual(
+                benchmark.pending_attempts(root, campaign, resume=True), [attempts[-1]]
+            )
+            self.assertEqual((root / "success" / "receipt.json").read_bytes(), successful)
+            partial = json.loads((root / "partial" / "receipt.json").read_text())
+            self.assertEqual(partial["outcome"], "interrupted")
+            self.assertIsNone(partial["official_score"])
+            self.assertTrue((root / "partial" / "receipt.before_resume.json").exists())
+
+    def test_resume_recovers_already_observed_official_score(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "partial").mkdir()
+            evidence.write_json(root / "partial/receipt.json", dict(outcome="in_progress"))
+            (root / "partial/events.jsonl").write_text(
+                json.dumps(
+                    dict(
+                        kind="official_receipt",
+                        outcome="success",
+                        official_score=12.3,
+                        inputs=dict(fuelUsed_kg=48),
+                        termination_reason="official_arrival",
+                    )
+                )
+                + "\n"
+            )
+            campaign = dict(config=self.config(), attempts=[dict(run_id="partial")])
+            self.assertEqual(benchmark.pending_attempts(root, campaign, resume=True), [])
+            receipt = json.loads((root / "partial/receipt.json").read_text())
+            self.assertEqual(receipt["official_score"], 12.3)
+            self.assertEqual(receipt["inputs"]["fuelUsed_kg"], 48)
+
+    def test_stop_marks_every_queued_campaign(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            campaigns = [root / "baseline", root / "seeded"]
+            for campaign in campaigns:
+                campaign.mkdir()
+                evidence.write_json(campaign / "campaign.json", {})
+            evidence.write_json(
+                root / "queue_status.json", dict(campaigns=[str(p) for p in campaigns])
+            )
+            benchmark.request_stop(root)
+            self.assertTrue(all((p / "STOP").exists() for p in campaigns))
 
     def bank_fixture(self, root):
         bank = json.loads((BENCHMARK / "seed_bank.json").read_text())
@@ -58,7 +198,7 @@ class OfficialBenchmarkTests(unittest.TestCase):
             runs = evidence.schedule(config, "seeded")
             for controller in config["controllers"]:
                 values = [r["seed"] for r in runs if r["controller"]["id"] == controller["id"]]
-                self.assertEqual(values, [s for seed in expanded["seeds"] for s in (seed, seed)])
+                self.assertEqual(values, expanded["seeds"] + expanded["seeds"])
 
     def test_seed_extension_is_stable_across_incremental_preparations(self):
         config = self.config()
@@ -118,10 +258,11 @@ class OfficialBenchmarkTests(unittest.TestCase):
 
     def test_pairs_rotate_without_changing_matching_or_repetitions(self):
         config = self.config()
+        config["execution_order"] = "paired"
         runs = evidence.schedule(config, "seeded")
         n = len(config["controllers"])
-        self.assertEqual(len(runs), n * 40)
-        for block in range(20):
+        self.assertEqual(len(runs), n * config["seed_count"] * 2)
+        for block in range(config["seed_count"]):
             group = runs[block * n * 2 : (block + 1) * n * 2]
             self.assertEqual(group[0]["controller"]["id"], config["controllers"][block % n]["id"])
             self.assertEqual({r["seed"] for r in group}, {config["seeds"][block]})
@@ -131,6 +272,33 @@ class OfficialBenchmarkTests(unittest.TestCase):
         baseline = evidence.schedule(config, "baseline")
         self.assertEqual(len(baseline), 10 * n)
         self.assertTrue(all(r["seed"] is None for r in baseline))
+
+    def test_coverage_first_visits_all_controller_seed_combinations_before_repeats(self):
+        config = self.config()
+        runs = evidence.schedule(config, "seeded")
+        n = len(config["controllers"])
+        pass_size = config["seed_count"] * n
+        self.assertEqual({r["repetition"] for r in runs[:pass_size]}, {0})
+        self.assertEqual({r["repetition"] for r in runs[pass_size:]}, {1})
+        self.assertEqual(
+            [r["controller"]["id"] for r in runs[:n]], [c["id"] for c in config["controllers"]]
+        )
+        self.assertEqual({r["seed"] for r in runs[:n]}, {100})
+        for block in range(config["seed_count"]):
+            for repetition in range(2):
+                group = runs[
+                    repetition * pass_size + block * n : repetition * pass_size + (block + 1) * n
+                ]
+                self.assertEqual(len({r["controller"]["id"] for r in group}), n)
+                self.assertEqual({r["seed"] for r in group}, {config["seeds"][block]})
+                self.assertEqual(
+                    group[0]["controller"]["id"], config["controllers"][block % n]["id"]
+                )
+        paired = evidence.order_attempts(config, runs, "paired")
+        self.assertCountEqual(
+            [(r["block"], r["repetition"], r["controller"]["id"]) for r in paired],
+            [(r["block"], r["repetition"], r["controller"]["id"]) for r in runs],
+        )
 
     def test_duplicate_seed_rejected(self):
         config = self.config()
@@ -320,14 +488,62 @@ class OfficialBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             original, seeded = root / "original.py", root / "seeded.py"
-            original.write_text("seed = 100\nrng = np.random.default_rng(seed)\n")
+            original.write_text("seed = 8193\nrng = np.random.default_rng(seed)\n")
             expected = original.read_bytes()
-            benchmark.seed_copy(original, seeded, 1729, "spawner")
+            profile = dict(native_seed=8193, sha256=evidence.digest(original))
+            benchmark.seed_copy(original, seeded, 1729, "spawner", profile)
             self.assertEqual(original.read_bytes(), expected)
             self.assertIn("seed = 1729", seeded.read_text())
             original.write_text("seed = 999\n")
             with self.assertRaises(ValueError):
-                benchmark.seed_copy(original, seeded, 1729, "spawner")
+                benchmark.seed_copy(original, seeded, 1729, "spawner", profile)
+
+    def test_seed_adapter_matches_actual_pinned_competition_sources(self):
+        package = benchmark.path(self.config()["package"])
+        if not package.is_dir():
+            self.skipTest("Pinned official STP package is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            for role, name in (("spawner", "SpawnDebris.py"), ("radar", "Radar.py")):
+                original = package / "Systems" / name
+                target = Path(temporary) / name
+                self.assertEqual(
+                    evidence.digest(original), benchmark.seed_adapter()["systems"][role]["sha256"]
+                )
+                if role == "spawner":
+                    benchmark.seed_copy(original, target, 100, role)
+                    self.assertIn("seed = 100", target.read_text())
+                else:
+                    with self.assertRaises(ValueError):
+                        benchmark.seed_copy(original, target, 1729, role)
+
+    def test_seeded_mission_preserves_original_radar_and_changes_only_spawner_seed(self):
+        config = self.config()
+        package = benchmark.path(config["package"])
+        if not package.is_dir():
+            self.skipTest("Pinned official STP package is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            shutil.copytree(package, snapshot / "STU4-Sim")
+            controller = config["controllers"][0]
+            shutil.copytree(
+                benchmark.path(controller["directory"]), snapshot / "controllers" / controller["id"]
+            )
+            attempt = dict(run_id="seeded", controller=controller, seed=1729)
+            (root / "seeded").mkdir()
+            receiver = SimpleNamespace(port=1234, token="test-only")
+            _, changes = benchmark.attempt_mission(root, attempt, receiver, config)
+            radar = json.loads((root / "seeded/launchers/radar.json").read_text())
+            self.assertEqual(Path(radar["source"]), snapshot / "STU4-Sim/Systems/Radar.py")
+            self.assertEqual(
+                evidence.digest(radar["source"]),
+                benchmark.seed_adapter()["systems"]["radar"]["sha256"],
+            )
+            self.assertFalse((root / "seeded/launchers/seeded_radar.py").exists())
+            spawner = root / "seeded/launchers/seeded_spawner.py"
+            self.assertIn("seed = 1729", spawner.read_text())
+            self.assertEqual([c["role"] for c in changes if "seeded_sha256" in c], ["spawner"])
 
 
 if __name__ == "__main__":

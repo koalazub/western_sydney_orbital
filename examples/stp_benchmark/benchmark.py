@@ -19,11 +19,11 @@ import threading
 import time
 import traceback
 import uuid
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from ctypes import wintypes
 from pathlib import Path
 
-from evidence import SCHEMA, analyze, digest, schedule, write_json
+from evidence import SCHEMA, analyze, digest, read_events, schedule, write_json
 from seeds import select_seeds
 
 HERE = Path(__file__).resolve().parent
@@ -170,6 +170,7 @@ def prepare(config_path, output, mode, seed_count=None):
         raise ValueError("sample_period_s must be positive")
     snapshot = output / "snapshot"
     snapshot.mkdir()
+    shutil.copy2(HERE / "seed_adapter.json", snapshot / "seed_adapter.json")
     if seed_bank is not None:
         write_json(snapshot / "seed_bank.json", seed_bank)
         write_json(output / "seed_selection.json", seed_selection)
@@ -243,7 +244,7 @@ def prepare(config_path, output, mode, seed_count=None):
             "Monitoring, camera, GUI and logging affect wall scheduling",
             "No native collision identity/time stream has been established",
             "Scorer does not terminate the simulation; runner stops after its first receipt",
-            "Fixed saved field; experimental seeds vary initial impulses and radar noise",
+            "Fixed saved field; seeds vary initial impulses; original radar seed remains 100",
         ],
     )
     write_json(output / "provenance.json", provenance)
@@ -252,6 +253,7 @@ def prepare(config_path, output, mode, seed_count=None):
     campaign = dict(
         schema=SCHEMA,
         mode=mode,
+        execution_order=config.get("execution_order", "coverage_first"),
         config=config,
         attempts=attempts,
         prepared_utc=utc(),
@@ -482,9 +484,26 @@ class Receiver:
         self.thread.join(timeout=1)
 
 
-def seed_copy(source, target, seed, role):
+def seed_adapter(root=None):
+    frozen = root / "snapshot" / "seed_adapter.json" if root is not None else None
+    location = frozen if frozen is not None and frozen.exists() else HERE / "seed_adapter.json"
+    adapter = json.loads(location.read_text(encoding="utf-8"))
+    if adapter["package_revision"] != OFFICIAL_REVISION:
+        raise ValueError("Unreviewed native seed adapter revision")
+    return adapter
+
+
+def seed_copy(source, target, seed, role, profile=None):
+    if role != "spawner":
+        raise ValueError("Only debris perturbations may be reseeded; radar must remain unchanged")
+    profile = profile or seed_adapter()["systems"][role]
+    if digest(source) != profile["sha256"]:
+        raise ValueError(f"Seed adapter source hash changed in {source}; review required")
     text = source.read_text(encoding="utf-8")
-    anchor = "seed = 100" if role == "spawner" else "np.random.default_rng(100)"
+    native_seed = profile["native_seed"]
+    anchor = (
+        f"seed = {native_seed}" if role == "spawner" else f"np.random.default_rng({native_seed})"
+    )
     replacement = f"seed = {seed}" if role == "spawner" else f"np.random.default_rng({seed})"
     if text.count(anchor) != 1:
         raise ValueError(f"Seed adapter anchor changed in {source}; refusing an unreviewed patch")
@@ -504,6 +523,7 @@ def attempt_mission(root, attempt, receiver, config):
     controller_dir = folder / "controller"
     shutil.copytree(frozen / "controllers" / controller["id"], controller_dir)
     changes = []
+    native_seeds = seed_adapter(root)["systems"]
     for system in mission["SystemManager"]["Systems"]:
         role = {
             "Controller": "controller",
@@ -518,15 +538,18 @@ def attempt_mission(root, attempt, receiver, config):
         source = (
             controller_dir / controller["entrypoint"] if role == "controller" else original_source
         )
-        if attempt["seed"] is not None and role in {"radar", "spawner"}:
+        if role == "radar" and digest(source) != native_seeds["radar"]["sha256"]:
+            raise ValueError("Radar source differs from the reviewed fixed-seed competition model")
+        if attempt["seed"] is not None and role == "spawner":
             modified = launchers / f"seeded_{role}.py"
-            seed_copy(source, modified, attempt["seed"], role)
+            seed_copy(source, modified, attempt["seed"], role, native_seeds[role])
             changes.append(
                 dict(
                     role=role,
                     original_sha256=digest(source),
                     seeded_sha256=digest(modified),
                     seed=attempt["seed"],
+                    native_seed=native_seeds[role]["native_seed"],
                 )
             )
             source = modified
@@ -625,12 +648,17 @@ def execute(root, attempt):
                 controller_initial_hashes=hashes(folder / "controller"),
                 changes=changes,
                 effective_seeds=dict(
-                    spawner=attempt["seed"] if attempt["seed"] is not None else 100,
-                    radar=attempt["seed"] if attempt["seed"] is not None else 100,
+                    **{
+                        role: attempt["seed"]
+                        if role == "spawner" and attempt["seed"] is not None
+                        else profile["native_seed"]
+                        for role, profile in seed_adapter(root)["systems"].items()
+                    },
                 ),
+                native_seed_adapter=seed_adapter(root),
                 seed_selection="../seed_selection.json" if attempt["seed"] is not None else None,
                 seed_index=attempt["block"] if attempt["seed"] is not None else None,
-                seed_scope="saved field initial impulses and radar noise; fixed debris layout",
+                seed_scope="saved field initial impulses; unchanged radar model with seed 100",
                 settings=attempt["controller"].get("environment", {}),
                 limits=limits,
                 normal_scheduling=True,
@@ -829,12 +857,107 @@ def execute(root, attempt):
     return receipt
 
 
-def run_campaign(root, max_attempts=None):
+def must_halt(receipt, continue_controller_errors=False):
+    if receipt.get("cleanup_errors") or receipt.get("cleanup") != "owned_process_tree_exited":
+        return True
+    if (
+        continue_controller_errors
+        and receipt["outcome"] == "exception"
+        and receipt.get("error", {}).get("role") == "controller"
+    ):
+        return False
+    return receipt["outcome"] in {
+        "failed_start",
+        "startup_timeout",
+        "evidence_failure",
+        "runner_exception",
+        "simulator_crash",
+        "controller_stall",
+        "simulator_stall",
+        "exception",
+        "aborted",
+    }
+
+
+@contextmanager
+def keep_awake():
+    """A process-scoped Windows request, cleared on exit; no power settings are changed."""
+    if os.name != "nt":
+        raise RuntimeError("Use native Windows, not WSL")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+    kernel.SetThreadExecutionState.restype = wintypes.DWORD
+    if not kernel.SetThreadExecutionState(0x80000003):
+        raise RuntimeError("Windows rejected the process-scoped keep-awake request")
+    try:
+        yield
+    finally:
+        kernel.SetThreadExecutionState(0x80000000)
+
+
+def pending_attempts(root, campaign, resume=False):
+    pending = []
+    for attempt in campaign["attempts"]:
+        folder = root / attempt["run_id"]
+        if not folder.exists():
+            pending.append(attempt)
+            continue
+        receipt_path = folder / "receipt.json"
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+        if receipt.get("outcome") not in {None, "in_progress"}:
+            continue
+        if not resume:
+            raise ValueError("Interrupted attempt found; use --resume to preserve it and continue")
+        if receipt and not (folder / "receipt.before_resume.json").exists():
+            write_json(folder / "receipt.before_resume.json", receipt)
+        events = read_events(folder / "events.jsonl")
+        native = {
+            e[key]
+            for e in events
+            if e.get("kind") == "connected"
+            for key in ("native_logs", "native_output")
+            if e.get(key)
+        }
+        user_root = path(campaign["config"]["user_root"])
+        for index, directory in enumerate(sorted(native)):
+            origin = Path(directory).resolve()
+            if not any(origin.is_relative_to(user_root / base) for base in ("Logs", "Output")):
+                raise ValueError(f"Unexpected native recovery directory: {origin}")
+            if origin.is_dir():
+                shutil.copytree(
+                    origin, folder / "native_recovered" / str(index), dirs_exist_ok=True
+                )
+            else:
+                receipt.setdefault("missing_native_directories", []).append(str(origin))
+        scored = next((e for e in events if e.get("kind") == "official_receipt"), None)
+        if scored:
+            receipt.update(
+                {k: v for k, v in scored.items() if k not in {"seq", "kind", "role", "process_id"}}
+            )
+        else:
+            receipt.update(
+                outcome="interrupted",
+                official_score=None,
+                inputs=None,
+                termination_reason="previous_runner_interrupted",
+            )
+        receipt.update(
+            schema=SCHEMA,
+            run_id=attempt["run_id"],
+            recovered_utc=utc(),
+            cleanup="previous_process_cleanup_unverified",
+            evidence_bytes=sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()),
+        )
+        write_json(receipt_path, receipt)
+    return pending
+
+
+def run_campaign(root, max_attempts=None, continue_controller_errors=False, resume=False):
     if os.name != "nt":
         raise RuntimeError("Use native Windows, not WSL")
     root = Path(root).resolve()
-    if (root / "STOP").exists():
-        raise ValueError("Campaign stopped by owner; prepare a fresh campaign to restart")
+    if (root / "STOP").exists() and not resume:
+        raise ValueError("Campaign stopped by owner; use --resume to continue unstarted IDs")
     campaign = json.loads((root / "campaign.json").read_text(encoding="utf-8"))
     provenance = json.loads((root / "provenance.json").read_text(encoding="utf-8"))
     if campaign["config"] != provenance["configuration"]:
@@ -854,43 +977,179 @@ def run_campaign(root, max_attempts=None):
             lock.flush()
         lock.seek(0)
         msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        status = dict(
+            state="running",
+            started_utc=utc(),
+            scheduled=len(campaign["attempts"]),
+            continue_controller_errors=continue_controller_errors,
+        )
+        write_json(root / "status.json", status)
         try:
-            pending = [a for a in campaign["attempts"] if not (root / a["run_id"]).exists()]
+            if resume and (root / "STOP").exists():
+                # Never clear a live runner's stop request before exclusive ownership.
+                (root / "STOP").unlink()
+            pending = pending_attempts(root, campaign, resume)
             if max_attempts is not None:
                 if max_attempts < 1:
                     raise ValueError("max-attempts must be positive")
                 pending = pending[:max_attempts]
             for attempt in pending:
+                status.update(
+                    current_run_id=attempt["run_id"],
+                    controller=attempt["controller"]["id"],
+                    seed=attempt["seed"],
+                    repetition=attempt["repetition"],
+                )
+                write_json(root / "status.json", status)
                 for dependency, expected in provenance["dependencies"].items():
                     if "sha256" in expected and digest(dependency) != expected["sha256"]:
                         raise ValueError(f"Native mission dependency changed: {dependency}")
                 receipt = execute(root, attempt)
-                if receipt.get("cleanup_errors"):
-                    print(
-                        "Campaign halted: cleanup/evidence preservation needs investigation",
-                        flush=True,
+                status.update(last_outcome=receipt["outcome"], last_run_id=attempt["run_id"])
+                write_json(root / "status.json", status)
+                if must_halt(receipt, continue_controller_errors):
+                    status.update(
+                        state="stopped" if receipt["outcome"] == "aborted" else "halted",
+                        finished_utc=utc(),
                     )
-                    break
-                if receipt["outcome"] in {
-                    "failed_start",
-                    "startup_timeout",
-                    "evidence_failure",
-                    "runner_exception",
-                    "simulator_crash",
-                    "controller_stall",
-                    "simulator_stall",
-                    "exception",
-                    "aborted",
-                }:
                     print(
                         "Campaign halted for investigation; no attempt retried or replaced",
                         flush=True,
                     )
-                    break
+                    return False
+                if receipt["outcome"] == "exception":
+                    print(
+                        "Controller exception preserved; continuing with the next scheduled ID",
+                        flush=True,
+                    )
+            status.update(state="finished", finished_utc=utc())
+            return True
+        except BaseException:
+            status.update(state="halted", finished_utc=utc(), error=traceback.format_exc())
+            raise
         finally:
+            write_json(root / "status.json", status)
             lock.seek(0)
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
             analyze(root)
+
+
+def run_queue(
+    campaigns, max_attempts=None, continue_controller_errors=False, status_file=None, resume=False
+):
+    status = dict(
+        state="running",
+        started_utc=utc(),
+        process_id=os.getpid(),
+        resume=resume,
+        campaigns=[str(p.resolve()) for p in campaigns],
+        finished_campaigns=[],
+    )
+
+    def save():
+        if status_file is not None:
+            write_json(status_file, status)
+
+    save()
+    try:
+        with keep_awake():
+            for campaign in campaigns:
+                status["current_campaign"] = str(campaign.resolve())
+                save()
+                if not run_campaign(
+                    campaign, max_attempts, continue_controller_errors, resume=resume
+                ):
+                    phase_status = campaign / "status.json"
+                    phase = json.loads(phase_status.read_text()) if phase_status.exists() else {}
+                    status.update(state=phase.get("state", "halted"), finished_utc=utc())
+                    save()
+                    return False
+                status["finished_campaigns"].append(str(campaign.resolve()))
+                save()
+        status.update(state="finished", finished_utc=utc())
+        save()
+        return True
+    except BaseException:
+        status.update(state="halted", finished_utc=utc(), error=traceback.format_exc())
+        save()
+        raise
+
+
+def campaign_status(root):
+    root = Path(root).resolve()
+    queue_path = root / "queue_status.json"
+    queue_status = (
+        json.loads(queue_path.read_text(encoding="utf-8")) if queue_path.exists() else None
+    )
+    campaigns = [Path(p) for p in queue_status["campaigns"]] if queue_status else [root]
+    result = dict(queue=queue_status, campaigns=[])
+    for campaign_root in campaigns:
+        campaign = json.loads((campaign_root / "campaign.json").read_text(encoding="utf-8"))
+        outcomes = {}
+        active = None
+        completed = 0
+        for attempt in campaign["attempts"]:
+            folder = campaign_root / attempt["run_id"]
+            receipt_path = folder / "receipt.json"
+            if not receipt_path.exists():
+                continue
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            outcome = receipt["outcome"]
+            if outcome == "in_progress":
+                events = read_events(folder / "events.jsonl")
+                latest = next((e for e in reversed(events) if e.get("kind") == "telemetry"), {})
+                active = dict(
+                    run_id=attempt["run_id"],
+                    controller=attempt["controller"]["id"],
+                    seed=attempt["seed"] if attempt["seed"] is not None else "native",
+                    repetition=attempt["repetition"],
+                    telemetry={
+                        key: latest.get(key)
+                        for key in (
+                            "utc",
+                            "sim_s",
+                            "range_m",
+                            "relative_speed_m_s",
+                            "fuel_kg",
+                            "damage_J",
+                        )
+                    },
+                )
+            else:
+                completed += 1
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        status_path = campaign_root / "status.json"
+        state = (
+            json.loads(status_path.read_text()) if status_path.exists() else dict(state="prepared")
+        )
+        result["campaigns"].append(
+            dict(
+                directory=str(campaign_root),
+                mode=campaign["mode"],
+                state=state["state"],
+                scheduled=len(campaign["attempts"]),
+                completed=completed,
+                remaining=len(campaign["attempts"]) - completed,
+                outcomes=outcomes,
+                active=active,
+            )
+        )
+    return result
+
+
+def request_stop(root):
+    root = Path(root).resolve()
+    queue_path = root / "queue_status.json"
+    if queue_path.exists():
+        targets = [Path(p).resolve() for p in json.loads(queue_path.read_text())["campaigns"]]
+        if any(not p.is_relative_to(root) for p in targets):
+            raise ValueError("Queue campaign path is outside its directory")
+    else:
+        targets = [root]
+    if any(not (target / "campaign.json").is_file() for target in targets):
+        raise ValueError("Not a prepared campaign or queue")
+    for target in targets:
+        (target / "STOP").write_text(utc() + "\n", encoding="utf-8")
 
 
 def main():
@@ -906,22 +1165,41 @@ def main():
         help="Seeded scenarios per controller; reuse saved seeds and append if needed",
     )
     run = commands.add_parser("run")
-    run.add_argument("campaign", type=Path)
+    run.add_argument("campaign", type=Path, nargs="+")
     run.add_argument("--max-attempts", type=int)
+    run.add_argument(
+        "--continue-on-controller-error",
+        action="store_true",
+        help="Record controller exceptions and continue only after verified cleanup",
+    )
+    run.add_argument("--status-file", type=Path, help="Save queue progress for unattended runs")
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume stopped/interrupted campaigns without retrying started attempts",
+    )
     report = commands.add_parser("analyze")
     report.add_argument("campaign", type=Path)
     stop = commands.add_parser("stop")
     stop.add_argument("campaign", type=Path)
+    status = commands.add_parser("status")
+    status.add_argument("directory", type=Path, help="Prepared campaign or full queue directory")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.config, args.output, args.mode, args.seed_count)
     elif args.command == "run":
-        run_campaign(args.campaign, args.max_attempts)
+        if not run_queue(
+            args.campaign,
+            args.max_attempts,
+            args.continue_on_controller_error,
+            args.status_file,
+            args.resume,
+        ):
+            raise SystemExit(1)
+    elif args.command == "status":
+        print(json.dumps(campaign_status(args.directory), indent=2))
     elif args.command == "stop":
-        root = args.campaign.resolve()
-        if not (root / "campaign.json").is_file():
-            raise ValueError("Not a prepared campaign")
-        (root / "STOP").write_text(utc() + "\n", encoding="utf-8")
+        request_stop(args.campaign)
         print(
             "Stop requested; runner will close its process tree and preserve evidence", flush=True
         )

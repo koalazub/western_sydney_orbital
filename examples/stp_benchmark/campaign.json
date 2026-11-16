@@ -8,6 +8,7 @@
   "mission_sha256": "910199b2a122c115667b4adb7cc3ca8aaef4b9ac1d1f71c5ef157194b7e20958",
   "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
   "reference": "tom",
+  "execution_order": "coverage_first",
   "controllers": [
     {"id": "tom", "directory": "examples/tom", "entrypoint": "Controller.py", "environment": {}},
     {"id": "bui", "directory": "examples/bui", "entrypoint": "Controller.py", "environment": {}},
@@ -15,11 +16,11 @@
     {"id": "ali_mppi", "directory": "examples/ali", "entrypoint": "controller_mppi.py", "environment": {}}
   ],
   "seed_bank": "examples/stp_benchmark/seed_bank.json",
-  "seed_bank_id": "stu4-phobos-2026-11-11-saved-field-v1",
-  "seed_bank_prefix_count": 21,
-  "seed_bank_prefix_sha256": "d82e2b2fbdb50049281187ffd5814afdd836f0a1c6ffe8377386aae47c562774",
-  "seed_count": 20,
-  "seed_scope": "saved_field_impulses_and_radar_noise",
+  "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",
+  "seed_bank_prefix_count": 22,
+  "seed_bank_prefix_sha256": "8eadb78d9a9b7de1044e7e0b5f2f59a83a986bfe550a2736277485438bc8cfb9",
+  "seed_count": 22,
+  "seed_scope": "saved_field_impulses_radar_fixed_100",
   "sample_period_s": 0.1,
   "limits": {
     "simulation_s": 600,

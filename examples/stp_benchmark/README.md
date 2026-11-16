@@ -52,13 +52,65 @@ Use the native Windows UV commands below, from the repository root:
 | Mode | Schedule |
 | --- | --- |
 | `pilot` | Two fresh flights of the configured reference controller; Tom by default. |
-| `baseline` | Five consecutive two-run pairs per controller: **10 flights each**. |
-| `seeded` | The first 20 saved perturbation/noise seeds by default, two flights per seed: **40 flights each**. Increase with `--seed-count N`. |
+| `baseline` | Five two-run blocks per controller: **10 flights each**, distributed across passes. |
+| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **44 flights each**. Override with `--seed-count N`. |
 
-Controller-pair order rotates between blocks. Failed and interrupted attempts stay
+The default `execution_order` is `coverage_first`: every controller runs once on
+seed 100, then once on each remaining seed, before the second pass repeats those
+same combinations. Controller order rotates between seed blocks. This spreads
+early results across contributors; repetitions retain their original matching
+indices. `execution_order: "paired"` selects consecutive two-run pairs if needed.
+Failed and interrupted attempts stay
 recorded; they are never silently retried or replaced. Use the runner's `stop`
 command for a clean stop. Full campaigns require an explicit start, and time-scale
 acceleration remains future work.
+
+### Unattended baseline and seeded queue
+
+Prepare both campaign directories first, then give both paths to `run`, in order:
+
+```powershell
+uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --continue-on-controller-error --status-file runs/full/queue_status.json
+```
+
+This runs each campaign sequentially and writes its analysis at completion.
+`queue_status.json` and each campaign's `status.json` show progress. The optional
+continuation flag preserves a controller exception as a failed attempt and moves
+to the next scheduled ID only after cleanup has been verified. It never retries
+or replaces that attempt. Startup, simulator, sensor/evidence-stream and cleanup
+failures still halt the queue for investigation; later campaigns do not start.
+Without the flag, controller exceptions also halt as before.
+
+While running, the process requests that Windows keep the system and display awake;
+the request ends with the process and does not change Windows power settings.
+Keep the Windows session unlocked for native SpaceCRAFT rendering. Reports and raw
+evidence stay under the prepared `runs/` directories.
+
+Check the entire queue from a second PowerShell terminal:
+
+```powershell
+uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py status runs/full
+```
+
+For one campaign, pass `runs/full/baseline` or `runs/full/seeded` instead. Status is
+read-only and reports completed/remaining flights, outcomes, the active controller
+and seed, and its latest range, speed, fuel, damage and telemetry timestamp. The
+queue directory is recognized by its `queue_status.json` file.
+
+Stop the whole queue cleanly, then resume the same prepared schedule:
+
+```powershell
+uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py stop runs/full
+uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.py run runs/full/seeded runs/full/baseline --resume --continue-on-controller-error --status-file runs/full/queue_status.json
+```
+
+Wait for the old runner to exit before resuming. Resume obtains the exclusive
+flight lock before clearing stop markers. It keeps the frozen sources, seeds,
+repetitions and IDs, preserves completed/failed/aborted attempts, and runs only
+unstarted IDs. A process interruption is retained as an interrupted attempt;
+available native logs and any already captured official receipt are recovered.
+Previously unverified cleanup is labelled as such, not claimed as successful.
+To rerun a failed or aborted flight deliberately, prepare a separate campaign.
 
 ## Runtime and mission
 
@@ -113,12 +165,13 @@ unstarted scheduled IDs, never a failed ID.
 To stop cleanly from a second terminal, use `benchmark.py stop runs/stp-pilot-001`
 with the same UV/native-Python prefix. This requests job cleanup and final evidence
 capture. Use it instead of force-stopping the enclosing terminal process. A stopped
-campaign cannot restart; prepare a new root and run IDs. An initial delivery check
+campaign can continue with `run --resume`, preserving started attempts and running
+only unstarted IDs. An initial delivery check
 can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 
 After inspecting the pilot, prepare `--mode baseline` for five fresh two-run pairs
-per controller, or `--mode seeded` for the saved seed prefix and two consecutive
-runs per controller/seed. Controller-pair order rotates between blocks. Commands
+per controller, or `--mode seeded` for the saved seed prefix and two runs per
+controller/seed, separated into coverage passes. Controller order rotates between blocks. Commands
 to run full campaigns are intentionally manual. The default four profiles are Tom,
 Bui, Ali MVP and Ali MPPI. Harry has no official STP entrypoint. WSO requires its
 own explicitly established clock/configuration and is not silently enabled.
@@ -132,14 +185,20 @@ identity is not inferred. Controllers are never tuned by this framework.
 ### Shared seed bank
 
 [`seed_bank.json`](seed_bank.json) is the versioned, ordered bank shared by all
-new seeded campaigns. **Native seed 100 is first**, followed by all 20 previously
-declared seeds. `seed_count` defaults to 20, so a normal seeded campaign uses
-seed 100 and the next 19 entries. Baseline and ordinary pilot flights retain the
-unchanged competition seed 100.
+new seeded campaigns. **Perturbation seed 100 is first**, followed by all 20 previously
+declared seeds, then the official default **8193** at position 22. The existing
+seed order is preserved. `seed_count` defaults to 22 so new campaigns include 8193;
+an explicit smaller count selects only that shorter prefix. The already prepared
+November 15 queue retains its frozen 20-seed sweep and covers debris seed 8193
+in its separate unchanged competition-baseline phase. Seeded experiments apply the selected seed only
+to debris perturbations. **The original radar model always keeps seed 100** and
+is never copied into a reseeded variant. The unchanged November competition
+baseline retains **radar seed 100 and spawner seed 8193**. The native
+seed adapter pins both original source hashes before changing any copied script.
 
 Every preparation starts at the beginning of the bank; flights do not consume
 seeds or move a global cursor. All controllers receive the same selected prefix,
-with two consecutive runs per seed. Failed attempts keep their original seed.
+with two runs per seed in separate passes. Failed attempts keep their original seed.
 Adding a controller or creating a new campaign reuses the same scenarios.
 
 To request more scenarios, set `seed_count` in the configuration or pass
@@ -151,7 +210,7 @@ uv run --no-project --python $stpPython python examples/stp_benchmark/benchmark.
 ```
 
 This prepares **60 flights per controller** and launches nothing. If the bank has
-21 saved seeds, preparation appends nine unique seeds before freezing the schedule.
+22 saved seeds, preparation appends eight unique seeds before freezing the schedule.
 Later campaigns reuse those same 30 values. Requests for fewer seeds select a
 shorter prefix and never shorten or rewrite the bank. Extension uses stable SHA-256
 generation by bank ID and index, so incremental extensions and different machines
@@ -175,11 +234,20 @@ needs runs from each controller, including Tom, before a matched comparison exis
 ### What the seeds control
 
 The official mission loads a saved debris field (`DoSpawning=false`). Its spawner
-applies seeded initial random impulses; the radar also seeds its noise. Seeded
-campaigns patch **only copies** of those two scripts, replacing the reviewed seed
-anchors with the declared seed. They retain the saved field and all competition
-physics/scoring/actuator settings. These are independent **perturbation/noise
-scenarios**, not newly generated debris layouts. Hashes, seeds and changes are
+applies seeded initial random impulses; the original radar noise model stays at
+seed 100. Seeded campaigns patch **only a copy of the spawner script**, replacing
+its reviewed seed anchor with the declared perturbation seed. They retain the
+saved field and all competition physics/scoring/actuator and radar settings.
+Radar seed 100 selects the Gaussian measurement-error sequence: position error
+has a 2 m standard deviation per axis, closest-surface distance error 2 m,
+range-rate error 0.02 m/s, and apparent-diameter error 5% of the true radar diameter.
+Errors are drawn during initialization and subsequent round-robin debris updates.
+They affect reported observations and potentially the controller's decisions,
+not physical debris positions or initial impulses directly. The seed fixes the
+random sequence; asynchronous update and controller timing can still change
+which noisy readings a controller receives.
+These are independent **debris-perturbation scenarios**, not newly generated
+debris layouts or radar-noise scenarios. Hashes, seeds and changes are
 recorded per attempt. `DoSpawning=true` is refused because the original controllers
 wait indefinitely in that mode. Experimental results stay separate from baseline.
 
