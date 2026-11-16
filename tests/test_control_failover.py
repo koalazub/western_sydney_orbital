@@ -567,7 +567,7 @@ class _Primary:
         assert not self.process.is_alive()
 
     def record_failure(self, native):
-        """Retain actual public failure data even if devenv truncates pytest's output."""
+        """Retain actual public failure data even if pytest truncates its output."""
         try:
             state = self.call()
         except (AssertionError, OSError) as error:

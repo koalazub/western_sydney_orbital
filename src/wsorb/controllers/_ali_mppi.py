@@ -24,13 +24,8 @@ class AliMppiController(ExperimentalController):
         super().__init__(metadata)
         self.math = load_math("ali_mppi")["core"]
         settings = settings if isinstance(settings, dict) else {}
-        policy = {}
-        for key in ("time_budget_s", "arrival_radius_m"):
-            value = settings.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                policy[key] = float(value)
+        policy = dict(settings)
         self.state = {
-            "rocks": [],
             "burning": False,
             "attitude_hold": False,
             "last_control": np.zeros(3),
@@ -49,176 +44,84 @@ class AliMppiController(ExperimentalController):
 
     def _functional_decision(self, sample, rows, now):
         dt = 0.1 if self.last_time is None else max(1e-3, now - self.last_time)
-        fuel = float(sample.fuel_used_kg)
         self.last_time = now
-        selected = np.asarray(rows, dtype=float)[:80]
-        for epoch in np.unique(selected[:, 2, 0]):
-            group = selected[selected[:, 2, 0] == epoch]
-            position_at, _ = self.history.at(float(epoch))
-            self.state = self.math.update_belief(self.state, group, position_at, float(epoch))
-        self.state = self.math.update_belief(
-            self.state, np.empty((0, 3, 3)), sample.position_world_m, now
-        )
+        current_position = np.asarray(sample.position_world_m, dtype=float)
+        selected = np.asarray(rows, dtype=float)[:80].copy()
+        if selected.ndim == 3:
+            for epoch in np.unique(selected[:, 2, 0]):
+                group = selected[:, 2, 0] == epoch
+                position_at, _ = self.history.at(float(epoch))
+                selected[group, 0] += position_at - current_position
         body_x = body_to_reference(
             np.array([1.0, 0.0, 0.0]),
             sample.quaternion_xyzw,
             sample.rotation_convention,
         )
-        desired_accel = self.math.plan(
+        observation = {
+            "position": current_position,
+            "velocity": np.asarray(sample.velocity_world_mps, dtype=float),
+            "target": np.asarray(sample.target_position_world_m, dtype=float),
+            "body_x": body_x,
+            "angular_velocity": np.asarray(sample.angular_velocity_world_rad_s, dtype=float),
+            "fuel": float(sample.fuel_used_kg),
+            "damage": float(sample.damage_j),
+            "mass": float(sample.mass_kg),
+            "radius": SHIP_RADIUS_M,
+            "max_accel": MAX_ACCEL_MPS2,
+            "max_angular": MAX_ANGULAR_ACCEL_RAD_S2,
+        }
+        body, angular_body, record = self.math.step(
             self.state,
-            sample.position_world_m,
-            sample.velocity_world_mps,
-            sample.target_position_world_m,
-            body_x,
-            SHIP_RADIUS_M,
-            MAX_ACCEL_MPS2,
-            dt,
-            fuel,
-            float(sample.damage_j),
-            float(sample.mass_kg),
-            now,
-        )
-        nominal_velocity = self.math.cruise_velocity(
-            np.asarray(sample.position_world_m),
-            np.asarray(sample.target_position_world_m),
-            self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
-            self.state.get("policy", {}).get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
-            MAX_ACCEL_MPS2,
-        )
-        acceleration, self.state["burning"] = self.math.govern(
-            desired_accel,
-            nominal_velocity,
-            np.asarray(sample.velocity_world_mps),
-            self.state["burning"],
-            MAX_ACCEL_MPS2,
-        )
-        emergency_accel, emergency_active = self.math.emergency_guard(
-            np.asarray(sample.velocity_world_mps), rows, now, MAX_ACCEL_MPS2
-        )
-        if emergency_active:
-            acceleration = emergency_accel
-            self.state["burning"] = True
-        if not np.all(np.isfinite(acceleration)):
-            raise _Rejected("MPPI produced a non-finite acceleration")
-        target_range = float(
-            np.linalg.norm(
-                np.asarray(sample.target_position_world_m) - np.asarray(sample.position_world_m)
-            )
-        )
-        remaining = target_range - self.state.get("policy", {}).get(
-            "arrival_radius_m", self.math.ARRIVAL_RADIUS_M
-        )
-        if (
-            not emergency_active
-            and remaining <= self.math.TERMINAL_COAST_RANGE_M
-            and np.linalg.norm(np.asarray(sample.velocity_world_mps))
-            >= self.math.TERMINAL_COAST_MIN_SPEED_MPS
-        ):
-            # The score checks the 50 m region without an arrival-speed gate.
-            # Coast on the clear terminal path instead of paying for a stop.
-            acceleration = np.zeros(3)
-            self.state["burning"] = False
-        desired = self.math.unit(nominal_velocity)
-        alignment = (
-            np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
-            if np.linalg.norm(desired) > 1e-9
-            else 0.0
-        )
-        angular_velocity = np.asarray(sample.angular_velocity_world_rad_s)
-        gate = "off"
-        if self.state["burning"]:
-            gate = "burn"
-        elif self.state.get("attitude_hold", False):
-            gate = "hold"
-        elif np.linalg.norm(angular_velocity) > self.math.ATTITUDE_HOLD_RATE_RAD_S:
-            gate = "rate"
-        elif alignment > self.math.ATTITUDE_HOLD_RAD:
-            gate = "alignment"
-        attitude_trace = {}
-        angular = self.math.attitude(
-            body_x,
-            angular_velocity,
-            desired,
-            COMMAND_CAP_ANGULAR,
-            dt,
-            self.state,
-            attitude_trace,
-        )
-        if gate == "off":
-            angular = np.zeros(3)
-            attitude_trace["command_rad_s2"] = [0.0, 0.0, 0.0]
-            attitude_trace["command_norm_rad_s2"] = 0.0
-            attitude_trace["saturated"] = False
-        body = bounded(
-            reference_to_body(acceleration, sample.quaternion_xyzw, sample.rotation_convention),
-            COMMAND_CAP_MPS2,
-        )
-        angular_body = bounded(
-            reference_to_body(angular, sample.quaternion_xyzw, sample.rotation_convention),
-            COMMAND_CAP_ANGULAR,
-        )
-        velocity_error = np.linalg.norm(nominal_velocity - np.asarray(sample.velocity_world_mps))
-        target_range = float(
-            np.linalg.norm(
-                np.asarray(sample.target_position_world_m) - np.asarray(sample.position_world_m)
-            )
-        )
-        record = self.math.telemetry_record(
+            observation,
+            selected,
             now,
             dt,
-            "burn" if self.state["burning"] else "coast",
-            gate,
-            body_x,
-            desired,
-            acceleration,
-            body,
-            angular_velocity,
-            attitude_trace,
-            float(velocity_error),
-            float(np.linalg.norm(np.asarray(sample.velocity_world_mps))),
-            target_range,
-            len(self.state["rocks"]),
-            fuel,
-            float(sample.damage_j),
+            lambda value: reference_to_body(
+                value, sample.quaternion_xyzw, sample.rotation_convention
+            ),
         )
-        record["emergency"] = bool(emergency_active)
-        raw_ranges = [
-            float(np.linalg.norm(np.asarray(row[0], dtype=float)))
-            for row in rows
-            if np.all(np.isfinite(row))
-        ]
-        track_ranges = [
-            float(
-                np.linalg.norm(
-                    np.asarray(rock["position"], dtype=float)
-                    - np.asarray(sample.position_world_m, dtype=float)
-                )
-            )
-            for rock in self.state["rocks"]
-        ]
-        record["nearest_raw_range_m"] = min(raw_ranges) if raw_ranges else None
-        record["nearest_track_range_m"] = min(track_ranges) if track_ranges else None
-        record["line"] = self.math.telemetry_line(record)
+        body = bounded(body, COMMAND_CAP_MPS2)
+        angular_body = bounded(angular_body, COMMAND_CAP_ANGULAR)
+        record["accel_body_mps2"] = body.tolist()
+        record["angular_command_rad_s2"] = angular_body.tolist()
         if os.environ.get("WSORB_MPPI_DEBUG") == "1":
             print(
                 json.dumps(record, separators=(",", ":"), allow_nan=False),
                 file=sys.stderr,
                 flush=True,
             )
+        policy = self.state.get("policy", {})
+        nominal = self.math.cruise_velocity(
+            current_position,
+            np.asarray(sample.target_position_world_m, dtype=float),
+            self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
+            policy.get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
+        )
+        velocity_error = float(
+            np.linalg.norm(nominal - np.asarray(sample.velocity_world_mps, dtype=float))
+        )
+        accel_reference = body_to_reference(
+            body, sample.quaternion_xyzw, sample.rotation_convention
+        )
         self._report["guidance"] = {
-            "track_count": len(self.state["rocks"]),
+            "track_count": len(selected),
             "mppi_samples": self.math.MPPI_SAMPLES,
             "mppi_steps": self.math.MPPI_STEPS,
-            "mode": "burn" if self.state["burning"] else "coast",
+            "mode": record["mode"],
             "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
             "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
-            "time_budget_s": self.state.get("policy", {}).get("time_budget_s"),
+            "time_budget_s": policy.get("time_budget_s"),
             "velocity_error_mps": velocity_error,
-            "alignment_angle_rad": alignment,
-            "accel_reference_mps2": acceleration.tolist(),
+            "alignment_angle_rad": record.get("target_align_rad") or 0.0,
+            "accel_reference_mps2": accel_reference.tolist(),
             "angular_accel_body_rad_s2": angular_body.tolist(),
             "fuel_per_delta_v_kg_per_mps": float(sample.mass_kg) / (80.0 * 9.8),
             "capsule_radius_m": SHIP_RADIUS_M,
+            "collision_hits": int(self.state.get("collision_hits", 0)),
+            "collision_active": bool(self.state.get("collision")),
+            "collision_impact_j": self.state.get("last_impact_j"),
+            "collision_detour": bool(record.get("collision_detour", False)),
+            "collision_offset_m": record.get("collision_offset_m"),
             "model": "3-DOF translation MPPI, capsule clearance, burn/coast governor",
             "telemetry": record,
         }

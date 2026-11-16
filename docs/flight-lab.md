@@ -16,24 +16,32 @@ The [README](../README.md) introduces the competition and the team's work. This 
 
 ## Start locally
 
-Install Nix, devenv and Just. Enter the pinned environment from the repository root, then run project commands inside it:
+Install Nix and Just. Enter the pinned flake environment from the repository root, then run project commands inside it:
 
 ```sh
-devenv shell
+nix develop
 just setup
 just build
-devenv up lab simulation
 ```
 
 The first build can take several minutes. Later builds reuse unchanged outputs.
+
+Start the two local services in separate terminals:
+
+```sh
+nix run .#game   # game at http://127.0.0.1:61829/
+nix run .#lab    # private Marimo editor at http://127.0.0.1:2718/
+```
 
 1. Open **http://127.0.0.1:61829/** in a current browser with WebGPU enabled.
 2. Wait for the world to appear. Keep one game tab visible and press **F** to follow the lander.
 3. Select **Notebook** in the bottom toolbar to open the private Python editor. It normally uses port `2718`; open it through the game rather than sharing its access link.
 
-Leave the processes running while you work. `devenv processes down` stops them. Use `devenv up -d lab simulation` for background operation.
+Keep the two terminals running while you work; Ctrl-C stops each one. There is no
+separate process manager. For a game-only session, use `PORT=0 just local` and
+open the address it prints.
 
-For game-only sessions, Windows, headless physics or startup logs, see [other ways to start](#other-ways-to-start). Do not start a second server accidentally.
+For Windows, headless physics or startup logs, see [other ways to start](#other-ways-to-start). Do not start a second server accidentally.
 
 ## Fly manually
 
@@ -70,7 +78,7 @@ Keep one controller in charge. Manual thrust, pause, placement or reset can end 
 
 ### Choose a teammate profile
 
-The source entrypoint for each person is indexed in [examples/README.md](../examples/README.md).
+The source entrypoint for each person is indexed in [controllers/README.md](../controllers/README.md).
 
 Python runs on a teammate's machine, never on the hosted site. Hosting stays on Cloudflare Free. Use the local game or the [private room relay](#hosted-python-connection) to connect that Python runner to a browser flight.
 
@@ -78,35 +86,35 @@ Choose a profile in the footer below the scene, then use **Run flight**. **More 
 
 The launcher offers the competition hop with the official debris cloud, the historical L2 settings from the saved teammate comparison, and the current Across Phobos practice world. Seeds are whole numbers from 0 to 4294967295. A comparison row's **Fly this code** link fills these choices without starting a flight or Python. It still requires a runner on your machine. New runs use the current local engine and live Python timing, so they can differ from saved runs.
 
-For a locally served game, run this from the repository root inside `devenv shell`, after `just setup` and `just build`:
+For a locally served game, run this from the repository root inside the Nix development shell (`nix develop`), after `just setup` and `just build`:
 
 ```sh
 WSORB_LAB=1 just local
 ```
 
-In a second terminal, enter `devenv shell` in the same checkout and start the private runner:
+In a second terminal, enter `nix develop` in the same checkout and start the private runner:
 
 ```sh
-uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run
+uv run --locked wsorb controllers serve --connection-file .wsorb/wsorb-local.json --run
 ```
 
 **Run flight** starts directly in a fresh tab and asks before replacing a flight that has already started. Keep the tab visible while Python flies. Live time, range, speed, fuel and damage stay below the scene beside **Stop controller**. Changing a profile or world requests Stop first. It does not start the next profile automatically.
 
-If `devenv up lab simulation` already serves your local game, leave it running and only start the runner in the second terminal. Do not start another game server.
+If the game and lab are already running, leave them up and only start the runner in the second terminal. Do not start another game server.
 
 Check **Controller running**, not just **API connected**. The game must have accepted the controller's command and be running physics. The status panel shows the command time and expiry.
 
-Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. The reviewed Ali MPPI profile uses that rule: inside 200 m at ≥4 m/s it coasts through the region when the raw-radar emergency is clear, instead of braking for a non-existent arrival-speed gate. The emergency guard and damage threshold still apply. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
+Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. The reviewed Ali MPPI profile uses that rule: inside 200 m at ≥4 m/s it coasts through the region when the raw-radar emergency is clear, instead of braking for a non-existent arrival-speed gate. The emergency guard and damage threshold still apply. After a contact, the same profile takes a short lateral escape impulse and flies a capped parallel-route offset; repeated contacts flip the side and reduce cruise speed when damage is high. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
 
 For run budgets, sensor failures, standby takeover and isolated CLI runs, see [notebook policies and failures](#notebook-policies-and-failures).
 
 ## Other ways to start
 
-Run commands from the repository root inside `devenv shell`. The normal game-and-notebook setup is in [Start locally](#start-locally).
+Run commands from the repository root inside the Nix development shell (`nix develop`). The normal game-and-notebook setup is in [Start locally](#start-locally).
 
-For a game-only session after `just setup` and `just build`, use `PORT=0 just local` and open the exact address printed in the terminal. `just local` serves the existing build. Choose this or the managed game-and-lab setup, rather than starting both.
+For a game-only session after `just setup` and `just build`, use `PORT=0 just local` and open the exact address printed in the terminal. `just local` serves the existing build. Choose this or the two-service setup above, rather than starting both.
 
-For background processes, use `devenv up -d lab simulation`. `devenv processes logs lab` shows the editor's startup message. The process named `notebook` is a separate sharing service, not the Marimo flight lab.
+For background operation, use your terminal multiplexer or shell job control; run `nix run .#game` and `nix run .#lab` separately. The lab terminal shows the editor startup message. The Tailscale sharing service (`nix run .#share`) is separate from the Marimo flight lab.
 
 ### Without a browser
 
@@ -216,13 +224,13 @@ Start with the default 500 bodies. Larger trials can request 10,000 or 100,000 r
 Inspect a fresh isolated world without issuing flight commands:
 
 ```sh
-devenv shell uv run --locked wsorb checkpoint --isolated
+nix develop --command uv run --locked wsorb checkpoint --isolated
 ```
 
 Explicitly run matched baseline and body-axis attempts in separate stock worlds:
 
 ```sh
-devenv shell uv run --locked wsorb checkpoint --isolated --run --policy compare --playback-rate 5 --cadence-hz 50
+nix develop --command uv run --locked wsorb checkpoint --isolated --run --policy compare --playback-rate 5 --cadence-hz 50
 ```
 
 This script uses authenticated HTTP calls and the same portable numeric controller as the colleague-facing STP script. It does not click the interface, reset an open flight, call a fixed-step test driver or emulate `spaceteams`. The two portable profiles differ only in body-axis preference; they are separate from the notebook's native-contract resilient A* controller. Default inspection is read-only, and default playback is 1×. Accelerated runs can expire their leases when computation or transport is too slow; expiry is a failed attempt, not permission to extend or retime the decision.
@@ -233,16 +241,16 @@ The final JSON reports native arrival, range, speed, damage, fuel and source/con
 
 Python runs privately on your machine. The existing Cloudflare Free room relay sends authenticated calls to the real WASM engine in your browser; it does not host Python or publish the controller's source. To watch a hosted flight, keep both your local runner and the browser running.
 
-From the repository root inside `devenv shell`, create a private room:
+From the repository root inside the Nix development shell (`nix develop`), create a private room:
 
 ```sh
-uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json
+uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json
 ```
 
 Open the private browser link printed by this command in a new tab, then choose **Allow Python connection**. This starts a separate game; leave existing flights open. Keep the new game visible in a separate window. Start the profile runner on your machine:
 
 ```sh
-uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run
+uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run
 ```
 
 Then choose the code profile in the footer and use **Run flight**. **Check connection** and the world, seed and time budget are under **More options**. **Run flight** becomes available only after the game is ready and Python is online and idle. Room creation and connection alone do not start a controller.
@@ -252,8 +260,8 @@ If **Fly this code** already opened a game with your choices selected, append th
 For the separate portable checkpoint CLI, inspect first, then explicitly start its policy instead of running the profile service against the same flight:
 
 ```sh
-uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json
-uv run --locked wsorb checkpoint --room-file .devenv/wsorb-room.json --run --progress
+uv run --locked wsorb checkpoint --room-file .wsorb/wsorb-room.json
+uv run --locked wsorb checkpoint --room-file .wsorb/wsorb-room.json --run --progress
 ```
 
 Keep the link and connection file private. A room cannot replace an already connected owner. Room calls read fresh public observations, not saved room state or hidden debris truth. Flight control uses the native ownership fence and original-source expiring commands. A disconnect never retries thrust, resets the game or extends a decision's validity. Manual ship input or pausing ends the run. The hosted bridge deliberately excludes reset, tuning, raw latched thrust and private local-lab endpoints. Network latency may exhaust a lease and end an attempt; this connection is not STP runtime validation.
@@ -273,7 +281,7 @@ A local game started with a separate connection file does not redirect its Noteb
 Diagnostics are off by default. Collect a short, read-only log from an existing flight without starting a controller or changing its playback:
 
 ```sh
-devenv shell uv run --locked wsorb diagnostics --connection-file .devenv/wsorb-local.json --duration-s 5 --output .devenv/flight-debug.jsonl
+nix develop --command uv run --locked wsorb diagnostics --connection-file .wsorb/wsorb-local.json --duration-s 5 --output .wsorb/flight-debug.jsonl
 ```
 
 Use `--room-file` for a hosted flight. The output path must be unused; logs are private mode-0600 JSONL. The collector skips a busy local API rather than competing with the controller. It records actual source clocks, ownership, Rapier motion and renderer counters. Page identity, debug camera and Bevy visual transforms are included only when the loaded bridge/engine supplies them; older builds report them unavailable.
@@ -294,13 +302,13 @@ The [controller steps](#run-a-controller) cover connecting, running and stopping
 
 Resilient Stop requests a guarded native release without clearing a newer manual command. If release cannot be confirmed, native expiry still bounds the old command. Use **P** or **Pause physics** to pause, and confirm that the clock has stopped. Select **Connect / Refresh** for read-only guidance again.
 
-For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI example is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; their original SDK entrypoints and displays remain in [`examples/`](../examples/).
+For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI template is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; current entrypoints and support modules live in [`controllers/`](../controllers/), and retired templates live under [`docs/history/controllers/`](history/controllers/README.md).
 
 Choose a catalog profile in the footer's quick launcher. **More options** opens teammate, world, seed, time budget and **Set up Python runner**; Python always runs on your machine and the hosted site never starts it. **Run flight** requires a ready game and an online, idle Python service. It queues the selected Python adapter and opens the native lander view. The orange trail with Debug guides enabled records actual lander positions. **Watch flight** returns to the scene after reopening the panel. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
 
 The profile result puts **Points** before the physical diagnostics and shows the current-formula local breakdown when terminal inputs are available. It is not an official receipt. For a damage failure, initial range must come from the actual time-zero row in the existing bounded native analytics. The job's final measurement alone does not contain that range; if the row is missing, failure points remain unavailable. No preset geometry, current-engine assumption or protocol extension fills the gap. Errors and unfinished attempts remain attempts, not zero-point results.
 
-`uv run --locked wsorb controllers list` lists profile names and adaptations. `uv run --locked wsorb controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `uv run --locked wsorb controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. An explicit local `--connection-file` claim requests the native lander view once the page renderer is ready; the request is presentation-only and never changes the flight. `--progress` prints one structured progress record per second on stderr; profiles that expose attitude telemetry include it, and no CSV is written. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
+`uv run --locked wsorb controllers list` lists profile names and adaptations. `uv run --locked wsorb controllers run --isolated --profile PROFILE --run` runs one in a fresh headless world. `uv run --locked wsorb fuzz --seeds 100-107 --workers 4` runs the reviewed profile across seeds on separate owned native engines, prints one row per seed plus min/mean/max points, and writes the per-seed JSON report under `runs/`. `uv run --locked wsorb tune --grid GRID --seeds SEEDS --validation-seeds SEEDS` searches policy settings by worst-seed score with native success and the official damage limit as hard constraints. `uv run --locked wsorb controllers compare --isolated --run` compares profiles in separate matching worlds using native ownership and expiring commands, not manual stepping. Neither command resets an existing game. An explicit local `--connection-file` claim requests the native lander view once the page renderer is ready; the request is presentation-only and never changes the flight. `--progress` prints one structured progress record per second on stderr; profiles that expose attitude telemetry include it, and no CSV is written. For a hosted profile runner, replace `--connection-file` with `--room-file` and the private room descriptor.
 
 The connection badge distinguishes API transport from execution. **Controller running** needs matching native ownership, an accepted command that has not expired and running physics. Details show the command's simulation timestamp and expiry, plus idle, claimed, paused, expired and released transitions. Credentials are not logged. Native receipts have verified both local startup and Stop, not arrival through the transit stress field or the official cloud.
 
@@ -428,7 +436,7 @@ Both official and historical-team metric supplements are hosted and use existing
 Reproduce the experiment and publish to new directories:
 
 ```sh
-uv run --locked --extra lab python examples/flight_sweep.py --config examples/teammate_comparison.json --output runs/scratch/teammate-comparison-new
+uv run --locked --extra lab python experiments/flight_sweep.py --config experiments/teammate_comparison.json --output runs/scratch/teammate-comparison-new
 uv run --locked wsorb scoreboard --input runs/scratch/teammate-comparison-new --output docs/analytics/teammate-comparison-new
 ```
 
@@ -438,7 +446,7 @@ Both outputs must be new directories. The [publisher](../src/wsorb/scoreboard.py
 
 To correct an existing generated publication, `uv run --locked wsorb scoreboard --input INPUT --output OUTPUT --refresh` verifies its current artifact digests before replacing generated files. It refuses changed files and leaves other files and raw evidence alone.
 
-Use `uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output RUN_DIRECTORY` to inspect saved sweep trials, or `uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
+Use `uv run --locked --extra lab python experiments/flight_sweep.py --analyze-only --output RUN_DIRECTORY` to inspect saved sweep trials, or `uv run --locked --extra lab marimo edit docs/labs/20261029-HEADLESS-EXPERIMENTS/usage.py` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
 
 ## Save and share runs
 
@@ -456,7 +464,7 @@ Prepare downloads again if you need newer readings. History contains at most 2,0
 
 The game's **Details → Export** is a separate full-state JSON download. It includes world details the ship's sensors may not have observed. Do not use those hidden details to give a competition policy an unfair view of the debris.
 
-Add the setup, reason for the experiment, result and next question to our [shared mission notebook](../notebook/NOTEBOOK.md). Keep the exported run and saved code with it. Historical Lunar SAR and rover experiments remain references, not the current Phobos challenge. Use private screen sharing to demonstrate a run; separate local games do not share a physical world.
+Add the setup, reason for the experiment, result and next question to our [shared mission notebook](notebook/NOTEBOOK.md). Keep the exported run and saved code with it. Historical Lunar SAR and rover experiments remain references, not the current Phobos challenge. Use private screen sharing to demonstrate a run; separate local games do not share a physical world.
 
 ## What local practice does not prove
 
@@ -464,11 +472,11 @@ Our practice world uses simplified gravity, terrain, contact, fuel and damage mo
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 
-Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [WSO controller entrypoint](../examples/wso/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
+Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [WSO controller entrypoint](../controllers/wso/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
 
 ## Send a controller to a colleague
 
-Send `examples/wso/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
+Send `controllers/wso/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
 
 Keep the server's existing ControllerSystem launch arguments unchanged. Start with no policy configuration, or this disabled configuration selected by `WSORB_STP_POLICY_JSON`:
 
@@ -481,7 +489,7 @@ That runs a read-only SDK probe. It reports actual versions, resolved handles, f
 For an enabled checkpoint attempt, select `policy: "checkpoint_velocity"` in the reviewed configuration. Set an independently established `radar_clock_offset_s`, verify `checkpoint_radius_m` against the server's Scoring `KeepOutRadius_m`, and ensure this is the only jet-command writer. Select `body_axis_preference` explicitly for the candidate policy. Do not infer the radar offset from one reading or pass our policy options as SDK bootstrap arguments. The legacy PD/radar policy remains available for comparison.
 
 Ali's official-profile source port is
-[`examples/ali/stp_official_profile.py`](../examples/ali/stp_official_profile.py).
+[`docs/history/controllers/ali/stp_official_profile.py`](history/controllers/ali/stp_official_profile.py).
 Configure it with `WSORB_STP_OFFICIAL_FILE` or `WSORB_STP_OFFICIAL_JSON`; a
 missing configuration never connects or writes. Start with the read-only
 `{"schema":"wsorb.stp_official","schema_version":1,"enabled":false,"probe":true}`
@@ -491,13 +499,13 @@ The portable controller uses named reference frames, original measurement times 
 
 SDK state/radar reads and the two command writes are sequential. The script rechecks the actual clock after computation, but STP has no native decision lease here. Cleanup attempts real zeros only after explicit enabled control; it cannot guarantee a stop after process death, blocked calls or failed writes. A configured-radius observation is not an official scoring result or a physics freeze. Authentic licensed-server execution is still required. Missing SDK access fails clearly rather than returning substitute results.
 
-For technical details, use the [API and measurement reference](../notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
+For technical details, use the [API and measurement reference](notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
 
 ## Where to change code
 
 | File or folder | What belongs there |
 | --- | --- |
-| [`notebooks/flight_lab.py`](../notebooks/flight_lab.py) | Experiment controls, editable Python functions and analysis in Marimo. |
+| [`docs/labs/flight_lab.py`](labs/flight_lab.py) | Experiment controls, editable Python functions and analysis in Marimo. |
 | [`src/wsorb/flight/`](../src/wsorb/flight/) | Shared prediction, geometry, path-search and controller functions. |
 | [`src/wsorb/local_api.py`](../src/wsorb/local_api.py) | The notebook's connection to the actual local game. |
 | [`simulation/scenarios/`](../simulation/scenarios/) | Versioned default world and vehicle settings. |

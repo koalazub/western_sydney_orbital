@@ -1,7 +1,7 @@
 """Prepare checked-in mission imagery. This script never accesses the network.
 
 Run explicitly with the existing environment:
-devenv shell uv run --locked --extra lab worker/scripts/prepare-planetary-assets.py
+nix develop --command uv run --locked --extra lab worker/scripts/prepare-planetary-assets.py
 Ordinary browser builds only copy the resulting PNGs.
 """
 

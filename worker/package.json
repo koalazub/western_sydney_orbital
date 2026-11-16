@@ -14,7 +14,7 @@
     "build:licenses": "node scripts/build-licenses.mjs",
     "build": "npm run types && npm run build:web && npm run build:licenses && npm run build:sim",
     "format": "cd .. && nix fmt && uv run --locked ruff format . && cargo fmt --manifest-path simulation/Cargo.toml",
-    "check": "cd .. && uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict --ignore-scripts notebooks && cargo fmt --manifest-path simulation/Cargo.toml -- --check && cargo clippy --manifest-path simulation/Cargo.toml --locked --target wasm32-unknown-unknown --lib -- -D warnings && git diff --check",
+    "check": "cd .. && uv run --locked --extra lab ruff check . && uv run --locked --extra lab ruff format --check . && uv run --locked --extra lab marimo check --strict --ignore-scripts docs/labs && cargo fmt --manifest-path simulation/Cargo.toml -- --check && cargo clippy --manifest-path simulation/Cargo.toml --locked --target wasm32-unknown-unknown --lib -- -D warnings && git diff --check",
     "test": "cd .. && cargo test --manifest-path simulation/Cargo.toml --locked --lib && WSORB_CHECKPOINT_INTEGRATION=1 WSORB_DIAGNOSTICS_INTEGRATION=1 uv run --locked --extra lab pytest -ra",
     "test:transit": "cd .. && WSORB_TRANSIT_STRESS=1 uv run --locked --extra lab pytest -m transit_stress",
     "verify": "result=0; npm run build || result=1; npm run check || result=1; npm test || result=1; (cd .. && nix flake check --all-systems --no-build --impure) || result=1; exit \"$result\""

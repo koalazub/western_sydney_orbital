@@ -138,9 +138,9 @@
       <details id="controller-setup">
         <summary>Connect the Python runner</summary>
         <p>Python runs on a teammate's machine. The hosted site stays on Cloudflare Free and only relays authenticated calls to this browser. It does not start or host Python.</p>
-        <p>Run these commands from the repository root inside <code>devenv shell</code>.</p>
-        <p>Local game: after <code>just setup</code> and <code>just build</code>, start <code>WSORB_LAB=1 just local</code>. In a second devenv shell, start <code>uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run</code>.</p>
-        <p>Hosted game: create a private room with <code>uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json</code>. Open its private browser link and allow Python, then start <code>uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run</code> on your machine. Keep the link and file private.</p>
+        <p>Run these commands from the repository root inside the Nix development shell (<code>nix develop</code>).</p>
+        <p>Local game: after <code>just setup</code> and <code>just build</code>, start <code>WSORB_LAB=1 just local</code>. In a second Nix development shell, start <code>uv run --locked wsorb controllers serve --connection-file .wsorb/wsorb-local.json --run</code>.</p>
+        <p>Hosted game: create a private room with <code>uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json</code>. Open its private browser link and allow Python, then start <code>uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run</code> on your machine. Keep the link and file private.</p>
         <p>A comparison link only selects flight settings. To connect that open hosted tab without losing them, paste the room link's <code>#room=…&amp;key=…</code> fragment at the end of its address and allow Python. A local notebook cannot control an unrelated hosted tab.</p>
         <p>Keep the runner running, then check the connection. Run flight needs a ready game and an online, idle Python service.</p>
         <button id="reconnect-controller" type="button">Check connection</button>

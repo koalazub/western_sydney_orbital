@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const scripts = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(scripts, "../..");
 const published = join(repository, "worker/public/sim");
-const receiptPath = join(repository, ".devenv/wsorb-wasm-cache.json");
+const receiptPath = join(repository, ".wsorb/wsorb-wasm-cache.json");
 const lockPath = `${receiptPath}.lock`;
 const names = ["wsorb_bevy.js", "wsorb_bevy.d.ts", "wsorb_bevy_bg.wasm", "wsorb_bevy_bg.wasm.d.ts", "manifest.json"];
 const bindgenFlags = ["--target", "web", "--out-name", "wsorb_bevy"];

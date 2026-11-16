@@ -63,9 +63,7 @@ class ObserverHistory:
     def at(self, epoch: float) -> tuple[np.ndarray, np.ndarray]:
         if not self.covers(epoch):
             raise _Rejected("Observer history does not cover a radar row epoch")
-        epoch = min(
-            max(epoch, self.samples[0].elapsed_time_s), self.samples[-1].elapsed_time_s
-        )
+        epoch = min(max(epoch, self.samples[0].elapsed_time_s), self.samples[-1].elapsed_time_s)
         previous = self.samples[0]
         for current in self.samples:
             if current.elapsed_time_s == epoch:

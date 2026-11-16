@@ -683,11 +683,11 @@ def test_profile_controls_use_catalog_owners_and_actual_python_queue_after_conse
     assert "Python runs on a teammate's machine" in setup
     assert "Cloudflare Free" in setup and "does not start or host Python" in setup
     for command in (
-        "devenv shell",
+        "nix develop",
         "WSORB_LAB=1 just local",
-        "uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run",
-        "uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json",
-        "uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run",
+        "uv run --locked wsorb controllers serve --connection-file .wsorb/wsorb-local.json --run",
+        "uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json",
+        "uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run",
     ):
         assert command in setup
     assert "A comparison link only selects flight settings" in setup

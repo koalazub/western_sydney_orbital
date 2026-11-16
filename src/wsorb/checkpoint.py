@@ -122,6 +122,7 @@ class CheckpointOptions:
     diagnostics: bool = False
     wait_for_owner_s: float = 0.0
     await_owner: bool = False
+    settings: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for name in ("isolated", "run", "progress", "diagnostics", "await_owner"):
@@ -129,6 +130,14 @@ class CheckpointOptions:
                 raise CheckpointError(
                     "invalid_options", "Consent and scope flags must be booleans."
                 )
+        if self.settings is not None:
+            if not isinstance(self.settings, Mapping) or any(
+                not isinstance(key, str) for key in self.settings
+            ):
+                raise CheckpointError(
+                    "invalid_options", "Controller settings must be a string-keyed mapping."
+                )
+            object.__setattr__(self, "settings", dict(self.settings))
         for name in ("connection_file", "room_file"):
             value = getattr(self, name)
             if value is not None:
@@ -864,10 +873,10 @@ def run_trial(
     origin_sim = _number(observation.get("time_s"))
     if origin_sim is None:
         raise CheckpointError("source_contract", "The actual native clock is unavailable.")
-    controller_settings = None
+    controller_settings = dict(options.settings) if options.settings else {}
     if policy == "ali_mppi":
         geometry = observation.get("geometry")
-        controller_settings = {"time_budget_s": options.duration_s}
+        controller_settings.setdefault("time_budget_s", options.duration_s)
         arrival = geometry.get("arrival_radius_m") if isinstance(geometry, Mapping) else None
         if (
             isinstance(arrival, (int, float))
@@ -875,8 +884,8 @@ def run_trial(
             and math.isfinite(arrival)
             and arrival > 0
         ):
-            controller_settings["arrival_radius_m"] = float(arrival)
-    controller = create_controller(policy, controller_settings)
+            controller_settings.setdefault("arrival_radius_m", float(arrival))
+    controller = create_controller(policy, controller_settings or None)
     from .flight_analytics import FlightAnalyticsRecorder
 
     # Never attribute an existing flight's earlier burns to this Run action.

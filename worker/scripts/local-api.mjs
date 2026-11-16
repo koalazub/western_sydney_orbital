@@ -305,7 +305,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
   const assetDiagnostics = process.env.WSORB_DIAGNOSTICS === "1";
   const token = randomBytes(32).toString("base64url");
   const authorization = Buffer.from(`Bearer ${token}`);
-  const requestedPath = resolve(process.env.WSORB_LOCAL_CONNECTION || resolve(worker, "..", ".devenv/wsorb-local.json"));
+  const requestedPath = resolve(process.env.WSORB_LOCAL_CONNECTION || resolve(worker, "..", ".wsorb/wsorb-local.json"));
   if (inside(publicRoot, requestedPath)) throw new Error("The local connection descriptor must be outside public assets");
   await mkdir(dirname(requestedPath), { recursive: true, mode: 0o700 });
   const descriptorPath = resolve(await realpath(dirname(requestedPath)), basename(requestedPath));
@@ -359,7 +359,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     throw new Error("Invalid local engine manifest");
   }
   const clientSource = await readFile(resolve(worker, "web/local-api.js"), "utf8");
-  const alternateConnection = requestedPath !== resolve(worker, "..", ".devenv/wsorb-local.json");
+  const alternateConnection = requestedPath !== resolve(worker, "..", ".wsorb/wsorb-local.json");
   const relativeConnection = relative(resolve(worker, ".."), descriptorPath);
   const connectionLabel = inside(resolve(worker, ".."), descriptorPath)
     ? relativeConnection : "PATH_TO_THIS_GAME_CONNECTION";
@@ -367,7 +367,7 @@ export async function createLocalApi({ worker, publicRoot, rootRealPath, headles
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[character]);
   const notebookHelp = alternateConnection
-    ? `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect Python to this game</title><style>:root{color-scheme:dark;font:1rem/1.6 system-ui,sans-serif;background:#101923;color:#edf3f7}body{max-width:42rem;margin:2rem auto;padding:0 1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><main><h1>Separate game connection</h1><p>This game uses a separate Python API connection. The existing notebook may control another flight, so this page will not redirect you to that editor.</p><p>Inspect this game's public state with its explicit connection file:</p><pre>devenv shell uv run --locked wsorb checkpoint --connection-file ${escapedConnection}</pre><p>Add <code>--run --progress</code> only when you want to fly this game. If a controller is already running, do not start a second one.</p><p>Close this help tab to return to your existing game window. Do not reload or reset it.</p></main></html>`
+    ? `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect Python to this game</title><style>:root{color-scheme:dark;font:1rem/1.6 system-ui,sans-serif;background:#101923;color:#edf3f7}body{max-width:42rem;margin:2rem auto;padding:0 1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><main><h1>Separate game connection</h1><p>This game uses a separate Python API connection. The existing notebook may control another flight, so this page will not redirect you to that editor.</p><p>Inspect this game's public state with its explicit connection file:</p><pre>nix develop --command uv run --locked wsorb checkpoint --connection-file ${escapedConnection}</pre><p>Add <code>--run --progress</code> only when you want to fly this game. If a controller is already running, do not start a second one.</p><p>Close this help tab to return to your existing game window. Do not reload or reset it.</p></main></html>`
     : await readFile(resolve(worker, "web/notebook.html"), "utf8");
   const native = headless
     ? await (await import("./headless.mjs")).createHeadless({ publicRoot, rootRealPath, engineBuild })

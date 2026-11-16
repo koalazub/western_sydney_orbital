@@ -3,7 +3,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { get } from "node:http";
 import { dirname, relative, resolve, sep } from "node:path";
 
-const DEFAULT_TOKEN_FILE = ".devenv/wsorb-marimo.token";
+const DEFAULT_TOKEN_FILE = ".wsorb/wsorb-marimo.token";
 const MAX_TOKEN_BYTES = 44;
 const PUBLIC_DIRECTORIES = ["worker/public", "worker/web", "dist"];
 const PRIVATE_FILE = "Marimo token must be an owned private regular file, mode 0600";
@@ -100,7 +100,7 @@ function ready(port) {
 
 /**
  * Server-only handoff: await resolveNotebook({ root: repositoryRoot }).
- * Uses WSORB_LAB_TOKEN_FILE relative to root, default .devenv/wsorb-marimo.token,
+ * Uses WSORB_LAB_TOKEN_FILE relative to root, default .wsorb/wsorb-marimo.token,
  * and WSORB_LAB_PORT, default 2718. Missing files or an unready editor return null.
  * Unsafe files/configuration throw fixed messages without secrets or file paths.
  * The caller owns route authentication and redirect headers. Never publish this

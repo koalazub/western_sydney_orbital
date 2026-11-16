@@ -35,12 +35,14 @@ _ALI_MPPI_END = "# END ALI MPPI CORE"
 
 
 def require_template_source() -> None:
-    if not (ROOT / "examples/tom/UserAPI.py").is_file():
-        raise ValueError("Body +Z template requires the source checkout: examples/tom/UserAPI.py")
+    if not (ROOT / "docs/history/controllers/tom/UserAPI.py").is_file():
+        raise ValueError(
+            "Body +Z template requires the source checkout: docs/history/controllers/tom/UserAPI.py"
+        )
 
 
 def _load_ali_core() -> dict[str, ModuleType]:
-    """Extract the marked pure section so the submission stays one file."""
+    """Extract the retained radar MVP core from its historical single file."""
     with _LOCK:
         return _load_ali_core_locked()
 
@@ -48,9 +50,11 @@ def _load_ali_core() -> dict[str, ModuleType]:
 def _load_ali_core_locked() -> dict[str, ModuleType]:
     if "ali" in _LOADED:
         return dict(_LOADED["ali"])
-    path = ROOT / "examples/ali/controller.py"
+    path = ROOT / "docs/history/controllers/ali/radar_mvp.py"
     if not path.is_file():
-        raise ValueError("Ali controller requires the source checkout: examples/ali/controller.py")
+        raise ValueError(
+            "Ali radar MVP requires the source checkout: docs/history/controllers/ali/radar_mvp.py"
+        )
     source = path.read_text(encoding="utf-8")
     if _ALI_CORE_BEGIN not in source or _ALI_CORE_END not in source:
         raise ValueError("Ali controller pure-core markers are missing")
@@ -74,11 +78,9 @@ def _load_ali_mppi_core() -> dict[str, ModuleType]:
     with _LOCK:
         if "ali_mppi" in _LOADED:
             return dict(_LOADED["ali_mppi"])
-        path = ROOT / "examples/ali/controller_mppi.py"
+        path = ROOT / "controllers/ali/controller.py"
         if not path.is_file():
-            raise ValueError(
-                "Ali MPPI requires the source checkout: examples/ali/controller_mppi.py"
-            )
+            raise ValueError("Ali MPPI requires the source checkout: controllers/ali/controller.py")
         source = path.read_text(encoding="utf-8")
         if _ALI_MPPI_BEGIN not in source or _ALI_MPPI_END not in source:
             raise ValueError("Ali MPPI core markers are missing")
@@ -102,7 +104,7 @@ def load_math(profile: str) -> dict[str, ModuleType]:
 
     No source directory enters sys.path. Relative Bui imports resolve only to
     these preloaded modules; the private package has no filesystem search path.
-    A wheel without examples must fail honestly rather than substitute an SDK.
+    A wheel without the controllers source must fail honestly rather than substitute an SDK.
     """
     if profile == "ali":
         return _load_ali_core()
@@ -112,9 +114,9 @@ def load_math(profile: str) -> dict[str, ModuleType]:
         raise ValueError("Unknown reviewed controller math profile")
     with _LOCK:
         folder, names = _MODULES[profile]
-        paths = {name: ROOT / "examples" / folder / f"{name}.py" for name in names}
+        paths = {name: ROOT / "controllers" / folder / f"{name}.py" for name in names}
         if any(not path.is_file() for path in paths.values()):
-            raise ValueError(f"Controller requires the source checkout: examples/{folder}")
+            raise ValueError(f"Controller requires the source checkout: controllers/{folder}")
         if profile in _LOADED:
             return dict(_LOADED[profile])
         package_name = f"{__package__}._source_{profile}_bounded"
