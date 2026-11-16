@@ -53,7 +53,7 @@ Use the native Windows UV commands below, from the repository root:
 | --- | --- |
 | `pilot` | One fresh flight of the configured reference controller; Tom by default. |
 | `baseline` | Five blocks per controller: **5 flights each**. |
-| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **22 flights each**, **44 total** for Tom and MPPI. Override with `--seed-count N`. |
+| `seeded` | The first 22 saved debris-perturbation seeds, including 100 and official default 8193, with radar fixed at 100: **22 flights each**, **66 total** for the two current-main Tom entrypoints and Ali MPPI. Override with `--seed-count N`. |
 
 The current configuration sets `repetitions: 1` and a **300 s simulated-time limit**.
 Each controller flies each seeded scenario once. Set `repetitions` to another
@@ -178,8 +178,10 @@ can use a config copy with `diagnostic_rerun=true` and a short simulation limit.
 After inspecting the pilot, prepare `--mode baseline` for five fresh flights
 per controller, or `--mode seeded` for the saved seed prefix and one run per
 controller/seed. Controller order rotates between blocks. Commands
-to run full campaigns are intentionally manual. The current two profiles are Tom
-and Ali MPPI. Harry has no official STP entrypoint. WSO requires its
+to run full campaigns are intentionally manual. The current three profiles are Tom's
+legacy entrypoint in the `kalman` folder, Tom's current `polyfit` entrypoint and Ali
+MPPI. Both current-main Tom entrypoints actually use `np.polyfit`; unused Kalman
+support files do not establish that an entrypoint uses Kalman. Harry has no official STP entrypoint. WSO requires its
 own explicitly established clock/configuration and is not silently enabled.
 Additional official entrypoints can declare their directory, entrypoint, extra
 support files and existing environment settings in the configuration. Preparation
@@ -274,8 +276,12 @@ separate 12-character SHA-256 identifier for the complete frozen controller bund
 Full values are retained in metadata/CSV fields. These SHA-256 identifiers are
 file-content hashes, not commit hashes.
 
-The source commit is the preparation checkout revision only when every frozen
-controller file matches that commit, allowing CRLF/LF differences explicitly.
+The source commit is the controller's explicit `source_commit`, or the preparation
+checkout revision when no source pin is supplied, only when every frozen controller
+file matches that commit, allowing CRLF/LF differences explicitly. A moved source
+folder can declare its original `source_directory` at that commit. Preserve
+`source_changes` for local adjustments; the origin is retained separately when
+the adjusted files cannot match it exactly.
 Git is used read-only to inspect committed blobs; no checkout or repository writes
 occur. The bundle includes supporting files, so a helper-only change changes its
 identity. Modified sources or unavailable local commit history produce an
