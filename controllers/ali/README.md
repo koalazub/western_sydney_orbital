@@ -30,7 +30,7 @@ uv run --locked wsorb tune --grid '{"cruise_fraction":[0.48,0.5,0.52]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 515 lines. The original 200-line target remains a guideline,
+The marked core is 524 lines. The original 200-line target remains a guideline,
 not a hard limit; the numeric test keeps a 600-line regression guard. The
 current default is the line-fit tracker, raw-radar guard, MPPI steering off, no
 risk inflation, no fixed samples, MPPI beeline, full governor, attitude control
