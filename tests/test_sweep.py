@@ -156,7 +156,8 @@ def test_pure_schedule_keeps_fresh_repetitions_consecutive_and_snapshots_peer_ha
     evidence = json.loads((output / "python.json").read_text())
     hashes = evidence["reviewed_example_hashes"]
     assert "controllers/bui/mvp/guidance.py" in hashes
-    assert "controllers/tom/avoidance.py" in hashes
+    assert "controllers/tom/kalman/avoidance.py" in hashes
+    assert "controllers/tom/polyfit/Controller.py" in hashes
     assert all(len(value) == 64 for value in hashes.values())
 
 

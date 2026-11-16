@@ -97,7 +97,7 @@ def saved_sweep(tmp_path):
             "uv_lock_sha256": "c" * 64,
             "reviewed_example_hashes": {
                 "controllers/bui/mvp/guidance.py": "a" * 64,
-                "controllers/tom/avoidance.py": "b" * 64,
+                "controllers/tom/kalman/avoidance.py": "b" * 64,
             },
             "package_sources": {
                 "src/wsorb/flight/control.py": {
@@ -490,7 +490,7 @@ def test_actual_engine_definition_and_hash_are_used_without_current_file_depende
         == "f" * 64
     )
     assert "controllers/bui/mvp/guidance.py" in bundle["comparison"]["source_hashes"]
-    assert "controllers/tom/avoidance.py" in bundle["comparison"]["source_hashes"]
+    assert "controllers/tom/kalman/avoidance.py" in bundle["comparison"]["source_hashes"]
 
 
 def test_new_output_is_deterministic_private_safe_and_has_actual_artifact_digests(

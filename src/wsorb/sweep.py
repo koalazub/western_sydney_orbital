@@ -244,7 +244,7 @@ def run_sweep(
             "uv_lock_sha256": hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
             "reviewed_example_hashes": {
                 str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-                for family in ("bui/mvp", "tom")
+                for family in ("bui/mvp", "tom/polyfit", "tom/kalman")
                 for path in sorted((root / "controllers" / family).glob("*.py"))
             },
             "analytics_definitions": (

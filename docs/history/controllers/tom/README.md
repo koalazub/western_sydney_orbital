@@ -8,4 +8,4 @@ These files are retained as reference. They are not current entrypoints.
   controller loop.
 
 The current controller is
-[`controllers/tom/Controller.py`](../../../../controllers/tom/Controller.py).
+[`controllers/tom/polyfit/Controller.py`](../../../../controllers/tom/polyfit/Controller.py).
