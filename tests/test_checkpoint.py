@@ -101,7 +101,7 @@ def test_versioned_worlds_are_full_normalized_distinct_and_preserve_archived_tea
     scenario = json.loads((root / "simulation/scenarios/phobos_escape.json").read_text())
     defaults = validate_experiment_settings(scenario["experiment_settings"])
     assert controller_world("across_phobos").settings == defaults
-    official = json.loads((root / "examples/official_comparison.json").read_text())
+    official = json.loads((root / "experiments/official_comparison.json").read_text())
     assert controller_world("official").preset == official["preset"]
     expected_official = deepcopy(defaults)
     expected_official["debris"].update(official["settings"]["debris"])

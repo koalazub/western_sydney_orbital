@@ -73,7 +73,7 @@ def test_invalid_design_rejected_before_creating_output(tmp_path, monkeypatch, f
 
 
 def test_official_comparison_config_is_a_valid_competition_sweep():
-    config = json.loads((ROOT / "examples/official_comparison.json").read_text())
+    config = json.loads((ROOT / "experiments/official_comparison.json").read_text())
     policies = {name: coast_factory for name in config["algorithms"]}
     validated = _configuration(config, SCENARIO, policies)
     assert validated["preset"] == "competition_reference"
@@ -92,7 +92,7 @@ def test_official_comparison_config_is_a_valid_competition_sweep():
 def test_ali_official_profile_alias_is_registered_for_published_configs():
     from runpy import run_path
 
-    policies = run_path(str(ROOT / "examples/flight_sweep.py"))["POLICIES"]
+    policies = run_path(str(ROOT / "experiments/flight_sweep.py"))["POLICIES"]
     assert "ali_official_profile" in policies
     assert "wso_official_profile" in policies
     assert policies["ali_official_profile"] is policies["wso_official_profile"]
@@ -155,8 +155,8 @@ def test_pure_schedule_keeps_fresh_repetitions_consecutive_and_snapshots_peer_ha
     assert all(row["sample_count"] == 0 for row in summaries)
     evidence = json.loads((output / "python.json").read_text())
     hashes = evidence["reviewed_example_hashes"]
-    assert "examples/bui/mvp/guidance.py" in hashes
-    assert "examples/tom/avoidance.py" in hashes
+    assert "controllers/bui/mvp/guidance.py" in hashes
+    assert "controllers/tom/avoidance.py" in hashes
     assert all(len(value) == 64 for value in hashes.values())
 
 

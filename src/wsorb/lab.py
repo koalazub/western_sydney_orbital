@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NoReturn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-NOTEBOOK_PATH = (PROJECT_ROOT / "notebooks/flight_lab.py").resolve()
+NOTEBOOK_PATH = (PROJECT_ROOT / "docs/labs/flight_lab.py").resolve()
 DEFAULT_PORT = 2718
 DEFAULT_TOKEN_FILE = Path(".devenv/wsorb-marimo.token")
 MAX_TOKEN_BYTES = 44
@@ -141,7 +141,7 @@ def launch_lab(*, port: str | int | None = None) -> NoReturn:
             "Marimo is optional. Start the lab with `uv run --locked --extra lab wsorb lab`"
         )
     if not NOTEBOOK_PATH.is_file():
-        raise ValueError("The repository's notebooks/flight_lab.py is missing")
+        raise ValueError("The repository's docs/labs/flight_lab.py is missing")
     command = lab_command(prepare_token_file(), port=port)
     os.chdir(PROJECT_ROOT)
     os.execvp(command[0], command)

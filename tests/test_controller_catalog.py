@@ -495,7 +495,7 @@ def test_published_basic_adapter_is_the_saved_original_math_not_harry_pd(velocit
 
     data = observation(2.0, velocity=velocity)
     data["shuttle"]["rotation"] = [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]
-    original = run_path(str(Path(__file__).resolve().parents[1] / "examples/flight_sweep.py"))[
+    original = run_path(str(Path(__file__).resolve().parents[1] / "experiments/flight_sweep.py"))[
         "official_basic_policy"
     ]({})
     controller = create_controller("official_basic_beeline")
@@ -705,7 +705,7 @@ def test_sources_load_only_allowlisted_math_without_bare_import_or_sdk_side_effe
     for profile in ("bui", "tom", "ali", "ali_mppi"):
         for module in load_math(profile).values():
             assert module.__name__.startswith(f"wsorb.controllers._source_{profile}_bounded.")
-            assert "examples" in Path(module.__file__).parts
+            assert "controllers" in Path(module.__file__).parts
             assert not any(
                 word in module.__name__ for word in ("context", "display", "Controller", "UserAPI")
             )
@@ -745,9 +745,9 @@ def test_catalog_import_is_lightweight_and_factory_has_no_arbitrary_script_setti
         )
     for controller_id in IDS:
         with pytest.raises(ValueError, match="Unsupported settings"):
-            create_controller(controller_id, {"script": "examples/tom/Controller.py"})
+            create_controller(controller_id, {"script": "controllers/tom/Controller.py"})
     with pytest.raises(ValueError, match="Unknown reviewed"):
-        create_controller("examples/tom/Controller.py")
+        create_controller("controllers/tom/Controller.py")
     with pytest.raises(ValueError):
         create_controller("basic_pd_radar", {"velocity_gain_s": True})
 

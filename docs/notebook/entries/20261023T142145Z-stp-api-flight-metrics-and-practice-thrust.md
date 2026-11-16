@@ -11,7 +11,7 @@ tags = ["escape_from_phobos", "api", "telemetry", "practice_limits"]
 
 ## Historical guidance, supersession recorded 2026-10-28
 
-The original research body below is preserved unchanged. Its Space practice-boost selector and profile-selection instructions are superseded. Beads `wso-sal.41.5`, completed 2026-10-24, removed live boost selection. Space and E now share the 0.5 m/s² reference command cap; normal angular requests remain capped at 0.05 rad/s². Local actuator gain is a separate calibration, not the retired boost selector or a change to those command limits. See the [current controls](../../docs/flight-lab.md#fly-manually), [live calibration](../../docs/flight-lab.md#edit-inputs-and-inspect-the-result) and [practice limits](../../docs/flight-lab.md#what-local-practice-does-not-prove). The boost acceptance criteria in `wso-sal.32` describe the old implementation, not the current UI.
+The original research body below is preserved unchanged. Its Space practice-boost selector and profile-selection instructions are superseded. Beads `wso-sal.41.5`, completed 2026-10-24, removed live boost selection. Space and E now share the 0.5 m/s² reference command cap; normal angular requests remain capped at 0.05 rad/s². Local actuator gain is a separate calibration, not the retired boost selector or a change to those command limits. See the [current controls](../../flight-lab.md#fly-manually), [live calibration](../../flight-lab.md#edit-inputs-and-inspect-the-result) and [practice limits](../../flight-lab.md#what-local-practice-does-not-prove). The boost acceptance criteria in `wso-sal.32` describe the old implementation, not the current UI.
 
 This reference checks the published official sources. It does not establish licensed-runtime execution or exact parity between this Bevy/Rapier practice model and Space Teams Pro.
 
@@ -68,7 +68,7 @@ The official actuator contains Isp 80 and g₀ 9.8, but its fuel accumulation us
 
 ## Local practice boundary
 
-The repository now also contains a separate [SDK-backed adapter](../../src/wsorb/stp_api.py) and [ControllerSystem entry point](../../examples/wso/stp_controller.py). Its `SetCommand`, public radar, frame-qualified state, pan/tilt and capture functions delegate to the actual corroborated `spaceteams` methods. It imports the licensed SDK only when connecting, fails clearly when it is unavailable and contains no fake SDK backend. The entry point requests public radar rows and sends a zero-command placeholder until a reviewed policy replaces it. Syntax, lint and pure vector-validation checks do not establish live STP execution. The [README](../../README.md) explains runtime configuration and the single-command-writer requirement.
+The repository now also contains a separate [SDK-backed adapter](../../../src/wsorb/stp_api.py) and [ControllerSystem entry point](../../../controllers/wso/stp_controller.py). Its `SetCommand`, public radar, frame-qualified state, pan/tilt and capture functions delegate to the actual corroborated `spaceteams` methods. It imports the licensed SDK only when connecting, fails clearly when it is unavailable and contains no fake SDK backend. The entry point requests public radar rows and sends a zero-command placeholder until a reviewed policy replaces it. Syntax, lint and pure vector-validation checks do not establish live STP execution. The [README](../../../README.md) explains runtime configuration and the single-command-writer requirement.
 
 These names belong to our WASM facade. They are not aliases for official SDK calls.
 

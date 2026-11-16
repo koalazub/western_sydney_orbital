@@ -14,7 +14,7 @@ Both profiles are registered in `src/wsorb/controllers/catalog.json` and can be
 selected in **Controller profiles** or run through the cross-team sweep:
 
 ```sh
-uv run --locked --extra lab python examples/flight_sweep.py --config examples/teammate_comparison.json --output runs/teammate-comparison-new
+uv run --locked --extra lab python experiments/flight_sweep.py --config experiments/teammate_comparison.json --output runs/teammate-comparison-new
 ```
 
 This policy does not model a complete stopping reserve or certify clearance. It

@@ -7,7 +7,7 @@ This repository contains the team's Python controllers, a local practice simulat
 ## Get started
 
 - Follow the [flight lab setup](docs/flight-lab.md#start-locally), then [fly manually](docs/flight-lab.md#fly-manually) or [run a controller](docs/flight-lab.md#run-a-controller).
-- Find each person's entrypoint and shared implementation in [the controller index](examples/README.md).
+- Find each person's entrypoint and shared implementation in [the controller index](controllers/README.md).
 - Inspect recorded flights in [Compare flights](https://western-sydney-orbital-api.western-sydney-orbital-worker.workers.dev/compare.html). It needs neither Python nor WebGPU.
 - Check the [competition reference and local differences](docs/competition-reference.md) and [scoring notes](docs/scoring.md) before interpreting results.
 
@@ -29,8 +29,8 @@ The [older teammate comparison](docs/flight-lab.md#recorded-teammate-flights) us
 
 ## Team records
 
-- [Meeting minutes](minutes/)
-- [Shared mission notebook](notebook/NOTEBOOK.md)
+- [Meeting minutes](docs/minutes/)
+- [Shared mission notebook](docs/notebook/NOTEBOOK.md)
 - [Controller theory and implementation review](docs/python-flight-theory.md)
 
 Historical Lunar SAR experiments and notebooks remain as reference material. Raw sweep outputs stay local under the ignored `runs/` directory; reviewed comparison datasets and charts live in [`docs/analytics/`](docs/analytics/).

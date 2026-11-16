@@ -1,7 +1,7 @@
 """Versioned launcher worlds and exact, read-only native receipt comparisons.
 
 The team settings come from runs/teammate-analytics-69/configuration.json.
-Official uses examples/official_comparison.json over the normalized scenario
+Official uses experiments/official_comparison.json over the normalized scenario
 defaults. Across Phobos records the current phobos_escape.json defaults.
 These definitions grant no setup or actuation permission.
 """

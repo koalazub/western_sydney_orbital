@@ -100,7 +100,7 @@ def _():
 
 @app.cell
 def _(json, lab_source_path, validate_experiment_settings):
-    scenario_source_path = lab_source_path.parents[1] / "simulation/scenarios/phobos_escape.json"
+    scenario_source_path = lab_source_path.parents[2] / "simulation/scenarios/phobos_escape.json"
     workspace_scenario = json.loads(scenario_source_path.read_text(encoding="utf-8"))
     default_world_settings = validate_experiment_settings(workspace_scenario["experiment_settings"])
     impact_defaults = dict(workspace_scenario["impact_ejecta_defaults"])
@@ -2829,7 +2829,7 @@ def _(
         _rows = experiment.history()
         _flight_dir = Path(flight_modules.__file__).resolve().parent
         _saved_notebook = lab_source_path.read_bytes()
-        _sources = {"notebooks/flight_lab.py, saved file at export": _saved_notebook}
+        _sources = {"docs/labs/flight_lab.py, saved file at export": _saved_notebook}
         _sources["simulation/scenarios/phobos_escape.json, saved file at export"] = (
             scenario_source_path.read_bytes()
         )

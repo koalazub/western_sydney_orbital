@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("marimo")
 pytest.importorskip("altair")
 
-LAB_PATH = Path(__file__).resolve().parents[1] / "notebooks" / "flight_lab.py"
+LAB_PATH = Path(__file__).resolve().parents[1] / "docs" / "labs" / "flight_lab.py"
 
 
 @pytest.fixture

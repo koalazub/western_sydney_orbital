@@ -52,7 +52,7 @@
     "profile": "17 m/s cruise, 0.25 + 0.25 bounded burns",
     "experimental": true,
     "target_seeking": true,
-    "source": "examples/bui/mvp"
+    "source": "controllers/bui/mvp"
   },
   {
     "id": "tom_kalman_velocity_mvp",
@@ -63,7 +63,7 @@
     "profile": "17 m/s cruise, gain 2, 0.5 m/s² governor",
     "experimental": true,
     "target_seeking": true,
-    "source": "examples/tom"
+    "source": "controllers/tom"
   },
   {
     "id": "ali_official_profile",
@@ -85,7 +85,7 @@
     "profile": "17 m/s cruise, functional planner plus emergency check",
     "experimental": true,
     "target_seeking": true,
-    "source": "examples/ali"
+    "source": "docs/history/controllers/ali"
   },
   {
     "id": "ali_mppi",
@@ -96,7 +96,7 @@
     "profile": "MPPI score cost, 48 x 40 samples",
     "experimental": true,
     "target_seeking": true,
-    "source": "examples/ali/controller_mppi.py"
+    "source": "controllers/ali/controller.py"
   },
   {
     "id": "official_basic_beeline",
@@ -118,6 +118,6 @@
     "profile": "Template, body +Z at 0.5 m/s²",
     "experimental": true,
     "target_seeking": false,
-    "source": "examples/tom/UserAPI.py"
+    "source": "docs/history/controllers/tom/UserAPI.py"
   }
 ]

@@ -17,7 +17,7 @@ def _():
     from wsorb.sweep import load_trial, run_sweep
     from wsorb.sweep_analysis import write_report
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     return UTC, csv, datetime, json, load_trial, mo, root, run_path, run_sweep, write_report
 
 
@@ -34,7 +34,7 @@ def _(mo):
     From the repository root, open:
 
     ```sh
-    just flight-notebook
+    devenv up lab
     ```
 
     Saved inspection and report rebuilding need no engine build. Run `just build`
@@ -52,8 +52,8 @@ def _(mo):
 @app.cell
 def _(json, root, run_path):
     # Edit these ordinary Python values, or replace the policy factories below.
-    policies = run_path(str(root / "examples/flight_sweep.py"))["POLICIES"]
-    config = json.loads((root / "examples/flight_sweep.json").read_text())
+    policies = run_path(str(root / "experiments/flight_sweep.py"))["POLICIES"]
+    config = json.loads((root / "experiments/flight_sweep.json").read_text())
     config["seeds"] = [11, 22]
     config["debris_counts"] = [0, 500]
     config["duration_s"] = 300.0
@@ -225,7 +225,7 @@ def _(mo):
     starts a simulator, and leaves datasets unchanged. Outside this notebook:
 
     ```sh
-    devenv shell uv run --locked --extra lab python examples/flight_sweep.py \
+    devenv shell uv run --locked --extra lab python experiments/flight_sweep.py \
       --analyze-only --output runs/EXISTING_SWEEP --trial trial-00002
     ```
 

@@ -27,11 +27,11 @@ meeting suggestion into a competition claim.
 
 | Owner | Contribution | Entrypoint / implementation |
 | --- | --- | --- |
-| Ali | Official-profile local controller and the 6/6 comparison | [`examples/ali/official_profile.py`](../examples/ali/official_profile.py), [`src/wsorb/controllers/official_profile.py`](../src/wsorb/controllers/official_profile.py), [`src/wsorb/flight/official_profile.py`](../src/wsorb/flight/official_profile.py) |
-| WSO | Portable STP checkpoint controller; local `baseline` / `body-axis` | [`examples/wso/stp_controller.py`](../examples/wso/stp_controller.py), [`src/wsorb/stp_policy.py`](../src/wsorb/stp_policy.py) |
-| Bui | Alpha-beta tracker and sidestep controller | [`examples/bui/`](../examples/bui/), adapter [`src/wsorb/controllers/_bui.py`](../src/wsorb/controllers/_bui.py) |
-| Tom | Kalman tracker and velocity governor; UserAPI template | [`examples/tom/`](../examples/tom/), adapter [`src/wsorb/controllers/_tom.py`](../src/wsorb/controllers/_tom.py) |
-| Harry | Basic PD/radar and coast baselines | [`examples/harry/README.md`](../examples/harry/README.md), [`src/wsorb/flight/control.py`](../src/wsorb/flight/control.py) |
+| Ali | Official-profile local controller and the 6/6 comparison | [`docs/history/controllers/ali/official_profile.py`](../history/controllers/ali/official_profile.py), [`src/wsorb/controllers/official_profile.py`](../../src/wsorb/controllers/official_profile.py), [`src/wsorb/flight/official_profile.py`](../../src/wsorb/flight/official_profile.py) |
+| WSO | Portable STP checkpoint controller; local `baseline` / `body-axis` | [`controllers/wso/stp_controller.py`](../../controllers/wso/stp_controller.py), [`src/wsorb/stp_policy.py`](../../src/wsorb/stp_policy.py) |
+| Bui | Alpha-beta tracker and sidestep controller | [`controllers/bui/`](../../controllers/bui/), adapter [`src/wsorb/controllers/_bui.py`](../../src/wsorb/controllers/_bui.py) |
+| Tom | Kalman tracker and velocity governor; UserAPI template | [`controllers/tom/`](../../controllers/tom/), adapter [`src/wsorb/controllers/_tom.py`](../../src/wsorb/controllers/_tom.py) |
+| Harry | Basic PD/radar and coast baselines | [`docs/controllers/harry.md`](../controllers/harry.md), [`src/wsorb/flight/control.py`](../../src/wsorb/flight/control.py) |
 
 The minutes do not name Ali or assign the qualifier submission. Ali is the
 named owner of the official-profile contribution in this repository. Ali is
@@ -56,7 +56,7 @@ explicit team decision.
 | R11 | Account for multi-thruster fuel, no ignition cost | Reference implementation | L1 proxy and `FuelProxy`; explicit exclusion of ignition/allocation |
 | R12 | Initial attitude bias only if justified | Reference implementation | `attitude_bias.py` optional shortest-arc planner and bounded angular request |
 | R13 | PID theory and saturation/overshoot | Reference implementation | `pid.py` plus `control_validation.py` synthetic metrics; no final gains |
-| R14 | Modular control/filter/tracking/planning | Implemented | Pure modules in `src/wsorb/flight/`; per-person entrypoints in `examples/` |
+| R14 | Modular control/filter/tracking/planning | Implemented | Pure modules in `src/wsorb/flight/`; per-person entrypoints in `controllers/` |
 | R15 | Demonstrate controllers and prediction | Partial | Local teammate and official comparisons published; live STP demo remains external |
 | R16 | Validate the cited ~41% diagonal penalty | Geometry validated | `maneuver_objective.py` yields `sqrt(2)-1`; not a measured propellant result |
 | R17 | Floor-related penalty | Labelled local proxy | `FloorPenaltyProxy` is configurable; the official formula and parameters are still unknown |
@@ -78,7 +78,7 @@ explicit team decision.
 | Optional attitude bias | `flight/attitude_bias.py` | 43 |
 | Event-camera and pinhole prototype | `flight/event_camera.py` | 22 |
 | PID/gamma/300 s synthetic validation | `flight/control_validation.py` | 14 |
-| STP official-profile source port | `stp_official.py`, `examples/ali/stp_official_profile.py` | 29 |
+| STP official-profile source port | `stp_official.py`, `docs/history/controllers/ali/stp_official_profile.py` | 29 |
 
 These are focused package tests, not the final whole-project result. The
 licenced-runtime probe and flight remain external.

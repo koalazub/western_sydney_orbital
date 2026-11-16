@@ -138,11 +138,11 @@ def _build_parser() -> argparse.ArgumentParser:
     nb_add.add_argument("--run", default=None, help="relative path to a run directory")
     nb_add.add_argument("--body", default="")
     nb_add.add_argument("--body-file", type=Path, default=None)
-    nb_add.add_argument("--notebook-dir", type=Path, default=Path("notebook"))
+    nb_add.add_argument("--notebook-dir", type=Path, default=Path("docs/notebook"))
     nb_index = notebook_sub.add_parser("index", help="regenerate NOTEBOOK.md")
-    nb_index.add_argument("--notebook-dir", type=Path, default=Path("notebook"))
+    nb_index.add_argument("--notebook-dir", type=Path, default=Path("docs/notebook"))
     nb_list = notebook_sub.add_parser("list", help="list entries")
-    nb_list.add_argument("--notebook-dir", type=Path, default=Path("notebook"))
+    nb_list.add_argument("--notebook-dir", type=Path, default=Path("docs/notebook"))
 
     return parser
 
@@ -296,7 +296,7 @@ def _cmd_campaign_run(args: argparse.Namespace) -> int:
         body.append("")
         body.append(f"Raw data: `{relative}/campaign.json`, `{relative}/results.csv`.")
         entry = add_entry(
-            "notebook",
+            "docs/notebook",
             title=title,
             author=args.author,
             kind="campaign",
@@ -304,7 +304,7 @@ def _cmd_campaign_run(args: argparse.Namespace) -> int:
             body="\n".join(body),
             run=relative,
         )
-        index = write_index("notebook")
+        index = write_index("docs/notebook")
         print(f"notebook: {entry} (index: {index})", file=sys.stderr if args.json else sys.stdout)
     return 0
 

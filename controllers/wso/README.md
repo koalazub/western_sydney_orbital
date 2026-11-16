@@ -50,7 +50,7 @@ for the full handoff, clock and single-writer requirements.
 The local policy that produced the 6/6 official-profile result is owned by Ali
 and lives in [`../ali/`](../ali/). It uses
 `src/wsorb/flight/official_profile.py` and is selected as
-`ali_official_profile` by [`../flight_sweep.py`](../flight_sweep.py), not by
+`ali_official_profile` by [`../../experiments/flight_sweep.py`](../../experiments/flight_sweep.py), not by
 the controller-profiles catalog. The old `wso_official_profile` key is a
 backward-compatible alias for the published comparison.
 

@@ -43,7 +43,7 @@ from wsorb.stp_policy import sample_from_stp_state
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "src/wsorb/stp_official.py"
-ENTRYPOINT = ROOT / "examples/ali/stp_official_profile.py"
+ENTRYPOINT = ROOT / "docs/history/controllers/ali/stp_official_profile.py"
 NEW_FILES = (MODULE, ENTRYPOINT, Path(__file__))
 
 

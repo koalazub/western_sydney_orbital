@@ -58,10 +58,10 @@ def _listed(root: Path, base: str, allowed: set[str] | None, suffix: str) -> lis
 
 
 def _index(root: Path) -> bytes:
-    links = ['<li><a href="notebook/NOTEBOOK.md">Notebook index</a></li>']
-    for entry in _listed(root, "notebook/entries", None, ".md"):
+    links = ['<li><a href="docs/notebook/NOTEBOOK.md">Notebook index</a></li>']
+    for entry in _listed(root, "docs/notebook/entries", None, ".md"):
         links.append(
-            f'<li><a href="notebook/entries/{html.escape(quote(entry.name, safe=""))}">'
+            f'<li><a href="docs/notebook/entries/{html.escape(quote(entry.name, safe=""))}">'
             f"{html.escape(entry.stem)}</a></li>"
         )
     runs = root / "runs"
@@ -102,17 +102,17 @@ class SharingHandler(BaseHTTPRequestHandler):
         elif decoded == "/":
             data, content_type = _index(self.root), "text/html; charset=utf-8"
         else:
-            match = re.fullmatch(r"/(notebook|runs)/(.+)", decoded)
+            match = re.fullmatch(r"/(docs/notebook|runs)/(.+)", decoded)
             if not match:
                 self.send_error(404)
                 return
             area, relative = match.groups()
             parts = relative.split("/")
-            if area == "notebook":
+            if area == "docs/notebook":
                 if parts == ["NOTEBOOK.md"]:
-                    path = _safe_file(self.root, ["notebook", "NOTEBOOK.md"])
+                    path = _safe_file(self.root, ["docs", "notebook", "NOTEBOOK.md"])
                 elif len(parts) == 2 and parts[0] == "entries" and parts[1].endswith(".md"):
-                    path = _safe_file(self.root, ["notebook", *parts])
+                    path = _safe_file(self.root, ["docs", "notebook", *parts])
                 else:
                     path = None
             elif len(parts) == 2 and CAMPAIGN_ID.fullmatch(parts[0]) and parts[1] in REPORT_FILES:

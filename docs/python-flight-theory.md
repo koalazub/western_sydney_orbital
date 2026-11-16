@@ -9,7 +9,7 @@ assumptions. It does not claim that every point in the minutes is complete.
 ## What the scripts execute
 
 ```text
-examples/flight_sweep.py -> POLICIES -> wsorb.sweep.run_sweep
+experiments/flight_sweep.py -> POLICIES -> wsorb.sweep.run_sweep
   -> fresh HeadlessSimulation and policy factory for each trial
   -> configure_flight -> public observation -> policy -> Decision
   -> paused native run_step -> next observation -> repeat
@@ -21,9 +21,9 @@ API and isolated Node headless adapter. That adapter loads the same built Rust/B
 WASM physics used by the browser, without a renderer. This is not a Python
 replacement plant, and it does not run the licensed STP runtime.
 
-The [historical HY script](../notebooks/20261028-MVP-HY/flight_sweep.py) maps
+The [historical HY script](labs/20261028-MVP-HY/flight_sweep.py) maps
 `basic_pd_radar` directly to `flight.control.basic_command`, plus a coast trial.
-The [current example](../examples/flight_sweep.py) uses `policy_factory` for that
+The [current example](../experiments/flight_sweep.py) uses `policy_factory` for that
 same numeric PD/radar law and exposes more profiles. Their default JSON files
 still request `far_side_l2`, 600 s, 0.5 s commands and basic/coast policies. Merely
 adding an official policy to `POLICIES` does not select it or change that preset.
@@ -267,7 +267,7 @@ active-braking assumption. The gate does not certify a future stop or unseen
 space.
 
 [`stp_official.py`](../src/wsorb/stp_official.py), used by
-[`examples/ali/stp_official_profile.py`](../examples/ali/stp_official_profile.py),
+[`docs/history/controllers/ali/stp_official_profile.py`](history/controllers/ali/stp_official_profile.py),
 is a separate source port. It combines capped beeline acceleration with radial
 repulsion based on closest range, margin and closing-rate lookahead. It has no
 local swept candidate gate or arrival-distance braking envelope. Its configured

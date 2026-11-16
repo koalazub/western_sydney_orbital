@@ -245,7 +245,7 @@ def run_sweep(
             "reviewed_example_hashes": {
                 str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                 for family in ("bui/mvp", "tom")
-                for path in sorted((root / "examples" / family).glob("*.py"))
+                for path in sorted((root / "controllers" / family).glob("*.py"))
             },
             "analytics_definitions": (
                 json.loads((root / "simulation/scenarios/flight_analytics.json").read_text())

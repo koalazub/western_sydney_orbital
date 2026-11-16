@@ -70,7 +70,7 @@ Keep one controller in charge. Manual thrust, pause, placement or reset can end 
 
 ### Choose a teammate profile
 
-The source entrypoint for each person is indexed in [examples/README.md](../examples/README.md).
+The source entrypoint for each person is indexed in [controllers/README.md](../controllers/README.md).
 
 Python runs on a teammate's machine, never on the hosted site. Hosting stays on Cloudflare Free. Use the local game or the [private room relay](#hosted-python-connection) to connect that Python runner to a browser flight.
 
@@ -294,7 +294,7 @@ The [controller steps](#run-a-controller) cover connecting, running and stopping
 
 Resilient Stop requests a guarded native release without clearing a newer manual command. If release cannot be confirmed, native expiry still bounds the old command. Use **P** or **Pause physics** to pause, and confirm that the clock has stopped. Select **Connect / Refresh** for read-only guidance again.
 
-For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI example is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; their original SDK entrypoints and displays remain in [`examples/`](../examples/).
+For teammate profiles, Harry's choices are the shared PD and coast baselines used by his sweep workflow. Tom's stock UserAPI template is labelled separately from his target-seeking MVP. Both teammate MVP adapters respect the command limits; current entrypoints and support modules live in [`controllers/`](../controllers/), and retired templates live under [`docs/history/controllers/`](history/controllers/README.md).
 
 Choose a catalog profile in the footer's quick launcher. **More options** opens teammate, world, seed, time budget and **Set up Python runner**; Python always runs on your machine and the hosted site never starts it. **Run flight** requires a ready game and an online, idle Python service. It queues the selected Python adapter and opens the native lander view. The orange trail with Debug guides enabled records actual lander positions. **Watch flight** returns to the scene after reopening the panel. The profile status and **Stop controller** remain below the scene when the panel closes. Stop requests release; it does not promise zero velocity or arrival.
 
@@ -428,7 +428,7 @@ Both official and historical-team metric supplements are hosted and use existing
 Reproduce the experiment and publish to new directories:
 
 ```sh
-uv run --locked --extra lab python examples/flight_sweep.py --config examples/teammate_comparison.json --output runs/scratch/teammate-comparison-new
+uv run --locked --extra lab python experiments/flight_sweep.py --config experiments/teammate_comparison.json --output runs/scratch/teammate-comparison-new
 uv run --locked wsorb scoreboard --input runs/scratch/teammate-comparison-new --output docs/analytics/teammate-comparison-new
 ```
 
@@ -438,7 +438,7 @@ Both outputs must be new directories. The [publisher](../src/wsorb/scoreboard.py
 
 To correct an existing generated publication, `uv run --locked wsorb scoreboard --input INPUT --output OUTPUT --refresh` verifies its current artifact digests before replacing generated files. It refuses changed files and leaves other files and raw evidence alone.
 
-Use `uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output RUN_DIRECTORY` to inspect saved sweep trials, or `uv run --locked --extra lab marimo edit notebooks/20261029-HEADLESS-EXPERIMENTS/usage.py` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
+Use `uv run --locked --extra lab python experiments/flight_sweep.py --analyze-only --output RUN_DIRECTORY` to inspect saved sweep trials, or `uv run --locked --extra lab marimo edit docs/labs/20261029-HEADLESS-EXPERIMENTS/usage.py` to open Harry's usage notebook. The sweep's authenticated headless client uses manual steps of at most one second; saved runs identify that mode separately from live leased-controller results. Selecting a saved trial does not overwrite its report or rewrite historical evidence.
 
 ## Save and share runs
 
@@ -456,7 +456,7 @@ Prepare downloads again if you need newer readings. History contains at most 2,0
 
 The game's **Details → Export** is a separate full-state JSON download. It includes world details the ship's sensors may not have observed. Do not use those hidden details to give a competition policy an unfair view of the debris.
 
-Add the setup, reason for the experiment, result and next question to our [shared mission notebook](../notebook/NOTEBOOK.md). Keep the exported run and saved code with it. Historical Lunar SAR and rover experiments remain references, not the current Phobos challenge. Use private screen sharing to demonstrate a run; separate local games do not share a physical world.
+Add the setup, reason for the experiment, result and next question to our [shared mission notebook](notebook/NOTEBOOK.md). Keep the exported run and saved code with it. Historical Lunar SAR and rover experiments remain references, not the current Phobos challenge. Use private screen sharing to demonstrate a run; separate local games do not share a physical world.
 
 ## What local practice does not prove
 
@@ -464,11 +464,11 @@ Our practice world uses simplified gravity, terrain, contact, fuel and damage mo
 
 The normal command request limits are 0.5 m/s² and 0.05 rad/s². Local thrust-strength controls, placement, pause/step controls and the look-ahead ray are experiment tools, not additional official SDK capabilities. The ray is a debugging aid, not radar or a route-safety guarantee. The planner uses public ship observations; missing radar readings do not mean that space is empty.
 
-Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [WSO controller entrypoint](../examples/wso/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
+Validate promising policies with the real licensed runtime and its sensors, actuators and scoring. The [SDK adapter](../src/wsorb/stp_api.py) and [WSO controller entrypoint](../controllers/wso/stp_controller.py) use authentic STP calls reviewed against the pinned official UserAPI and Controller sources. The local HTTP API is a separate transport, not a replacement `spaceteams` SDK. Local pause, step, fault injection and controller leases are not STP capabilities.
 
 ## Send a controller to a colleague
 
-Send `examples/wso/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
+Send `controllers/wso/stp_controller.py` with these five files from `src/wsorb` beside it: `stp_api.py`, `stp_policy.py`, `control_contract.py`, `maneuvers.py` and `tracking.py`. This subset does not import the local engine, `flight/` or the historical package. It targets Python 3.10+ syntax and requires compatible NumPy and the server's genuine SDK. Source checks do not prove SDK binary or interpreter compatibility.
 
 Keep the server's existing ControllerSystem launch arguments unchanged. Start with no policy configuration, or this disabled configuration selected by `WSORB_STP_POLICY_JSON`:
 
@@ -481,7 +481,7 @@ That runs a read-only SDK probe. It reports actual versions, resolved handles, f
 For an enabled checkpoint attempt, select `policy: "checkpoint_velocity"` in the reviewed configuration. Set an independently established `radar_clock_offset_s`, verify `checkpoint_radius_m` against the server's Scoring `KeepOutRadius_m`, and ensure this is the only jet-command writer. Select `body_axis_preference` explicitly for the candidate policy. Do not infer the radar offset from one reading or pass our policy options as SDK bootstrap arguments. The legacy PD/radar policy remains available for comparison.
 
 Ali's official-profile source port is
-[`examples/ali/stp_official_profile.py`](../examples/ali/stp_official_profile.py).
+[`docs/history/controllers/ali/stp_official_profile.py`](history/controllers/ali/stp_official_profile.py).
 Configure it with `WSORB_STP_OFFICIAL_FILE` or `WSORB_STP_OFFICIAL_JSON`; a
 missing configuration never connects or writes. Start with the read-only
 `{"schema":"wsorb.stp_official","schema_version":1,"enabled":false,"probe":true}`
@@ -491,13 +491,13 @@ The portable controller uses named reference frames, original measurement times 
 
 SDK state/radar reads and the two command writes are sequential. The script rechecks the actual clock after computation, but STP has no native decision lease here. Cleanup attempts real zeros only after explicit enabled control; it cannot guarantee a stop after process death, blocked calls or failed writes. A configured-radius observation is not an official scoring result or a physics freeze. Authentic licensed-server execution is still required. Missing SDK access fails clearly rather than returning substitute results.
 
-For technical details, use the [API and measurement reference](../notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
+For technical details, use the [API and measurement reference](notebook/entries/20261023T142145Z-stp-api-flight-metrics-and-practice-thrust.md), the adapter source and the official resources below. Check how each simulator defines directions and timestamps before moving a policy between them.
 
 ## Where to change code
 
 | File or folder | What belongs there |
 | --- | --- |
-| [`notebooks/flight_lab.py`](../notebooks/flight_lab.py) | Experiment controls, editable Python functions and analysis in Marimo. |
+| [`docs/labs/flight_lab.py`](labs/flight_lab.py) | Experiment controls, editable Python functions and analysis in Marimo. |
 | [`src/wsorb/flight/`](../src/wsorb/flight/) | Shared prediction, geometry, path-search and controller functions. |
 | [`src/wsorb/local_api.py`](../src/wsorb/local_api.py) | The notebook's connection to the actual local game. |
 | [`simulation/scenarios/`](../simulation/scenarios/) | Versioned default world and vehicle settings. |

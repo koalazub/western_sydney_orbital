@@ -12,7 +12,7 @@ core = load_math("ali_mppi")["core"]
 
 
 def test_competitor_region_stays_within_the_current_budget():
-    source = (ROOT / "examples/ali/controller_mppi.py").read_text(encoding="utf-8")
+    source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
     # Temporary allowance while the policy knobs are parameterized; optimize later.
     assert len(source[begin:].splitlines()) <= 250

@@ -38,7 +38,7 @@ def test_publication_digests_and_svg_graphs_match_the_committed_measurements():
 
 def test_every_published_pair_has_its_actual_native_metrics_and_matching_cohort():
     data = bundle()
-    config = json.loads((ROOT / "examples/teammate_comparison.json").read_text())
+    config = json.loads((ROOT / "experiments/teammate_comparison.json").read_text())
     comparison = data["comparison"]
     assert comparison["seeds"] == config["seeds"]
     assert comparison["repetitions"] == config["repetitions"] == 2
@@ -70,7 +70,10 @@ def test_guide_generated_table_and_graph_links_are_not_stale():
 
 def test_readme_guides_and_notebook_links_resolve_after_documentation_moves():
     documents = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
-    documents.extend(sorted((ROOT / "notebook").rglob("*.md")))
+    documents.extend(sorted((ROOT / "docs/notebook").rglob("*.md")))
+    documents.extend(sorted((ROOT / "docs/history").rglob("*.md")))
+    documents.extend(sorted((ROOT / "controllers").rglob("*.md")))
+    documents.extend(sorted((ROOT / "experiments").rglob("*.md")))
     for document in documents:
         for link in re.findall(r"\[[^\]\n]*\]\(([^)\s]+)\)", document.read_text()):
             url = urlsplit(link)
