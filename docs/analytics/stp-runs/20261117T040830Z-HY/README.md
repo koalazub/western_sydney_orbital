@@ -152,3 +152,7 @@ the authoritative configurations actually executed remain in each run's snapshot
 The separately authorized `ali_mppi_v2` comparison, native diagnostic evidence,
 source commit, design and execution status are in [ali-mppi-v2.md](ali-mppi-v2.md).
 This supplements the earlier frozen three-arm experiment.
+
+The separately authorized two-candidate matched addition is documented in
+[updated-candidates.md](updated-candidates.md). It adds `ali_mppi_v2` and
+`tom_polyfit_updated` without pooling or overwriting earlier controller versions.

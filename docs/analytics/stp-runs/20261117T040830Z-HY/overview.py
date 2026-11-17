@@ -22,7 +22,7 @@ def _():
 
     root = Path(__file__).resolve().parents[4]
     run_dir = root / "runs/stp-20261117T040830Z-HY-final-001"
-    _combined = root / "runs/stp-20261117T040830Z-HY-mppi-v2-combined-001"
+    _combined = root / "runs/stp-20261117T040830Z-HY-updated-candidates-combined-001"
     if (_combined / "attempts.csv").exists():
         run_dir = _combined
     with (run_dir / "attempts.csv").open(encoding="utf-8", newline="") as _stream:
@@ -198,6 +198,7 @@ def _(mo):
             "Same seeds scored by original and V2",
             "Same seeds scored by original and MPPI",
             "Same seeds scored by frozen and updated MPPI",
+            "Same seeds scored by bodge and upstream Polyfit",
         ],
         value="All scored flights per controller",
         label="Score comparison cohort",
@@ -236,11 +237,13 @@ def _(median, number, rows, score_cohort):
     _mode = score_cohort.value
     _included = _controllers
     if _mode == "Same seeds scored by original and V2":
-        _included = _controllers[:2]
+        _included = ["polyfit_bodge", "polyfit_bodge_v2"]
     elif _mode == "Same seeds scored by original and MPPI":
-        _included = [_controllers[0], _controllers[2]]
+        _included = ["polyfit_bodge", "ali_mppi"]
     if _mode == "Same seeds scored by frozen and updated MPPI":
         _included = [c for c in ["ali_mppi", "ali_mppi_v2"] if c in _controllers]
+    if _mode == "Same seeds scored by bodge and upstream Polyfit":
+        _included = [c for c in ["polyfit_bodge", "tom_polyfit_updated"] if c in _controllers]
     _common = set.intersection(*[_keys[c] for c in _included])
     _chosen = [
         r
@@ -649,6 +652,69 @@ def _(median, mo, number, rows, score_components):
         """),
             mo.ui.table(_summary, selection=None),
             mo.ui.table(_paired, selection=None) if _paired else mo.md("Awaiting matched results."),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(median, mo, number, rows):
+    _upstream = [r for r in rows if r["controller"] == "tom_polyfit_updated"]
+    _results = []
+    _details = []
+    for _reference in ["polyfit_bodge", "polyfit_bodge_v2"]:
+        _baseline = {(r["seed"], r["repetition"]): r for r in rows if r["controller"] == _reference}
+        _pairs = []
+        for _r in _upstream:
+            _a = _baseline.get((_r["seed"], _r["repetition"]))
+            if _a is None:
+                continue
+            _p = {
+                "reference": _reference,
+                "seed": _r["seed"],
+                "reference_outcome": _a["outcome"],
+                "upstream_outcome": _r["outcome"],
+            }
+            for _metric in ["official_score", "fuel_kg", "arrival_time_s", "damage_J"]:
+                _x, _y = number(_a[_metric]), number(_r[_metric])
+                _joint = _a["outcome"] == _r["outcome"] == "success"
+                _p[_metric] = (
+                    _y - _x
+                    if _x is not None and _y is not None and (_joint or _metric == "damage_J")
+                    else None
+                )
+            _pairs.append(_p)
+        _details.extend(_pairs)
+        for _metric in ["official_score", "fuel_kg", "arrival_time_s", "damage_J"]:
+            _values = [p[_metric] for p in _pairs if p[_metric] is not None]
+            _results.append(
+                {
+                    "reference": _reference,
+                    "metric_upstream_minus_reference": _metric,
+                    "paired_n": len(_values),
+                    "median_delta": median(_values),
+                    "mean_delta": sum(_values) / len(_values) if _values else None,
+                    "min_delta": min(_values, default=None),
+                    "max_delta": max(_values, default=None),
+                }
+            )
+    mo.vstack(
+        [
+            mo.md(f"""
+        ## Upstream Polyfit versus preserved bodge variants
+
+        Upstream flights available: **{len(_upstream)}/22**. `tom_polyfit_updated`
+        identifies Tom's main source at `7d757fe2c988`, last changed by
+        `8e2dc968d22f` (NaN/order-of-operations correction). It is separate from
+        both timing-corrected bodge variants; this is a whole-source comparison.
+        Differences are upstream minus reference. Damage uses available all-outcome
+        observations; score, fuel and time use jointly successful seeds. The outcome
+        table above discloses failures and scored coverage. No missing score is zero-filled.
+        """),
+            mo.ui.table(_results, selection=None),
+            mo.ui.table(_details, selection=None)
+            if _details
+            else mo.md("Awaiting upstream results."),
         ]
     )
     return
