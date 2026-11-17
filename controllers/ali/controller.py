@@ -688,18 +688,16 @@ def emergency_guard(
 ):
     policy = {**DEFAULT_POLICY, **(policy or {})}
     velocity = np.asarray(velocity, float)
+    margin = float(policy["emergency_margin_m"])
     items = []
+
+    def add(relative, rock_velocity, radius):
+        if np.linalg.norm(relative) <= policy["emergency_range_m"]:
+            items.append((relative, rock_velocity, float(radius) + float(ship_radius) + margin))
+
     if tracks is not None and position is not None and policy["guard_source"] in ("tracks", "both"):
         for track in tracks:
-            relative = np.asarray(track["p"], float) - position
-            if np.linalg.norm(relative) <= policy["emergency_range_m"]:
-                items.append(
-                    (
-                        relative,
-                        np.asarray(track["v"], float),
-                        float(track["r"]) + float(ship_radius) + policy["emergency_margin_m"],
-                    )
-                )
+            add(np.asarray(track["p"], float) - position, np.asarray(track["v"], float), track["r"])
     if policy["guard_source"] in ("raw", "both"):
         for row in rows:
             if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
@@ -713,14 +711,7 @@ def emergency_guard(
             ):
                 continue
             relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
-            if np.linalg.norm(relative) <= policy["emergency_range_m"]:
-                items.append(
-                    (
-                        relative,
-                        rock_velocity,
-                        0.5 * float(row[1, 2]) + float(ship_radius) + policy["emergency_margin_m"],
-                    )
-                )
+            add(relative, rock_velocity, 0.5 * float(row[1, 2]))
     if not items:
         return np.zeros(3), False
     relative, rock_velocity, keep_out = (np.array(values) for values in zip(*items, strict=True))
