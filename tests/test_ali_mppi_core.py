@@ -17,7 +17,7 @@ def sample_observation(position, velocity, target, damage=0.0):
         "velocity": np.asarray(velocity, float),
         "target": np.asarray(target, float),
         "body_x": np.array([1.0, 0.0, 0.0]),
-        "body_z": np.array([0.0, 0.0, 1.0]),
+        "thrust_axis": np.array([0.0, 0.0, 1.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": float(damage),
@@ -240,7 +240,7 @@ def test_terminal_coast_command_is_zero_inside_the_goal_band():
         "velocity": np.array([5.0, 0.0, 0.0]),
         "target": np.array([1200.0, 0.0, 0.0]),
         "body_x": np.array([1.0, 0.0, 0.0]),
-        "body_z": np.array([1.0, 0.0, 0.0]),
+        "thrust_axis": np.array([1.0, 0.0, 0.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": 0.0,
@@ -468,7 +468,7 @@ def test_launch_phase_clears_radially_before_cruise():
     assert record["phase"] != "launch"
 
 
-def test_launch_gate_blocks_main_thrust_until_body_z_aligns():
+def test_launch_gate_blocks_main_thrust_until_thrust_axis_aligns():
     state = {
         "burning": False,
         "attitude_hold": False,
@@ -477,14 +477,14 @@ def test_launch_gate_blocks_main_thrust_until_body_z_aligns():
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
-    observation["body_z"] = np.array([1.0, 0.0, 0.0])
+    observation["thrust_axis"] = np.array([1.0, 0.0, 0.0])
     body, angular, record = core.step(state, observation, [], 0.0, 0.1)
     assert record["phase"] == "launch"
     assert record["launch_gate_rad"] == 0.15
     assert record["launch_align_rad"] > 1.4
     assert np.allclose(body, 0.0)
     assert np.linalg.norm(angular) > 0.0
-    observation["body_z"] = np.array([0.0, 0.0, 1.0])
+    observation["thrust_axis"] = np.array([0.0, 0.0, 1.0])
     body, angular, record = core.step(state, observation, [], 0.1, 0.1)
     assert np.linalg.norm(body) > 0.4
     assert abs(body[0]) < 1e-6

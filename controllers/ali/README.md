@@ -48,7 +48,7 @@ uv run --locked wsorb tune --grid '{"cruise_speed_mps":[7.0,8.0,9.0]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-Attitude control and the launch gate track the lander's **+Z launch axis**;
+Attitude control and the launch gate track the lander's **+Z thrust axis**;
 `+X` remains the nose and capsule axis used for lateral collision geometry.
 Aligning `+X` to the launch direction tips a tail-lander onto its side.
 

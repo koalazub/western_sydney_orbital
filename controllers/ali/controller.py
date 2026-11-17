@@ -946,13 +946,13 @@ def plan(
     return controls[best, 0]
 
 
-def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
+def attitude(body_axis, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
     policy = {**DEFAULT_POLICY, **state.get("policy", {})}
     trace = diagnostics if diagnostics is not None else {}
     desired = unit(desired)
-    cross = np.cross(body_x, desired)
+    cross = np.cross(body_axis, desired)
     sine = np.linalg.norm(cross)
-    angle = np.arctan2(sine, float(np.clip(body_x @ desired, -1.0, 1.0)))
+    angle = np.arctan2(sine, float(np.clip(body_axis @ desired, -1.0, 1.0)))
     speed = np.linalg.norm(angular_velocity)
     held = state.get("attitude_hold", False)
     hold = angle <= (np.radians(2.0) if held else ATTITUDE_HOLD_RAD) and speed <= (
@@ -973,7 +973,7 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, di
     state["attitude_hold"] = bool(hold)
     if hold or np.linalg.norm(desired) < 1e-9:
         return np.zeros(3)
-    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, [0.0, 0.0, 1.0]))
+    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_axis, [0.0, 0.0, 1.0]))
     safe_rate = np.sqrt(
         2.0 * max_angular_accel * policy["attitude_brake_scale"] * max(angle - np.radians(0.5), 0.0)
     )
@@ -1000,7 +1000,7 @@ def telemetry(
     mode,
     gate,
     body_x,
-    body_z,
+    thrust_axis,
     target_direction,
     accel_world,
     accel_body,
@@ -1026,8 +1026,8 @@ def telemetry(
         "mode": mode,
         "gate": gate,
         "emergency": bool(emergency),
-        "target_align_rad": finite(angle(body_z, target_direction)),
-        "burn_align_rad": finite(angle(body_z, accel_world)),
+        "target_align_rad": finite(angle(thrust_axis, target_direction)),
+        "burn_align_rad": finite(angle(thrust_axis, accel_world)),
         "nose_align_rad": finite(angle(body_x, target_direction)),
         "accel_body_mps2": [finite(value) for value in accel_body],
         "speed_mps": finite(speed),
@@ -1134,11 +1134,11 @@ class GuidanceController:
     def step(self, obs, rows, now, dt, to_body=None):
         state = self.state
         policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
-        position, velocity, target, body_x, body_z = (
+        position, velocity, target, body_x, thrust_axis = (
             np.asarray(obs[key], float)
-            for key in ("position", "velocity", "target", "body_x", "body_z")
+            for key in ("position", "velocity", "target", "body_x", "thrust_axis")
         )
-        body_z = unit(body_z)
+        thrust_axis = unit(thrust_axis)
         max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
@@ -1280,7 +1280,7 @@ class GuidanceController:
             collision["side"] if self.collision_mode is CollisionMode.ESCAPE else nominal
         )
         alignment = (
-            np.arccos(float(np.clip(body_z @ desired, -1.0, 1.0)))
+            np.arccos(float(np.clip(thrust_axis @ desired, -1.0, 1.0)))
             if np.linalg.norm(desired) > 1e-9
             else 0.0
         )
@@ -1296,7 +1296,9 @@ class GuidanceController:
         gate = self._gate(self.phase, burning, acceleration, alignment, angular_velocity)
         trace = {}
         if policy["attitude_control"]:
-            angular = attitude(body_z, angular_velocity, desired, max_angular, dt, state, trace)
+            angular = attitude(
+                thrust_axis, angular_velocity, desired, max_angular, dt, state, trace
+            )
         else:
             angular = np.zeros(3)
             state["attitude_hold"] = False
@@ -1323,7 +1325,7 @@ class GuidanceController:
             "burn" if burning else "coast",
             gate,
             body_x,
-            body_z,
+            thrust_axis,
             desired,
             acceleration,
             body_accel,
@@ -1426,7 +1428,7 @@ while True:
     body_x = np.asarray(
         st.frames.FramedVector(np.array([1.0, 0.0, 0.0]), shuttleFrame).ExprIn(phobosFrame), float
     )
-    body_z = np.asarray(
+    thrust_axis = np.asarray(
         st.frames.FramedVector(np.array([0.0, 0.0, 1.0]), shuttleFrame).ExprIn(phobosFrame), float
     )
     mass = float(shuttle.getMass())
@@ -1436,7 +1438,7 @@ while True:
         "velocity": velocity,
         "target": target_position,
         "body_x": body_x,
-        "body_z": body_z,
+        "thrust_axis": thrust_axis,
         "angular_velocity": np.asarray(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame), float),
         "fuel": float(shuttle.GetParam(st.VarType.double, ["Stats", "FuelUsed"])),
         "damage": float(shuttle.GetParam(st.VarType.double, ["Stats", "Damage"])),
