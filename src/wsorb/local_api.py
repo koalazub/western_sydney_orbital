@@ -37,7 +37,7 @@ import numpy as np
 from . import diagnostics
 from .flight.control import reference_to_body
 
-DEFAULT_CONNECTION = Path(".devenv/wsorb-local.json")
+DEFAULT_CONNECTION = Path(".wsorb/wsorb-local.json")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_STEP_SECONDS = 1.0
 MAX_DEBRIS_COUNT = 100_000

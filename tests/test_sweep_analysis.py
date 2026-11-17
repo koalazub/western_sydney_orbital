@@ -558,7 +558,7 @@ def test_report_color_shape_dash_domains_and_cursor_stay_shared(tmp_path):
 
 
 def test_analyze_only_trial_does_not_read_config_or_start_simulator(tmp_path, monkeypatch, capsys):
-    example = Path(__file__).resolve().parents[1] / "examples/flight_sweep.py"
+    example = Path(__file__).resolve().parents[1] / "experiments/flight_sweep.py"
     main = run_path(str(example))["main"]
     calls = []
 

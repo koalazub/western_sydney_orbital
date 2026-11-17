@@ -29,9 +29,9 @@ runs/
 htmlcov/
 __marimo__/
 
-# Nix / direnv
+# Nix / direnv and local runtime state
 .direnv/
-.devenv/
+.wsorb/
 result
 result-*
 

@@ -186,7 +186,7 @@ def test_command_uses_the_canonical_notebook_and_only_a_password_file(tmp_path):
         "marimo",
         "--quiet",
         "edit",
-        str(ROOT / "notebooks/flight_lab.py"),
+        str(ROOT / "docs/labs/flight_lab.py"),
         "--host",
         "127.0.0.1",
         "--port",
@@ -229,18 +229,18 @@ def test_parser_and_help_do_not_start_an_editor_or_create_a_token(tmp_path):
     assert not token_file.exists()
     notebook = parser.parse_args(["notebook", "list"])
     assert notebook.notebook_command == "list"
-    assert notebook.notebook_dir == Path("notebook")
+    assert notebook.notebook_dir == Path("docs/notebook")
 
 
 def test_profile_setup_documents_local_python_and_native_uv_commands():
     local = (
-        "uv run --locked wsorb controllers serve --connection-file .devenv/wsorb-local.json --run"
+        "uv run --locked wsorb controllers serve --connection-file .wsorb/wsorb-local.json --run"
     )
-    room = "uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json"
-    relay = "uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run"
-    for path in ("docs/flight-lab.md", "examples/README.md", "worker/web/index.html"):
+    room = "uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json"
+    relay = "uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run"
+    for path in ("docs/flight-lab.md", "controllers/README.md", "worker/web/index.html"):
         source = (ROOT / path).read_text()
-        assert "devenv shell" in source
+        assert "nix develop" in source
         assert "WSORB_LAB=1 just local" in source
         assert "Cloudflare Free" in source
         for command in (local, room, relay):
@@ -476,7 +476,7 @@ def notebook_server(tmp_path_factory, real_marimo):
         target = workspace / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    connection = workspace / ".devenv/wsorb-local.json"
+    connection = workspace / ".wsorb/wsorb-local.json"
     process = subprocess.Popen(
         [node, "worker/scripts/local.mjs"],
         cwd=workspace,
@@ -566,7 +566,7 @@ def _assert_notebook_fallback(response, server):
     _assert_notebook_security_headers(response)
     assert response.headers.get_content_type() == "text/html"
     assert "Location" not in response.headers
-    assert "devenv up lab simulation" in body
+    assert "nix run .#game" in body and "nix run .#lab" in body
 
 
 @pytest.mark.parametrize("route", NOTEBOOK_ROUTES)

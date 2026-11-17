@@ -10,9 +10,9 @@ from wsorb.sharing import SharingHandler, _index, _safe_file
 
 
 def test_allowlisted_files_and_generated_index(tmp_path: Path) -> None:
-    (tmp_path / "notebook/entries").mkdir(parents=True)
-    (tmp_path / "notebook/NOTEBOOK.md").write_text("Notebook", encoding="utf-8")
-    (tmp_path / "notebook/entries/a.md").write_text("Entry", encoding="utf-8")
+    (tmp_path / "docs/notebook/entries").mkdir(parents=True)
+    (tmp_path / "docs/notebook/NOTEBOOK.md").write_text("Notebook", encoding="utf-8")
+    (tmp_path / "docs/notebook/entries/a.md").write_text("Entry", encoding="utf-8")
     (tmp_path / "private.md").write_text("private", encoding="utf-8")
     run = "20261022T022803Z-35a51684"
     (tmp_path / f"runs/{run}").mkdir(parents=True)
@@ -34,19 +34,19 @@ def test_allowlisted_files_and_generated_index(tmp_path: Path) -> None:
             assert response.read() == b"ok\n"
         with urlopen(base + "/") as response:
             index = response.read().decode()
-        assert 'href="notebook/entries/a.md"' in index
-        assert 'href="notebook/NOTEBOOK.md"' in index
+        assert 'href="docs/notebook/entries/a.md"' in index
+        assert 'href="docs/notebook/NOTEBOOK.md"' in index
         assert f'href="runs/{run}/summary.md"' in index
         assert "/runs/scratch" not in index
-        with urlopen(base + "/notebook/entries/a.md") as response:
+        with urlopen(base + "/docs/notebook/entries/a.md") as response:
             assert response.read() == b"Entry"
         with urlopen(base + f"/runs/{run}/summary.md") as response:
             assert response.read() == b"Report"
         # Tailscale Serve --set-path=/wsorb strips the mount prefix before proxying.
         # Relative links in the browser keep that prefix in the public URL.
         public_url = "https://host.example.ts.net/wsorb/"
-        assert public_url + "notebook/entries/a.md" == (
-            "https://host.example.ts.net/wsorb/notebook/entries/a.md"
+        assert public_url + "docs/notebook/entries/a.md" == (
+            "https://host.example.ts.net/wsorb/docs/notebook/entries/a.md"
         )
         for path in (
             "/.env",
@@ -56,8 +56,8 @@ def test_allowlisted_files_and_generated_index(tmp_path: Path) -> None:
             "/runs/.private/secret",
             "/runs/scratch/summary.md",
             f"/runs/{run}/../.env",
-            "/notebook/../.env",
-            "/notebook/entries/folder%5C..%5C..%5Cprivate.md",
+            "/docs/notebook/../.env",
+            "/docs/notebook/entries/folder%5C..%5C..%5Cprivate.md",
         ):
             try:
                 with urlopen(base + path):
@@ -97,5 +97,6 @@ def test_symlink_and_traversal_rejected(tmp_path: Path) -> None:
     notebook_target = tmp_path / "notebook-target"
     (notebook_target / "entries").mkdir(parents=True)
     (notebook_target / "entries/leak.md").write_text("private", encoding="utf-8")
-    (root / "notebook").symlink_to(notebook_target, target_is_directory=True)
+    (root / "docs").mkdir()
+    (root / "docs/notebook").symlink_to(notebook_target, target_is_directory=True)
     assert b"leak.md" not in _index(root)

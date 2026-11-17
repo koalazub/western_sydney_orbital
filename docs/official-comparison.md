@@ -11,7 +11,7 @@ example controller.
 
 The published run predates the owner designation and labels the same policy
 `wso_official_profile`. The current entrypoint is
-[`ali_official_profile`](../examples/ali/official_profile.py); the old sweep key
+[`ali_official_profile`](history/controllers/ali/official_profile.py); the old sweep key
 remains an alias so the published configuration still reproduces.
 
 ## Policies
@@ -63,7 +63,7 @@ The per-trial records and summary are the published result:
 - [Artifact checksums](analytics/official-comparison/manifest.json)
 
 The full interactive report is not committed because it embeds raw public
-observation traces. Regenerate it locally with `examples/flight_sweep.py --analyze-only` from a
+observation traces. Regenerate it locally with `experiments/flight_sweep.py --analyze-only` from a
 saved run.
 
 The archived `runs.csv` has zero sample counts and blank per-trial metrics even
@@ -127,15 +127,15 @@ The archived score fields, physical measurements and artifact checksums stay unc
 
 For one watched flight, choose **Fly this code** on a hosted comparison row. The game opens with that profile, world, seed and time budget selected, but it does not start Python. Python runs on your machine. The hosted site stays on Cloudflare Free and uses the existing authenticated room relay.
 
-Follow the [private-room setup](flight-lab.md#hosted-python-connection): inside `devenv shell`, create a room with `uv run --locked wsorb room create --connection-file .devenv/wsorb-room.json`, append its private fragment to the selected game's address, allow Python, and start `uv run --locked wsorb controllers serve --room-file .devenv/wsorb-room.json --run` on your machine. Keep the query parameters so the profile, world, seed and time budget stay selected. Keep the room link and file private. You can also use the [local game and runner](flight-lab.md#choose-a-teammate-profile).
+Follow the [private-room setup](flight-lab.md#hosted-python-connection): inside the Nix development shell, create a room with `uv run --locked wsorb room create --connection-file .wsorb/wsorb-room.json`, append its private fragment to the selected game's address, allow Python, and start `uv run --locked wsorb controllers serve --room-file .wsorb/wsorb-room.json --run` on your machine. Keep the query parameters so the profile, world, seed and time budget stay selected. Keep the room link and file private. You can also use the [local game and runner](flight-lab.md#choose-a-teammate-profile).
 
 **Run flight** becomes available after the game is ready and Python confirms it is online and idle. It queues the selected Python code and opens the lander view. Historical `wso_official_profile` links explicitly select `ali_official_profile`. This is a new live run on the current local engine, so asynchronous control timing can produce a different result from the saved fixed-step sweep.
 
-For a new matched sweep, run these from the repository root inside `devenv shell`:
+For a new matched sweep, run these from the repository root inside the Nix development shell:
 
 ```sh
 just build
-uv run --locked --extra lab python examples/flight_sweep.py --config examples/official_comparison.json --output runs/official-comparison-new
+uv run --locked --extra lab python experiments/flight_sweep.py --config experiments/official_comparison.json --output runs/official-comparison-new
 uv run --locked python -m wsorb.official_comparison_chart --summary docs/analytics/official-comparison/summary.csv --output docs/analytics/official-comparison/performance.svg --manifest docs/analytics/official-comparison/manifest.json
 ```
 
@@ -147,14 +147,14 @@ policy sources, configuration and every trial trace in that directory. To
 regenerate the HTML from saved trials, run:
 
 ```sh
-uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output runs/official-comparison-new
+uv run --locked --extra lab python experiments/flight_sweep.py --analyze-only --output runs/official-comparison-new
 ```
 
 To inspect a specific repetition without replacing its saved report, provide a
 new HTML file with `--report-file`:
 
 ```sh
-uv run --locked --extra lab python examples/flight_sweep.py --analyze-only --output runs/official-comparison-2026-11-02 --trial trial-00012 --report-file runs/seed-101-review.html
+uv run --locked --extra lab python experiments/flight_sweep.py --analyze-only --output runs/official-comparison-2026-11-02 --trial trial-00012 --report-file runs/seed-101-review.html
 ```
 
 The new report reads existing traces only. It refuses an existing output file.
