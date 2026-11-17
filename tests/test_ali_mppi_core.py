@@ -467,6 +467,28 @@ def test_launch_phase_clears_radially_before_cruise():
     assert record["phase"] != "launch"
 
 
+def test_launch_gate_blocks_main_thrust_until_body_x_aligns():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    observation["body_x"] = np.array([1.0, 0.0, 0.0])
+    body, angular, record = core.step(state, observation, [], 0.0, 0.1)
+    assert record["phase"] == "launch"
+    assert record["launch_gate_rad"] == 0.15
+    assert record["launch_align_rad"] > 1.4
+    assert np.allclose(body, 0.0)
+    assert np.linalg.norm(angular) > 0.0
+    observation["body_x"] = np.array([0.0, 0.0, 1.0])
+    body, _, record = core.step(state, observation, [], 0.1, 0.1)
+    assert np.linalg.norm(body) > 0.4
+    assert abs(body[0]) < 1e-6
+
+
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
     calls = []
 
