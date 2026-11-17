@@ -185,7 +185,7 @@ class Tracker:
             ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
             return dot > 0.0 and ang < CONE_ANGLE
 
-        radar_items = [r for r in radar_items if debris_in_cone(r)]
+        radar_items = [r for r in radar_items if debris_in_cone(r[0])]
 
         for item in radar_items:
             # The radar gives positions relative to the shuttle. Add the shuttle's own
