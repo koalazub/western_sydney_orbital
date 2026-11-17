@@ -100,7 +100,7 @@ def status(msg: str, key: str = "Status") -> None:
 
 
 """
-Get angular velocity from two quaternions representing the orientation of 
+Get angular velocity from two quaternions representing the orientation of
 an object at time (t0) and (t0 + dt). Assumes scalar-last quaternions.
 """
 
@@ -174,7 +174,19 @@ class Tracker:
         self.gate = gate  # sightings closer than this (m) count as the same rock
         self.max_age = max_age  # forget rocks not seen for this long (s)
 
-    def update(self, radar_items, shuttle_position, now):
+    def update(self, radar_items, shuttle_position, now, target_position):
+
+        target_vec = target_position - shuttle_position
+        CONE_ANGLE: float = np.radians(45.0)
+
+        def debris_in_cone(debris_pos) -> bool:
+            debris_vec = debris_pos - shuttle_position
+            dot = np.dot(debris_vec, target_vec)
+            ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
+            return dot > 0.0 and ang < CONE_ANGLE
+
+        radar_items = [r for r in radar_items if debris_in_cone(r[0])]
+
         for item in radar_items:
             # The radar gives positions relative to the shuttle. Add the shuttle's own
             # position so that all sightings share one fixed frame.
@@ -434,7 +446,7 @@ while not exit_flag:
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start)
+    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start, targetLoc)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)  # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)

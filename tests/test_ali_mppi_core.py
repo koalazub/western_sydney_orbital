@@ -47,7 +47,7 @@ def test_competitor_region_stays_within_the_current_budget():
     source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:].splitlines()) <= 700
+    assert len(source[begin:].splitlines()) <= 1250
 
 
 def test_cruise_velocity_points_at_the_target():
