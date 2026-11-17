@@ -105,6 +105,15 @@ def command(controller, value):
     return controller.command(sample(value), value["radar"], now_elapsed_time_s=value["time_s"])
 
 
+def test_tom_polyfit_accepts_only_the_benchmark_cruise_setting():
+    controller = create_controller("tom_polyfit_mvp", {"cruise_speed_mps": 14})
+    assert controller.planner.cruise_speed == 14.0
+    with pytest.raises(ValueError):
+        create_controller("tom_polyfit_mvp", {"other": 1})
+    with pytest.raises(ValueError):
+        create_controller("tom_polyfit_mvp", {"cruise_speed_mps": 0})
+
+
 def test_shared_json_catalog_is_exact_detached_safe_and_grouped_by_name():
     expected = json.loads(files("wsorb.controllers").joinpath("catalog.json").read_text())
     entries = catalog()

@@ -71,7 +71,7 @@
         "owner": "Tom",
         "contributor": "Tom; WSO native polyfit port",
         "description": "Native read-only port of Tom's current 8 m/s polyfit entrypoint: polyfit rock tracker, velocity-space sideways avoider, gain-50 burn governor and goal-corridor coast planner. The STP transport is replaced by the native observation contract; Tom's source file is unchanged. No docking or certified clearance claim.",
-        "profile": "8 m/s polyfit, goal corridor 15 m, 50 s velocity avoider",
+        "profile": "8 m/s polyfit default; cruise_speed_mps configurable for matched-speed benchmarks",
         "experimental": true,
         "target_seeking": true,
         "source": "controllers/tom/polyfit/Controller.py"

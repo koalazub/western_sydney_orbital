@@ -220,12 +220,14 @@ class GoalPlanner:
 
 
 class TomPolyfitController(ExperimentalController):
-    def __init__(self, metadata):
+    def __init__(self, metadata, settings=None):
         super().__init__(metadata)
+        settings = settings if isinstance(settings, dict) else {}
+        cruise = float(settings.get("cruise_speed_mps", 8.0))
         self.tracker = Tracker()
         self.avoider = Avoider()
         self.governor = BurnGovernor(gain=50.0)
-        self.planner = GoalPlanner(cruise_speed=8.0)
+        self.planner = GoalPlanner(cruise_speed=cruise)
         self.target_position = None
 
     def _ingest(self, epoch, rows):
