@@ -32,14 +32,22 @@ the offset cap; three hits or damage above `collision_safe_damage_j` also reduce
 cruise speed. Offsets are capped so the ship still arrives inside the goal
 radius.
 
+Aged radar rows are reconstructed from a short shuttle-position history before
+tracking; if the measurement epoch is outside that history, the current position
+is used. The collision detour side is scored by predicting both parallel routes
+against fitted tracks over `collision_side_horizon_s` with
+`collision_side_margin_m`. The previous side is kept only when its predicted
+clearance is within `collision_side_switch_m` of the safer side; hit parity is no
+longer used.
+
 ```sh
 uv run --locked wsorb fuzz --seeds 100-107 --workers 4
 uv run --locked wsorb tune --grid '{"cruise_speed_mps":[7.0,8.0,9.0]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 1078 lines. The original 200-line target remains a guideline,
-not a hard limit; the numeric test keeps a 1100-line regression guard. The
+The marked core is 1232 lines. The original 200-line target remains a guideline,
+not a hard limit; the numeric test keeps a 1250-line regression guard. The
 current default is the line-fit tracker, fitted-track guard, MPPI steering on,
 no risk inflation, no fixed samples, MPPI beeline, full governor, attitude
 control on and an 8 m/s cruise. The guard prefers a lateral dodge whenever it

@@ -114,6 +114,9 @@ DEFAULT_POLICY = {
     "collision_escape_s": 0.6,
     "collision_detour_s": 120.0,
     "collision_offset_m": 25.0,
+    "collision_side_margin_m": 8.0,
+    "collision_side_horizon_s": 20.0,
+    "collision_side_switch_m": 2.0,
     "collision_safe_damage_j": 104600.0,
     "collision_slow_fraction": 0.8,
 }
@@ -285,6 +288,59 @@ class KalmanTracker:
         return tracks
 
 
+SHUTTLE_HISTORY_S = 10.0
+SHUTTLE_HISTORY_LIMIT = 200
+SHUTTLE_HISTORY_EDGE_S = 0.5
+
+
+def record_shuttle_state(state, now, position):
+    """Keep recent shuttle positions so aged radar rows can be reconstructed."""
+    history = state.setdefault("shuttle_history", [])
+    position = np.asarray(position, float)
+    if history and now < history[-1][0]:
+        history.clear()
+    history.append((float(now), position.copy()))
+    cutoff = float(now) - SHUTTLE_HISTORY_S
+    state["shuttle_history"] = [entry for entry in history if entry[0] >= cutoff][
+        -SHUTTLE_HISTORY_LIMIT:
+    ]
+    return state["shuttle_history"]
+
+
+def shuttle_position_at(history, epoch, fallback):
+    """Interpolate the shuttle position at a radar measurement epoch."""
+    if not history:
+        return fallback
+    if epoch <= history[0][0]:
+        return history[0][1] if history[0][0] - epoch <= SHUTTLE_HISTORY_EDGE_S else fallback
+    if epoch >= history[-1][0]:
+        return history[-1][1] if epoch - history[-1][0] <= SHUTTLE_HISTORY_EDGE_S else fallback
+    for (time0, position0), (time1, position1) in zip(history, history[1:], strict=False):
+        if time0 <= epoch <= time1:
+            span = float(time1 - time0)
+            return (
+                position1.copy()
+                if span <= 1e-9
+                else position0 + (position1 - position0) * ((epoch - time0) / span)
+            )
+    return fallback
+
+
+def reconstruct_measurements(rows, history, position):
+    """Rebase each radar row from its measurement epoch to the current position."""
+    position = np.asarray(position, float)
+    adjusted = []
+    for row in rows:
+        if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
+            adjusted.append(row)
+            continue
+        measured_at = shuttle_position_at(history, float(row[2, 0]), position)
+        rebased = row.copy()
+        rebased[0] = row[0] + measured_at - position
+        adjusted.append(rebased)
+    return adjusted
+
+
 def update_estimates(state, rows, position, velocity, now, policy):
     if policy["tracker"] == "kalman":
         tracker = state.setdefault("kalman", KalmanTracker())
@@ -322,14 +378,78 @@ def collision_check(state, velocity, damage, dt, policy):
     return hit, energy, change
 
 
-def collision_route(
-    state, position, velocity, target, body_x, rows, now, energy, change, max_accel, policy
+def route_lateral(route, body_x):
+    """A stable unit vector perpendicular to the route."""
+    axis = body_x if abs(float(route @ body_x)) < 0.9 else np.array([0.0, 0.0, 1.0])
+    lateral = np.cross(route, axis)
+    if np.linalg.norm(lateral) < 1e-6:
+        lateral = np.cross(route, [0.0, 0.0, 1.0])
+    if np.linalg.norm(lateral) < 1e-6:
+        lateral = np.array([0.0, 1.0, 0.0])
+    return unit(lateral)
+
+
+def detour_clearance(position, target, side, offset, tracks, speed, horizon, margin):
+    """Minimum predicted clearance along a straight detour to target + side*offset."""
+    detour = np.asarray(target, float) + np.asarray(side, float) * float(offset)
+    delta = detour - position
+    distance = float(np.linalg.norm(delta))
+    if distance < 1e-9 or not tracks:
+        return None
+    direction = delta / distance
+    duration = min(float(horizon), distance / max(float(speed), 1.0))
+    if duration <= 0.0:
+        return None
+    times = np.linspace(0.0, duration, 12)
+    ship = np.asarray(position, float) + direction[None, :] * (float(speed) * times)[:, None]
+    best = np.inf
+    for track in tracks:
+        future = (
+            np.asarray(track["p"], float)[None, :]
+            + np.asarray(track["v"], float)[None, :] * times[:, None]
+        )
+        clearance = np.linalg.norm(future - ship, axis=1) - (float(track["r"]) + float(margin))
+        best = min(best, float(clearance.min()))
+    return best
+
+
+def choose_collision_side(
+    route, position, target, body_x, tracks, velocity, offset, previous_side, policy
 ):
-    hits = int(state.get("collision_hits", 0)) + 1
-    state["collision_hits"] = hits
-    route = unit(np.asarray(target, float) - position)
-    valid = [np.asarray(row[0], float) for row in rows if np.all(np.isfinite(row))]
-    closest = min(valid, key=np.linalg.norm, default=None)
+    """Score both detour sides by predicted clearance; keep continuity when close."""
+    if not tracks:
+        return None, None, None, "fallback"
+    lateral = route_lateral(route, body_x)
+    candidates = (lateral, -lateral)
+    speed = max(float(np.linalg.norm(velocity)), 1.0)
+    scores = [
+        detour_clearance(
+            position,
+            target,
+            side,
+            offset,
+            tracks[:30],
+            speed,
+            policy["collision_side_horizon_s"],
+            policy["collision_side_margin_m"],
+        )
+        for side in candidates
+    ]
+    if any(score is None for score in scores):
+        return None, None, None, "fallback"
+    best = int(np.argmax(scores))
+    reason = "prediction"
+    if previous_side is not None:
+        previous = np.asarray(previous_side, float)
+        previous_index = 0 if float(previous @ lateral) >= 0.0 else 1
+        if scores[previous_index] >= scores[best] - policy["collision_side_switch_m"]:
+            best = previous_index
+            reason = "continuity"
+    return candidates[best], float(scores[best]), float(scores[1 - best]), reason
+
+
+def fallback_collision_side(change, closest, velocity, route, body_x, previous_side):
+    """Geometry-only side choice used before any fitted track exists."""
     if np.linalg.norm(change) > 0.05:
         escape = unit(change)
     elif closest is not None and np.linalg.norm(closest) > 1e-6:
@@ -348,12 +468,23 @@ def collision_route(
     side = unit(lateral)
     if closest is not None and abs(float(closest @ side)) > 1e-6:
         side = -np.sign(float(closest @ side)) * side
-    previous_side = state.get("collision_side")
-    if hits % 2 == 0 and previous_side is not None:
-        alternate = -previous_side
-        if closest is None or float(closest @ alternate) <= 0.0:
-            side = alternate
-    state["collision_side"] = side.copy()
+    if previous_side is not None and (closest is None or float(closest @ previous_side) <= 0.0):
+        side = np.asarray(previous_side, float).copy()
+    return side
+
+
+def collision_route(
+    state, position, velocity, target, body_x, rows, tracks, now, energy, change, max_accel, policy
+):
+    hits = int(state.get("collision_hits", 0)) + 1
+    state["collision_hits"] = hits
+    route = unit(np.asarray(target, float) - position)
+    if np.linalg.norm(route) < 1e-9:
+        route = unit(body_x)
+    if np.linalg.norm(route) < 1e-9:
+        route = np.array([1.0, 0.0, 0.0])
+    valid = [np.asarray(row[0], float) for row in rows if np.all(np.isfinite(row))]
+    closest = min(valid, key=np.linalg.norm, default=None)
     impulse_s = float(policy["collision_escape_s"]) * (1.0 + 0.5 * (hits - 1))
     speed = max(float(np.linalg.norm(velocity)), 1.0)
     time_to_go = float(np.linalg.norm(np.asarray(target, float) - position)) / speed
@@ -361,17 +492,31 @@ def collision_route(
     offset = min(float(policy["collision_offset_m"]), desired_offset)
     if desired_offset > offset and time_to_go > 1e-6:
         impulse_s = offset / (float(max_accel) * time_to_go)
+    previous_side = state.get("collision_side")
+    side, score, other, reason = choose_collision_side(
+        route,
+        position,
+        target,
+        body_x,
+        tracks,
+        velocity,
+        offset,
+        previous_side,
+        policy,
+    )
+    if side is None:
+        side = fallback_collision_side(change, closest, velocity, route, body_x, previous_side)
+        reason = "fallback"
+    state["collision_side"] = side.copy()
     state["collision"] = {
-        "point": np.asarray(position, float).copy(),
-        "escape": escape,
         "side": side,
         "offset": float(offset),
         "impulse_s": impulse_s,
         "until": float(now) + float(policy["collision_detour_s"]),
         "hits": hits,
-        "impact_j": float(energy),
-        "impact_mps": float(np.linalg.norm(change)),
-        "time": float(now),
+        "side_score": score,
+        "side_other": other,
+        "side_reason": reason,
     }
     state["collision_escape_until"] = float(now) + impulse_s
     state["last_impact_j"], state["last_impact_mps"] = float(energy), float(np.linalg.norm(change))
@@ -941,6 +1086,9 @@ class GuidanceController:
         max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
+        history = record_shuttle_state(state, now, position)
+        rows = reconstruct_measurements(rows, history, position)
+        tracks = update_estimates(state, rows, position, velocity, now, policy)
 
         hit, energy, change = collision_check(state, velocity, damage, dt, policy)
         collision = active_collision(state, now)
@@ -952,6 +1100,7 @@ class GuidanceController:
                 target,
                 body_x,
                 rows,
+                tracks,
                 now,
                 energy,
                 change,
@@ -966,7 +1115,6 @@ class GuidanceController:
             else target
         )
         state["steer_target"] = steer_target
-        tracks = update_estimates(state, rows, position, velocity, now, policy)
 
         plan_active = bool(policy["plan_steering"] and policy["avoidance"] == "mppi")
         if plan_active:
@@ -1111,6 +1259,13 @@ class GuidanceController:
             collision_impact_j=finite(state.get("last_impact_j", 0.0)),
             collision_impact_mps=finite(state.get("last_impact_mps", 0.0)),
             collision_offset_m=finite(collision["offset"]) if collision is not None else None,
+            collision_side_clearance_m=(
+                finite(collision.get("side_score")) if collision is not None else None
+            ),
+            collision_side_other_m=(
+                finite(collision.get("side_other")) if collision is not None else None
+            ),
+            collision_side_reason=collision.get("side_reason") if collision is not None else None,
         )
         record.update(
             tracker=policy["tracker"],

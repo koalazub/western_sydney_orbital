@@ -86,6 +86,9 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "collision_escape_s",
             "collision_detour_s",
             "collision_offset_m",
+            "collision_side_margin_m",
+            "collision_side_horizon_s",
+            "collision_side_switch_m",
             "collision_safe_damage_j",
             "collision_slow_fraction",
         }
@@ -113,6 +116,8 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "collision_escape_s",
             "collision_detour_s",
             "collision_offset_m",
+            "collision_side_margin_m",
+            "collision_side_horizon_s",
             "collision_slow_fraction",
         }
         booleans = {"plan_steering", "risk_inflation", "mppi_fixed_samples", "attitude_control"}
