@@ -1145,6 +1145,7 @@ class GuidanceController:
         damage = float(obs["damage"])
         history = record_shuttle_state(state, now, position)
         rows, radar_offset = align_radar_rows(state, rows, now)
+        raw_rows = rows
         rows = reconstruct_measurements(rows, history, position)
         radar_newest_age = now - max(
             (float(row[2, 0]) for row in rows if np.all(np.isfinite(row))),
@@ -1250,7 +1251,7 @@ class GuidanceController:
 
         emergency_accel, emergency_active = emergency_guard(
             velocity,
-            rows,
+            raw_rows,
             now,
             max_accel,
             policy,
