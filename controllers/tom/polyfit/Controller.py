@@ -175,17 +175,33 @@ class Tracker:
         self.max_age = max_age  # forget rocks not seen for this long (s)
 
     def update(self, radar_items, shuttle_position, now, target_position):
+        TRACKER_DEBUG = False
 
+        CONE_ANGLE: float = np.radians(30.0)
+        CORE_BUBBLE: float = 50 # (m)
         target_vec = target_position - shuttle_position
-        CONE_ANGLE: float = np.radians(45.0)
 
-        def debris_in_cone(debris_pos) -> bool:
-            debris_vec = debris_pos - shuttle_position
-            dot = np.dot(debris_vec, target_vec)
-            ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
+        ROCKS_FROM_RADAR = len(radar_items)
+        ETC = f"tv: {target_vec}\n"
+        if TRACKER_DEBUG:
+            for r in radar_items:
+                debris_pos = r[0]
+                dot = np.dot(target_vec, debris_pos)
+                ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
+                ETC += f"({debris_pos}, {dot}, {np.degrees(ang)})\n"
+
+
+        def debris_in_cone(debris) -> bool:
+            # debris_pos already relative
+            debris_pos = debris[0]
+            if debris[1][0] < CORE_BUBBLE:
+                return True
+            dot = np.dot(target_vec, debris_pos)
+            ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
             return dot > 0.0 and ang < CONE_ANGLE
 
-        radar_items = [r for r in radar_items if debris_in_cone(r[0])]
+        radar_items = [r for r in radar_items if debris_in_cone(r)]
+        ROCKS_IN_FRUSTUM = len(radar_items)
 
         for item in radar_items:
             # The radar gives positions relative to the shuttle. Add the shuttle's own
@@ -198,6 +214,8 @@ class Tracker:
             else:
                 rock.add_sighting(position, diameter, time)
         self.rocks = [r for r in self.rocks if now - r.last_seen < self.max_age]
+        if TRACKER_DEBUG:
+            return (ROCKS_FROM_RADAR, ROCKS_IN_FRUSTUM, ETC)
 
     def find_match(self, position, diameter, time):
         """The closest existing rock that is a similar size and within the gate, else None."""
@@ -446,7 +464,7 @@ while not exit_flag:
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start, targetLoc)
+    tracker.update(GetNearestDebrisLocations(500), loc, t_from_start, targetLoc)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)  # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)
