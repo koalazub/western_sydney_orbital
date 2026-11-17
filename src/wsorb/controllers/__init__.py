@@ -60,7 +60,11 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "emergency_margin_m",
             "plan_steering",
             "plan_risk_threshold",
+            "plan_horizon_s",
+            "goal_corridor_start_m",
+            "goal_corridor_stop_m",
             "risk_weight",
+            "plan_filter_alpha",
             "switch_weight",
             "attitude_brake_scale",
             "tracker",
@@ -70,6 +74,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "risk_max_inflate",
             "mppi_fixed_samples",
             "avoidance",
+            "avoidance_range_m",
             "governor",
             "governor_gain",
             "governor_start_err",
@@ -81,6 +86,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "avoider_max_inflate",
             "avoider_lag_s",
             "avoider_w_aim",
+            "avoider_slow_penalty",
             "avoider_switch_margin",
             "collision_damage_j",
             "collision_jump_mps",
@@ -104,8 +110,9 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "arrival_radius_m",
             "cruise_fraction",
             "cruise_speed_mps",
-            "launch_clearance_m",
             "launch_speed_mps",
+            "plan_horizon_s",
+            "avoidance_range_m",
             "coast_speed_mps",
             "risk_weight",
             "switch_weight",
@@ -113,7 +120,6 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "governor_gain",
             "avoider_margin",
             "avoider_horizon",
-            "avoider_lag_s",
             "avoider_w_aim",
             "collision_jump_mps",
             "collision_escape_s",
@@ -127,7 +133,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
         choices = {
             "tracker": ("line", "kalman"),
             "guard_source": ("raw", "tracks", "both"),
-            "avoidance": ("mppi", "avoider"),
+            "avoidance": ("mppi", "avoider", "hybrid"),
             "governor": ("full", "proportional"),
         }
         for key, value in settings.items():
@@ -149,6 +155,8 @@ def create_controller(controller_id: str, settings: dict | None = None):
                 raise ValueError(f"Ali MPPI {key} must be a non-negative finite number")
             if key == "collision_slow_fraction" and not 0.0 < value <= 1.0:
                 raise ValueError("Ali MPPI collision_slow_fraction must be in (0, 1]")
+            if key == "plan_filter_alpha" and not 0.0 < value <= 1.0:
+                raise ValueError("Ali MPPI plan_filter_alpha must be in (0, 1]")
     if controller_id in ("baseline", "body-axis"):
         # Checkpoint also imports this catalog. Defer this import until its
         # module is loaded, and return the original class/report unwrapped.
@@ -165,6 +173,10 @@ def create_controller(controller_id: str, settings: dict | None = None):
         from ._tom import TomController
 
         return TomController(metadata)
+    if controller_id == "tom_polyfit_mvp":
+        from ._tom_polyfit import TomPolyfitController
+
+        return TomPolyfitController(metadata)
     if controller_id == "ali_radar_mvp":
         from ._ali import AliMvpController
 
