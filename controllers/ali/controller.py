@@ -1000,6 +1000,7 @@ def telemetry(
     mode,
     gate,
     body_x,
+    body_z,
     target_direction,
     accel_world,
     accel_body,
@@ -1025,8 +1026,9 @@ def telemetry(
         "mode": mode,
         "gate": gate,
         "emergency": bool(emergency),
-        "target_align_rad": finite(angle(body_x, target_direction)),
-        "burn_align_rad": finite(angle(body_x, accel_world)),
+        "target_align_rad": finite(angle(body_z, target_direction)),
+        "burn_align_rad": finite(angle(body_z, accel_world)),
+        "nose_align_rad": finite(angle(body_x, target_direction)),
         "accel_body_mps2": [finite(value) for value in accel_body],
         "speed_mps": finite(speed),
         "target_range_m": finite(target_range),
@@ -1132,9 +1134,11 @@ class GuidanceController:
     def step(self, obs, rows, now, dt, to_body=None):
         state = self.state
         policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
-        position, velocity, target, body_x = (
-            np.asarray(obs[key], float) for key in ("position", "velocity", "target", "body_x")
+        position, velocity, target, body_x, body_z = (
+            np.asarray(obs[key], float)
+            for key in ("position", "velocity", "target", "body_x", "body_z")
         )
+        body_z = unit(body_z)
         max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
@@ -1276,7 +1280,7 @@ class GuidanceController:
             collision["side"] if self.collision_mode is CollisionMode.ESCAPE else nominal
         )
         alignment = (
-            np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
+            np.arccos(float(np.clip(body_z @ desired, -1.0, 1.0)))
             if np.linalg.norm(desired) > 1e-9
             else 0.0
         )
@@ -1292,7 +1296,7 @@ class GuidanceController:
         gate = self._gate(self.phase, burning, acceleration, alignment, angular_velocity)
         trace = {}
         if policy["attitude_control"]:
-            angular = attitude(body_x, angular_velocity, desired, max_angular, dt, state, trace)
+            angular = attitude(body_z, angular_velocity, desired, max_angular, dt, state, trace)
         else:
             angular = np.zeros(3)
             state["attitude_hold"] = False
@@ -1319,6 +1323,7 @@ class GuidanceController:
             "burn" if burning else "coast",
             gate,
             body_x,
+            body_z,
             desired,
             acceleration,
             body_accel,
@@ -1421,6 +1426,9 @@ while True:
     body_x = np.asarray(
         st.frames.FramedVector(np.array([1.0, 0.0, 0.0]), shuttleFrame).ExprIn(phobosFrame), float
     )
+    body_z = np.asarray(
+        st.frames.FramedVector(np.array([0.0, 0.0, 1.0]), shuttleFrame).ExprIn(phobosFrame), float
+    )
     mass = float(shuttle.getMass())
     mass = mass if np.isfinite(mass) and mass > 0.0 else 3388.7
     obs = {
@@ -1428,6 +1436,7 @@ while True:
         "velocity": velocity,
         "target": target_position,
         "body_x": body_x,
+        "body_z": body_z,
         "angular_velocity": np.asarray(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame), float),
         "fuel": float(shuttle.GetParam(st.VarType.double, ["Stats", "FuelUsed"])),
         "damage": float(shuttle.GetParam(st.VarType.double, ["Stats", "Damage"])),

@@ -46,11 +46,17 @@ class AliMppiController(ExperimentalController):
             sample.quaternion_xyzw,
             sample.rotation_convention,
         )
+        body_z = body_to_reference(
+            np.array([0.0, 0.0, 1.0]),
+            sample.quaternion_xyzw,
+            sample.rotation_convention,
+        )
         observation = {
             "position": current_position,
             "velocity": np.asarray(sample.velocity_world_mps, dtype=float),
             "target": np.asarray(sample.target_position_world_m, dtype=float),
             "body_x": body_x,
+            "body_z": body_z,
             "angular_velocity": np.asarray(sample.angular_velocity_world_rad_s, dtype=float),
             "fuel": float(sample.fuel_used_kg),
             "damage": float(sample.damage_j),

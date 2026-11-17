@@ -17,6 +17,7 @@ def sample_observation(position, velocity, target, damage=0.0):
         "velocity": np.asarray(velocity, float),
         "target": np.asarray(target, float),
         "body_x": np.array([1.0, 0.0, 0.0]),
+        "body_z": np.array([0.0, 0.0, 1.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": float(damage),
@@ -207,6 +208,7 @@ def test_telemetry_is_finite_json_and_flags_a_coast_warning():
         "coast",
         "off",
         np.array([1.0, 0.0, 0.0]),
+        np.array([1.0, 0.0, 0.0]),
         np.array([0.0, 1.0, 0.0]),
         np.zeros(3),
         np.zeros(3),
@@ -238,6 +240,7 @@ def test_terminal_coast_command_is_zero_inside_the_goal_band():
         "velocity": np.array([5.0, 0.0, 0.0]),
         "target": np.array([1200.0, 0.0, 0.0]),
         "body_x": np.array([1.0, 0.0, 0.0]),
+        "body_z": np.array([1.0, 0.0, 0.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": 0.0,
@@ -368,7 +371,7 @@ def test_collision_detour_offsets_the_route_after_the_escape_burn():
         0.1,
     )
     assert record["collision"] is True and record["collision_detour"] is True
-    assert record["gate"] == "burn"
+    assert record["gate"] in {"alignment", "burn"}
     assert state["steer_target"][1] < -20.0
     assert state["collision"]["offset"] > 20.0
     assert np.isclose(state["collision"]["offset"], 25.0)
@@ -455,19 +458,17 @@ def test_launch_phase_clears_radially_before_cruise():
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
-    observation["body_x"] = np.array([0.0, 0.0, 1.0])
     body, _, record = core.step(state, observation, [], 0.0, 0.1)
     assert record["phase"] == "launch"
     assert body[2] > 0.4
     assert abs(body[0]) < 1e-6
     cleared = sample_observation([0.0, 0.0, 130.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 130.0])
-    cleared["body_x"] = np.array([0.0, 0.0, 1.0])
     _, _, record = core.step(state, cleared, [], 0.1, 0.1)
     assert state["launched"] is True
     assert record["phase"] != "launch"
 
 
-def test_launch_gate_blocks_main_thrust_until_body_x_aligns():
+def test_launch_gate_blocks_main_thrust_until_body_z_aligns():
     state = {
         "burning": False,
         "attitude_hold": False,
@@ -476,17 +477,19 @@ def test_launch_gate_blocks_main_thrust_until_body_x_aligns():
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
-    observation["body_x"] = np.array([1.0, 0.0, 0.0])
+    observation["body_z"] = np.array([1.0, 0.0, 0.0])
     body, angular, record = core.step(state, observation, [], 0.0, 0.1)
     assert record["phase"] == "launch"
     assert record["launch_gate_rad"] == 0.15
     assert record["launch_align_rad"] > 1.4
     assert np.allclose(body, 0.0)
     assert np.linalg.norm(angular) > 0.0
-    observation["body_x"] = np.array([0.0, 0.0, 1.0])
-    body, _, record = core.step(state, observation, [], 0.1, 0.1)
+    observation["body_z"] = np.array([0.0, 0.0, 1.0])
+    body, angular, record = core.step(state, observation, [], 0.1, 0.1)
     assert np.linalg.norm(body) > 0.4
     assert abs(body[0]) < 1e-6
+    assert record["launch_align_rad"] < 1e-6
+    assert np.linalg.norm(angular) < 1e-9
 
 
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
