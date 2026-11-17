@@ -33,9 +33,11 @@ cruise speed. Offsets are capped so the ship still arrives inside the goal
 radius.
 
 Aged radar rows are reconstructed from a short shuttle-position history before
-tracking; if the measurement epoch is outside that history, the current position
-is used. The collision detour side is scored by predicting both parallel routes
-against fitted tracks over `collision_side_horizon_s` with
+tracking. Radar timestamps count from the radar loop's own startup, so the
+controller estimates that origin from the freshest row seen and shifts every row
+onto its own clock first; if the measurement epoch is outside the history, the
+current position is used. The collision detour side is scored by predicting both
+parallel routes against fitted tracks over `collision_side_horizon_s` with
 `collision_side_margin_m`. The previous side is kept only when its predicted
 clearance is within `collision_side_switch_m` of the safer side; hit parity is no
 longer used.
@@ -46,7 +48,7 @@ uv run --locked wsorb tune --grid '{"cruise_speed_mps":[7.0,8.0,9.0]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 1277 lines. The original 200-line target remains a guideline,
+The marked core is 1318 lines. The original 200-line target remains a guideline,
 not a hard limit; the numeric test keeps a 1350-line regression guard. The
 current default is the line-fit tracker, fitted-track guard, MPPI steering on,
 no risk inflation, no fixed samples, MPPI beeline, full governor, attitude

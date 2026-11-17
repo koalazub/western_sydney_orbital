@@ -306,6 +306,40 @@ class KalmanTracker:
 SHUTTLE_HISTORY_S = 10.0
 SHUTTLE_HISTORY_LIMIT = 200
 SHUTTLE_HISTORY_EDGE_S = 0.5
+RADAR_CLOCK_LIMIT_S = 10.0
+
+
+def align_radar_rows(state, rows, now):
+    """Shift radar-loop timestamps from their own origin onto the controller clock.
+
+    Radar rows count seconds from the radar loop's startup, not necessarily from
+    the mission origin, and the offset is not published with the rows. The
+    newest row of a snapshot was measured no later than ``now``, so the running
+    minimum of ``now - newest`` is that origin offset plus the smallest observed
+    transport delay. Zero timestamps are the pre-sweep initialisation and are
+    shifted with the rest once the origin is known.
+    """
+    newest = max(
+        (float(row[2, 0]) for row in rows if np.all(np.isfinite(row)) and float(row[2, 0]) != 0.0),
+        default=None,
+    )
+    previous = state.get("radar_clock_offset_s")
+    if newest is None:
+        offset = float(previous) if previous is not None else 0.0
+    else:
+        observed = float(now) - newest
+        offset = observed if previous is None else min(float(previous), observed)
+        offset = float(np.clip(offset, -RADAR_CLOCK_LIMIT_S, RADAR_CLOCK_LIMIT_S))
+        state["radar_clock_offset_s"] = offset
+    if offset == 0.0:
+        return rows, offset
+    aligned = []
+    for row in rows:
+        adjusted = np.asarray(row, float).copy()
+        if np.all(np.isfinite(adjusted)):
+            adjusted[2, 0] += offset
+        aligned.append(adjusted)
+    return aligned, offset
 
 
 def record_shuttle_state(state, now, position):
@@ -1105,7 +1139,12 @@ class GuidanceController:
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
         history = record_shuttle_state(state, now, position)
+        rows, radar_offset = align_radar_rows(state, rows, now)
         rows = reconstruct_measurements(rows, history, position)
+        radar_newest_age = now - max(
+            (float(row[2, 0]) for row in rows if np.all(np.isfinite(row))),
+            default=now,
+        )
         tracks = update_estimates(state, rows, position, velocity, now, policy)
 
         up = unit(position) if np.linalg.norm(position) > 1e-6 else unit(body_x)
@@ -1327,6 +1366,8 @@ class GuidanceController:
             launch_vertical_mps=finite(float(up @ velocity)),
             launch_align_rad=finite(alignment),
             launch_gate_rad=finite(policy["main_engine_gate_rad"]),
+            radar_clock_offset_s=finite(radar_offset),
+            radar_newest_age_s=finite(radar_newest_age),
         )
         record["line"] += (
             f" phase={self.phase.value} src={source}"

@@ -528,6 +528,33 @@ def test_aged_radar_measurement_is_reconstructed_from_shuttle_history():
     assert np.isclose(state["rocks"][0]["p"][0], 100.0)
 
 
+def test_radar_loop_origin_is_shifted_onto_the_controller_clock():
+    state = {}
+    for step in range(1, 21):
+        now = step * 0.1
+        position = np.array([8.0 * now, 0.0, 0.0])
+        history = core.record_shuttle_state(state, now, position)
+        measured_at = now - 0.98
+        row = radar_row(
+            [100.0 - position[0], 0.0, 0.0],
+            -8.0,
+            2.0,
+            measured_at,
+        )
+        aligned, offset = core.align_radar_rows(state, [row], now)
+        assert np.isclose(offset, 0.98)
+        rebased = core.reconstruct_measurements(aligned, history, position)
+        assert np.isclose(rebased[0][0, 0] + position[0], 100.0, atol=0.01)
+
+
+def test_pre_sweep_radar_timestamps_do_not_define_the_clock_origin():
+    state = {}
+    row = radar_row([100.0, 0.0, 0.0], 0.0, 2.0, 0.0)
+    _, offset = core.align_radar_rows(state, [row], 1.0)
+    assert offset == 0.0
+    assert "radar_clock_offset_s" not in state
+
+
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
     tracker = core.KalmanTracker()
     for time in (0.0, 1.0, 2.0, 3.0):

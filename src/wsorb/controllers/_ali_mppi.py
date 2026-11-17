@@ -101,6 +101,8 @@ class AliMppiController(ExperimentalController):
             "launch_height_m": record.get("launch_height_m"),
             "launch_vertical_mps": record.get("launch_vertical_mps"),
             "launch_align_rad": record.get("launch_align_rad"),
+            "radar_clock_offset_s": record.get("radar_clock_offset_s"),
+            "radar_newest_age_s": record.get("radar_newest_age_s"),
             "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
             "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
             "time_budget_s": policy.get("time_budget_s"),
