@@ -48,7 +48,7 @@ def test_competitor_region_stays_within_the_current_budget():
     begin = source.index("# BEGIN ALI MPPI CORE")
     end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:end].splitlines()) <= 1250
+    assert len(source[begin:end].splitlines()) <= 1350
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -446,6 +446,27 @@ def test_collision_side_policy_avoids_the_predicted_rock():
     assert record["collision_side_reason"] == "prediction"
 
 
+def test_launch_phase_clears_radially_before_cruise():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    observation["body_x"] = np.array([0.0, 0.0, 1.0])
+    body, _, record = core.step(state, observation, [], 0.0, 0.1)
+    assert record["phase"] == "launch"
+    assert body[2] > 0.4
+    assert abs(body[0]) < 1e-6
+    cleared = sample_observation([0.0, 0.0, 130.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 130.0])
+    cleared["body_x"] = np.array([0.0, 0.0, 1.0])
+    _, _, record = core.step(state, cleared, [], 0.1, 0.1)
+    assert state["launched"] is True
+    assert record["phase"] != "launch"
+
+
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
     calls = []
 
@@ -460,6 +481,7 @@ def test_plan_steering_controls_mppi_sampling(monkeypatch):
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+        "launched": True,
     }
     core.step(
         state,

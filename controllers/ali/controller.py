@@ -90,7 +90,9 @@ DEFAULT_SCORE = {
 DEFAULT_POLICY = {
     "cruise_fraction": 0.5,
     "cruise_speed_mps": 8.0,
-    "main_engine_gate_rad": 0.0,
+    "main_engine_gate_rad": 0.15,
+    "launch_clearance_m": 25.0,
+    "launch_speed_mps": 1.5,
     "coast_range_m": 200.0,
     "coast_speed_mps": 4.0,
     "emergency_range_m": 180.0,
@@ -137,6 +139,7 @@ DEFAULT_POLICY = {
 class Phase(Enum):
     """Why the controller issued the current acceleration."""
 
+    LAUNCH = "launch"
     COLLISION = "collision"
     EMERGENCY = "emergency"
     TERMINAL = "terminal"
@@ -1050,6 +1053,7 @@ class GuidanceController:
         collision_mode,
         guard_mode,
         terminal,
+        launching,
         acceleration,
         burning,
         emergency_accel,
@@ -1065,6 +1069,8 @@ class GuidanceController:
                 return emergency_accel, True, Phase.EMERGENCY, "guard"
             case (_, _, True):
                 return np.zeros(3), False, Phase.TERMINAL, "coast"
+            case _ if launching:
+                return acceleration, burning, Phase.LAUNCH, "launch"
             case _ if plan_active:
                 return acceleration, burning, Phase.PLAN, "plan"
             case _ if avoider:
@@ -1102,6 +1108,16 @@ class GuidanceController:
         rows = reconstruct_measurements(rows, history, position)
         tracks = update_estimates(state, rows, position, velocity, now, policy)
 
+        up = unit(position) if np.linalg.norm(position) > 1e-6 else unit(body_x)
+        if np.linalg.norm(up) < 1e-9:
+            up = np.array([0.0, 0.0, 1.0])
+        launch_radius = float(state.setdefault("launch_radius", np.linalg.norm(position)))
+        height = float(np.linalg.norm(position)) - launch_radius
+        launching = not state.get("launched", False)
+        if launching and height >= float(policy["launch_clearance_m"]):
+            state["launched"] = True
+            launching = False
+
         hit, energy, change = collision_check(state, velocity, damage, dt, policy)
         collision = active_collision(state, now)
         if hit:
@@ -1129,40 +1145,54 @@ class GuidanceController:
         state["steer_target"] = steer_target
 
         plan_active = bool(policy["plan_steering"] and policy["avoidance"] == "mppi")
-        if plan_active:
-            desired_accel = plan(
-                state,
-                position,
-                velocity,
-                target,
-                body_x,
-                float(obs["radius"]),
-                max_accel,
-                dt,
-                float(obs["fuel"]),
-                damage,
-                float(obs["mass"]),
-                now,
-            )
-        else:
+        if launching:
             prepare_cruise(
                 state, max(0.0, remaining - radius), max_accel, damage, float(obs["mass"]), policy
             )
             desired_accel = np.zeros(3)
-        v_des = cruise_velocity(
-            position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS)
-        )
-        steering = bool(
-            plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"]
-        )
-        avoider = policy["avoidance"] == "avoider"
-        match policy["avoidance"]:
-            case "avoider":
-                nominal = avoid_velocity(v_des, tracks, position, velocity, state, policy)
-            case _:
-                nominal = v_des
-                if not steering:
-                    desired_accel = np.zeros(3)
+            nominal = up * float(policy["launch_speed_mps"])
+            steering = False
+            avoider = False
+        else:
+            if plan_active:
+                desired_accel = plan(
+                    state,
+                    position,
+                    velocity,
+                    target,
+                    body_x,
+                    float(obs["radius"]),
+                    max_accel,
+                    dt,
+                    float(obs["fuel"]),
+                    damage,
+                    float(obs["mass"]),
+                    now,
+                )
+            else:
+                prepare_cruise(
+                    state,
+                    max(0.0, remaining - radius),
+                    max_accel,
+                    damage,
+                    float(obs["mass"]),
+                    policy,
+                )
+                desired_accel = np.zeros(3)
+            v_des = cruise_velocity(
+                position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS)
+            )
+            steering = bool(
+                plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"]
+            )
+            avoider = policy["avoidance"] == "avoider"
+            match policy["avoidance"]:
+                case "avoider":
+                    nominal = avoid_velocity(v_des, tracks, position, velocity, state, policy)
+                case _:
+                    nominal = v_des
+                    if not steering:
+                        desired_accel = np.zeros(3)
 
         match policy["governor"]:
             case "proportional" if not np.any(desired_accel):
@@ -1193,6 +1223,7 @@ class GuidanceController:
             self.collision_mode,
             self.guard_mode,
             terminal,
+            launching,
             acceleration,
             burning,
             emergency_accel,
@@ -1286,15 +1317,28 @@ class GuidanceController:
             governor=policy["governor"],
             estimate_count=len(tracks),
             phase=self.phase.value,
+            controller_phase=self.phase.value,
             source=source,
             guard_mode=self.guard_mode.value,
             collision_mode=self.collision_mode.value,
+            launching=bool(launching),
+            launch_height_m=finite(height),
+            launch_clearance_m=finite(policy["launch_clearance_m"]),
+            launch_vertical_mps=finite(float(up @ velocity)),
+            launch_align_rad=finite(alignment),
+            launch_gate_rad=finite(policy["main_engine_gate_rad"]),
         )
         record["line"] += (
             f" phase={self.phase.value} src={source}"
             f" coll={int(record['collision'])} hits={record['collision_hits']}"
             f" off={record['collision_offset_m'] or 0.0:.0f}"
         )
+        if self.phase is Phase.LAUNCH:
+            record["line"] += (
+                f" launch h={height:.1f}m vz={float(up @ velocity):.2f}"
+                f" align={np.degrees(alignment):.1f}deg"
+                f" gate={np.degrees(policy['main_engine_gate_rad']):.1f}deg"
+            )
         state["last_accel"] = acceleration.copy()
         return body_accel, body_angular, record
 
@@ -1323,6 +1367,7 @@ state = {
     },
 }
 last_time, last_status, last_display, last_alert = None, -np.inf, -np.inf, -np.inf
+last_phase = None
 while True:
     time.sleep(1.0 / loop_hz)
     now = (st.SimGlobals.SimClock.GetTimeNow().as_datetime() - t0).total_seconds()
@@ -1363,6 +1408,17 @@ while True:
         ),
     )
     SetCommand(accel_body, angular_body)
+    if record["phase"] != last_phase:
+        phase_message = (
+            f"MPPI phase {last_phase or 'none'} -> {record['phase']} "
+            f"height={record.get('launch_height_m')} m "
+            f"vz={record.get('launch_vertical_mps')} m/s "
+            f"align={np.degrees(record.get('launch_align_rad') or 0.0):.1f} deg "
+            f"gate={np.degrees(record.get('launch_gate_rad') or 0.0):.1f} deg"
+        )
+        st.logger_info(phase_message)
+        st.OnScreenLogMessage(phase_message, "MPPI", st.Severity.Info)
+        last_phase = record["phase"]
     if now - last_status >= 0.5:
         last_status = now
         st.logger_info("MPPI " + json.dumps(record, separators=(",", ":"), allow_nan=False))

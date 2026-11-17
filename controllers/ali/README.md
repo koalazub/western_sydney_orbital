@@ -46,8 +46,8 @@ uv run --locked wsorb tune --grid '{"cruise_speed_mps":[7.0,8.0,9.0]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 1232 lines. The original 200-line target remains a guideline,
-not a hard limit; the numeric test keeps a 1250-line regression guard. The
+The marked core is 1277 lines. The original 200-line target remains a guideline,
+not a hard limit; the numeric test keeps a 1350-line regression guard. The
 current default is the line-fit tracker, fitted-track guard, MPPI steering on,
 no risk inflation, no fixed samples, MPPI beeline, full governor, attitude
 control on and an 8 m/s cruise. The guard prefers a lateral dodge whenever it
