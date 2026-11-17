@@ -46,8 +46,9 @@ def radar_row(position, range_rate, diameter, time):
 def test_competitor_region_stays_within_the_current_budget():
     source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
+    end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:].splitlines()) <= 1250
+    assert len(source[begin:end].splitlines()) <= 1250
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -85,6 +86,24 @@ def test_emergency_guard_reacts_to_a_closing_rock():
     assert np.linalg.norm(acceleration) <= 0.5
 
 
+def test_emergency_guard_dodges_sideways_instead_of_reversing_the_launch():
+    track = {
+        "p": np.array([40.0, 0.0, 0.0]),
+        "v": np.array([-6.0, 0.0, 0.0]),
+        "r": 2.0,
+        "sp": 0.5,
+        "sv": 0.0,
+        "t": 0.0,
+        "s": 0.5,
+    }
+    acceleration, active = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, core.DEFAULT_POLICY, [track], np.zeros(3)
+    )
+    assert active is True
+    assert abs(float(acceleration[0])) < 1e-6
+    assert abs(float(acceleration[1])) > 0.4
+
+
 def test_plan_returns_a_finite_bounded_first_control():
     state = {
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
@@ -104,7 +123,6 @@ def test_plan_returns_a_finite_bounded_first_control():
         0.0,
         3388.7,
         0.0,
-        [],
     )
     assert np.isfinite(acceleration).all()
     assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
@@ -358,7 +376,7 @@ def test_collision_detour_offsets_the_route_after_the_escape_burn():
     assert record["collision_hits"] == 1
 
 
-def test_repeated_collisions_flip_the_detour_side_and_escalate_speed_safety():
+def test_repeated_collisions_keep_the_predicted_side_and_escalate_speed_safety():
     state = {
         "burning": False,
         "attitude_hold": False,
@@ -390,11 +408,42 @@ def test_repeated_collisions_flip_the_detour_side_and_escalate_speed_safety():
         0.1,
     )
     assert state["collision"]["hits"] == 2
-    assert float(state["collision"]["side"] @ first_side) < 0.0
+    assert np.allclose(state["collision"]["side"], first_side)
     assert core.safe_cruise(state, 8.0, 1_000.0, core.DEFAULT_POLICY) == 8.0
     state["collision_hits"] = 3
     assert np.isclose(core.safe_cruise(state, 8.0, 1_000.0, core.DEFAULT_POLICY), 6.4)
     assert np.isclose(core.safe_cruise(state, 8.0, 120_000.0, core.DEFAULT_POLICY), 6.4)
+
+
+def test_collision_side_policy_avoids_the_predicted_rock():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+    }
+    ship_velocity = np.array([7.0, 0.0, 0.0])
+    rock = np.array([50.0, -20.0, 0.0])
+    line = rock / np.linalg.norm(rock)
+    row = radar_row(rock, -float(ship_velocity @ line), 4.0, 0.0)
+    core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], ship_velocity, [1000.0, 0.0, 0.0]),
+        [row],
+        0.0,
+        0.1,
+    )
+    _, _, record = core.step(
+        state,
+        sample_observation([0.0, 0.0, 0.0], ship_velocity, [1000.0, 0.0, 0.0], damage=500.0),
+        [row],
+        0.1,
+        0.1,
+    )
+    assert state["collision"]["side"][1] > 0.0
+    assert state["collision"]["side_reason"] == "prediction"
+    assert record["collision_side_reason"] == "prediction"
 
 
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
@@ -447,12 +496,22 @@ def test_line_tracker_fits_the_latest_position_and_absolute_velocity():
     assert track["sp"] >= 0.0
 
 
+def test_aged_radar_measurement_is_reconstructed_from_shuttle_history():
+    history = [(0.0, np.zeros(3)), (1.0, np.array([10.0, 0.0, 0.0]))]
+    row = radar_row([100.0, 0.0, 0.0], -20.0, 2.0, 0.0)
+    rebased = core.reconstruct_measurements([row], history, np.array([20.0, 0.0, 0.0]))
+    assert np.isclose(rebased[0][0, 0], 80.0)
+    state = {"rocks": [], "policy": {"tracker": "line"}}
+    core.update_tracks(state, rebased, np.array([20.0, 0.0, 0.0]), np.array([20.0, 0.0, 0.0]), 2.0)
+    assert np.isclose(state["rocks"][0]["p"][0], 100.0)
+
+
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
     tracker = core.KalmanTracker()
     for time in (0.0, 1.0, 2.0, 3.0):
         row = radar_row([100.0 - 5.0 * time, 0.0, 0.0], -5.0, 2.0, time)
         tracker.update(np.zeros(3), np.zeros(3), [row])
-    tracks = tracker.snapshot(3.0, np.zeros(3))
+    tracks = tracker.snapshot(3.0)
     assert len(tracks) >= 1
     track = min(tracks, key=lambda item: np.linalg.norm(item["p"] - np.array([85.0, 0.0, 0.0])))
     assert np.linalg.norm(track["p"] - np.array([85.0, 0.0, 0.0])) < 3.0

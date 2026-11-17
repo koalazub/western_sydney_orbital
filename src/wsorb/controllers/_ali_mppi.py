@@ -41,11 +41,6 @@ class AliMppiController(ExperimentalController):
         self.last_time = now
         current_position = np.asarray(sample.position_world_m, dtype=float)
         selected = np.asarray(rows, dtype=float)[:80].copy()
-        if selected.ndim == 3:
-            for epoch in np.unique(selected[:, 2, 0]):
-                group = selected[:, 2, 0] == epoch
-                position_at, _ = self.history.at(float(epoch))
-                selected[group, 0] += position_at - current_position
         body_x = body_to_reference(
             np.array([1.0, 0.0, 0.0]),
             sample.quaternion_xyzw,
@@ -88,7 +83,6 @@ class AliMppiController(ExperimentalController):
             current_position,
             np.asarray(sample.target_position_world_m, dtype=float),
             self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
-            policy.get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
         )
         velocity_error = float(
             np.linalg.norm(nominal - np.asarray(sample.velocity_world_mps, dtype=float))
