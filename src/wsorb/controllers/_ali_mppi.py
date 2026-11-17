@@ -24,14 +24,8 @@ class AliMppiController(ExperimentalController):
         super().__init__(metadata)
         self.math = load_math("ali_mppi")["core"]
         settings = settings if isinstance(settings, dict) else {}
-        policy = dict(settings)
-        self.state = {
-            "burning": False,
-            "attitude_hold": False,
-            "last_control": np.zeros(3),
-            "rng": np.random.default_rng(12345),
-            "policy": policy,
-        }
+        self.controller = self.math.GuidanceController(settings)
+        self.state = self.controller.state
         self.last_time = None
 
     def _calculate(self, sample, rows, now):
@@ -70,8 +64,7 @@ class AliMppiController(ExperimentalController):
             "max_accel": MAX_ACCEL_MPS2,
             "max_angular": MAX_ANGULAR_ACCEL_RAD_S2,
         }
-        body, angular_body, record = self.math.step(
-            self.state,
+        body, angular_body, record = self.controller.step(
             observation,
             selected,
             now,
@@ -108,6 +101,8 @@ class AliMppiController(ExperimentalController):
             "mppi_samples": self.math.MPPI_SAMPLES,
             "mppi_steps": self.math.MPPI_STEPS,
             "mode": record["mode"],
+            "phase": record.get("phase"),
+            "source": record.get("source"),
             "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
             "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
             "time_budget_s": policy.get("time_budget_s"),
