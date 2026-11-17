@@ -105,6 +105,45 @@ def test_emergency_guard_dodges_sideways_instead_of_reversing_the_launch():
     assert abs(float(acceleration[1])) > 0.4
 
 
+def test_emergency_guard_uses_raw_rows_when_tracks_are_empty():
+    row = np.zeros((3, 3))
+    row[0] = [60.0, 0.0, 0.0]
+    row[1] = [59.0, -20.0, 2.0]
+    row[2, 0] = 0.0
+    tracks_only = {**core.DEFAULT_POLICY, "guard_source": "tracks"}
+    _, inactive = core.emergency_guard(
+        np.zeros(3), [row], 0.0, 0.5, tracks_only, [], np.zeros(3), 3.0
+    )
+    assert inactive is False
+    both = {**core.DEFAULT_POLICY, "guard_source": "both"}
+    acceleration, active = core.emergency_guard(
+        np.zeros(3), [row], 0.0, 0.5, both, [], np.zeros(3), 3.0
+    )
+    assert active is True
+    assert np.linalg.norm(acceleration) <= 0.5
+
+
+def test_emergency_guard_includes_the_ship_radius_in_the_keep_out():
+    track = {
+        "p": np.array([40.0, 9.5, 0.0]),
+        "v": np.array([-10.0, 0.0, 0.0]),
+        "r": 2.0,
+        "sp": 0.5,
+        "sv": 0.0,
+        "t": 0.0,
+        "s": 0.5,
+    }
+    policy = {**core.DEFAULT_POLICY, "guard_source": "tracks"}
+    _, without_ship = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, policy, [track], np.zeros(3), 0.0
+    )
+    _, with_ship = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, policy, [track], np.zeros(3), 3.0
+    )
+    assert without_ship is False
+    assert with_ship is True
+
+
 def test_plan_returns_a_finite_bounded_first_control():
     state = {
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},

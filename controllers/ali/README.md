@@ -14,7 +14,7 @@ The runtime profile is `ali_mppi`. The policy is settings-driven: cruise
 speed, terminal coast, emergency guard, MPPI plan steering, main-engine gate,
 risk/switch weights, attitude brake scale and collision response. The core also
 keeps the reviewed estimator and guidance alternatives as settings: `tracker`
-(`line`/`kalman`), `guard_source` (`raw`/`tracks`), `risk_inflation`,
+(`line`/`kalman`), `guard_source` (`raw`/`tracks`/`both`, default `both`), `risk_inflation`,
 `mppi_fixed_samples`, `avoidance` (`mppi`/`avoider`), `governor`
 (`full`/`proportional`) and `attitude_control`. The planner traces a zero-control
 coast sample and steers when that coast path is risky, rather than waiting for
@@ -52,7 +52,12 @@ Attitude control and the launch gate track the lander's **+Z thrust axis**;
 `+X` remains the nose and capsule axis used for lateral collision geometry.
 Aligning `+X` to the launch direction tips a tail-lander onto its side.
 
-The marked core is 1323 lines. The original 200-line target remains a guideline,
+The emergency guard evaluates fitted tracks and raw radar rows together, so a
+close rock is not invisible when association fails. Its keep-out includes the
+ship radius, and escape clearance is predicted with the available acceleration
+rather than an instantaneous velocity jump.
+
+The marked core is 1327 lines. The original 200-line target remains a guideline,
 not a hard limit; the numeric test keeps a 1350-line regression guard. The
 current default is the line-fit tracker, fitted-track guard, MPPI steering on,
 no risk inflation, no fixed samples, MPPI beeline, full governor, attitude

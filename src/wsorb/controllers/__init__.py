@@ -58,7 +58,6 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "emergency_range_m",
             "emergency_lookahead_s",
             "emergency_margin_m",
-            "emergency_escape_mps",
             "plan_steering",
             "plan_risk_threshold",
             "risk_weight",
@@ -127,7 +126,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
         booleans = {"plan_steering", "risk_inflation", "mppi_fixed_samples", "attitude_control"}
         choices = {
             "tracker": ("line", "kalman"),
-            "guard_source": ("raw", "tracks"),
+            "guard_source": ("raw", "tracks", "both"),
             "avoidance": ("mppi", "avoider"),
             "governor": ("full", "proportional"),
         }

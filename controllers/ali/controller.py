@@ -98,14 +98,13 @@ DEFAULT_POLICY = {
     "emergency_range_m": 180.0,
     "emergency_lookahead_s": 7.0,
     "emergency_margin_m": 6.0,
-    "emergency_escape_mps": 3.5,
     "plan_steering": True,
     "plan_risk_threshold": 0.01,
     "risk_weight": 200.0,
     "switch_weight": 0.5,
     "attitude_brake_scale": 0.65,
     "tracker": "line",
-    "guard_source": "tracks",
+    "guard_source": "both",
     "risk_inflation": False,
     "risk_k_sigma": 1.5,
     "risk_max_inflate": 10.0,
@@ -682,11 +681,13 @@ def proportional_govern(nominal_velocity, velocity, state, max_accel, policy):
     return command, True
 
 
-def emergency_guard(velocity, rows, now, max_accel, policy=None, tracks=None, position=None):
+def emergency_guard(
+    velocity, rows, now, max_accel, policy=None, tracks=None, position=None, ship_radius=0.0
+):
     policy = {**DEFAULT_POLICY, **(policy or {})}
     velocity = np.asarray(velocity, float)
     items = []
-    if tracks is not None and position is not None:
+    if tracks is not None and position is not None and policy["guard_source"] in ("tracks", "both"):
         for track in tracks:
             relative = np.asarray(track["p"], float) - position
             if np.linalg.norm(relative) <= policy["emergency_range_m"]:
@@ -694,41 +695,42 @@ def emergency_guard(velocity, rows, now, max_accel, policy=None, tracks=None, po
                     (
                         relative,
                         np.asarray(track["v"], float),
-                        float(track["r"]) + policy["emergency_margin_m"],
+                        float(track["r"]) + float(ship_radius) + policy["emergency_margin_m"],
                     )
                 )
-    else:
+    if policy["guard_source"] in ("raw", "both"):
         for row in rows:
-            if np.all(np.isfinite(row)) and row[1, 2] > 0.0:
-                los = unit(row[0])
-                rock_velocity = los * (float(row[1, 1]) + los @ velocity)
-                relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
-                if np.linalg.norm(relative) <= policy["emergency_range_m"]:
-                    items.append(
-                        (
-                            relative,
-                            rock_velocity,
-                            0.55 * float(row[1, 2]) + policy["emergency_margin_m"],
-                        )
+            if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
+                continue
+            los = unit(row[0])
+            rock_velocity = los * (float(row[1, 1]) + los @ velocity)
+            relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
+            if np.linalg.norm(relative) <= policy["emergency_range_m"]:
+                items.append(
+                    (
+                        relative,
+                        rock_velocity,
+                        0.5 * float(row[1, 2]) + float(ship_radius) + policy["emergency_margin_m"],
                     )
+                )
     if not items:
         return np.zeros(3), False
     relative, rock_velocity, keep_out = (np.array(values) for values in zip(*items, strict=True))
+    times = np.linspace(0.0, float(policy["emergency_lookahead_s"]), 17)
 
-    def miss(option):
-        relative_velocity = rock_velocity - option
-        time = np.clip(
-            -np.einsum("ij,ij->i", relative, relative_velocity)
-            / (np.einsum("ij,ij->i", relative_velocity, relative_velocity) + 1e-9),
-            0.0,
-            policy["emergency_lookahead_s"],
+    def clearance(acceleration):
+        relative_acceleration = -np.asarray(acceleration, float)
+        path = (
+            relative[:, None, :]
+            + (rock_velocity - velocity)[:, None, :] * times[None, :, None]
+            + 0.5 * relative_acceleration[None, None, :] * times[None, :, None] ** 2
         )
-        return np.linalg.norm(relative + time[:, None] * relative_velocity, axis=1) - keep_out
+        return np.linalg.norm(path, axis=2) - keep_out[:, None]
 
-    current = miss(velocity)
+    current = clearance(np.zeros(3))
     if current.min() >= 0.0:
         return np.zeros(3), False
-    threat = int(np.argmin(current))
+    threat = int(np.argmin(current.min(axis=1)))
     heading = unit(velocity) if np.linalg.norm(velocity) > 1e-6 else np.array([1.0, 0.0, 0.0])
     lateral = relative[threat] - (relative[threat] @ heading) * heading
     side = (
@@ -736,21 +738,19 @@ def emergency_guard(velocity, rows, now, max_accel, policy=None, tracks=None, po
         if np.linalg.norm(lateral) > 1e-6
         else unit(np.cross(heading, [0.0, 0.0, 1.0] if abs(heading[2]) < 0.9 else [1.0, 0.0, 0.0]))
     )
-    escape = policy["emergency_escape_mps"]
     options = [
-        velocity + escape * unit(-relative[threat]),
-        velocity + escape * side,
-        velocity - escape * side,
-        velocity,
+        max_accel * unit(-relative[threat]),
+        max_accel * side,
+        -max_accel * side,
+        np.zeros(3),
     ]
-    scores = [float(miss(option).min()) for option in options]
-    # Prefer a sideways dodge over reversing the launch. Retrograde only wins
-    # when neither lateral option produces a positive predicted clearance.
+    scores = [float(clearance(option).min()) for option in options]
+    # Keep the sideways preference unless neither lateral option clears.
     lateral = max((1, 2), key=lambda index: scores[index])
     best = lateral if scores[lateral] >= 0.0 else int(np.argmax(scores))
     if scores[best] <= float(current.min()):
         return np.zeros(3), False
-    return max_accel * unit(options[best] - velocity), True
+    return options[best], True
 
 
 def avoid_velocity(v_des, tracks, position, velocity, state, policy):
@@ -1140,6 +1140,7 @@ class GuidanceController:
         )
         thrust_axis = unit(thrust_axis)
         max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
+        ship_radius = float(obs["radius"])
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
         history = record_shuttle_state(state, now, position)
@@ -1253,8 +1254,9 @@ class GuidanceController:
             now,
             max_accel,
             policy,
-            tracks if policy["guard_source"] == "tracks" else None,
+            tracks,
             position,
+            ship_radius,
         )
         self.guard_mode = GuardMode.ESCAPE if emergency_active else GuardMode.CLEAR
         terminal = bool(
