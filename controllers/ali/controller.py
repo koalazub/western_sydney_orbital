@@ -4,7 +4,7 @@ This is a single-file STP submission. The marked core below is the only copy;
 the local adapter imports the same marked region for tests and practice runs.
 """
 
-# ruff: noqa: E402, E501, E731
+# ruff: noqa: E402, E501
 
 #############################################################################################
 # DON'T CHANGE ANY OF THE BELOW. NECESSARY FOR CORRECTLY JOINING THE COMPETITION SIMULATION #
@@ -66,7 +66,6 @@ from enum import Enum
 ARRIVAL_RADIUS_M = 50.0
 MPPI_SAMPLES, MPPI_STEPS = 48, 40
 CRUISE_SPEED_MPS, MIN_CRUISE_SPEED_MPS = 7.0, 1.0
-TERMINAL_COAST_RANGE_M, TERMINAL_COAST_MIN_SPEED_MPS = 200.0, 4.0
 ATTITUDE_HOLD_RAD, ATTITUDE_HOLD_RATE_RAD_S = np.radians(1.0), 0.01
 DEFAULT_SCORE = {
     "nominal_time_s": 120.0,
@@ -144,20 +143,6 @@ class CollisionMode(Enum):
     CLEAR = "clear"
     ESCAPE = "escape"
     DETOUR = "detour"
-
-
-class BurnMode(Enum):
-    """Main-engine hysteresis state."""
-
-    COAST = "coast"
-    BURN = "burn"
-
-
-class AttitudeMode(Enum):
-    """Attitude-hold hysteresis state."""
-
-    HOLD = "hold"
-    SLEW = "slew"
 
 
 def unit(value):
@@ -283,7 +268,7 @@ class KalmanTracker:
         alpha = max(1.0 / track["hits"], 0.1)
         track["diam"] = (1.0 - alpha) * track["diam"] + alpha * measurement["diam"]
 
-    def snapshot(self, now, position):
+    def snapshot(self, now):
         tracks = []
         for track in self.tracks:
             dt = float(np.clip(now - track["t"], 0.0, 1.0))
@@ -305,7 +290,7 @@ def update_estimates(state, rows, position, velocity, now, policy):
         tracker = state.setdefault("kalman", KalmanTracker())
         tracker.update(position, velocity, rows)
         state["tracks"] = sorted(
-            tracker.snapshot(now, position), key=lambda track: np.linalg.norm(track["p"] - position)
+            tracker.snapshot(now), key=lambda track: np.linalg.norm(track["p"] - position)
         )[:160]
     else:
         update_tracks(state, rows, position, velocity, now)
@@ -460,7 +445,7 @@ def update_tracks(state, rows, position, velocity, now):
     )[:160]
 
 
-def cruise_velocity(position, target_position, cruise_speed_mps=CRUISE_SPEED_MPS, *_):
+def cruise_velocity(position, target_position, cruise_speed_mps=CRUISE_SPEED_MPS):
     delta = target_position - position
     distance = np.linalg.norm(delta)
     return np.zeros(3) if distance < 1e-9 else max(0.0, float(cruise_speed_mps)) * delta / distance
@@ -590,8 +575,8 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy):
     p_rel = np.array([np.asarray(track["p"], float) - position for track in tracks])
     v_abs = np.array([np.asarray(track["v"], float) for track in tracks])
     radii = np.array([float(track["r"]) for track in tracks])
-    sigma_p = np.array([float(track.get("sp", track.get("s", 0.0))) for track in tracks])
-    sigma_v = np.array([float(track.get("sv", 0.0)) for track in tracks])
+    sigma_p = np.array([float(track["sp"]) for track in tracks])
+    sigma_v = np.array([float(track["sv"]) for track in tracks])
     previous = state.get("avoid_v_prev", v_des)
     heading = unit(v_des)
     axis = np.array([1.0, 0.0, 0.0]) if abs(float(heading[0])) < 0.9 else np.array([0.0, 1.0, 0.0])
@@ -676,7 +661,6 @@ def plan(
     damage,
     ship_mass_kg,
     now,
-    rows,
 ):
     policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
     radius_target = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
@@ -716,8 +700,8 @@ def plan(
         centers = np.array([track["p"] for track in tracks])
         rock_velocities = np.array([track["v"] for track in tracks])
         radii = np.array([track["r"] for track in tracks])
-        sigma_p = np.array([track.get("sp", track.get("s", 0.0)) for track in tracks])
-        sigma_v = np.array([track.get("sv", 0.0) for track in tracks])
+        sigma_p = np.array([track["sp"] for track in tracks])
+        sigma_v = np.array([track["sv"] for track in tracks])
     for step in range(MPPI_STEPS):
         positions += ship_velocities * plan_dt + 0.5 * controls[:, step] * plan_dt**2
         ship_velocities += controls[:, step] * plan_dt
@@ -763,11 +747,7 @@ def plan(
         + policy["switch_weight"] * np.linalg.norm(controls[:, 0] - state["last_control"], axis=1)
     )
     best = int(np.argmin(cost))
-    state["last_control"], state["last_plan"], state["risk"] = (
-        controls[best, 0].copy(),
-        controls[best].copy(),
-        float(risk[best]),
-    )
+    state["last_control"], state["last_plan"] = controls[best, 0].copy(), controls[best].copy()
     state["coast_risk"] = float(risk[0])
     return controls[best, 0]
 
@@ -775,18 +755,6 @@ def plan(
 def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
     policy = {**DEFAULT_POLICY, **state.get("policy", {})}
     trace = diagnostics if diagnostics is not None else {}
-    trace.update(
-        angle_rad=0.0,
-        angle_deg=0.0,
-        rate_rad_s=0.0,
-        desired_rate_rad_s=0.0,
-        rate_error_rad_s=0.0,
-        command_rad_s2=[0.0] * 3,
-        command_norm_rad_s2=0.0,
-        saturated=False,
-        hold=False,
-        released=False,
-    )
     desired = unit(desired)
     cross = np.cross(body_x, desired)
     sine = np.linalg.norm(cross)
@@ -829,7 +797,8 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, di
     return command
 
 
-finite = lambda value: float(value) if value is not None and np.isfinite(float(value)) else None
+def finite(value):
+    return float(value) if value is not None and np.isfinite(float(value)) else None
 
 
 def telemetry(
@@ -908,8 +877,6 @@ class GuidanceController:
         self.phase = Phase.CRUISE
         self.guard_mode = GuardMode.CLEAR
         self.collision_mode = CollisionMode.CLEAR
-        self.burn_mode = BurnMode.COAST
-        self.attitude_mode = AttitudeMode.HOLD
 
     def _collision_mode(self, collision, now):
         match collision:
@@ -1016,7 +983,6 @@ class GuidanceController:
                 damage,
                 float(obs["mass"]),
                 now,
-                rows,
             )
         else:
             prepare_cruise(
@@ -1024,21 +990,18 @@ class GuidanceController:
             )
             desired_accel = np.zeros(3)
         v_des = cruise_velocity(
-            position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS), radius
+            position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS)
+        )
+        steering = bool(
+            plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"]
         )
         avoider = policy["avoidance"] == "avoider"
         match policy["avoidance"]:
             case "avoider":
-                nominal, desired_accel = (
-                    avoid_velocity(v_des, tracks, position, velocity, state, policy),
-                    np.zeros(3),
-                )
+                nominal = avoid_velocity(v_des, tracks, position, velocity, state, policy)
             case _:
                 nominal = v_des
-                if (
-                    not policy["plan_steering"]
-                    or state.get("coast_risk", 0.0) <= policy["plan_risk_threshold"]
-                ):
+                if not steering:
                     desired_accel = np.zeros(3)
 
         match policy["governor"]:
@@ -1074,11 +1037,10 @@ class GuidanceController:
             burning,
             emergency_accel,
             max_accel,
-            plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"],
+            steering,
             avoider,
         )
         state["burning"] = burning
-        self.burn_mode = BurnMode.BURN if burning else BurnMode.COAST
 
         desired = unit(
             collision["side"] if self.collision_mode is CollisionMode.ESCAPE else nominal
@@ -1116,7 +1078,6 @@ class GuidanceController:
                 hold=False,
                 released=False,
             )
-        self.attitude_mode = AttitudeMode.HOLD if state.get("attitude_hold") else AttitudeMode.SLEW
         if gate == "off":
             angular = np.zeros(3)
             trace.update(command_rad_s2=[0.0] * 3, command_norm_rad_s2=0.0, saturated=False)
@@ -1138,14 +1099,6 @@ class GuidanceController:
             damage,
             len(rows),
             emergency_active,
-        )
-        record["nearest_raw_range_m"] = min(
-            (
-                float(np.linalg.norm(np.asarray(row[0], float)))
-                for row in rows
-                if np.all(np.isfinite(row))
-            ),
-            default=None,
         )
         record.update(
             collision=bool(collision),

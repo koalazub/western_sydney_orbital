@@ -46,8 +46,9 @@ def radar_row(position, range_rate, diameter, time):
 def test_competitor_region_stays_within_the_current_budget():
     source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
+    end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:].splitlines()) <= 1250
+    assert len(source[begin:end].splitlines()) <= 1100
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -85,6 +86,24 @@ def test_emergency_guard_reacts_to_a_closing_rock():
     assert np.linalg.norm(acceleration) <= 0.5
 
 
+def test_emergency_guard_dodges_sideways_instead_of_reversing_the_launch():
+    track = {
+        "p": np.array([40.0, 0.0, 0.0]),
+        "v": np.array([-6.0, 0.0, 0.0]),
+        "r": 2.0,
+        "sp": 0.5,
+        "sv": 0.0,
+        "t": 0.0,
+        "s": 0.5,
+    }
+    acceleration, active = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, core.DEFAULT_POLICY, [track], np.zeros(3)
+    )
+    assert active is True
+    assert abs(float(acceleration[0])) < 1e-6
+    assert abs(float(acceleration[1])) > 0.4
+
+
 def test_plan_returns_a_finite_bounded_first_control():
     state = {
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
@@ -104,7 +123,6 @@ def test_plan_returns_a_finite_bounded_first_control():
         0.0,
         3388.7,
         0.0,
-        [],
     )
     assert np.isfinite(acceleration).all()
     assert np.linalg.norm(acceleration) <= 0.5 + 1e-9
@@ -452,7 +470,7 @@ def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
     for time in (0.0, 1.0, 2.0, 3.0):
         row = radar_row([100.0 - 5.0 * time, 0.0, 0.0], -5.0, 2.0, time)
         tracker.update(np.zeros(3), np.zeros(3), [row])
-    tracks = tracker.snapshot(3.0, np.zeros(3))
+    tracks = tracker.snapshot(3.0)
     assert len(tracks) >= 1
     track = min(tracks, key=lambda item: np.linalg.norm(item["p"] - np.array([85.0, 0.0, 0.0])))
     assert np.linalg.norm(track["p"] - np.array([85.0, 0.0, 0.0])) < 3.0
