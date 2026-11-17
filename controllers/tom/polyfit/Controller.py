@@ -182,7 +182,7 @@ class Tracker:
         def debris_in_cone(debris_pos) -> bool:
             debris_vec = debris_pos - shuttle_position
             dot = np.dot(debris_vec, target_vec)
-            ang = np.acos(dot / np.linag.norm(debris_vec) * np.linag.norm(target_vec))
+            ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
             return dot > 0.0 and ang < CONE_ANGLE
 
         radar_items = [r for r in radar_items if debris_in_cone(r)]
