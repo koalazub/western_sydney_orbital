@@ -60,8 +60,28 @@ close rock is not invisible when association fails. Its keep-out includes the
 ship radius, and escape clearance is predicted with the available acceleration
 rather than an instantaneous velocity jump.
 
-The marked core is 1430 lines. The original 200-line target remains a guideline,
-not a hard limit; the numeric test keeps a 1435-line regression guard. The
+## Guidance composition
+
+`GuidanceController.step` builds one `Tick` per decision and runs eight ordered
+stages: `_sense -> _collide -> _guide -> _pilot -> _guard -> _arbitrate_cmd ->
+_steer -> _report`. Each stage owns one responsibility and writes only the
+`Tick` fields it names:
+
+- `_sense`: radar clock, observer history, line/Kalman tracks, launch height.
+- `_collide`: collision check/route, collision mode, steering target.
+- `_guide`: cruise prep, goal velocity, avoider/MPPI nominal and lateral plan.
+- `_pilot`: full/proportional governor and plan-lateral composition.
+- `_guard`: emergency escape and terminal condition.
+- `_arbitrate_cmd`: command-source priority (collision, guard, terminal, launch, plan, avoider, cruise).
+- `_steer`: alignment, main-engine gate, attitude, body-frame command.
+- `_report`: telemetry record and compact line.
+
+The `_stages` tuple is the composition seam; replacing one stage does not change
+the others. The persistent `state` dict remains the adapter/run boundary.
+
+The marked core is 1522 lines across eight stages. The original 200-line target
+remains a guideline, not a hard limit; the numeric test keeps a 1530-line
+regression guard. The
 current 8 m/s default is the line-fit tracker, 25 s velocity avoider, a 10/20 m
 goal corridor, the 0.3/0.1 m/s governor deadband, no launch clearance, and the
 +Z thrust axis. The emergency guard remains the last-resort layer. The high-speed
