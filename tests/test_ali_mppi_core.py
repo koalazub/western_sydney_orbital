@@ -123,6 +123,16 @@ def test_emergency_guard_uses_raw_rows_when_tracks_are_empty():
     assert np.linalg.norm(acceleration) <= 0.5
 
 
+def test_both_guard_ignores_distant_slow_rows():
+    row = np.zeros((3, 3))
+    row[0] = [100.0, 0.0, 0.0]
+    row[1] = [99.0, 0.5, 2.0]
+    row[2, 0] = 0.0
+    policy = {**core.DEFAULT_POLICY, "guard_source": "both"}
+    _, active = core.emergency_guard(np.zeros(3), [row], 0.0, 0.5, policy, [], np.zeros(3), 3.0)
+    assert active is False
+
+
 def test_emergency_guard_includes_the_ship_radius_in_the_keep_out():
     track = {
         "p": np.array([40.0, 9.5, 0.0]),

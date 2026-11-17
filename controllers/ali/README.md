@@ -57,7 +57,7 @@ close rock is not invisible when association fails. Its keep-out includes the
 ship radius, and escape clearance is predicted with the available acceleration
 rather than an instantaneous velocity jump.
 
-The marked core is 1328 lines. The original 200-line target remains a guideline,
+The marked core is 1336 lines. The original 200-line target remains a guideline,
 not a hard limit; the numeric test keeps a 1350-line regression guard. The
 current default is the line-fit tracker, fitted-track guard, MPPI steering on,
 no risk inflation, no fixed samples, MPPI beeline, full governor, attitude

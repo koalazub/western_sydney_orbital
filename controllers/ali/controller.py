@@ -306,6 +306,8 @@ SHUTTLE_HISTORY_S = 10.0
 SHUTTLE_HISTORY_LIMIT = 200
 SHUTTLE_HISTORY_EDGE_S = 0.5
 RADAR_CLOCK_LIMIT_S = 10.0
+RAW_GUARD_MIN_SPEED_MPS = 2.0
+RAW_GUARD_MIN_RANGE_M = 30.0
 
 
 def align_radar_rows(state, rows, now):
@@ -704,6 +706,12 @@ def emergency_guard(
                 continue
             los = unit(row[0])
             rock_velocity = los * (float(row[1, 1]) + los @ velocity)
+            if (
+                policy["guard_source"] == "both"
+                and np.linalg.norm(rock_velocity) < RAW_GUARD_MIN_SPEED_MPS
+                and np.linalg.norm(row[0]) > RAW_GUARD_MIN_RANGE_M
+            ):
+                continue
             relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
             if np.linalg.norm(relative) <= policy["emergency_range_m"]:
                 items.append(
