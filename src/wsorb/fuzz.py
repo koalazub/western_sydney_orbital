@@ -80,6 +80,7 @@ def run_seed(
     profile_id: str,
     duration_s: float,
     wall_budget_s: float,
+    playback_rate: int = 1,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one seed on a fresh owned native server. Never reuses world or controller state."""
@@ -105,12 +106,15 @@ def run_seed(
                 source,
                 job,
                 CheckpointOptions(
-                    connection_file="fuzz.json",
+                    isolated=True,
                     run=True,
                     wall_budget_s=wall_budget_s,
+                    cadence_hz=min(50.0, 10.0 * playback_rate),
+                    playback_rate=playback_rate,
                     settings=settings,
                 ),
                 JobMonitor(job, threading.Event()),
+                allow_playback=True,
             )
     except Exception as error:
         return {
@@ -187,12 +191,13 @@ def run_fuzz(
     threshold: float | None,
     workers: int,
     out: Path | None,
+    playback_rate: int = 1,
     settings: dict[str, Any] | None = None,
     progress: bool = True,
 ) -> dict[str, Any]:
     """Run seeds in parallel and return the complete report."""
     results: list[dict[str, Any]] = []
-    wall_budget_s = duration_s + 120.0
+    wall_budget_s = duration_s / playback_rate + 120.0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(
@@ -202,6 +207,7 @@ def run_fuzz(
                 profile_id=profile_id,
                 duration_s=duration_s,
                 wall_budget_s=wall_budget_s,
+                playback_rate=playback_rate,
                 settings=settings,
             ): seed
             for seed in seeds
@@ -222,6 +228,7 @@ def run_fuzz(
         "threshold_points": threshold,
         "settings": settings,
         "workers": workers,
+        "playback_rate": playback_rate,
         "seeds": list(seeds),
         "runs": results,
         "summary": summarize(results, threshold),
@@ -288,6 +295,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--world", choices=WORLD_IDS, default="official")
     parser.add_argument("--profile", choices=PROFILE_IDS, default="ali_mppi")
     parser.add_argument("--duration", type=float, default=300.0)
+    parser.add_argument(
+        "--playback-rate",
+        type=int,
+        choices=(1, 2, 4),
+        default=1,
+        help="simulation speed for owned native runs",
+    )
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument(
         "--settings",
@@ -317,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             threshold=args.threshold,
             workers=args.workers,
             out=out,
+            playback_rate=args.playback_rate,
             settings=args.settings,
         )
     except (ValueError, OSError) as error:

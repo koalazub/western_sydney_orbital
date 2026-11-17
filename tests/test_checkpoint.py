@@ -398,6 +398,30 @@ def test_external_scope_is_explicit_single_trial_and_does_not_change_playback_ra
             parse_args(argv)
 
 
+def test_isolated_playback_can_use_two_or_four_times():
+    for rate in (2, 4):
+        options = CheckpointOptions(isolated=True, run=True, playback_rate=rate)
+        assert options.playback_rate == rate
+
+
+def test_owned_playback_is_claimed_from_the_isolated_server_not_a_forked_transport():
+    from wsorb.checkpoint import _OWNED_CLIENTS
+    from wsorb.controller_service import _owned_playback
+
+    source = LocalSimulation("http://127.0.0.1:1", secrets.token_urlsafe(32))
+    forked = LocalSimulation(source.url, source._token)
+    options = CheckpointOptions(isolated=True, run=True, playback_rate=4)
+    assert not _owned_playback(options, source, True)
+    _OWNED_CLIENTS.add(source)
+    try:
+        assert _owned_playback(options, source, True)
+        assert not _owned_playback(options, forked, True)
+        assert not _owned_playback(options, source, False)
+        assert not _owned_playback(CheckpointOptions(connection_file="private.json"), source, True)
+    finally:
+        _OWNED_CLIENTS.discard(source)
+
+
 def test_hosted_room_scope_is_explicit_read_only_and_cannot_change_rate_or_compare():
     options = parse_args(["--room-file", "private-room.json"])
     assert str(options.room_file) == "private-room.json"

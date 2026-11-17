@@ -41,13 +41,13 @@ class AliMppiController(ExperimentalController):
         self.last_time = now
         current_position = np.asarray(sample.position_world_m, dtype=float)
         selected = np.asarray(rows, dtype=float)[:80].copy()
-        if selected.ndim == 3:
-            for epoch in np.unique(selected[:, 2, 0]):
-                group = selected[:, 2, 0] == epoch
-                position_at, _ = self.history.at(float(epoch))
-                selected[group, 0] += position_at - current_position
         body_x = body_to_reference(
             np.array([1.0, 0.0, 0.0]),
+            sample.quaternion_xyzw,
+            sample.rotation_convention,
+        )
+        thrust_axis = body_to_reference(
+            np.array([0.0, 0.0, 1.0]),
             sample.quaternion_xyzw,
             sample.rotation_convention,
         )
@@ -56,6 +56,7 @@ class AliMppiController(ExperimentalController):
             "velocity": np.asarray(sample.velocity_world_mps, dtype=float),
             "target": np.asarray(sample.target_position_world_m, dtype=float),
             "body_x": body_x,
+            "thrust_axis": thrust_axis,
             "angular_velocity": np.asarray(sample.angular_velocity_world_rad_s, dtype=float),
             "fuel": float(sample.fuel_used_kg),
             "damage": float(sample.damage_j),
@@ -88,7 +89,6 @@ class AliMppiController(ExperimentalController):
             current_position,
             np.asarray(sample.target_position_world_m, dtype=float),
             self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
-            policy.get("arrival_radius_m", self.math.ARRIVAL_RADIUS_M),
         )
         velocity_error = float(
             np.linalg.norm(nominal - np.asarray(sample.velocity_world_mps, dtype=float))
@@ -103,6 +103,12 @@ class AliMppiController(ExperimentalController):
             "mode": record["mode"],
             "phase": record.get("phase"),
             "source": record.get("source"),
+            "launching": bool(record.get("launching", False)),
+            "launch_height_m": record.get("launch_height_m"),
+            "launch_vertical_mps": record.get("launch_vertical_mps"),
+            "launch_align_rad": record.get("launch_align_rad"),
+            "radar_clock_offset_s": record.get("radar_clock_offset_s"),
+            "radar_newest_age_s": record.get("radar_newest_age_s"),
             "cruise_speed_mps": self.state.get("cruise_speed_mps", self.math.CRUISE_SPEED_MPS),
             "fuel_rate_kg_s": self.state.get("fuel_rate_kg_s"),
             "time_budget_s": policy.get("time_budget_s"),
