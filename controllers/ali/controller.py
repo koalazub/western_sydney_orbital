@@ -1145,6 +1145,9 @@ class GuidanceController:
         history = record_shuttle_state(state, now, position)
         rows, radar_offset = align_radar_rows(state, rows, now)
         raw_rows = rows
+        valid_raw = [row for row in raw_rows if np.all(np.isfinite(row)) and row[1, 2] > 0.0]
+        radar_min_range = min((float(np.linalg.norm(row[0])) for row in valid_raw), default=None)
+        radar_closing = max((-float(row[1, 1]) for row in valid_raw), default=None)
         rows = reconstruct_measurements(rows, history, position)
         radar_newest_age = now - max(
             (float(row[2, 0]) for row in rows if np.all(np.isfinite(row))),
@@ -1377,6 +1380,8 @@ class GuidanceController:
             launch_gate_rad=finite(policy["main_engine_gate_rad"]),
             radar_clock_offset_s=finite(radar_offset),
             radar_newest_age_s=finite(radar_newest_age),
+            radar_min_range_m=finite(radar_min_range) if radar_min_range is not None else None,
+            radar_closing_mps=finite(radar_closing) if radar_closing is not None else None,
         )
         record["line"] += (
             f" phase={self.phase.value} src={source}"
