@@ -541,6 +541,23 @@ def test_launch_gate_blocks_main_thrust_until_thrust_axis_aligns():
     assert np.linalg.norm(angular) < 1e-9
 
 
+def test_launch_emergency_overrides_the_vertical_burn_for_a_fast_rock():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    row = radar_row([60.0, 0.0, 0.0], -20.0, 2.0, 0.0)
+    body, _, record = core.step(state, observation, [row], 0.0, 0.1)
+    assert record["emergency"] is True
+    assert record["source"] == "guard"
+    assert record["phase"] == "emergency"
+    assert np.linalg.norm(body) > 0.4
+
+
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
     calls = []
 
