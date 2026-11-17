@@ -61,6 +61,11 @@ planning off scored 72.38 with 68.72 kg and a 105.2 s arrival on the same seed.
 The Kalman, raw-radar guard, inflation, fixed-sample, avoider and
 proportional-governor modes remain opt-in for seed studies.
 
+On seeds `100-103, 200-201` the 8 m/s default produced six arrivals, zero
+damage, and `37.41 / 54.18 / 72.65` min/mean/max points. Seeds 200 and 201
+needed one worker per run; the two-worker batch hit harness lease expiry, not a
+controller failure.
+
 Retired Ali entrypoints are kept for reproduction, not submission, in
 [`docs/history/controllers/ali/`](../../docs/history/controllers/ali/README.md):
 the radar MVP, the local official-profile runner and the STP source port.
