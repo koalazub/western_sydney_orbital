@@ -1,8 +1,8 @@
 # Ali controller
 
 [`controller.py`](controller.py) is the current single-file STP submission. The
-marked core from `# BEGIN ALI MPPI CORE` to the end of the file is the only copy;
-the local adapter and numeric tests load the same region.
+marked core from `# BEGIN ALI MPPI CORE` to `# END ALI MPPI CORE` is the only
+copy; the local adapter and numeric tests load the same region.
 
 The runtime profile is `ali_mppi`. The policy is settings-driven: cruise
 reference, terminal coast, emergency guard, MPPI plan steering, main-engine gate,
@@ -30,14 +30,16 @@ uv run --locked wsorb tune --grid '{"cruise_fraction":[0.48,0.5,0.52]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-The marked core is 524 lines. The original 200-line target remains a guideline,
-not a hard limit; the numeric test keeps a 600-line regression guard. The
-current default is the line-fit tracker, raw-radar guard, MPPI steering off, no
-risk inflation, no fixed samples, MPPI beeline, full governor, attitude control
-on and a fixed 14 m/s cruise. On seeds `100-107, 200-203` this produced 12/12
-arrivals, zero damage, and `63.11 / 76.92 / 82.49` min/mean/max points. The
-Kalman, track-guard, inflation, fixed-sample, avoider and proportional-governor
-modes remain opt-in for seed studies.
+The marked core is 588 lines. The original 200-line target remains a guideline,
+not a hard limit; the numeric test keeps a 700-line regression guard. The
+current default is the line-fit tracker, fitted-track guard, MPPI steering on,
+no risk inflation, no fixed samples, MPPI beeline, full governor, attitude
+control on and an 8 m/s cruise. On seed 108 this produced 42.48 points,
+59.65 kg of fuel, zero damage and a 166.7 s arrival; the ship coasts from about
+40 s to the target. The same core at 14 m/s with planning off scored 72.38 with
+68.72 kg and a 105.2 s arrival on the same seed. The Kalman, raw-radar guard,
+inflation, fixed-sample, avoider and proportional-governor modes remain opt-in
+for seed studies.
 
 Retired Ali entrypoints are kept for reproduction, not submission, in
 [`docs/history/controllers/ali/`](../../docs/history/controllers/ali/README.md):

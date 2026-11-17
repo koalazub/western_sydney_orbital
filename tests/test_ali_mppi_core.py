@@ -47,7 +47,7 @@ def test_competitor_region_stays_within_the_current_budget():
     source = (ROOT / "controllers/ali/controller.py").read_text(encoding="utf-8")
     begin = source.index("# BEGIN ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:].splitlines()) <= 600
+    assert len(source[begin:].splitlines()) <= 700
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -397,7 +397,7 @@ def test_repeated_collisions_flip_the_detour_side_and_escalate_speed_safety():
     assert np.isclose(core.safe_cruise(state, 8.0, 120_000.0, core.DEFAULT_POLICY), 6.4)
 
 
-def test_default_beeline_skips_unused_mppi_sampling(monkeypatch):
+def test_plan_steering_controls_mppi_sampling(monkeypatch):
     calls = []
 
     def fake_plan(*args, **kwargs):
@@ -419,8 +419,8 @@ def test_default_beeline_skips_unused_mppi_sampling(monkeypatch):
         0.0,
         0.1,
     )
-    assert calls == []
-    state["policy"]["plan_steering"] = True
+    assert calls == [1]
+    state["policy"]["plan_steering"] = False
     core.step(
         state,
         sample_observation([0.0, 0.0, 0.0], [7.0, 0.0, 0.0], [1000.0, 0.0, 0.0]),
@@ -429,6 +429,22 @@ def test_default_beeline_skips_unused_mppi_sampling(monkeypatch):
         0.1,
     )
     assert calls == [1]
+
+
+def test_line_tracker_fits_the_latest_position_and_absolute_velocity():
+    state = {
+        "policy": {"tracker": "line", "time_budget_s": 300.0, "arrival_radius_m": 50.0},
+        "rng": np.random.default_rng(12345),
+    }
+    for time in (0.0, 1.0, 2.0, 3.0):
+        row = radar_row([100.0 - 5.0 * time, 2.0 * time, 0.0], 0.0, 2.0, time)
+        tracks = core.update_estimates(
+            state, [row], np.zeros(3), np.zeros(3), time, state["policy"]
+        )
+    track = min(tracks, key=lambda item: np.linalg.norm(item["p"] - [85.0, 6.0, 0.0]))
+    assert np.linalg.norm(track["p"] - [85.0, 6.0, 0.0]) < 1.0
+    assert np.linalg.norm(track["v"] - [-5.0, 2.0, 0.0]) < 1.0
+    assert track["sp"] >= 0.0
 
 
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():
