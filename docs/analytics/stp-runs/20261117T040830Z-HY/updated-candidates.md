@@ -49,3 +49,20 @@ observed motion, zero damage, and zero owned processes after cleanup. Diagnostic
 IDs: MPPI `ec0affa8-b5ad-4ca5-98ee-eb097279448a`, Polyfit
 `69b1a83f-732a-416e-af1e-a98a42b59545`. Ruff and strict marimo validation passed.
 The matched 44-flight scored batch is running; no completed sweep is claimed.
+
+## TODO: replace the interrupted Polyfit flight
+
+- [ ] After the current sweep finishes, rerun **tom_polyfit_updated, seed 3253,
+  repetition 0** as a separate replacement attempt, using the original frozen
+  source bundle and the same native mission, radar seed 100 and 300-second limit.
+- Interrupted run ID: `bf1b02fa-f693-45d2-97f2-e611b7e8970b` in
+  `runs/stp-20261117T040830Z-HY-updated-candidates-001`.
+- Its receipt records `interrupted` / `previous_runner_interrupted`.
+  `--resume` preserved it and continued with unstarted flights; it did not retry it.
+- Preserve the partial folder and receipt. Do not delete logs to make it appear
+  unstarted. Confirm old-process cleanup before launching the replacement.
+- Record the replacement's ID and evidence location here. During final analysis,
+  explicitly link it to this interrupted slot and count that slot once; retain
+  interruption incidence and never choose between attempts by score.
+
+Replacement has not yet been prepared or launched.
