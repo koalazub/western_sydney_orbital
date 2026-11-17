@@ -1120,5 +1120,114 @@ class OfficialBenchmarkTests(unittest.TestCase):
             self.assertEqual([c["role"] for c in changes if "seeded_sha256" in c], ["spawner"])
 
 
+class EvidenceRetryTests(unittest.TestCase):
+    def receipt(self, outcome="evidence_failure", **values):
+        return dict(outcome=outcome, cleanup="owned_process_tree_exited", **values)
+
+    def test_only_clean_unscored_evidence_failures_are_retryable(self):
+        self.assertTrue(evidence.retryable_evidence_failure(self.receipt()))
+        for outcome in ("success", "exception", "simulator_crash", "startup_timeout", "aborted"):
+            self.assertFalse(evidence.retryable_evidence_failure(self.receipt(outcome)))
+        for patch_value in (
+            {"cleanup": "failed"},
+            {"cleanup_errors": ["error"]},
+            {"official_score": 0},
+            {"inputs": {"time_s": 1}},
+        ):
+            self.assertFalse(
+                evidence.retryable_evidence_failure(dict(self.receipt(), **patch_value))
+            )
+
+    def exercise(self, outcomes, stop=False):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        attempt = dict(run_id="logical", controller={"id": "ali"}, seed=100, repetition=0)
+        calls = []
+
+        def execute(folder, physical):
+            calls.append(dict(physical))
+            destination = folder / physical["run_id"]
+            destination.mkdir(exist_ok=False)
+            result = self.receipt(outcomes[len(calls) - 1])
+            evidence.write_json(destination / "receipt.json", result)
+            (destination / "events.jsonl").write_text("original evidence")
+            if stop:
+                (folder / "STOP").touch()
+            return result
+
+        with patch.object(benchmark, "execute", side_effect=execute):
+            result = benchmark.execute_with_evidence_retries(root, attempt, {"state": "running"})
+        return root, calls, result
+
+    def test_retries_same_conditions_and_preserves_original(self):
+        root, calls, result = self.exercise(["evidence_failure", "evidence_failure", "success"])
+        self.assertEqual(result["outcome"], "success")
+        self.assertEqual(
+            [a["run_id"] for a in calls], ["logical", "logical-retry-1", "logical-retry-2"]
+        )
+        self.assertTrue(all(a["seed"] == 100 and a["controller"] == {"id": "ali"} for a in calls))
+        history = evidence.attempt_history(root, "logical")
+        self.assertEqual(
+            [r["outcome"] for _, _, r in history], ["evidence_failure"] * 2 + ["success"]
+        )
+        self.assertEqual((root / "logical/events.jsonl").read_text(), "original evidence")
+
+    def test_three_retries_are_a_persistent_limit(self):
+        root, calls, result = self.exercise(["evidence_failure"] * 4)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(benchmark.must_halt(result, True))
+        self.assertEqual(
+            benchmark.pending_attempts(root, {"attempts": [{"run_id": "logical"}]}, resume=True), []
+        )
+
+    def test_resume_failed_run_uses_next_physical_id_only(self):
+        root, calls, _ = self.exercise(["evidence_failure"], stop=True)
+        campaign = {"attempts": [calls[0], {"run_id": "unstarted"}]}
+        self.assertEqual(benchmark.pending_attempts(root, campaign), [{"run_id": "unstarted"}])
+        pending = benchmark.pending_attempts(root, campaign, resume=True)
+        self.assertEqual(pending[0]["run_id"], "logical-retry-1")
+        self.assertEqual(pending[0]["logical_run_id"], "logical")
+        self.assertEqual(pending[1]["run_id"], "unstarted")
+
+    def test_stop_and_other_outcomes_do_not_retry(self):
+        _, calls, _ = self.exercise(["evidence_failure"], stop=True)
+        self.assertEqual(len(calls), 1)
+        _, calls, _ = self.exercise(["exception"])
+        self.assertEqual(len(calls), 1)
+
+    def test_illegal_history_is_rejected(self):
+        root, _, _ = self.exercise(["success"])
+        (root / "logical-retry-1").mkdir()
+        with self.assertRaises(ValueError):
+            evidence.attempt_history(root, "logical")
+
+    def test_status_and_analysis_use_one_logical_run_with_retry_provenance(self):
+        root, calls, _ = self.exercise(["evidence_failure", "success"])
+        campaign = dict(
+            mode="seeded",
+            config=dict(
+                reference="ali",
+                controllers=[dict(id="ali", directory="controllers/ali")],
+                thresholds={},
+            ),
+            attempts=[dict(calls[0], block=0)],
+        )
+        evidence.write_json(root / "campaign.json", campaign)
+        status = benchmark.campaign_status(root)["campaigns"][0]
+        self.assertEqual(status["scheduled"], 1)
+        self.assertEqual(status["completed"], 1)
+        self.assertEqual(status["remaining"], 0)
+        self.assertEqual(status["evidence_retries"], 1)
+        # Replace fake event payload with an empty stream for analysis.
+        (root / "logical-retry-1/events.jsonl").write_text("")
+        with patch.object(evidence, "controller_versions", return_value={"ali": {}}):
+            rows = evidence.campaign_rows(root, write_derived=False)[2]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "success")
+        self.assertEqual(rows[0]["physical_run_id"], "logical-retry-1")
+        self.assertEqual(json.loads(rows[0]["prior_outcomes"]), ["evidence_failure"])
+
+
 if __name__ == "__main__":
     unittest.main()

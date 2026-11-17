@@ -1,0 +1,66 @@
+{
+  "schema": "wsorb.official_stp.benchmark.v1",
+  "experiment_id": "20261117T040830Z-HY",
+  "execution_batch": "pilot-001",
+  "install": "K:/Work/SPT-Sim",
+  "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
+  "package": "runs/stp-packages/stu4-0d753a28/SimDynamX-STU4-Sim-0d753a2",
+  "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+  "mission": "Sims/COMPETITION_SIM.simconf",
+  "mission_sha256": "910199b2a122c115667b4adb7cc3ca8aaef4b9ac1d1f71c5ef157194b7e20958",
+  "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+  "reference": "tom_polyfit_v2",
+  "execution_order": "coverage_first",
+  "repetitions": 1,
+  "controllers": [
+    {
+      "id": "tom_polyfit",
+      "author": "Tom Kirkpatrick; Harry Yendle timing patch",
+      "method": "Polyfit original cone; timing corrected",
+      "directory": "controllers/tom/polyfit",
+      "entrypoint": "Controller.py",
+      "environment": {
+        "WSORB_RADAR_ORIGIN_OFFSET_S": "0"
+      },
+      "source_changes": "Own-state history and fallback logging fix; original cone retained"
+    },
+    {
+      "id": "tom_polyfit_v2",
+      "author": "Tom Kirkpatrick; Harry Yendle cone/timing patch",
+      "method": "Polyfit corrected cone; timing corrected",
+      "directory": "controllers/tom/polyfit-v2",
+      "entrypoint": "Controller.py",
+      "environment": {
+        "WSORB_RADAR_ORIGIN_OFFSET_S": "0"
+      },
+      "source_changes": "Matched timing/logging corrections plus corrected cone"
+    },
+    {
+      "id": "ali_mppi",
+      "author": "Ali El Ali",
+      "method": "MPPI latest native history correction",
+      "directory": "controllers/ali",
+      "entrypoint": "controller.py",
+      "environment": {}
+    }
+  ],
+  "seed_bank": "experiments/stp_benchmark/seed_bank.json",
+  "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",
+  "seed_bank_prefix_count": 22,
+  "seed_bank_prefix_sha256": "8eadb78d9a9b7de1044e7e0b5f2f59a83a986bfe550a2736277485438bc8cfb9",
+  "seed_count": 22,
+  "seed_scope": "saved_field_impulses_radar_fixed_100",
+  "sample_period_s": 0.1,
+  "limits": {
+    "simulation_s": 40,
+    "wall_s": 720,
+    "startup_s": 120,
+    "stall_s": 20,
+    "controller_stall_s": 45
+  },
+  "thresholds": {
+    "decision_overrun_s": 0.1,
+    "sensor_stale_s": 5.0
+  },
+  "diagnostic_rerun": true
+}

@@ -34,9 +34,14 @@ conditions, with the fallback log disabled in both. Freeze a new campaign to
 include this directory; existing prepared campaigns keep their frozen sources.
 This change does not add a campaign entry or start a sweep.
 
-Both versions still combine aged radar offsets with the current shuttle
-position, and assume radar timestamps share the mission clock. Those timing
-limitations are deliberately unchanged so the new candidate isolates the cone
-correction. The cone still excludes contacts outside its 45-degree field,
+Both versions now apply identical own-position history interpolation before
+tracking, preserve individual timestamps, and skip duplicate, stale, future,
+bootstrap-zero and unbracketed measurements. The history covers up to 10 s
+(4096 samples maximum); usable measurement age remains 5 s.
+`WSORB_RADAR_ORIGIN_OFFSET_S` specifies radar origin minus mission origin.
+The default zero uses the owner-specified shared-origin assumption for this
+experiment, consistent with Ali's history correction. No packet-arrival offset
+is guessed; no independent native clock measurement is claimed.
+The cone still excludes contacts outside its 45-degree field,
 including possible crossing threats. Validate outcomes in licensed STP;
 numeric checks alone do not establish flight performance.

@@ -120,6 +120,37 @@ To rerun a failed or aborted flight deliberately, prepare a separate campaign.
 
 ## Runtime and mission
 
+### Evidence-failure retries
+
+The runner now allows **three additional physical attempts** after an
+`evidence_failure` for the same scheduled run (four attempts maximum, including
+the initial one). Retries use the same frozen controller, seed, repetition,
+mission and limits, and run immediately after verified owned-process cleanup.
+No retry occurs after incomplete cleanup, an owner stop, a recorded official
+score/scoring inputs, or a different outcome. Exhausted evidence failures still
+halt the queue. Other failure handling is unchanged.
+
+The original UUID directory is preserved; retries use sibling directories
+`<UUID>-retry-1` through `<UUID>-retry-3`. Receipts/manifests carry logical run ID
+and retry index. Never delete these folders to reset a budget. Resume reads the
+saved history and, when eligible, retries an earlier evidence failure before
+continuing unstarted runs. It does not retry controller exceptions, stalls or
+ordinary mission timeouts. This supersedes the older blanket no-retry wording
+only for eligible evidence failures; no original record is replaced.
+
+Status reports logical run counts plus physical retry counts and active retry
+identity. Analysis uses the latest attempt, never the best score, once per
+scheduled run. CSVs include `physical_run_id`, `physical_attempt_ids`,
+`retry_count` and `prior_outcomes`; summaries disclose retry incidence. Failed
+attempts remain in their original evidence folders. A recovered success is not
+evidence of first-attempt reliability. `status.json` records the current runner
+hash and retry limit; frozen source/mission snapshots are not modified.
+
+Use the existing `run ... --resume --continue-on-controller-error` command from
+normal PowerShell. A running process does not acquire this policy until it exits
+and is launched again. No new sweep or automatic resume is started by installing
+this change.
+
 STP 0.54.2 Windows is installed at `K:\Work\SPT-Sim`, release build
 `4b98c53dd4339223fab3df542d0a5b5d13393902`. Its SDK is Python **3.12**, separate
 from this repository's Python 3.13 practice environment. Use UV with the native

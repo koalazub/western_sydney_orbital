@@ -24,13 +24,16 @@ from ctypes import wintypes
 from pathlib import Path
 
 from evidence import (
+    MAX_EVIDENCE_RETRIES,
     SCHEMA,
     analyze,
     combine_campaigns,
     controller_versions,
     digest,
+    latest_attempt,
     read_events,
     require_matched_conditions,
+    retryable_evidence_failure,
     schedule,
     write_json,
 )
@@ -683,6 +686,8 @@ def execute(root, attempt):
     receipt = dict(
         schema=SCHEMA,
         run_id=attempt["run_id"],
+        logical_run_id=attempt.get("logical_run_id", attempt["run_id"]),
+        retry_index=attempt.get("retry_index", 0),
         outcome="in_progress",
         official_score=None,
         inputs=None,
@@ -998,13 +1003,25 @@ def keep_awake():
 def pending_attempts(root, campaign, resume=False):
     pending = []
     for attempt in campaign["attempts"]:
-        folder = root / attempt["run_id"]
+        folder, retry_index, receipt = latest_attempt(root, attempt["run_id"])
         if not folder.exists():
             pending.append(attempt)
             continue
         receipt_path = folder / "receipt.json"
-        receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
         if receipt.get("outcome") not in {None, "in_progress"}:
+            if (
+                resume
+                and retry_index < MAX_EVIDENCE_RETRIES
+                and retryable_evidence_failure(receipt)
+            ):
+                pending.append(
+                    dict(
+                        attempt,
+                        logical_run_id=attempt["run_id"],
+                        retry_index=retry_index + 1,
+                        run_id=f"{attempt['run_id']}-retry-{retry_index + 1}",
+                    )
+                )
             continue
         if not resume:
             raise ValueError("Interrupted attempt found; use --resume to preserve it and continue")
@@ -1043,13 +1060,42 @@ def pending_attempts(root, campaign, resume=False):
             )
         receipt.update(
             schema=SCHEMA,
-            run_id=attempt["run_id"],
+            run_id=folder.name,
             recovered_utc=utc(),
             cleanup="previous_process_cleanup_unverified",
             evidence_bytes=sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()),
         )
         write_json(receipt_path, receipt)
     return pending
+
+
+def execute_with_evidence_retries(root, attempt, status):
+    """Retry infrastructure evidence loss, preserving every physical attempt."""
+    logical_id = attempt.get("logical_run_id", attempt["run_id"])
+    while True:
+        index = attempt.get("retry_index", 0)
+        status.update(
+            current_run_id=attempt["run_id"], logical_run_id=logical_id, retry_index=index
+        )
+        write_json(root / "status.json", status)
+        receipt = execute(root, attempt)
+        if (
+            not retryable_evidence_failure(receipt)
+            or index >= MAX_EVIDENCE_RETRIES
+            or (root / "STOP").exists()
+        ):
+            return receipt
+        index += 1
+        print(
+            f"Evidence failure preserved; retry {index}/{MAX_EVIDENCE_RETRIES}: {logical_id}",
+            flush=True,
+        )
+        attempt = dict(
+            attempt,
+            logical_run_id=logical_id,
+            retry_index=index,
+            run_id=f"{logical_id}-retry-{index}",
+        )
 
 
 def run_campaign(root, max_attempts=None, continue_controller_errors=False, resume=False):
@@ -1082,6 +1128,8 @@ def run_campaign(root, max_attempts=None, continue_controller_errors=False, resu
             started_utc=utc(),
             scheduled=len(campaign["attempts"]),
             continue_controller_errors=continue_controller_errors,
+            max_evidence_retries=MAX_EVIDENCE_RETRIES,
+            runner_sha256=digest(Path(__file__)),
         )
         write_json(root / "status.json", status)
         try:
@@ -1104,8 +1152,8 @@ def run_campaign(root, max_attempts=None, continue_controller_errors=False, resu
                 for dependency, expected in provenance["dependencies"].items():
                     if "sha256" in expected and digest(dependency) != expected["sha256"]:
                         raise ValueError(f"Native mission dependency changed: {dependency}")
-                receipt = execute(root, attempt)
-                status.update(last_outcome=receipt["outcome"], last_run_id=attempt["run_id"])
+                receipt = execute_with_evidence_retries(root, attempt, status)
+                status.update(last_outcome=receipt["outcome"], last_run_id=status["current_run_id"])
                 write_json(root / "status.json", status)
                 if must_halt(receipt, continue_controller_errors):
                     status.update(
@@ -1113,7 +1161,8 @@ def run_campaign(root, max_attempts=None, continue_controller_errors=False, resu
                         finished_utc=utc(),
                     )
                     print(
-                        "Campaign halted for investigation; no attempt retried or replaced",
+                        "Campaign halted; attempts preserved "
+                        "(evidence retry budget exhausted or ineligible)",
                         flush=True,
                     )
                     return False
@@ -1188,8 +1237,10 @@ def campaign_status(root):
         outcomes = {}
         active = None
         completed = 0
+        evidence_retries = 0
         for attempt in campaign["attempts"]:
-            folder = campaign_root / attempt["run_id"]
+            folder, retry_index, _ = latest_attempt(campaign_root, attempt["run_id"])
+            evidence_retries += retry_index
             receipt_path = folder / "receipt.json"
             if not receipt_path.exists():
                 continue
@@ -1200,6 +1251,8 @@ def campaign_status(root):
                 latest = next((e for e in reversed(events) if e.get("kind") == "telemetry"), {})
                 active = dict(
                     run_id=attempt["run_id"],
+                    physical_run_id=folder.name,
+                    retry_index=retry_index,
                     controller=attempt["controller"]["id"],
                     seed=attempt["seed"] if attempt["seed"] is not None else "native",
                     repetition=attempt["repetition"],
@@ -1231,6 +1284,7 @@ def campaign_status(root):
                 completed=completed,
                 remaining=len(campaign["attempts"]) - completed,
                 outcomes=outcomes,
+                evidence_retries=evidence_retries,
                 active=active,
             )
         )

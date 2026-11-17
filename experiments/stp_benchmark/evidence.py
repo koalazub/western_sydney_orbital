@@ -15,6 +15,45 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 SCHEMA = "wsorb.official_stp.benchmark.v1"
+MAX_EVIDENCE_RETRIES = 3
+
+
+def retryable_evidence_failure(receipt):
+    return (
+        receipt.get("outcome") == "evidence_failure"
+        and receipt.get("cleanup") == "owned_process_tree_exited"
+        and not receipt.get("cleanup_errors")
+        and receipt.get("official_score") is None
+        and not receipt.get("inputs")
+    )
+
+
+def attempt_history(root, run_id):
+    """Ordered physical attempts for one scheduled run; never choose a best score."""
+    root = Path(root)
+    history = []
+    for index in range(MAX_EVIDENCE_RETRIES + 1):
+        name = run_id if index == 0 else f"{run_id}-retry-{index}"
+        folder = root / name
+        if not folder.exists():
+            if any(
+                (root / f"{run_id}-retry-{i}").exists()
+                for i in range(index + 1, MAX_EVIDENCE_RETRIES + 1)
+            ):
+                raise ValueError(f"Noncontiguous retry history for {run_id}")
+            break
+        if history and not retryable_evidence_failure(history[-1][2]):
+            raise ValueError(f"Retry follows an ineligible result for {run_id}")
+        receipt_path = folder / "receipt.json"
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+        history.append((folder, index, receipt))
+    return history
+
+
+def latest_attempt(root, run_id):
+    history = attempt_history(root, run_id)
+    return history[-1] if history else (Path(root) / run_id, 0, {})
+
 
 MATCHED_SETTINGS = (
     "experiment_id",
@@ -525,7 +564,8 @@ def campaign_rows(root, write_derived=True):
     )
     rows, timelines = [], []
     for attempt in campaign["attempts"]:
-        folder = root / attempt["run_id"]
+        folder, retry_index, _ = latest_attempt(root, attempt["run_id"])
+        history = attempt_history(root, attempt["run_id"])
         path = folder / "receipt.json"
         receipt = json.loads(path.read_text()) if path.exists() else dict(outcome="not_started")
         events = read_events(folder / "events.jsonl")
@@ -540,7 +580,12 @@ def campaign_rows(root, write_derived=True):
             write_json(folder / "incidents.json", issue)
             write_json(folder / "delivery.json", delivery)
         timelines.extend(
-            dict(run_id=attempt["run_id"], source_campaign=str(root.resolve()), **item)
+            dict(
+                run_id=attempt["run_id"],
+                physical_run_id=folder.name,
+                source_campaign=str(root.resolve()),
+                **item,
+            )
             for item in issue
         )
         inputs = receipt.get("inputs") or {}
@@ -548,6 +593,10 @@ def campaign_rows(root, write_derived=True):
         last = samples[-1] if samples else {}
         row = dict(
             run_id=attempt["run_id"],
+            physical_run_id=folder.name,
+            retry_count=retry_index,
+            prior_outcomes=json.dumps([r.get("outcome") for _, _, r in history[:-1]]),
+            physical_attempt_ids=json.dumps([p.name for p, _, _ in history]),
             source_campaign=str(root.resolve()),
             experiment_id=campaign["config"].get("experiment_id"),
             execution_batch=campaign["config"].get("execution_batch"),
@@ -597,6 +646,8 @@ def summarize(root, campaign, versions, rows, timelines):
             **versions[name],
             scheduled=len(group),
             outcomes=counts,
+            evidence_retries=sum(r.get("retry_count", 0) for r in group),
+            runs_requiring_retry=sum(r.get("retry_count", 0) > 0 for r in group),
             attempted=sum(r["outcome"] != "not_started" for r in group),
             success_rate=counts.get("success", 0) / len(group),
             scored_coverage=sum(r["official_score"] is not None for r in group) / len(group),
@@ -714,6 +765,10 @@ def summarize(root, campaign, versions, rows, timelines):
         )
     lines += [
         "",
+        "Each scheduled run uses its latest eligible physical attempt, never its best score. "
+        "attempts.csv retains physical_attempt_ids, prior_outcomes and retry_count. "
+        "All original evidence remains in the linked attempt folders. "
+        "Recovered outcomes must be interpreted alongside evidence-failure incidence.",
         "Raw score and component distributions: summary.json and attempts.csv.",
         "Matched flights: matched.csv; scenario score differences averaged over all "
         "configured repetitions: scenario_comparisons.csv. "
