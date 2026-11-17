@@ -14,10 +14,10 @@
   "repetitions": 1,
   "controllers": [
     {
-      "id": "tom_polyfit",
+      "id": "polyfit_bodge",
       "author": "Tom Kirkpatrick; Harry Yendle timing patch",
       "method": "Polyfit original cone; timing corrected",
-      "directory": "controllers/tom/polyfit",
+      "directory": "controllers/tom/polyfit_bodge",
       "entrypoint": "Controller.py",
       "environment": {
         "WSORB_RADAR_ORIGIN_OFFSET_S": "0"
@@ -25,10 +25,10 @@
       "source_changes": "Own-state history and fallback logging fix; original cone retained"
     },
     {
-      "id": "tom_polyfit_v2",
+      "id": "polyfit_bodge_v2",
       "author": "Tom Kirkpatrick; Harry Yendle cone/timing patch",
       "method": "Polyfit corrected cone; timing corrected",
-      "directory": "controllers/tom/polyfit-v2",
+      "directory": "controllers/tom/polyfit_bodge_v2",
       "entrypoint": "Controller.py",
       "environment": {
         "WSORB_RADAR_ORIGIN_OFFSET_S": "0"

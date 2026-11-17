@@ -152,3 +152,17 @@ Main final-submission evidence will be stored at
 competition-config diagnostic as historical preparation/compatibility evidence.
 No launches are part of this amendment. Use the final batch for subsequent
 execution and do not pool it with competition-config flights as one version.
+
+## Controller naming and MPPI-v2 follow-up (17 November 2026)
+
+The owner's modified controllers are now `polyfit_bodge` and
+`polyfit_bodge_v2`, at the matching directories under `controllers/tom/`.
+Original final-001 frozen IDs remain `tom_polyfit` and `tom_polyfit_v2`;
+these historical names in the earlier entries above refer to the same preserved
+bundles. The notebook maps those IDs to the new display names without changing
+raw evidence. Configuration copies here now use the renamed live source paths;
+the authoritative configurations actually executed remain in each run's snapshot.
+
+The separately authorized `ali_mppi_v2` comparison, native diagnostic evidence,
+source commit, design and execution status are in [ali-mppi-v2.md](ali-mppi-v2.md).
+This supplements the earlier frozen three-arm experiment.

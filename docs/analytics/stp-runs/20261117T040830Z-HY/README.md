@@ -81,8 +81,8 @@ confirmed Ali seed 100 remains eligible for its first retry. No simulator flight
 was launched as part of these checks. The separately aborted V2 seed-1729 slot
 is not an evidence failure and is deliberately not retried by this policy.
 
-Both `controllers/tom/polyfit/Controller.py` and
-`controllers/tom/polyfit-v2/Controller.py` now keep recent own-position history,
+Both `controllers/tom/polyfit_bodge/Controller.py` and
+`controllers/tom/polyfit_bodge_v2/Controller.py` now keep recent own-position history,
 interpolate the shuttle position at each radar timestamp, and rebase radar
 offsets before cone filtering and track updates. Each row retains its own epoch;
 rows are processed oldest first. Repeated rows are not assimilated again.
@@ -138,3 +138,17 @@ numeric regression tests passed under native STP Python 3.12. Ruff formatting
 and lint passed for the changed Python files. A source comparison confirmed
 the two controller files differ only in the cone-filter calculation. Native flight
 and local WASM validation have not been performed for this edit.
+
+## Controller naming and MPPI-v2 follow-up (17 November 2026)
+
+The owner's modified controllers are now `polyfit_bodge` and
+`polyfit_bodge_v2`, at the matching directories under `controllers/tom/`.
+Original final-001 frozen IDs remain `tom_polyfit` and `tom_polyfit_v2`;
+these historical names in the earlier entries above refer to the same preserved
+bundles. The notebook maps those IDs to the new display names without changing
+raw evidence. Configuration copies here now use the renamed live source paths;
+the authoritative configurations actually executed remain in each run's snapshot.
+
+The separately authorized `ali_mppi_v2` comparison, native diagnostic evidence,
+source commit, design and execution status are in [ali-mppi-v2.md](ali-mppi-v2.md).
+This supplements the earlier frozen three-arm experiment.

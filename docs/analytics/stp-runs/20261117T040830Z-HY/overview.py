@@ -22,9 +22,18 @@ def _():
 
     root = Path(__file__).resolve().parents[4]
     run_dir = root / "runs/stp-20261117T040830Z-HY-final-001"
+    _combined = root / "runs/stp-20261117T040830Z-HY-mppi-v2-combined-001"
+    if (_combined / "attempts.csv").exists():
+        run_dir = _combined
     with (run_dir / "attempts.csv").open(encoding="utf-8", newline="") as _stream:
         rows = list(csv.DictReader(_stream))
     versions = json.loads((run_dir / "controller_versions.json").read_text(encoding="utf-8"))
+
+    _aliases = {"tom_polyfit": "polyfit_bodge", "tom_polyfit_v2": "polyfit_bodge_v2"}
+    for _row in rows:
+        _row["frozen_controller_id"] = _row["controller"]
+        _row["controller"] = _aliases.get(_row["controller"], _row["controller"])
+    versions = {_aliases.get(k, k): v for k, v in versions.items()}
 
     def number(value):
         try:
@@ -37,16 +46,22 @@ def _():
         present = [v for v in values if v is not None]
         return stats.median(present) if present else None
 
-    return alt, json, median, mo, number, rows, run_dir, versions
+    return Path, alt, json, median, mo, number, rows, run_dir, versions
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Final STP run overview · 20261117T040830Z-HY
+    # Final STP run overview Ã‚Â· 20261117T040830Z-HY
 
     Read-only analysis of **final-001**: native licensed STP 0.54.2, 22 saved
-    impulse seeds × three controllers × one repetition, 300 s simulation budget.
+    impulse seeds Ãƒâ€” three controllers Ãƒâ€” one repetition, 300 s simulation budget.
+    The historical original/V2 arms are displayed as **polyfit_bodge** and
+    **polyfit_bodge_v2**; frozen IDs and hashes remain unchanged. When the matched
+    MPPI-v2 combined report is available, it is loaded automatically. MPPI-v2 uses
+    +Z attitude alignment, an 8.6-degree thrust gate, 25 m radial launch clearance,
+    estimated radar-clock alignment and a combined raw/track emergency guard.
+    See [MPPI-v2 design and execution](ali-mppi-v2.md).
     Pilot and earlier competition-config batches are excluded. No flights are launched.
 
     The primary comparison is corrected-cone V2 versus original-cone Polyfit.
@@ -179,9 +194,10 @@ def _(mo):
     score_cohort = mo.ui.dropdown(
         options=[
             "All scored flights per controller",
-            "Same seeds scored by all three",
+            "Same seeds scored by all available controllers",
             "Same seeds scored by original and V2",
             "Same seeds scored by original and MPPI",
+            "Same seeds scored by frozen and updated MPPI",
         ],
         value="All scored flights per controller",
         label="Score comparison cohort",
@@ -211,7 +227,7 @@ def _(mo):
 
 @app.cell
 def _(median, number, rows, score_cohort):
-    _controllers = ["tom_polyfit", "tom_polyfit_v2", "ali_mppi"]
+    _controllers = list(dict.fromkeys(r["controller"] for r in rows))
     _scored = [r for r in rows if number(r["official_score"]) is not None]
     _keys = {
         c: {(r["seed"], r["repetition"]) for r in _scored if r["controller"] == c}
@@ -223,6 +239,8 @@ def _(median, number, rows, score_cohort):
         _included = _controllers[:2]
     elif _mode == "Same seeds scored by original and MPPI":
         _included = [_controllers[0], _controllers[2]]
+    if _mode == "Same seeds scored by frozen and updated MPPI":
+        _included = [c for c in ["ali_mppi", "ali_mppi_v2"] if c in _controllers]
     _common = set.intersection(*[_keys[c] for c in _included])
     _chosen = [
         r
@@ -360,10 +378,10 @@ def _(number, rows, score_components):
     _original = {
         (r["seed"], r["repetition"]): r
         for r in rows
-        if r["controller"] == "tom_polyfit" and number(r["official_score"]) is not None
+        if r["controller"] == "polyfit_bodge" and number(r["official_score"]) is not None
     }
     score_attribution = []
-    for _other in ["tom_polyfit_v2", "ali_mppi"]:
+    for _other in ["polyfit_bodge_v2", "ali_mppi"]:
         _matched = [
             (_original[(r["seed"], r["repetition"])], r)
             for r in rows
@@ -393,7 +411,7 @@ def _(mo, score_attribution):
     mo.vstack(
         [
             mo.md("""
-        ### Matched mean score attribution · independent of the selector
+        ### Matched mean score attribution Ã‚Â· independent of the selector
 
         These comparisons use each pair of controllers' jointly scored seeds.
         **Positive means original Polyfit scores more.** Component mean differences
@@ -401,7 +419,7 @@ def _(mo, score_attribution):
         decomposition. Against V2 (13 pairs), original averages **27.68 points more**:
         about **23.49 fuel**, **2.91 damage**, and **1.28 time** points.
         Against MPPI (11 pairs), original averages **4.84 points less** despite its
-        higher unpaired median: **+3.68 fuel**, **−6.70 damage**, **−1.83 time**.
+        higher unpaired median: **+3.68 fuel**, **Ã¢Ë†â€™6.70 damage**, **Ã¢Ë†â€™1.83 time**.
         This illustrates both cohort selection and the sensitivity of means to poor
         flights. These are descriptive associations, not proof of a controller mechanism.
         Failures without scores remain excluded; see all scheduled outcomes above.
@@ -417,9 +435,9 @@ def _(median, number, rows):
     by_key = {(r["controller"], r["seed"], r["repetition"]): r for r in rows}
     pairs = []
     for baseline in rows:
-        if baseline["controller"] != "tom_polyfit":
+        if baseline["controller"] != "polyfit_bodge":
             continue
-        treatment = by_key[("tom_polyfit_v2", baseline["seed"], baseline["repetition"])]
+        treatment = by_key[("polyfit_bodge_v2", baseline["seed"], baseline["repetition"])]
         pair = {
             "seed": baseline["seed"],
             "repetition": baseline["repetition"],
@@ -454,7 +472,7 @@ def _(alt, mo, paired_stats, pairs):
         .mark_bar()
         .encode(
             x=alt.X("seed:N", sort=None),
-            y=alt.Y("delta_damage_J:Q", title="V2 − original damage (J)"),
+            y=alt.Y("delta_damage_J:Q", title="V2 Ã¢Ë†â€™ original damage (J)"),
             tooltip=["seed:N", "original_outcome:N", "v2_outcome:N", "delta_damage_J:Q"],
         )
         .properties(title="Paired final damage, including partial flights", width="container")
@@ -479,7 +497,7 @@ def _(alt, mo, paired_stats, pairs):
 
 
 @app.cell
-def _(json, number, rows, run_dir):
+def _(Path, json, number, rows, run_dir):
     timeouts = []
     for row in rows:
         if row["outcome"] != "simulation_limit":
@@ -487,7 +505,9 @@ def _(json, number, rows, run_dir):
         first = None
         official_initial = None
         # Stream only timeout evidence; no multi-gigabyte in-memory event collection.
-        with (run_dir / row["physical_run_id"] / "events.jsonl").open(encoding="utf-8") as _stream:
+        with (Path(row["source_campaign"]) / row["physical_run_id"] / "events.jsonl").open(
+            encoding="utf-8"
+        ) as _stream:
             for line in _stream:
                 event = json.loads(line)
                 candidate = number(event.get("initial_range_m"))
@@ -552,7 +572,7 @@ def _(mo, rows, timeouts):
                 Progress coverage: **{coverage}/{len(timeouts)}** timeouts. Range is the
                 last observed centre-to-centre distance, not necessarily at exactly 300
                 s. Positive sample-minus-cutoff means the last sample was after the
-                cutoff. Progress is `1 − final / initial`, remains unclipped, and is
+                cutoff. Progress is `1 Ã¢Ë†â€™ final / initial`, remains unclipped, and is
                 descriptive rather than an official score. Aborts and evidence failures
                 are separate below.
                 """
@@ -566,6 +586,69 @@ def _(mo, rows, timeouts):
                 """
             ),
             mo.ui.table(exceptions, selection=None),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(median, mo, number, rows, score_components):
+    _old = {(r["seed"], r["repetition"]): r for r in rows if r["controller"] == "ali_mppi"}
+    _new = [r for r in rows if r["controller"] == "ali_mppi_v2"]
+    _paired = []
+    for _r in _new:
+        _a = _old.get((_r["seed"], _r["repetition"]))
+        if _a is None:
+            continue
+        _joint = _a["outcome"] == _r["outcome"] == "success"
+        _p = {
+            "seed": _r["seed"],
+            "old_outcome": _a["outcome"],
+            "new_outcome": _r["outcome"],
+            "joint_success": _joint,
+        }
+        for _field in [
+            "official_score",
+            "fuel_kg",
+            "arrival_time_s",
+            "damage_J",
+            *score_components,
+        ]:
+            _x, _y = number(_a[_field]), number(_r[_field])
+            _p["delta_" + _field] = (
+                _y - _x
+                if _x is not None and _y is not None and (_joint or _field == "damage_J")
+                else None
+            )
+        _paired.append(_p)
+    _summary = []
+    for _field in ["official_score", "fuel_kg", "arrival_time_s", "damage_J", *score_components]:
+        _ds = [r["delta_" + _field] for r in _paired if r["delta_" + _field] is not None]
+        _summary.append(
+            {
+                "metric_new_minus_old": _field,
+                "paired_n": len(_ds),
+                "median_delta": median(_ds),
+                "mean_delta": sum(_ds) / len(_ds) if _ds else None,
+                "min_delta": min(_ds, default=None),
+                "max_delta": max(_ds, default=None),
+            }
+        )
+    mo.vstack(
+        [
+            mo.md(f"""
+        ## Updated versus frozen MPPI
+
+        Updated flights available: **{len(_new)}/22**. Differences are **new minus old**:
+        negative fuel/time/damage is favourable; positive score is favourable.
+        Damage includes available partial-flight observations; other deltas require
+        joint success. Compare with all-attempt outcomes above. Component **mean**
+        differences sum to the mean score difference with complete observations.
+        This is a whole-policy, cross-session comparison, not isolated fuel attribution.
+        If no new flights appear, the combined analysis has not yet been generated.
+        """),
+            mo.ui.table(_summary, selection=None),
+            mo.ui.table(_paired, selection=None) if _paired else mo.md("Awaiting matched results."),
         ]
     )
     return
