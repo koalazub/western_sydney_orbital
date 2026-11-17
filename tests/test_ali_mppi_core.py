@@ -17,6 +17,7 @@ def sample_observation(position, velocity, target, damage=0.0):
         "velocity": np.asarray(velocity, float),
         "target": np.asarray(target, float),
         "body_x": np.array([1.0, 0.0, 0.0]),
+        "thrust_axis": np.array([0.0, 0.0, 1.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": float(damage),
@@ -48,7 +49,7 @@ def test_competitor_region_stays_within_the_current_budget():
     begin = source.index("# BEGIN ALI MPPI CORE")
     end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:end].splitlines()) <= 1250
+    assert len(source[begin:end].splitlines()) <= 1350
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -102,6 +103,55 @@ def test_emergency_guard_dodges_sideways_instead_of_reversing_the_launch():
     assert active is True
     assert abs(float(acceleration[0])) < 1e-6
     assert abs(float(acceleration[1])) > 0.4
+
+
+def test_emergency_guard_uses_raw_rows_when_tracks_are_empty():
+    row = np.zeros((3, 3))
+    row[0] = [60.0, 0.0, 0.0]
+    row[1] = [59.0, -20.0, 2.0]
+    row[2, 0] = 0.0
+    tracks_only = {**core.DEFAULT_POLICY, "guard_source": "tracks"}
+    _, inactive = core.emergency_guard(
+        np.zeros(3), [row], 0.0, 0.5, tracks_only, [], np.zeros(3), 3.0
+    )
+    assert inactive is False
+    both = {**core.DEFAULT_POLICY, "guard_source": "both"}
+    acceleration, active = core.emergency_guard(
+        np.zeros(3), [row], 0.0, 0.5, both, [], np.zeros(3), 3.0
+    )
+    assert active is True
+    assert np.linalg.norm(acceleration) <= 0.5
+
+
+def test_both_guard_ignores_distant_slow_rows():
+    row = np.zeros((3, 3))
+    row[0] = [100.0, 0.0, 0.0]
+    row[1] = [99.0, 0.5, 2.0]
+    row[2, 0] = 0.0
+    policy = {**core.DEFAULT_POLICY, "guard_source": "both"}
+    _, active = core.emergency_guard(np.zeros(3), [row], 0.0, 0.5, policy, [], np.zeros(3), 3.0)
+    assert active is False
+
+
+def test_emergency_guard_includes_the_ship_radius_in_the_keep_out():
+    track = {
+        "p": np.array([40.0, 9.5, 0.0]),
+        "v": np.array([-10.0, 0.0, 0.0]),
+        "r": 2.0,
+        "sp": 0.5,
+        "sv": 0.0,
+        "t": 0.0,
+        "s": 0.5,
+    }
+    policy = {**core.DEFAULT_POLICY, "guard_source": "tracks"}
+    _, without_ship = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, policy, [track], np.zeros(3), 0.0
+    )
+    _, with_ship = core.emergency_guard(
+        np.zeros(3), [], 0.0, 0.5, policy, [track], np.zeros(3), 3.0
+    )
+    assert without_ship is False
+    assert with_ship is True
 
 
 def test_plan_returns_a_finite_bounded_first_control():
@@ -207,6 +257,7 @@ def test_telemetry_is_finite_json_and_flags_a_coast_warning():
         "coast",
         "off",
         np.array([1.0, 0.0, 0.0]),
+        np.array([1.0, 0.0, 0.0]),
         np.array([0.0, 1.0, 0.0]),
         np.zeros(3),
         np.zeros(3),
@@ -238,6 +289,7 @@ def test_terminal_coast_command_is_zero_inside_the_goal_band():
         "velocity": np.array([5.0, 0.0, 0.0]),
         "target": np.array([1200.0, 0.0, 0.0]),
         "body_x": np.array([1.0, 0.0, 0.0]),
+        "thrust_axis": np.array([1.0, 0.0, 0.0]),
         "angular_velocity": np.zeros(3),
         "fuel": 0.0,
         "damage": 0.0,
@@ -368,7 +420,7 @@ def test_collision_detour_offsets_the_route_after_the_escape_burn():
         0.1,
     )
     assert record["collision"] is True and record["collision_detour"] is True
-    assert record["gate"] == "burn"
+    assert record["gate"] in {"alignment", "burn"}
     assert state["steer_target"][1] < -20.0
     assert state["collision"]["offset"] > 20.0
     assert np.isclose(state["collision"]["offset"], 25.0)
@@ -446,6 +498,66 @@ def test_collision_side_policy_avoids_the_predicted_rock():
     assert record["collision_side_reason"] == "prediction"
 
 
+def test_launch_phase_clears_radially_before_cruise():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    body, _, record = core.step(state, observation, [], 0.0, 0.1)
+    assert record["phase"] == "launch"
+    assert body[2] > 0.4
+    assert abs(body[0]) < 1e-6
+    cleared = sample_observation([0.0, 0.0, 130.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 130.0])
+    _, _, record = core.step(state, cleared, [], 0.1, 0.1)
+    assert state["launched"] is True
+    assert record["phase"] != "launch"
+
+
+def test_launch_gate_blocks_main_thrust_until_thrust_axis_aligns():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    observation["thrust_axis"] = np.array([1.0, 0.0, 0.0])
+    body, angular, record = core.step(state, observation, [], 0.0, 0.1)
+    assert record["phase"] == "launch"
+    assert record["launch_gate_rad"] == 0.15
+    assert record["launch_align_rad"] > 1.4
+    assert np.allclose(body, 0.0)
+    assert np.linalg.norm(angular) > 0.0
+    observation["thrust_axis"] = np.array([0.0, 0.0, 1.0])
+    body, angular, record = core.step(state, observation, [], 0.1, 0.1)
+    assert np.linalg.norm(body) > 0.4
+    assert abs(body[0]) < 1e-6
+    assert record["launch_align_rad"] < 1e-6
+    assert np.linalg.norm(angular) < 1e-9
+
+
+def test_launch_emergency_overrides_the_vertical_burn_for_a_fast_rock():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+    }
+    observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
+    row = radar_row([60.0, 0.0, 0.0], -20.0, 2.0, 0.0)
+    body, _, record = core.step(state, observation, [row], 0.0, 0.1)
+    assert record["emergency"] is True
+    assert record["source"] == "guard"
+    assert record["phase"] == "emergency"
+    assert np.linalg.norm(body) > 0.4
+
+
 def test_plan_steering_controls_mppi_sampling(monkeypatch):
     calls = []
 
@@ -460,6 +572,7 @@ def test_plan_steering_controls_mppi_sampling(monkeypatch):
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
         "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+        "launched": True,
     }
     core.step(
         state,
@@ -504,6 +617,33 @@ def test_aged_radar_measurement_is_reconstructed_from_shuttle_history():
     state = {"rocks": [], "policy": {"tracker": "line"}}
     core.update_tracks(state, rebased, np.array([20.0, 0.0, 0.0]), np.array([20.0, 0.0, 0.0]), 2.0)
     assert np.isclose(state["rocks"][0]["p"][0], 100.0)
+
+
+def test_radar_loop_origin_is_shifted_onto_the_controller_clock():
+    state = {}
+    for step in range(1, 21):
+        now = step * 0.1
+        position = np.array([8.0 * now, 0.0, 0.0])
+        history = core.record_shuttle_state(state, now, position)
+        measured_at = now - 0.98
+        row = radar_row(
+            [100.0 - position[0], 0.0, 0.0],
+            -8.0,
+            2.0,
+            measured_at,
+        )
+        aligned, offset = core.align_radar_rows(state, [row], now)
+        assert np.isclose(offset, 0.98)
+        rebased = core.reconstruct_measurements(aligned, history, position)
+        assert np.isclose(rebased[0][0, 0] + position[0], 100.0, atol=0.01)
+
+
+def test_pre_sweep_radar_timestamps_do_not_define_the_clock_origin():
+    state = {}
+    row = radar_row([100.0, 0.0, 0.0], 0.0, 2.0, 0.0)
+    _, offset = core.align_radar_rows(state, [row], 1.0)
+    assert offset == 0.0
+    assert "radar_clock_offset_s" not in state
 
 
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():

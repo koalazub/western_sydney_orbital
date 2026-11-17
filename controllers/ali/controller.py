@@ -90,20 +90,21 @@ DEFAULT_SCORE = {
 DEFAULT_POLICY = {
     "cruise_fraction": 0.5,
     "cruise_speed_mps": 8.0,
-    "main_engine_gate_rad": 0.0,
+    "main_engine_gate_rad": 0.15,
+    "launch_clearance_m": 25.0,
+    "launch_speed_mps": 1.5,
     "coast_range_m": 200.0,
     "coast_speed_mps": 4.0,
     "emergency_range_m": 180.0,
     "emergency_lookahead_s": 7.0,
     "emergency_margin_m": 6.0,
-    "emergency_escape_mps": 3.5,
     "plan_steering": True,
     "plan_risk_threshold": 0.01,
     "risk_weight": 200.0,
     "switch_weight": 0.5,
     "attitude_brake_scale": 0.65,
     "tracker": "line",
-    "guard_source": "tracks",
+    "guard_source": "both",
     "risk_inflation": False,
     "risk_k_sigma": 1.5,
     "risk_max_inflate": 10.0,
@@ -137,6 +138,7 @@ DEFAULT_POLICY = {
 class Phase(Enum):
     """Why the controller issued the current acceleration."""
 
+    LAUNCH = "launch"
     COLLISION = "collision"
     EMERGENCY = "emergency"
     TERMINAL = "terminal"
@@ -303,6 +305,42 @@ class KalmanTracker:
 SHUTTLE_HISTORY_S = 10.0
 SHUTTLE_HISTORY_LIMIT = 200
 SHUTTLE_HISTORY_EDGE_S = 0.5
+RADAR_CLOCK_LIMIT_S = 10.0
+RAW_GUARD_MIN_SPEED_MPS = 2.0
+RAW_GUARD_MIN_RANGE_M = 30.0
+
+
+def align_radar_rows(state, rows, now):
+    """Shift radar-loop timestamps from their own origin onto the controller clock.
+
+    Radar rows count seconds from the radar loop's startup, not necessarily from
+    the mission origin, and the offset is not published with the rows. The
+    newest row of a snapshot was measured no later than ``now``, so the running
+    minimum of ``now - newest`` is that origin offset plus the smallest observed
+    transport delay. Zero timestamps are the pre-sweep initialisation and are
+    shifted with the rest once the origin is known.
+    """
+    newest = max(
+        (float(row[2, 0]) for row in rows if np.all(np.isfinite(row)) and float(row[2, 0]) != 0.0),
+        default=None,
+    )
+    previous = state.get("radar_clock_offset_s")
+    if newest is None:
+        offset = float(previous) if previous is not None else 0.0
+    else:
+        observed = float(now) - newest
+        offset = observed if previous is None else min(float(previous), observed)
+        offset = float(np.clip(offset, -RADAR_CLOCK_LIMIT_S, RADAR_CLOCK_LIMIT_S))
+        state["radar_clock_offset_s"] = offset
+    if offset == 0.0:
+        return rows, offset
+    aligned = []
+    for row in rows:
+        adjusted = np.asarray(row, float).copy()
+        if np.all(np.isfinite(adjusted)):
+            adjusted[2, 0] += offset
+        aligned.append(adjusted)
+    return aligned, offset
 
 
 def record_shuttle_state(state, now, position):
@@ -645,53 +683,53 @@ def proportional_govern(nominal_velocity, velocity, state, max_accel, policy):
     return command, True
 
 
-def emergency_guard(velocity, rows, now, max_accel, policy=None, tracks=None, position=None):
+def emergency_guard(
+    velocity, rows, now, max_accel, policy=None, tracks=None, position=None, ship_radius=0.0
+):
     policy = {**DEFAULT_POLICY, **(policy or {})}
     velocity = np.asarray(velocity, float)
+    margin = float(policy["emergency_margin_m"])
     items = []
-    if tracks is not None and position is not None:
+
+    def add(relative, rock_velocity, radius):
+        if np.linalg.norm(relative) <= policy["emergency_range_m"]:
+            items.append((relative, rock_velocity, float(radius) + float(ship_radius) + margin))
+
+    if tracks is not None and position is not None and policy["guard_source"] in ("tracks", "both"):
         for track in tracks:
-            relative = np.asarray(track["p"], float) - position
-            if np.linalg.norm(relative) <= policy["emergency_range_m"]:
-                items.append(
-                    (
-                        relative,
-                        np.asarray(track["v"], float),
-                        float(track["r"]) + policy["emergency_margin_m"],
-                    )
-                )
-    else:
+            add(np.asarray(track["p"], float) - position, np.asarray(track["v"], float), track["r"])
+    if policy["guard_source"] in ("raw", "both"):
         for row in rows:
-            if np.all(np.isfinite(row)) and row[1, 2] > 0.0:
-                los = unit(row[0])
-                rock_velocity = los * (float(row[1, 1]) + los @ velocity)
-                relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
-                if np.linalg.norm(relative) <= policy["emergency_range_m"]:
-                    items.append(
-                        (
-                            relative,
-                            rock_velocity,
-                            0.55 * float(row[1, 2]) + policy["emergency_margin_m"],
-                        )
-                    )
+            if not np.all(np.isfinite(row)) or row[1, 2] <= 0.0:
+                continue
+            los = unit(row[0])
+            rock_velocity = los * (float(row[1, 1]) + los @ velocity)
+            if (
+                policy["guard_source"] == "both"
+                and np.linalg.norm(rock_velocity) < RAW_GUARD_MIN_SPEED_MPS
+                and np.linalg.norm(row[0]) > RAW_GUARD_MIN_RANGE_M
+            ):
+                continue
+            relative = row[0] + (now - float(row[2, 0])) * (rock_velocity - velocity)
+            add(relative, rock_velocity, 0.5 * float(row[1, 2]))
     if not items:
         return np.zeros(3), False
     relative, rock_velocity, keep_out = (np.array(values) for values in zip(*items, strict=True))
+    times = np.linspace(0.0, float(policy["emergency_lookahead_s"]), 17)
 
-    def miss(option):
-        relative_velocity = rock_velocity - option
-        time = np.clip(
-            -np.einsum("ij,ij->i", relative, relative_velocity)
-            / (np.einsum("ij,ij->i", relative_velocity, relative_velocity) + 1e-9),
-            0.0,
-            policy["emergency_lookahead_s"],
+    def clearance(acceleration):
+        relative_acceleration = -np.asarray(acceleration, float)
+        path = (
+            relative[:, None, :]
+            + (rock_velocity - velocity)[:, None, :] * times[None, :, None]
+            + 0.5 * relative_acceleration[None, None, :] * times[None, :, None] ** 2
         )
-        return np.linalg.norm(relative + time[:, None] * relative_velocity, axis=1) - keep_out
+        return np.linalg.norm(path, axis=2) - keep_out[:, None]
 
-    current = miss(velocity)
+    current = clearance(np.zeros(3))
     if current.min() >= 0.0:
         return np.zeros(3), False
-    threat = int(np.argmin(current))
+    threat = int(np.argmin(current.min(axis=1)))
     heading = unit(velocity) if np.linalg.norm(velocity) > 1e-6 else np.array([1.0, 0.0, 0.0])
     lateral = relative[threat] - (relative[threat] @ heading) * heading
     side = (
@@ -699,21 +737,19 @@ def emergency_guard(velocity, rows, now, max_accel, policy=None, tracks=None, po
         if np.linalg.norm(lateral) > 1e-6
         else unit(np.cross(heading, [0.0, 0.0, 1.0] if abs(heading[2]) < 0.9 else [1.0, 0.0, 0.0]))
     )
-    escape = policy["emergency_escape_mps"]
     options = [
-        velocity + escape * unit(-relative[threat]),
-        velocity + escape * side,
-        velocity - escape * side,
-        velocity,
+        max_accel * unit(-relative[threat]),
+        max_accel * side,
+        -max_accel * side,
+        np.zeros(3),
     ]
-    scores = [float(miss(option).min()) for option in options]
-    # Prefer a sideways dodge over reversing the launch. Retrograde only wins
-    # when neither lateral option produces a positive predicted clearance.
+    scores = [float(clearance(option).min()) for option in options]
+    # Keep the sideways preference unless neither lateral option clears.
     lateral = max((1, 2), key=lambda index: scores[index])
     best = lateral if scores[lateral] >= 0.0 else int(np.argmax(scores))
     if scores[best] <= float(current.min()):
         return np.zeros(3), False
-    return max_accel * unit(options[best] - velocity), True
+    return options[best], True
 
 
 def avoid_velocity(v_des, tracks, position, velocity, state, policy):
@@ -909,13 +945,13 @@ def plan(
     return controls[best, 0]
 
 
-def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
+def attitude(body_axis, angular_velocity, desired, max_angular_accel, dt, state, diagnostics=None):
     policy = {**DEFAULT_POLICY, **state.get("policy", {})}
     trace = diagnostics if diagnostics is not None else {}
     desired = unit(desired)
-    cross = np.cross(body_x, desired)
+    cross = np.cross(body_axis, desired)
     sine = np.linalg.norm(cross)
-    angle = np.arctan2(sine, float(np.clip(body_x @ desired, -1.0, 1.0)))
+    angle = np.arctan2(sine, float(np.clip(body_axis @ desired, -1.0, 1.0)))
     speed = np.linalg.norm(angular_velocity)
     held = state.get("attitude_hold", False)
     hold = angle <= (np.radians(2.0) if held else ATTITUDE_HOLD_RAD) and speed <= (
@@ -936,7 +972,7 @@ def attitude(body_x, angular_velocity, desired, max_angular_accel, dt, state, di
     state["attitude_hold"] = bool(hold)
     if hold or np.linalg.norm(desired) < 1e-9:
         return np.zeros(3)
-    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_x, [0.0, 0.0, 1.0]))
+    axis = cross / sine if sine > 1e-9 else unit(np.cross(body_axis, [0.0, 0.0, 1.0]))
     safe_rate = np.sqrt(
         2.0 * max_angular_accel * policy["attitude_brake_scale"] * max(angle - np.radians(0.5), 0.0)
     )
@@ -963,6 +999,7 @@ def telemetry(
     mode,
     gate,
     body_x,
+    thrust_axis,
     target_direction,
     accel_world,
     accel_body,
@@ -988,8 +1025,9 @@ def telemetry(
         "mode": mode,
         "gate": gate,
         "emergency": bool(emergency),
-        "target_align_rad": finite(angle(body_x, target_direction)),
-        "burn_align_rad": finite(angle(body_x, accel_world)),
+        "target_align_rad": finite(angle(thrust_axis, target_direction)),
+        "burn_align_rad": finite(angle(thrust_axis, accel_world)),
+        "nose_align_rad": finite(angle(body_x, target_direction)),
         "accel_body_mps2": [finite(value) for value in accel_body],
         "speed_mps": finite(speed),
         "target_range_m": finite(target_range),
@@ -1050,6 +1088,7 @@ class GuidanceController:
         collision_mode,
         guard_mode,
         terminal,
+        launching,
         acceleration,
         burning,
         emergency_accel,
@@ -1065,6 +1104,8 @@ class GuidanceController:
                 return emergency_accel, True, Phase.EMERGENCY, "guard"
             case (_, _, True):
                 return np.zeros(3), False, Phase.TERMINAL, "coast"
+            case _ if launching:
+                return acceleration, burning, Phase.LAUNCH, "launch"
             case _ if plan_active:
                 return acceleration, burning, Phase.PLAN, "plan"
             case _ if avoider:
@@ -1092,15 +1133,37 @@ class GuidanceController:
     def step(self, obs, rows, now, dt, to_body=None):
         state = self.state
         policy = {**DEFAULT_POLICY, **state.setdefault("policy", {})}
-        position, velocity, target, body_x = (
-            np.asarray(obs[key], float) for key in ("position", "velocity", "target", "body_x")
+        position, velocity, target, body_x, thrust_axis = (
+            np.asarray(obs[key], float)
+            for key in ("position", "velocity", "target", "body_x", "thrust_axis")
         )
+        thrust_axis = unit(thrust_axis)
         max_accel, max_angular = float(obs["max_accel"]), float(obs["max_angular"])
+        ship_radius = float(obs["radius"])
         radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         damage = float(obs["damage"])
         history = record_shuttle_state(state, now, position)
+        rows, radar_offset = align_radar_rows(state, rows, now)
+        raw_rows = rows
+        valid_raw = [row for row in raw_rows if np.all(np.isfinite(row)) and row[1, 2] > 0.0]
+        radar_min_range = min((float(np.linalg.norm(row[0])) for row in valid_raw), default=None)
+        radar_closing = max((-float(row[1, 1]) for row in valid_raw), default=None)
         rows = reconstruct_measurements(rows, history, position)
+        radar_newest_age = now - max(
+            (float(row[2, 0]) for row in rows if np.all(np.isfinite(row))),
+            default=now,
+        )
         tracks = update_estimates(state, rows, position, velocity, now, policy)
+
+        up = unit(position) if np.linalg.norm(position) > 1e-6 else unit(body_x)
+        if np.linalg.norm(up) < 1e-9:
+            up = np.array([0.0, 0.0, 1.0])
+        launch_radius = float(state.setdefault("launch_radius", np.linalg.norm(position)))
+        height = float(np.linalg.norm(position)) - launch_radius
+        launching = not state.get("launched", False)
+        if launching and height >= float(policy["launch_clearance_m"]):
+            state["launched"] = True
+            launching = False
 
         hit, energy, change = collision_check(state, velocity, damage, dt, policy)
         collision = active_collision(state, now)
@@ -1129,40 +1192,54 @@ class GuidanceController:
         state["steer_target"] = steer_target
 
         plan_active = bool(policy["plan_steering"] and policy["avoidance"] == "mppi")
-        if plan_active:
-            desired_accel = plan(
-                state,
-                position,
-                velocity,
-                target,
-                body_x,
-                float(obs["radius"]),
-                max_accel,
-                dt,
-                float(obs["fuel"]),
-                damage,
-                float(obs["mass"]),
-                now,
-            )
-        else:
+        if launching:
             prepare_cruise(
                 state, max(0.0, remaining - radius), max_accel, damage, float(obs["mass"]), policy
             )
             desired_accel = np.zeros(3)
-        v_des = cruise_velocity(
-            position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS)
-        )
-        steering = bool(
-            plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"]
-        )
-        avoider = policy["avoidance"] == "avoider"
-        match policy["avoidance"]:
-            case "avoider":
-                nominal = avoid_velocity(v_des, tracks, position, velocity, state, policy)
-            case _:
-                nominal = v_des
-                if not steering:
-                    desired_accel = np.zeros(3)
+            nominal = up * float(policy["launch_speed_mps"])
+            steering = False
+            avoider = False
+        else:
+            if plan_active:
+                desired_accel = plan(
+                    state,
+                    position,
+                    velocity,
+                    target,
+                    body_x,
+                    float(obs["radius"]),
+                    max_accel,
+                    dt,
+                    float(obs["fuel"]),
+                    damage,
+                    float(obs["mass"]),
+                    now,
+                )
+            else:
+                prepare_cruise(
+                    state,
+                    max(0.0, remaining - radius),
+                    max_accel,
+                    damage,
+                    float(obs["mass"]),
+                    policy,
+                )
+                desired_accel = np.zeros(3)
+            v_des = cruise_velocity(
+                position, steer_target, state.get("cruise_speed_mps", CRUISE_SPEED_MPS)
+            )
+            steering = bool(
+                plan_active and state.get("coast_risk", 0.0) > policy["plan_risk_threshold"]
+            )
+            avoider = policy["avoidance"] == "avoider"
+            match policy["avoidance"]:
+                case "avoider":
+                    nominal = avoid_velocity(v_des, tracks, position, velocity, state, policy)
+                case _:
+                    nominal = v_des
+                    if not steering:
+                        desired_accel = np.zeros(3)
 
         match policy["governor"]:
             case "proportional" if not np.any(desired_accel):
@@ -1176,12 +1253,13 @@ class GuidanceController:
 
         emergency_accel, emergency_active = emergency_guard(
             velocity,
-            rows,
+            raw_rows,
             now,
             max_accel,
             policy,
-            tracks if policy["guard_source"] == "tracks" else None,
+            tracks,
             position,
+            ship_radius,
         )
         self.guard_mode = GuardMode.ESCAPE if emergency_active else GuardMode.CLEAR
         terminal = bool(
@@ -1193,6 +1271,7 @@ class GuidanceController:
             self.collision_mode,
             self.guard_mode,
             terminal,
+            launching,
             acceleration,
             burning,
             emergency_accel,
@@ -1206,7 +1285,7 @@ class GuidanceController:
             collision["side"] if self.collision_mode is CollisionMode.ESCAPE else nominal
         )
         alignment = (
-            np.arccos(float(np.clip(body_x @ desired, -1.0, 1.0)))
+            np.arccos(float(np.clip(thrust_axis @ desired, -1.0, 1.0)))
             if np.linalg.norm(desired) > 1e-9
             else 0.0
         )
@@ -1222,7 +1301,9 @@ class GuidanceController:
         gate = self._gate(self.phase, burning, acceleration, alignment, angular_velocity)
         trace = {}
         if policy["attitude_control"]:
-            angular = attitude(body_x, angular_velocity, desired, max_angular, dt, state, trace)
+            angular = attitude(
+                thrust_axis, angular_velocity, desired, max_angular, dt, state, trace
+            )
         else:
             angular = np.zeros(3)
             state["attitude_hold"] = False
@@ -1249,6 +1330,7 @@ class GuidanceController:
             "burn" if burning else "coast",
             gate,
             body_x,
+            thrust_axis,
             desired,
             acceleration,
             body_accel,
@@ -1286,15 +1368,32 @@ class GuidanceController:
             governor=policy["governor"],
             estimate_count=len(tracks),
             phase=self.phase.value,
+            controller_phase=self.phase.value,
             source=source,
             guard_mode=self.guard_mode.value,
             collision_mode=self.collision_mode.value,
+            launching=bool(launching),
+            launch_height_m=finite(height),
+            launch_clearance_m=finite(policy["launch_clearance_m"]),
+            launch_vertical_mps=finite(float(up @ velocity)),
+            launch_align_rad=finite(alignment),
+            launch_gate_rad=finite(policy["main_engine_gate_rad"]),
+            radar_clock_offset_s=finite(radar_offset),
+            radar_newest_age_s=finite(radar_newest_age),
+            radar_min_range_m=finite(radar_min_range) if radar_min_range is not None else None,
+            radar_closing_mps=finite(radar_closing) if radar_closing is not None else None,
         )
         record["line"] += (
             f" phase={self.phase.value} src={source}"
             f" coll={int(record['collision'])} hits={record['collision_hits']}"
             f" off={record['collision_offset_m'] or 0.0:.0f}"
         )
+        if self.phase is Phase.LAUNCH:
+            record["line"] += (
+                f" launch h={height:.1f}m vz={float(up @ velocity):.2f}"
+                f" align={np.degrees(alignment):.1f}deg"
+                f" gate={np.degrees(policy['main_engine_gate_rad']):.1f}deg"
+            )
         state["last_accel"] = acceleration.copy()
         return body_accel, body_angular, record
 
@@ -1323,6 +1422,7 @@ state = {
     },
 }
 last_time, last_status, last_display, last_alert = None, -np.inf, -np.inf, -np.inf
+last_phase = None
 while True:
     time.sleep(1.0 / loop_hz)
     now = (st.SimGlobals.SimClock.GetTimeNow().as_datetime() - t0).total_seconds()
@@ -1335,6 +1435,9 @@ while True:
     body_x = np.asarray(
         st.frames.FramedVector(np.array([1.0, 0.0, 0.0]), shuttleFrame).ExprIn(phobosFrame), float
     )
+    thrust_axis = np.asarray(
+        st.frames.FramedVector(np.array([0.0, 0.0, 1.0]), shuttleFrame).ExprIn(phobosFrame), float
+    )
     mass = float(shuttle.getMass())
     mass = mass if np.isfinite(mass) and mass > 0.0 else 3388.7
     obs = {
@@ -1342,6 +1445,7 @@ while True:
         "velocity": velocity,
         "target": target_position,
         "body_x": body_x,
+        "thrust_axis": thrust_axis,
         "angular_velocity": np.asarray(shuttle.getAngVelocity().WRT_ExprIn(phobosFrame), float),
         "fuel": float(shuttle.GetParam(st.VarType.double, ["Stats", "FuelUsed"])),
         "damage": float(shuttle.GetParam(st.VarType.double, ["Stats", "Damage"])),
@@ -1363,6 +1467,17 @@ while True:
         ),
     )
     SetCommand(accel_body, angular_body)
+    if record["phase"] != last_phase:
+        phase_message = (
+            f"MPPI phase {last_phase or 'none'} -> {record['phase']} "
+            f"height={record.get('launch_height_m')} m "
+            f"vz={record.get('launch_vertical_mps')} m/s "
+            f"align={np.degrees(record.get('launch_align_rad') or 0.0):.1f} deg "
+            f"gate={np.degrees(record.get('launch_gate_rad') or 0.0):.1f} deg"
+        )
+        st.logger_info(phase_message)
+        st.OnScreenLogMessage(phase_message, "MPPI", st.Severity.Info)
+        last_phase = record["phase"]
     if now - last_status >= 0.5:
         last_status = now
         st.logger_info("MPPI " + json.dumps(record, separators=(",", ":"), allow_nan=False))

@@ -30,6 +30,20 @@ changing validated behaviour by accident.
 - The submission is a single-file controller. Keep the marked core region and
   the source loader contract intact. Do not introduce imports or module splits
   that the loader cannot execute.
+- Follow the official STU4 template exactly:
+  `git clone --branch template https://github.com/Legolas4224/STU4-Solution.git`.
+  The `DON'T CHANGE` block must diff clean: exact banners, imports, entity
+  handles, camera frames, `PanTiltCamera`, `GetNearestDebrisLocations` and
+  `SetCommand`. Keep user code below it. Do not add imports or helpers inside the
+  block; if formatting would rewrite it, wrap it in `# fmt: off` / `# fmt: on`
+  and compare the block with `diff` before committing.
+- Work inside the project environment: `nix develop --command <command>` or the
+  documented `just` recipe. Do not wrap commands in `bash -c`, ad-hoc shell
+  pipelines or interpreter snippets when a native command exists.
+- Native and adapter paths must share preprocessing. If the adapter corrects
+  radar epochs, frames or row caps, move that correction into the core (or a
+  shared function) and test the native path. The adapter must not be the only
+  place a correctness step exists.
 - Python is 3.13. Prefer `enum.Enum` and `match`/`case` for states. Do not rely
   on a 3.15-only builtin such as `frozendict`.
 - Keep random sampling deterministic for the same seed.
@@ -86,6 +100,24 @@ changing validated behaviour by accident.
 10. **Launch and close-threat cases.** Test a threat near the launch pad before
     the initial burn, not only mid-cruise encounters. A controller that dodges
     at cruise speed may behave differently at zero speed and low thrust.
+11. **State ownership and dead labels.** An enum or mode that is written but
+    never read is not a state machine; it is dead telemetry. Either make it the
+    authoritative transition state or delete it. Do not document a state machine
+    that the code does not own.
+12. **Time alignment and measurement history.** Radar rows carry a measurement
+    epoch. Store recent shuttle states, reconstruct each row from the shuttle
+    position at that epoch, and define the fallback when history is unavailable.
+    A stationary rock must not move because the shuttle moved between measurement
+    and reconstruction. Test the exact aged-row case.
+13. **Prediction-based, deterministic policy.** Where a policy chooses a side,
+    escape or route, score the candidates by predicted clearance using fitted
+    tracks. Use a fixed tie-break and a continuity margin; do not use hit parity,
+    random choice or a hardcoded alternation. Expose the score and the reason in
+    telemetry so the choice can be audited.
+14. **Merge and parity checks.** Fetch before pushing; rebase onto the new
+    remote tip instead of force-pushing. Re-run the affected tests after a merge.
+    Report local test success, native-sim success and transport/hosted status
+    separately; `lease_expired` is a harness failure, not a controller failure.
 
 ### Process
 
@@ -113,7 +145,10 @@ tuning in the same change.
 3. If the behaviour is intentionally changed, run the agreed seed set and report
    the distribution, not a single lucky seed.
 4. Format the changed files.
-5. Commit only the files you own, as one purpose per commit.
+5. Compare the `DON'T CHANGE` template block with the official template using
+   `diff`; it must be empty.
+6. Verify native/adapter preprocessing parity on the same input.
+7. Commit only the files you own, as one purpose per commit.
 
 ### Output format
 
@@ -134,4 +169,9 @@ Return:
 - The refactor preserves the baseline metrics within noise, or the intentional
   delta is measured and documented.
 - The affected tests pass and actually execute the changed paths.
+- The `DON'T CHANGE` template block diff is empty.
+- Native and adapter paths apply the same epoch/frame/row preprocessing.
+- No state label is written but unread, and no dead settings remain.
+- Prediction-based choices expose a deterministic score, tie-break and reason.
+- Seed results distinguish controller behaviour from transport or lease failures.
 - The diff touches only the named controller's files.

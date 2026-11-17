@@ -51,12 +51,13 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "cruise_fraction",
             "cruise_speed_mps",
             "main_engine_gate_rad",
+            "launch_clearance_m",
+            "launch_speed_mps",
             "coast_range_m",
             "coast_speed_mps",
             "emergency_range_m",
             "emergency_lookahead_s",
             "emergency_margin_m",
-            "emergency_escape_mps",
             "plan_steering",
             "plan_risk_threshold",
             "risk_weight",
@@ -103,6 +104,8 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "arrival_radius_m",
             "cruise_fraction",
             "cruise_speed_mps",
+            "launch_clearance_m",
+            "launch_speed_mps",
             "coast_speed_mps",
             "risk_weight",
             "switch_weight",
@@ -123,7 +126,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
         booleans = {"plan_steering", "risk_inflation", "mppi_fixed_samples", "attitude_control"}
         choices = {
             "tracker": ("line", "kalman"),
-            "guard_source": ("raw", "tracks"),
+            "guard_source": ("raw", "tracks", "both"),
             "avoidance": ("mppi", "avoider"),
             "governor": ("full", "proportional"),
         }
