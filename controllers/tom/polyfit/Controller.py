@@ -125,13 +125,71 @@ Conventions used everywhere:
   * "Radar item" = one 3x3 array from GetNearestDebrisLocations():
         item[0, :]  rock centre RELATIVE to the shuttle (m)
         item[1, 0]  distance to its surface     item[1, 1]  range rate (m/s)
-        item[1, 2]  diameter (m)                item[2, 0]  time of measurement (s since sim start)
+        item[1, 2]  diameter (m)                item[2, 0]  time of measurement (s since radar startup)
 """
 
 
 # =====================================================================================
 # 1. TRACKING - the radar forgets everything between readings, so we keep a list of rocks
 # =====================================================================================
+
+
+class RadarTiming:
+    """Reconstruct aged radar offsets using own-state history only.
+
+    offset = radar origin minus mission origin, in seconds. The experiment
+    assumes a shared origin (zero); no packet-arrival offset is estimated.
+    """
+
+    def __init__(self, origin_offset_s=0.0, history_s=10.0, max_age_s=5.0):
+        self.origin_offset_s = float(origin_offset_s)
+        if not np.isfinite(self.origin_offset_s):
+            raise ValueError("Radar origin offset must be finite")
+        self.history_s = history_s
+        self.max_age_s = max_age_s
+        self.history = deque(maxlen=4096)
+        self.seen = {}
+
+    def prepare(self, rows, position, now):
+        position = np.asarray(position, float)
+        now = float(now)
+        if not np.isfinite(now) or not np.all(np.isfinite(position)):
+            return []
+        if self.history and now < self.history[-1][0]:
+            self.history.clear()
+            self.seen.clear()
+        if self.history and now == self.history[-1][0]:
+            self.history[-1] = (now, position.copy())
+        else:
+            self.history.append((now, position.copy()))
+        while len(self.history) > 2 and self.history[1][0] < now - self.history_s:
+            self.history.popleft()
+        self.seen = {key: at for key, at in self.seen.items() if now - at <= self.max_age_s}
+        epochs = np.array([entry[0] for entry in self.history])
+        positions = np.array([entry[1] for entry in self.history])
+        prepared = []
+        for raw in rows:
+            row = np.asarray(raw, float)
+            if row.shape != (3, 3) or not np.all(np.isfinite(row)) or row[1, 2] <= 0:
+                continue
+            # Initial timestamp-zero rows predate the radar clock origin.
+            if row[2, 0] <= 0:
+                continue
+            at = float(row[2, 0]) + self.origin_offset_s
+            if at > now or now - at > self.max_age_s or at < epochs[0]:
+                continue  # no extrapolation or current-position fallback
+            key = tuple(row.ravel())
+            if key in self.seen:
+                continue
+            measured_position = np.array(
+                [np.interp(at, epochs, positions[:, axis]) for axis in range(3)]
+            )
+            adjusted = row.copy()
+            adjusted[0] += measured_position - position
+            adjusted[2, 0] = at
+            prepared.append(adjusted)
+            self.seen[key] = at
+        return sorted(prepared, key=lambda row: row[2, 0])
 
 
 class Rock:
@@ -169,43 +227,29 @@ class Rock:
 
 
 class Tracker:
-    def __init__(self, gate=15.0, max_age=5.0):
+    def __init__(self, gate=15.0, max_age=5.0, radar_origin_offset_s=0.0):
         self.rocks = []
+        self.timing = RadarTiming(radar_origin_offset_s, max_age_s=max_age)
         self.gate = gate  # sightings closer than this (m) count as the same rock
         self.max_age = max_age  # forget rocks not seen for this long (s)
 
     def update(self, radar_items, shuttle_position, now, target_position):
-        TRACKER_DEBUG = False
 
-        CONE_ANGLE: float = np.radians(30.0)
-        CORE_BUBBLE: float = 50 # (m)
+        radar_items = self.timing.prepare(radar_items, shuttle_position, now)
         target_vec = target_position - shuttle_position
+        CONE_ANGLE: float = np.radians(45.0)
 
-        ROCKS_FROM_RADAR = len(radar_items)
-        ETC = f"tv: {target_vec}\n"
-        if TRACKER_DEBUG:
-            for r in radar_items:
-                debris_pos = r[0]
-                dot = np.dot(target_vec, debris_pos)
-                ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
-                ETC += f"({debris_pos}, {dot}, {np.degrees(ang)})\n"
-
-
-        def debris_in_cone(debris) -> bool:
-            # debris_pos already relative
-            debris_pos = debris[0]
-            if debris[1][0] < CORE_BUBBLE:
-                return True
-            dot = np.dot(target_vec, debris_pos)
-            ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
+        def debris_in_cone(debris_pos) -> bool:
+            debris_vec = debris_pos - shuttle_position
+            dot = np.dot(debris_vec, target_vec)
+            ang = np.acos(dot / np.linalg.norm(debris_vec) * np.linalg.norm(target_vec))
             return dot > 0.0 and ang < CONE_ANGLE
 
-        radar_items = [r for r in radar_items if debris_in_cone(r)]
-        ROCKS_IN_FRUSTUM = len(radar_items)
+        radar_items = [r for r in radar_items if debris_in_cone(r[0])]
 
         for item in radar_items:
-            # The radar gives positions relative to the shuttle. Add the shuttle's own
-            # position so that all sightings share one fixed frame.
+            # prepare() rebases historical offsets to the current shuttle origin.
+            # This addition reconstructs the absolute position at measurement time.
             position = shuttle_position + item[0, :]
             diameter, time = item[1, 2], item[2, 0]
             rock = self.find_match(position, diameter, time)
@@ -214,8 +258,6 @@ class Tracker:
             else:
                 rock.add_sighting(position, diameter, time)
         self.rocks = [r for r in self.rocks if now - r.last_seen < self.max_age]
-        if TRACKER_DEBUG:
-            return (ROCKS_FROM_RADAR, ROCKS_IN_FRUSTUM, ETC)
 
     def find_match(self, position, diameter, time):
         """The closest existing rock that is a similar size and within the gate, else None."""
@@ -322,7 +364,7 @@ class Avoider:
         self.last_dodge = max(tried, key=score)
 
         # Report Changes
-        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}", st.Severity.Info)
+        # st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}", st.Severity.Info)
 
         return self.last_dodge
 
@@ -398,7 +440,12 @@ class GoalPlanner:
 #        Main Code Start           #
 ####################################
 
-tracker = Tracker()
+tracker = Tracker(radar_origin_offset_s=float(os.environ.get("WSORB_RADAR_ORIGIN_OFFSET_S", "0")))
+st.logger_info(
+    "Polyfit radar origin offset_s="
+    + str(tracker.timing.origin_offset_s)
+    + "; shared radar/mission origin assumed for this experiment"
+)
 avoider = Avoider()
 governor = BurnGovernor(gain=50.0)
 planner = GoalPlanner(cruise_speed=8.0)
@@ -464,7 +511,7 @@ while not exit_flag:
     # Update tracker module with RF data and calculate a safe velocity #
     ####################################################################
 
-    tracker.update(GetNearestDebrisLocations(500), loc, t_from_start, targetLoc)
+    tracker.update(GetNearestDebrisLocations(150), loc, t_from_start, targetLoc)
     safe_velocity = avoider.choose(goalVelocity, tracker.rocks, loc, t_from_start)
     accel = governor.acceleration(safe_velocity, vel)  # Phobos frame
     accel = st.frames.FramedVector(accel, phobosFrame).ExprIn(shuttleFrame)

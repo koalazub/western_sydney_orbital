@@ -1,5 +1,30 @@
 # Harry controller
 
+## Official STP analysis notebook
+
+[`stp_campaign_analysis.py`](stp_campaign_analysis.py) is a Marimo notebook for the
+largest native Windows campaign, `runs/stp-full-20261115-001/seeded-radar100`.
+It excludes incomplete attempts and other datasets. Completed 600 s timeouts
+remain outcomes with missing scores. The default comparison uses first-pass
+seeds with completed flights from every controller; repeatability uses complete
+two-run pairs only.
+
+From the repository root, using installed Python through UV:
+
+```powershell
+uv run --no-project --python 3.12 --with "marimo>=0.25.2" --with "altair>=6.3.0" python -m marimo edit --no-sandbox examples/harry/stp_campaign_analysis.py
+```
+
+The notebook covers arrival rates, official score reconciliation and components,
+fuel, damage, matched seed comparisons, repeatability, command pacing, native
+actuator readbacks, radar age and individual flight histories. The first load
+streams the raw event logs; later loads use per-flight caches under the selected
+campaign's `harry_analysis/` directory. Missing raw data produces a path prompt;
+no simulation is launched. CSV outputs and an analysis summary are saved alongside
+the cache, without modifying raw evidence or runner reports.
+
+## Local practice controller
+
 There is no separate STP entrypoint here. Harry's local controller is the shared
 basic PD/radar policy in
 [`src/wsorb/flight/control.py`](../../src/wsorb/flight/control.py):

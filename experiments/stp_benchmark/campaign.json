@@ -1,0 +1,38 @@
+{
+  "schema": "wsorb.official_stp.benchmark.v1",
+  "experiment_id": "20261116T192404-HY",
+  "execution_batch": "restart-002",
+  "supersedes_execution": "runs/stp-20261116T192404-HY-restart-001",
+  "install": "K:/Work/SPT-Sim",
+  "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
+  "package": "runs/stp-packages/stu4-0d753a28/SimDynamX-STU4-Sim-0d753a2",
+  "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+  "mission": "Sims/COMPETITION_SIM.simconf",
+  "mission_sha256": "910199b2a122c115667b4adb7cc3ca8aaef4b9ac1d1f71c5ef157194b7e20958",
+  "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+  "reference": "tom",
+  "execution_order": "coverage_first",
+  "repetitions": 1,
+  "controllers": [
+    {"id": "tom", "author": "Tom Kirkpatrick", "method": "Kalman", "source_commit": "faad3e0442ec7f8e7202a0f19d0136ea815e28c6", "directory": "controllers/tom/kalman", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "tom_polyfit", "author": "Tom Kirkpatrick", "method": "Polyfit", "source_commit": "faad3e0442ec7f8e7202a0f19d0136ea815e28c6", "directory": "controllers/tom/polyfit", "entrypoint": "Controller.py", "environment": {}},
+    {"id": "ali_mppi", "author": "Ali El Ali", "method": "MPPI", "source_commit": "faad3e0442ec7f8e7202a0f19d0136ea815e28c6", "directory": "controllers/ali", "entrypoint": "controller.py", "environment": {}},
+    {"id": "bui", "author": "Bui", "method": "Alpha-beta (avoid/hold/correction)", "source_commit": "faad3e0442ec7f8e7202a0f19d0136ea815e28c6", "directory": "controllers/bui", "entrypoint": "Controller.py", "environment": {}}
+  ],
+  "seed_bank": "experiments/stp_benchmark/seed_bank.json",
+  "seed_bank_id": "stu4-phobos-2026-11-11-impulses-radar100-v1",
+  "seed_bank_prefix_count": 22,
+  "seed_bank_prefix_sha256": "8eadb78d9a9b7de1044e7e0b5f2f59a83a986bfe550a2736277485438bc8cfb9",
+  "seed_count": 22,
+  "seed_scope": "saved_field_impulses_radar_fixed_100",
+  "sample_period_s": 0.1,
+  "limits": {
+    "simulation_s": 300,
+    "wall_s": 720,
+    "startup_s": 120,
+    "stall_s": 20,
+    "controller_stall_s": 45
+  },
+  "thresholds": {"decision_overrun_s": 0.1, "sensor_stale_s": 5.0},
+  "diagnostic_rerun": false
+}

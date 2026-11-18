@@ -1,0 +1,14 @@
+{
+  "schema": "wsorb.official_stp.seed_adapter.v1",
+  "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+  "systems": {
+    "spawner": {
+      "native_seed": 8193,
+      "sha256": "a4bae141983239bf517e82f1b60daead5ccb31f3cc63ae348c20a32f1d1dc21e"
+    },
+    "radar": {
+      "native_seed": 100,
+      "sha256": "dd48398db5ffa29221d3a03902db9250e86df0f8f1eb9b53f94fc061053a8061"
+    }
+  }
+}
