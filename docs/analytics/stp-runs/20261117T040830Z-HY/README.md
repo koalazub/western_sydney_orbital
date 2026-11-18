@@ -81,8 +81,8 @@ confirmed Ali seed 100 remains eligible for its first retry. No simulator flight
 was launched as part of these checks. The separately aborted V2 seed-1729 slot
 is not an evidence failure and is deliberately not retried by this policy.
 
-Both `controllers/tom/polyfit/Controller.py` and
-`controllers/tom/polyfit-v2/Controller.py` now keep recent own-position history,
+Both `controllers/tom/polyfit_bodge/Controller.py` and
+`controllers/tom/polyfit_bodge_v2/Controller.py` now keep recent own-position history,
 interpolate the shuttle position at each radar timestamp, and rebase radar
 offsets before cone filtering and track updates. Each row retains its own epoch;
 rows are processed oldest first. Repeated rows are not assimilated again.
@@ -138,3 +138,65 @@ numeric regression tests passed under native STP Python 3.12. Ruff formatting
 and lint passed for the changed Python files. A source comparison confirmed
 the two controller files differ only in the cone-filter calculation. Native flight
 and local WASM validation have not been performed for this edit.
+
+## Controller naming and MPPI-v2 follow-up (17 November 2026)
+
+The owner's modified controllers are now `polyfit_bodge` and
+`polyfit_bodge_v2`, at the matching directories under `controllers/tom/`.
+Original final-001 frozen IDs remain `tom_polyfit` and `tom_polyfit_v2`;
+these historical names in the earlier entries above refer to the same preserved
+bundles. The notebook maps those IDs to the new display names without changing
+raw evidence. Configuration copies here now use the renamed live source paths;
+the authoritative configurations actually executed remain in each run's snapshot.
+
+The separately authorized `ali_mppi_v2` comparison, native diagnostic evidence,
+source commit, design and execution status are in [ali-mppi-v2.md](ali-mppi-v2.md).
+This supplements the earlier frozen three-arm experiment.
+
+The separately authorized two-candidate matched addition is documented in
+[updated-candidates.md](updated-candidates.md). It adds `ali_mppi_v2` and
+`tom_polyfit_updated` without pooling or overwriting earlier controller versions.
+
+## Results appended: 18 November 2026
+
+The matched updated-candidates queue finished at 2026-11-17 13:31:12 UTC.
+Its results supplement the preserved 66 logical slots in `final-001`:
+
+| Added controller | Success | Simulation limit | Exception | Interrupted | Scheduled |
+| --- | --- | --- | --- | --- | --- |
+| ali_mppi_v2 | 18 | 4 | 0 | 0 | 22 |
+| tom_polyfit_updated | 8 | 1 | 12 | 1 | 22 |
+
+The five-controller analysis belongs in
+`runs/stp-20261117T040830Z-HY-updated-candidates-combined-001`, using the
+existing matched-campaign analyzer. `overview.py` automatically selects that
+report when available. Source campaigns, physical attempts, frozen bundle hashes,
+missing scores and failure outcomes remain preserved; diagnostics are excluded.
+The earlier prepared/unstarted and running statements above are historical.
+The interrupted upstream Polyfit seed-3253 replacement remains outstanding;
+see [updated-candidates.md](updated-candidates.md). No replacement flight was launched.
+
+## Polyfit replacement completed: 18 November 2026
+
+The previously outstanding seed-3253 replacement has now run using the same
+frozen bundle and mission. Attempt `57e32e2a-c1b9-4b01-823a-c0543742ebb0`
+ended in a controller logging `TypeError`, with no score and verified cleanup
+of all 18 owned processes. No controller changes or further retries were made.
+The notebook applies that linked result once and preserves the interruption in
+its replacement-history table. Upstream Polyfit now has 8 successes, 1 timeout
+and 13 exceptions across 22 slots. See [full evidence](updated-candidates.md).
+The earlier outstanding-replacement statements describe the previous capture.
+
+## polyfit_v2_bodge exception-seed results: 18 November 2026
+
+The new `polyfit_v2_bodge` controller comments out the malformed avoidance alert
+in updated upstream Polyfit. It is a separate version from `polyfit_bodge_v2`.
+The authorized 13-seed exception cohort completed with **9 arrivals, 4 timeouts
+and no controller exceptions**. One eligible scorer-connection evidence retry
+was required; all 14 physical attempts cleaned up successfully.
+
+Results are appended inside the existing final evidence directory at
+`runs/stp-20261117T040830Z-HY-final-001/polyfit_v2_bodge-exceptions-001`.
+The overview includes these 13 rows separately from the 110 preserved slots,
+with explicit links to the prior exception attempts. This selected cohort does
+not establish a full 22-seed success rate. See [details](updated-candidates.md).

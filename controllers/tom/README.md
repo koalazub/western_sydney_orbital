@@ -17,3 +17,8 @@ Use only one command writer per flight. Do not run either entrypoint alongside
 WSO's `stp_controller.py`, Bui's `Controller.py` or another Python writer.
 
 The controller index for the whole team is [`../README.md`](../README.md).
+
+[`polyfit_v2_bodge/Controller.py`](polyfit_v2_bodge/Controller.py) copies updated
+upstream Polyfit with only its malformed `Dodge info` simulator alert commented
+out. It is distinct from `polyfit_bodge_v2`. Its native exception-seed follow-up
+is documented in `docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.md`.

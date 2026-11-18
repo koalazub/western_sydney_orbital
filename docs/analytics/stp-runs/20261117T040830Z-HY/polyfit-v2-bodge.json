@@ -1,0 +1,166 @@
+{
+  "schema": "wsorb.official_stp.benchmark.v1",
+  "experiment_id": "20261117T040830Z-HY",
+  "execution_batch": "polyfit-v2-bodge-exceptions-001",
+  "install": "K:/Work/SPT-Sim",
+  "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
+  "package": "runs/stp-20261117T040830Z-HY-updated-candidates-001/snapshot/STU4-Sim",
+  "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+  "mission": "Sims/FINAL_SUBMISSION.simconf",
+  "mission_sha256": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
+  "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+  "reference": "polyfit_v2_bodge",
+  "execution_order": "coverage_first",
+  "repetitions": 1,
+  "controllers": [
+    {
+      "id": "polyfit_v2_bodge",
+      "author": "Tom Kirkpatrick; Harry Yendle logging patch",
+      "method": "Upstream Polyfit with malformed Dodge info alert commented out; exception-seed cohort only",
+      "directory": "controllers/tom/polyfit_v2_bodge",
+      "entrypoint": "Controller.py",
+      "environment": {},
+      "source_changes": "Copied current upstream Polyfit; commented out malformed two-argument Dodge info alert only"
+    }
+  ],
+  "seed_bank": "docs/analytics/stp-runs/20261117T040830Z-HY/polyfit-v2-bodge-seed-bank.json",
+  "seed_bank_id": "stu4-phobos-2026-11-11-final-impulses-radar100-v1-polyfit-v2-bodge-exceptions",
+  "seed_bank_prefix_count": 13,
+  "seed_bank_prefix_sha256": "baf509ed632313ff2572259728c4a2549bcf9ead36956eeb6505fbf62202de7a",
+  "seed_count": 13,
+  "seed_scope": "saved_field_impulses_radar_fixed_100",
+  "sample_period_s": 0.1,
+  "limits": {
+    "simulation_s": 300,
+    "wall_s": 720,
+    "startup_s": 120,
+    "stall_s": 20,
+    "controller_stall_s": 45
+  },
+  "thresholds": {
+    "decision_overrun_s": 0.1,
+    "sensor_stale_s": 5.0
+  },
+  "diagnostic_rerun": false,
+  "seeds": [
+    3253,
+    4999,
+    104729,
+    196613,
+    327673,
+    393241,
+    458879,
+    524309,
+    589859,
+    655373,
+    720899,
+    917519,
+    8193
+  ],
+  "exception_cohort": [
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-polyfit-replacement-001",
+      "run_id": "57e32e2a-c1b9-4b01-823a-c0543742ebb0",
+      "controller": "tom_polyfit_updated",
+      "seed": "3253",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "63e892b8-d5e0-41ee-a3e2-9ce56a98cec1",
+      "controller": "tom_polyfit_updated",
+      "seed": "4999",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "ed5d8712-5014-44f0-bb80-37119b436e23",
+      "controller": "tom_polyfit_updated",
+      "seed": "104729",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "5e7af010-695e-4608-af60-d2fbc5befa3d",
+      "controller": "tom_polyfit_updated",
+      "seed": "196613",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "4dc2ef10-51b7-47db-a40d-ad3c02d9c422",
+      "controller": "tom_polyfit_updated",
+      "seed": "327673",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "9f781e6b-02f7-47f6-a383-4dbcc2836297",
+      "controller": "tom_polyfit_updated",
+      "seed": "393241",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "893f7700-1336-4544-becf-334119fab5a1",
+      "controller": "tom_polyfit_updated",
+      "seed": "458879",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "83902f95-0561-47c9-9113-bb1a45316ddf",
+      "controller": "tom_polyfit_updated",
+      "seed": "524309",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "063e7568-bdef-4093-a43a-0d08a7057406",
+      "controller": "tom_polyfit_updated",
+      "seed": "589859",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "05b4552e-3bec-418d-8ab3-d5f3bb055655",
+      "controller": "tom_polyfit_updated",
+      "seed": "655373",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "8f3a92b8-992d-4db7-a484-e99ce5720104",
+      "controller": "tom_polyfit_updated",
+      "seed": "720899",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "514eda83-db52-4d95-a5dc-979485dabee1",
+      "controller": "tom_polyfit_updated",
+      "seed": "917519",
+      "repetition": "0",
+      "outcome": "exception"
+    },
+    {
+      "source_campaign": "K:\\Work\\western_sydney_orbital\\runs\\stp-20261117T040830Z-HY-updated-candidates-001",
+      "run_id": "063f4a04-b6e9-442c-a8ed-993649ba7bfd",
+      "controller": "tom_polyfit_updated",
+      "seed": "8193",
+      "repetition": "0",
+      "outcome": "exception"
+    }
+  ]
+}

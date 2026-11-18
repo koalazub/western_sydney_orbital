@@ -25,7 +25,7 @@ def row(at, offset=100.0):
 
 class RadarTimingTests(unittest.TestCase):
     def test_history_reconstruction_and_duplicate_reads(self):
-        for version in ("polyfit", "polyfit-v2"):
+        for version in ("polyfit_bodge", "polyfit_bodge_v2"):
             with self.subTest(version=version):
                 timing = load_timing(version)()
                 timing.prepare([], np.array([0, 0, 0]), 0)
@@ -39,7 +39,7 @@ class RadarTimingTests(unittest.TestCase):
                 np.testing.assert_array_equal(measurement, row(0.5, 96))
 
     def test_mixed_ages_invalid_rows_and_explicit_origin(self):
-        for version in ("polyfit", "polyfit-v2"):
+        for version in ("polyfit_bodge", "polyfit_bodge_v2"):
             with self.subTest(version=version):
                 timing = load_timing(version)(origin_offset_s=1)
                 timing.prepare([], np.zeros(3), 1)
@@ -58,7 +58,7 @@ class RadarTimingTests(unittest.TestCase):
                 self.assertEqual(len(timing.prepare([row(1)], np.zeros(3), 2)), 1)
 
     def test_history_miss_is_skipped_and_implementations_match(self):
-        timing_classes = [load_timing(v) for v in ("polyfit", "polyfit-v2")]
+        timing_classes = [load_timing(v) for v in ("polyfit_bodge", "polyfit_bodge_v2")]
         outputs = []
         for cls in timing_classes:
             timing = cls()

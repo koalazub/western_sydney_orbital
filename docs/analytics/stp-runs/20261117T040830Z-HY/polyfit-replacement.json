@@ -1,0 +1,56 @@
+{
+  "schema": "wsorb.official_stp.benchmark.v1",
+  "experiment_id": "20261117T040830Z-HY",
+  "execution_batch": "polyfit-replacement-001",
+  "install": "K:/Work/SPT-Sim",
+  "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
+  "package": "runs/stp-20261117T040830Z-HY-updated-candidates-001/snapshot/STU4-Sim",
+  "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+  "mission": "Sims/FINAL_SUBMISSION.simconf",
+  "mission_sha256": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
+  "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+  "reference": "tom_polyfit_updated",
+  "execution_order": "coverage_first",
+  "repetitions": 1,
+  "controllers": [
+    {
+      "id": "tom_polyfit_updated",
+      "author": "Tom Kirkpatrick",
+      "method": "Upstream Polyfit: NaN/order-of-operations correction (8e2dc968d22f)",
+      "directory": "runs/stp-20261117T040830Z-HY-updated-candidates-001/snapshot/controllers/tom_polyfit_updated",
+      "entrypoint": "Controller.py",
+      "environment": {},
+      "source_commit": "7d757fe2c988dd4b8816cc5f585bfc197ba4204d",
+      "source_directory": "controllers/tom/polyfit"
+    }
+  ],
+  "seed_bank": "docs/analytics/stp-runs/20261117T040830Z-HY/polyfit-replacement-seed-bank.json",
+  "seed_bank_id": "stu4-phobos-2026-11-11-final-impulses-radar100-v1-replacement-3253",
+  "seed_bank_prefix_count": 1,
+  "seed_bank_prefix_sha256": "a0a2ea67c01bd2141e70c5e4f183ba67af7af437ac4954e59ba3d8ff65601f5f",
+  "seed_count": 1,
+  "seed_scope": "saved_field_impulses_radar_fixed_100",
+  "sample_period_s": 0.1,
+  "limits": {
+    "simulation_s": 300,
+    "wall_s": 720,
+    "startup_s": 120,
+    "stall_s": 20,
+    "controller_stall_s": 45
+  },
+  "thresholds": {
+    "decision_overrun_s": 0.1,
+    "sensor_stale_s": 5.0
+  },
+  "diagnostic_rerun": false,
+  "seeds": [
+    3253
+  ],
+  "replacement_for": {
+    "campaign": "runs/stp-20261117T040830Z-HY-updated-candidates-001",
+    "run_id": "bf1b02fa-f693-45d2-97f2-e611b7e8970b",
+    "controller": "tom_polyfit_updated",
+    "seed": 3253,
+    "repetition": 0
+  }
+}
