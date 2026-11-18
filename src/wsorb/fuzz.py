@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing
 import os
 import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -195,10 +196,19 @@ def run_fuzz(
     settings: dict[str, Any] | None = None,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """Run seeds in parallel and return the complete report."""
+    """Run seeds in isolated processes and return the complete report.
+
+    Each seed owns a controller loop and an isolated native server. Threads
+    shared one GIL; at accelerated playback a Python scheduling stall could
+    outlive the fenced command lease and surface as a transport failure. A
+    process per seed preserves the controller timing contract without changing
+    the controller or the native lease.
+    """
     results: list[dict[str, Any]] = []
     wall_budget_s = duration_s / playback_rate + 120.0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("forkserver")
+    ) as pool:
         futures = {
             pool.submit(
                 run_seed_with_retry,
