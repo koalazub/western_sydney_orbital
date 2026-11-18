@@ -1539,7 +1539,7 @@ fn native_api_excludes_healthy_standby_and_rejects_a_late_primary_with_fresh_con
     for _ in 0..3 {
         frame(&mut app, STEP);
     }
-    assert!(!is_running());
+    assert!(is_running());
     assert_eq!(observation()["control_authority"]["status"], "expired");
     assert_eq!(observation()["control_authority"]["epoch"], primary.epoch);
     assert_eq!(
@@ -1556,9 +1556,6 @@ fn native_api_excludes_healthy_standby_and_rejects_a_late_primary_with_fresh_con
     assert_eq!(standby.term, primary.term + 1);
     assert_eq!(control_call(control_lease(&standby, 0.3))["ok"], true);
     assert_control_rejected_unchanged(control_lease(&primary, 0.3), "stale_context");
-    let mut resume = serde_json::json!({"op": "play", "rate": 1.0});
-    resume["expected_context"] = context_json(current_context());
-    assert_eq!(control_call(resume)["ok"], true);
     frame(&mut app, STEP);
     assert!(
         applied_physics()

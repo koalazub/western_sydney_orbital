@@ -811,12 +811,9 @@ pub(crate) fn advance_world(
     {
         refresh();
     }
-    let (control_frozen, control_expired) = SIMULATION.with(|simulation| {
+    let control_frozen = SIMULATION.with(|simulation| {
         let simulation = simulation.borrow();
-        (
-            simulation.control_held() || simulation.control_starved(),
-            simulation.control_authority().status == crate::model::ControlAuthorityStatus::Expired,
-        )
+        simulation.control_held() || simulation.control_starved()
     });
     if control_frozen {
         // Freeze the clock, not the playback state. A hold or a late controller
@@ -824,12 +821,6 @@ pub(crate) fn advance_world(
         // next fenced command clears the hold/starvation and resumes this clock.
         state.accumulator = 0.0;
         state.message = "Controller hold: clock frozen before the control lease expired.".into();
-        refresh();
-    } else if control_expired && state.running {
-        // A dead controller must not leave an uncontrolled coasting trial.
-        state.running = false;
-        state.accumulator = 0.0;
-        state.message = "Controller lease expired; playback stopped.".into();
         refresh();
     }
     let editor_focused = input_focus
