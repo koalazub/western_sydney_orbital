@@ -612,11 +612,14 @@ def update_tracks(state, rows, position, velocity, now):
             continue
         measured = position + row[0]
         radius, at = 0.5 * float(row[1, 2]), float(row[2, 0])
-        gaps = [
-            np.linalg.norm(rock["p"] + rock["v"] * (at - rock["t"]) - measured) for rock in rocks
-        ]
-        index = int(np.argmin(gaps)) if gaps else -1
-        if index < 0 or gaps[index] >= max(15.0, 2.0 * rocks[index]["s"]):
+        pairs = []
+        for candidate, rock in enumerate(rocks):
+            if abs(float(rock["r"]) - radius) > 0.25 * max(float(rock["r"]), radius):
+                continue
+            gap = np.linalg.norm(rock["p"] + rock["v"] * (at - rock["t"]) - measured)
+            pairs.append((float(gap), candidate))
+        index = min(pairs)[1] if pairs else -1
+        if index < 0 or min(pairs)[0] >= max(15.0, 2.0 * rocks[index]["s"]):
             los = unit(row[0])
             radial = float(row[1, 1]) + los @ velocity
             rocks.append(
@@ -796,7 +799,7 @@ def emergency_guard(
     return chosen[0], True
 
 
-def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=None):
+def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=None, ship_radius=0.0):
     v_des = np.asarray(v_des, float)
     speed = float(np.linalg.norm(v_des))
     if speed < 1e-3 or not tracks:
@@ -847,7 +850,7 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=Non
     inflation = float(policy["avoider_k_sigma"]) * (
         sigma_p[:, None] + sigma_v[:, None] * (time + lag)
     )
-    keep_out = (radii + float(policy["avoider_margin"]))[:, None] + np.minimum(
+    keep_out = (radii + float(ship_radius) + float(policy["avoider_margin"]))[:, None] + np.minimum(
         inflation, float(policy["avoider_max_inflate"])
     )
     clearance = (distance - keep_out).min(axis=0)
@@ -1341,7 +1344,13 @@ class GuidanceController:
             match policy["avoidance"]:
                 case "avoider":
                     t.nominal = avoid_velocity(
-                        t.v_des, t.tracks, t.position, t.velocity, state, policy
+                        t.v_des,
+                        t.tracks,
+                        t.position,
+                        t.velocity,
+                        state,
+                        policy,
+                        ship_radius=t.ship_radius,
                     )
                     if state["avoid_info"]["dv"] > float(policy["avoider_fallback_dv"]):
                         t.nominal = avoid_velocity(
@@ -1352,6 +1361,7 @@ class GuidanceController:
                             state,
                             policy,
                             float(policy["avoider_fallback_horizon"]),
+                            ship_radius=t.ship_radius,
                         )
                 case "hybrid":
                     near = bool(t.tracks) and min(
@@ -1538,7 +1548,27 @@ class GuidanceController:
                 t.collision.get("side_reason") if t.collision is not None else None
             ),
         )
+        info = state.get("avoid_info", {})
+        nearest = (
+            min(
+                t.tracks,
+                key=lambda track: float(np.linalg.norm(np.asarray(track["p"], float) - t.position)),
+            )
+            if t.tracks
+            else None
+        )
         record.update(
+            avoid_dv=finite(info.get("dv")),
+            avoid_blocked=bool(info.get("blocked", False)),
+            avoid_clearance=finite(info.get("clearance")),
+            avoid_tracks=int(info.get("n_tracks", 0)),
+            nearest_sp=finite(nearest.get("sp")) if nearest is not None else None,
+            nearest_sv=finite(nearest.get("sv")) if nearest is not None else None,
+            nearest_range_m=(
+                finite(float(np.linalg.norm(np.asarray(nearest["p"], float) - t.position)))
+                if nearest is not None
+                else None
+            ),
             tracker=policy["tracker"],
             guard_source=policy["guard_source"],
             avoidance=policy["avoidance"],
