@@ -15,6 +15,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -45,11 +46,14 @@ SPACES = {
         "fixed": {"avoidance": "mppi", "plan_steering": True},
     },
     "polyfit": {
-        "directory": "controllers/tom/polyfit_v2_bodge",
+        "directory": "controllers/harry/polyfit",
         "entrypoint": "Controller.py",
-        "author": "Tom Kirkpatrick; Harry Yendle logging fix and tuning inputs",
-        "method": "Updated upstream Polyfit with logging fix",
-        "source_changes": "Malformed Dodge info alert disabled; native tuning inputs only",
+        "author": "Tom Kirkpatrick; Harry Yendle logging/cone fixes and tuning inputs",
+        "method": "Updated upstream Polyfit with logging and finite cone-angle fixes",
+        "source_changes": (
+            "Copied upstream Polyfit; malformed alert disabled; "
+            "finite cone-angle fix; tuning inputs"
+        ),
         "bounds": {"cruise_speed": [6.0, 12.0], "margin": [3.0, 12.0], "horizon": [15.0, 60.0]},
         "defaults": {"cruise_speed": 8.0, "margin": 6.0, "horizon": 50.0},
         "fixed": {},
@@ -188,8 +192,34 @@ def assert_runtime(root, native=None, live=False):
             raise ValueError("Native STP release changed since baseline")
 
 
+def preserve_incomplete_preparation(root, native):
+    """Retain unflown partial staging; never move or reset a physical attempt."""
+    protected = {
+        "receipt.json",
+        "receipt.before_resume.json",
+        "manifest.json",
+        "events.jsonl",
+        "launcher.log",
+        "status.json",
+    }
+    if any(path.is_file() and path.name in protected for path in native.rglob("*")):
+        raise ValueError(
+            "Incomplete preparation contains flight evidence; manual recovery required"
+        )
+    preserved = native.with_name("native-incomplete-" + uuid.uuid4().hex)
+    workspace = root.resolve()
+    if not native.resolve().is_relative_to(workspace) or not preserved.resolve().is_relative_to(
+        workspace
+    ):
+        raise ValueError("Preparation recovery paths escape the campaign root")
+    native.rename(preserved)
+    return preserved
+
+
 def prepare_stage(root, target, values, controllers):
-    """Use the harness's bank validation, staging and complete provenance unchanged."""
+    """Reuse complete stages or preserve/rebuild interrupted, unflown staging."""
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError("Native stage must remain inside its campaign root")
     experiment = read(root / "experiment.json")
     parent = read(
         root
@@ -197,9 +227,7 @@ def prepare_stage(root, target, values, controllers):
     )
     if target != root / "baseline":
         assert_runtime(root, live=True)
-    target.mkdir(parents=True, exist_ok=False)
     bank = derived_bank(parent, values, target.relative_to(root).as_posix())
-    write(target / "bank.json", bank)
     config = copy.deepcopy(experiment["native_config"])
     config.update(
         controllers=controllers,
@@ -213,11 +241,30 @@ def prepare_stage(root, target, values, controllers):
         seeds=values,
         execution_batch=target.relative_to(root).as_posix(),
     )
-    write(target / "input.json", config)
-    benchmark.prepare(target / "input.json", target / "native", "seeded")
+    target.mkdir(parents=True, exist_ok=True)
+    for filename, expected in (("bank.json", bank), ("input.json", config)):
+        path = target / filename
+        if path.exists():
+            if read(path) != expected:
+                raise ValueError(f"Prepared stage inputs changed: {path}")
+        else:
+            write(path, expected)
+    native = target / "native"
+    if native.exists() and not all(
+        (native / name).is_file() for name in ("campaign.json", "provenance.json")
+    ):
+        preserve_incomplete_preparation(root, native)
+    if not native.exists():
+        benchmark.prepare(target / "input.json", native, "seeded")
+    campaign = read(native / "campaign.json")
+    provenance = read(native / "provenance.json")
+    if campaign["config"] != config or provenance["configuration"] != config:
+        raise ValueError("Native stage configuration differs from its frozen proposal")
+    if benchmark.hashes(native / "snapshot") != provenance["snapshot_hashes"]:
+        raise ValueError("Native stage snapshot changed")
     if (root / "runtime-pin.json").exists():
-        assert_runtime(root, target / "native")
-    return target / "native"
+        assert_runtime(root, native)
+    return native
 
 
 def loss(row, cap_loss=CAP_LOSS):
@@ -423,9 +470,10 @@ def tune(root, name, resume):
             native = (
                 root / "baseline/native" if index == 0 else folder / f"screen-{index:02d}/native"
             )
-            if not native.exists():
-                if index == 0:
+            if index == 0:
+                if not native.exists():
                     raise ValueError("Missing pinned baseline")
+            else:
                 prepare_stage(root, native.parent, train, [controller(root, name, values, label)])
             if journal[index]["loss"] is None:
                 run_native(native, resume)
@@ -443,13 +491,12 @@ def tune(root, name, resume):
         {i: all_rows[i] for i in range(1, 8)}, all_rows[0], ALTERNATIVE_CAP_LOSS
     )[:2]
     confirm = folder / "confirm/native"
-    if not confirm.exists():
-        prepare_stage(
-            root,
-            confirm.parent,
-            validation,
-            [controller(root, name, journal[i]["values"], f"{name}_{i:02d}") for i in [0, *top]],
-        )
+    prepare_stage(
+        root,
+        confirm.parent,
+        validation,
+        [controller(root, name, journal[i]["values"], f"{name}_{i:02d}") for i in [0, *top]],
+    )
     run_native(confirm, resume)
     combined = {i: all_rows[i] + rows(confirm, f"{name}_{i:02d}", validation) for i in [0, *top]}
     chosen = choose_finalist(combined, top)
@@ -493,16 +540,15 @@ def final_test(root, name, resume):
     ):
         raise ValueError("Frozen finalist changed")
     target = root / name / "final-test"
-    if not (target / "native").exists():
-        prepare_stage(
-            root,
-            target,
-            experiment["final_test"],
-            [
-                controller(root, name, SPACES[name]["defaults"], f"{name}_baseline"),
-                controller(root, name, chosen["values"], f"{name}_finalist"),
-            ],
-        )
+    prepare_stage(
+        root,
+        target,
+        experiment["final_test"],
+        [
+            controller(root, name, SPACES[name]["defaults"], f"{name}_baseline"),
+            controller(root, name, chosen["values"], f"{name}_finalist"),
+        ],
+    )
     run_native(target / "native", resume)
     baseline = rows(target / "native", f"{name}_baseline", experiment["final_test"])
     finalist = rows(target / "native", f"{name}_finalist", experiment["final_test"])
@@ -676,6 +722,27 @@ def archive_audit(root):
     write(root / "archive.json", output)
 
 
+def validate_package(config, profile):
+    """Check the supplied installed configs without copying or changing them."""
+    package = benchmark.path(config["package"])
+    expected = dict(profile.get("package_file_sha256", {}))
+    expected[config["mission"]] = config["mission_sha256"]
+    expected["Systems/Scoring.py"] = config["scorer_sha256"]
+    mismatches = []
+    for relative, sha256 in expected.items():
+        path = (package / relative).resolve()
+        if not path.is_relative_to(package):
+            raise ValueError("Package hash pin escapes the supplied package directory")
+        if not path.is_file():
+            mismatches.append(f"missing {relative}")
+        elif evidence.digest(path) != sha256:
+            mismatches.append(f"hash mismatch {relative}")
+    if mismatches:
+        raise ValueError(
+            "STU4-Sim configs do not match the reviewed version: " + "; ".join(mismatches)
+        )
+
+
 def preparation_config(
     config_path=None, controller_name=None, install=None, user_root=None, package=None
 ):
@@ -711,6 +778,8 @@ def preparation_config(
             config[key] = str(value)
         if not config.get(key):
             raise ValueError(f"Set --{key.replace('_', '-')} for this machine")
+    if profile is not None:
+        validate_package(config, profile)
     return config, selected, profile
 
 
@@ -723,12 +792,13 @@ def prepare(
     config, selected, profile = preparation_config(
         config_path, controller_name, install, user_root, package
     )
+    bank_path = REPO / config["seed_bank"]
+    parent_selection, final_bank = seed_tools.select_seeds(bank_path, config, 22)
+    if len(final_bank["seeds"]) != 22:
+        raise ValueError("Expected the existing frozen 22-seed final-test bank")
     root.mkdir(parents=True, exist_ok=False)
     for key in ("source_commit", "supersedes_execution", "seeds", "controllers", "reference"):
         config.pop(key, None)
-    final_bank = read(REPO / config["seed_bank"])
-    if len(final_bank["seeds"]) != 22:
-        raise ValueError("Expected the existing frozen 22-seed final-test bank")
     write(root / "final-bank.json", final_bank)
     bank_id = "phobos-smac3-optimisation-v1"
     used = set(final_bank["seeds"])
@@ -777,6 +847,7 @@ def prepare(
             schema="wsorb.stp.smac3.v1",
             native_config=config,
             input_profile=profile,
+            parent_seed_selection=parent_selection,
             checkout_revision=benchmark.revision(REPO),
             train=values[:TRAIN_SEED_COUNT],
             validation=values[TRAIN_SEED_COUNT:],

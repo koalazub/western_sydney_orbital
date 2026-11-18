@@ -44,6 +44,7 @@ def controller_namespace(name):
             "clearance",
             "two_sideways_directions",
             "native_tuning_settings",
+            "cone_angle",
         }
         nodes = [
             n
@@ -54,7 +55,7 @@ def controller_namespace(name):
     return ns, tree
 
 
-def native_fixture(native, install):
+def native_fixture(native, install, prepared_config=None):
     """Small native-provenance fixture; no SDK or native process is involved."""
     snapshot = native / "snapshot"
     snapshot.mkdir(parents=True, exist_ok=True)
@@ -76,7 +77,10 @@ def native_fixture(native, install):
         thresholds={},
         repetitions=1,
     )
+    if prepared_config is not None:
+        config = prepared_config
     provenance = dict(
+        configuration=config,
         mission_sha256="mission",
         scorer_sha256="scorer",
         package_revision="package",
@@ -345,7 +349,7 @@ class RuntimeAndArchive(unittest.TestCase):
             root, _ = runtime_fixture(repo)
 
             def changed_prepare(config, native, mode):
-                provenance, _ = native_fixture(native, repo / "install")
+                provenance, _ = native_fixture(native, repo / "install", opt.read(config))
                 provenance["scheduling"] = "different scheduling"
                 opt.write(native / "provenance.json", provenance)
 
@@ -416,6 +420,190 @@ class RuntimeAndArchive(unittest.TestCase):
                     "finalist_score_delta"
                 ]
             )
+
+
+class HarryPolyfitCone(unittest.TestCase):
+    def test_aligned_roundoff_contact_is_retained_without_warnings(self):
+        ns, _ = controller_namespace("polyfit")
+        vector = np.array([-0.6826779865523179, 104.61432923049026, 74.15884212884828])
+        row = np.zeros((3, 3))
+        row[0] = vector
+        row[1] = [np.linalg.norm(vector) - 1.0, 0.0, 2.0]
+        row[2, 0] = 1.0
+        tracker = ns["Tracker"]()
+        with np.errstate(invalid="raise", divide="raise"):
+            tracker.update([row], np.zeros(3), 1.0, vector * 2.0)
+        self.assertEqual(len(tracker.rocks), 1)
+        self.assertAlmostEqual(ns["cone_angle"](vector, vector * 2.0), 0.0)
+
+    def test_degenerate_vectors_are_rejected_and_core_bubble_is_preserved(self):
+        ns, _ = controller_namespace("polyfit")
+        angle = ns["cone_angle"]
+        with np.errstate(invalid="raise", divide="raise"):
+            self.assertTrue(np.isinf(angle(np.zeros(3), [1.0, 0.0, 0.0])))
+            self.assertTrue(np.isinf(angle([1.0, 0.0, 0.0], np.zeros(3))))
+            self.assertTrue(np.isinf(angle([np.inf, 0.0, 0.0], [1.0, 0.0, 0.0])))
+            self.assertAlmostEqual(angle([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]), np.pi)
+            row = np.zeros((3, 3))
+            row[1] = [10.0, 0.0, 2.0]
+            row[2, 0] = 1.0
+            tracker = ns["Tracker"]()
+            tracker.update([row], np.zeros(3), 1.0, np.zeros(3))
+        self.assertEqual(len(tracker.rocks), 1)
+        self.assertEqual(opt.SPACES["polyfit"]["directory"], "controllers/harry/polyfit")
+
+    def test_external_package_is_required_and_reviewed_inputs_are_pinned(self):
+        profile = opt.read(opt.REPO / "experiments/stp_optimiser/bui_polyfit.json")
+        self.assertIsNone(profile["native_config"]["package"])
+        pins = profile["package_file_sha256"]
+        for name in (
+            profile["native_config"]["mission"],
+            "Systems/Scoring.py",
+            "Systems/Radar.py",
+            "Systems/JetSelectionActuator.py",
+            "Systems/SpawnDebris.py",
+            "Data/SpaceBuggyJetConfigNoMains.csv",
+            "Entities/Rock1.enconf",
+        ):
+            self.assertIn(name, pins)
+        self.assertEqual(
+            pins[profile["native_config"]["mission"]], profile["native_config"]["mission_sha256"]
+        )
+        self.assertEqual(pins["Systems/Scoring.py"], profile["native_config"]["scorer_sha256"])
+        readme = (opt.REPO / "controllers/harry/polyfit/readme.md").read_text(encoding="utf-8")
+        self.assertIn("a1d4fed643440c85b0957c28aad22811fdfb35ddf6ac7a1c4a1b1b55e006626b", readme)
+
+
+class ExternalPackageValidation(unittest.TestCase):
+    def fixture(self, root):
+        files = {
+            "Sims/FINAL_SUBMISSION.simconf": "mission",
+            "Systems/Scoring.py": "scorer",
+            "Systems/Radar.py": "radar",
+            "Data/thrusters.csv": "data",
+        }
+        pins = {}
+        for relative, content in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            pins[relative] = opt.evidence.digest(path)
+        config = dict(
+            package=str(root),
+            mission="Sims/FINAL_SUBMISSION.simconf",
+            mission_sha256=pins["Sims/FINAL_SUBMISSION.simconf"],
+            scorer_sha256=pins["Systems/Scoring.py"],
+        )
+        return config, dict(package_file_sha256=pins)
+
+    def test_matching_external_configs_are_accepted_without_modification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, profile = self.fixture(root)
+            before = opt.benchmark.hashes(root)
+            opt.validate_package(config, profile)
+            self.assertEqual(opt.benchmark.hashes(root), before)
+
+    def test_missing_or_modified_configs_name_each_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, profile = self.fixture(root)
+            (root / "Systems/Radar.py").unlink()
+            (root / "Data/thrusters.csv").write_text("different data", encoding="utf-8")
+            with self.assertRaises(ValueError) as raised:
+                opt.validate_package(config, profile)
+            self.assertIn("missing Systems/Radar.py", str(raised.exception))
+            self.assertIn("hash mismatch Data/thrusters.csv", str(raised.exception))
+            self.assertEqual((root / "Data/thrusters.csv").read_text(), "different data")
+
+    def test_package_manifest_cannot_reference_files_outside_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, profile = self.fixture(Path(temporary))
+            profile["package_file_sha256"]["../outside"] = "bad"
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                opt.validate_package(config, profile)
+
+
+class StagePreparationRecovery(unittest.TestCase):
+    def test_unflown_partial_native_is_preserved_and_same_stage_can_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            root, _ = runtime_fixture(repo)
+            target = root / "polyfit/screen-01"
+            controllers = [dict(id="polyfit_01", environment={})]
+
+            def interrupted(config, native, mode):
+                (native / "snapshot").mkdir(parents=True)
+                (native / "snapshot/partial.txt").write_text("preserve this staging record")
+                raise RuntimeError("interrupted staging")
+
+            with (
+                patch.object(opt.benchmark, "prepare", side_effect=interrupted),
+                self.assertRaisesRegex(RuntimeError, "interrupted staging"),
+            ):
+                opt.prepare_stage(root, target, [1], controllers)
+            saved_input = (target / "input.json").read_bytes()
+
+            def completed(config, native, mode):
+                native_fixture(native, repo / "install", opt.read(config))
+
+            with patch.object(opt.benchmark, "prepare", side_effect=completed) as prepare:
+                native = opt.prepare_stage(root, target, [1], controllers)
+                again = opt.prepare_stage(root, target, [1], controllers)
+            self.assertEqual(native, again)
+            self.assertEqual(prepare.call_count, 1)
+            self.assertEqual((target / "input.json").read_bytes(), saved_input)
+            preserved = list(target.glob("native-incomplete-*"))
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(
+                (preserved[0] / "snapshot/partial.txt").read_text(), "preserve this staging record"
+            )
+            self.assertFalse(list(native.rglob("receipt.json")))
+            with self.assertRaisesRegex(ValueError, "inputs changed"):
+                opt.prepare_stage(root, target, [1], [dict(id="different", environment={})])
+
+    def test_partial_stage_with_flight_evidence_is_never_rebuilt(self):
+        for filename in (
+            "receipt.json",
+            "manifest.json",
+            "events.jsonl",
+            "launcher.log",
+            "status.json",
+        ):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                repo = Path(temporary)
+                root, _ = runtime_fixture(repo)
+                target = root / "polyfit/screen-01"
+                evidence_file = target / "native/attempt" / filename
+                evidence_file.parent.mkdir(parents=True)
+                evidence_file.write_text("original physical evidence")
+                with (
+                    patch.object(opt.benchmark, "prepare") as prepare,
+                    self.assertRaisesRegex(ValueError, "flight evidence"),
+                ):
+                    opt.prepare_stage(root, target, [1], [dict(id="polyfit_01")])
+                prepare.assert_not_called()
+                self.assertEqual(evidence_file.read_text(), "original physical evidence")
+                self.assertFalse(list(target.glob("native-incomplete-*")))
+
+    def test_partial_outer_directory_and_path_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            root, _ = runtime_fixture(repo)
+            target = root / "polyfit/screen-01"
+            target.mkdir(parents=True)
+            with patch.object(
+                opt.benchmark,
+                "prepare",
+                side_effect=lambda cfg, native, mode: native_fixture(
+                    native, repo / "install", opt.read(cfg)
+                ),
+            ) as prepare:
+                opt.prepare_stage(root, target, [1], [dict(id="polyfit_01")])
+                self.assertEqual(prepare.call_count, 1)
+            with self.assertRaisesRegex(ValueError, "inside its campaign root"):
+                opt.prepare_stage(root, root.parent / "escaped", [1], [dict(id="polyfit_01")])
+            self.assertFalse((root.parent / "escaped").exists())
 
 
 class LossAndCoverage(unittest.TestCase):
@@ -591,6 +779,7 @@ class CampaignScope(unittest.TestCase):
             root = repo / "runs/polyfit-fixture"
             with (
                 patch.object(opt, "REPO", repo),
+                patch.object(opt, "validate_package"),
                 patch.object(opt.benchmark, "revision", return_value=None),
                 patch.object(
                     opt,
@@ -626,10 +815,61 @@ class CampaignScope(unittest.TestCase):
                 opt.evidence.digest(root / "sources/polyfit/Controller.py"),
             )
 
+    def test_original_seed_bank_pin_is_validated_before_output_or_staging(self):
+        original_repo = opt.REPO
+        profile_path = original_repo / "experiments/stp_optimiser/bui_polyfit.json"
+        original = opt.read(
+            original_repo / "docs/analytics/stp-runs/20261117T040830Z-HY/final-seed-bank.json"
+        )
+
+        def reorder(bank):
+            bank["seeds"][0], bank["seeds"][-1] = bank["seeds"][-1], bank["seeds"][0]
+
+        mutations = (
+            reorder,
+            lambda b: b["seeds"].__setitem__(0, b["seeds"][1]),
+            lambda b: b.update(id="other bank"),
+            lambda b: b["scenario"].update(scorer_sha256="different scorer"),
+            lambda b: b["seeds"].__setitem__(0, -1),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate), tempfile.TemporaryDirectory() as temporary:
+                repo = Path(temporary)
+                bank = copy.deepcopy(original)
+                mutate(bank)
+                bank_path = (
+                    repo / "docs/analytics/stp-runs/20261117T040830Z-HY/final-seed-bank.json"
+                )
+                bank_path.parent.mkdir(parents=True)
+                opt.write(bank_path, bank)
+                source_dir = opt.SPACES["polyfit"]["directory"]
+                shutil.copytree(
+                    original_repo / source_dir,
+                    repo / source_dir,
+                    ignore=shutil.ignore_patterns("__pycache__"),
+                )
+                root = repo / "runs/reject-bank"
+                with (
+                    patch.object(opt, "REPO", repo),
+                    patch.object(opt, "validate_package"),
+                    patch.object(opt.benchmark, "prepare") as prepare,
+                    self.assertRaises(ValueError),
+                ):
+                    opt.prepare(
+                        root,
+                        config_path=profile_path,
+                        install=repo / "install",
+                        package=repo / "external-STU4-Sim",
+                    )
+                prepare.assert_not_called()
+                self.assertFalse(root.exists())
+
     def test_polyfit_profile_requires_machine_path_and_exact_source(self):
         profile_path = opt.REPO / "experiments/stp_optimiser/bui_polyfit.json"
         with self.assertRaisesRegex(ValueError, "Set --install"):
             opt.preparation_config(profile_path)
+        with self.assertRaisesRegex(ValueError, "Set --package"):
+            opt.preparation_config(profile_path, install="installed")
         with self.assertRaisesRegex(ValueError, "differs from the pinned"):
             opt.preparation_config(profile_path, controller_name="ali", install="installed")
         with tempfile.TemporaryDirectory() as temporary:
@@ -705,7 +945,7 @@ class Resumption(unittest.TestCase):
             launches = []
 
             def prepare(root, target, assigned, controllers):
-                (target / "native").mkdir(parents=True)
+                (target / "native").mkdir(parents=True, exist_ok=True)
                 scheduled[str(target / "native")] = (assigned, controllers)
 
             def collect(native, label, assigned):

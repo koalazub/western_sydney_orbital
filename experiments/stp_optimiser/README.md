@@ -43,8 +43,9 @@ are 8 m/s, 30 s, risk weight 400. The experiment explicitly enables
 `avoidance="mppi"`, `plan_steering=true` for baseline and proposals; the unchanged
 source default without campaign inputs remains `avoidance="avoider"`. Search
 bounds are [7,14], [15,40], [100,1600], with logarithmic risk weight.
-Polyfit settings support is retained for earlier work, but Polyfit is not staged,
-tuned or flown in this campaign.
+The separate Bui profile selects `controllers/harry/polyfit/Controller.py`, a
+copy with finite cone-angle handling. Polyfit is not staged by the default MPPI
+profile. Both profiles validate the original frozen bank before deriving stages.
 All other settings and logic stay fixed. Controller bundles, adapter, lockfile,
 mission, scorer, binaries and asset hashes are frozen. Every new stage must match
 the initial baseline runtime signature before launch. The baseline snapshot, live
@@ -122,8 +123,9 @@ uv run --no-project --python $stpPython python experiments/stp_benchmark/benchma
 
 Active later paths are `<controller>/screen-01/native` through `screen-07/native`,
 `<controller>/confirm/native`, then `<controller>/final-test/native`. An interruption
-inside native preparation is left intact and fails closed; do not delete or
-regenerate partially prepared evidence. Interrupted physical flights follow the
+inside native stage preparation preserves unflown partial staging under
+`native-incomplete-<UUID>` and rebuilds from the same frozen inputs. Any physical
+flight evidence blocks rebuilding; do not delete it to force recovery. Interrupted physical flights follow the
 existing harness policy and can require a separately reviewed recovery campaign.
 A normal resume never overwrites them or resets evidence retry budgets.
 

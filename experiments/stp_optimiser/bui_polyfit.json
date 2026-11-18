@@ -1,15 +1,15 @@
 {
   "schema": "wsorb.stp.optimiser_profile.v1",
   "controller": "polyfit",
-  "controller_sha256": "a1d4fed643440c85b0957c28aad22811fdfb35ddf6ac7a1c4a1b1b55e006626b",
-  "description": "Updated upstream Polyfit: logging crash fixed; source-default baseline; eight training/four confirmation/six final seeds; 88 flights",
+  "controller_sha256": "f8be84e7ecc4bfac7f52733e4fcc18651646e63e197b603397e652649d32a553",
+  "description": "Harry copy of updated upstream Polyfit with logging and finite cone-angle fixes; eight training/four confirmation/six final seeds; 88 flights",
   "native_config": {
     "schema": "wsorb.official_stp.benchmark.v1",
     "experiment_id": "bui-polyfit-smac3",
     "execution_batch": "viability",
     "install": null,
     "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
-    "package": "inputs/STU4-Sim",
+    "package": null,
     "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
     "mission": "Sims/FINAL_SUBMISSION.simconf",
     "mission_sha256": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
@@ -35,5 +35,17 @@
       "sensor_stale_s": 5.0
     },
     "diagnostic_rerun": false
+  },
+  "package_file_sha256": {
+    "Data/SpaceBuggyJetConfigNoMains.csv": "329a9e7b5dfd5aa5437e625fa2ba20edfaa85a91b46b3d0387fe5cbd0a01c356",
+    "Entities/ExplodedTank.enconf": "3779e80feeb80f856f11a9e5b33e7d4a5946f5be5bcdedb915ef717be9537dde",
+    "Entities/Rock1.enconf": "b33b1dd25709700bafef6d198f418970e5a02e9cc513580fceeb9f6108b392fd",
+    "Entities/Rock2.enconf": "86cbbfa7d2c10e479c6cd38b74c2e72a936e6919edd01627443b0f0bac8fd8dd",
+    "Entities/Rock3.enconf": "ba3e6e2a7c93c81950a2c2489d16011ce334f3de39dbc0f675b3cbeb5a871dec",
+    "Sims/FINAL_SUBMISSION.simconf": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
+    "Systems/JetSelectionActuator.py": "3b94557faa254142f4830cc6c2197df92f7cfe9eab06f8f18bd666653f12fcb7",
+    "Systems/Radar.py": "dd48398db5ffa29221d3a03902db9250e86df0f8f1eb9b53f94fc061053a8061",
+    "Systems/Scoring.py": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+    "Systems/SpawnDebris.py": "a4bae141983239bf517e82f1b60daead5ccb31f3cc63ae348c20a32f1d1dc21e"
   }
 }
