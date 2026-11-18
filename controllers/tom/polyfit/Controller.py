@@ -247,7 +247,8 @@ def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     t = -(rel_pos * rel_vel).sum(axis=1) / speed_squared
     t = np.clip(t, 0.0, horizon)  # only look from now until the horizon
     closest = np.linalg.norm(rel_pos + t[:, None] * rel_vel, axis=1)
-    return (closest - keep_out).min()
+    # return (closest - keep_out).min()
+    return np.all((closest-keep_out) > 0)
 
 
 def two_sideways_directions(direction):
@@ -267,12 +268,17 @@ class Avoider:
         )
         self.horizon = horizon
         self.last_dodge = None  # remembered so we don't flip-flop between dodges
+        self.dodge_counter = None
 
     def choose(self, wanted_velocity, rocks, shuttle_position, now):
         """Return the velocity to fly: the wanted one if it is safe, else the smallest safe change."""
+        def dodge_msg(msg) -> None:
+            st.OnScreenLogMessage(f"Dodge info: {msg}", st.Severity.Info)
+
         wanted_velocity = np.asarray(wanted_velocity, float)
         speed = np.linalg.norm(wanted_velocity)
         if speed < 1e-3 or len(rocks) == 0:
+            dodge_msg("no_dodge (no rocks)")
             return wanted_velocity
 
         # Describe every rock as plain arrays.
@@ -286,15 +292,25 @@ class Avoider:
         )
 
         def score(velocity):
-            return clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
+            # this now returns whether there will be:
+            #   a collision with any rock, at this velocity
+            s = clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
+            return 1 if s else 0
 
         # 1. Nothing in the way? Fly exactly as wanted (no thruster use at all).
         if score(wanted_velocity) > 0:
-            self.last_dodge = None
-            return wanted_velocity
+            if self.dodge_counter > 0:
+                self.dodge_counter -= 1
+                return self.last_dodge
+            else:
+                self.last_dodge = None
+                dodge_msg(f"nothing in way, req_vel:{wanted_velocity}")
+                return wanted_velocity
 
         # 2. Still dodging? Keep the same dodge while it still works (stops flip-flopping).
         if self.last_dodge is not None and score(self.last_dodge) > 0:
+            dodge_msg(f"still dodging last: {str(self.last_dodge)}")
+            self.dodge_counter = 20
             return self.last_dodge
 
         # 3. Try sideways dodges, SMALLEST first: a small velocity change costs the least fuel.
@@ -306,6 +322,8 @@ class Avoider:
                 candidate = wanted_velocity + size * speed * sideways
                 if score(candidate) > 0:
                     self.last_dodge = candidate
+                    dodge_msg(f"sideways dodge: {str(candidate)}")
+                    self.dodge_counter = 20
                     return candidate
                 tried.append(candidate)
 
@@ -314,14 +332,17 @@ class Avoider:
             candidate = wanted_velocity * fraction
             if score(candidate) > 0:
                 self.last_dodge = candidate
+                dodge_msg(f"trying to slow down: {str(self.last_dodge)}")
+                self.dodge_counter = 20
                 return candidate
             tried.append(candidate)
 
         # 5. Nothing is fully safe: take the least-bad option we looked at.
         self.last_dodge = max(tried, key=score)
+        self.dodge_counter = 20
 
         # Report Changes
-        st.OnScreenLogMessage(f"Dodge info: {str(self.last_dodge)}", st.Severity.Info)
+        dodge_msg(f"nothing fully safe! : {str(self.last_dodge)}")
 
         return self.last_dodge
 
