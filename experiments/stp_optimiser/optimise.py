@@ -33,6 +33,9 @@ SPACES = {
     "ali": {
         "directory": "controllers/harry/mppi",
         "entrypoint": "controller.py",
+        "author": "Ali El Ali; Harry Yendle terminal-coast patch",
+        "method": "MPPI with arrival-intersection terminal coast",
+        "source_changes": "Harry terminal-coast intersection patch plus native tuning inputs",
         "bounds": {
             "cruise_speed_mps": [7.0, 14.0],
             "plan_horizon_s": [15.0, 40.0],
@@ -44,6 +47,9 @@ SPACES = {
     "polyfit": {
         "directory": "controllers/tom/polyfit_v2_bodge",
         "entrypoint": "Controller.py",
+        "author": "Tom Kirkpatrick; Harry Yendle logging fix and tuning inputs",
+        "method": "Updated upstream Polyfit with logging fix",
+        "source_changes": "Malformed Dodge info alert disabled; native tuning inputs only",
         "bounds": {"cruise_speed": [6.0, 12.0], "margin": [3.0, 12.0], "horizon": [15.0, 60.0]},
         "defaults": {"cruise_speed": 8.0, "margin": 6.0, "horizon": 50.0},
         "fixed": {},
@@ -97,20 +103,13 @@ def controller(root, name, values, label):
     spec = SPACES[name]
     return dict(
         id=label,
-        author="Ali El Ali; Harry Yendle terminal-coast patch"
-        if name == "ali"
-        else "Tom Kirkpatrick",
-        method="MPPI with arrival-intersection terminal coast"
-        if name == "ali"
-        else "Polyfit v2 bodge",
+        author=spec["author"],
+        method=spec["method"],
         directory=str(root / "sources" / name),
         entrypoint=spec["entrypoint"],
         environment={"WSORB_STP_TUNING": json.dumps(settings(name, values), sort_keys=True)},
         source_commit=read(root / "experiment.json")["checkout_revision"],
-        source_changes=(
-            "Harry terminal-coast intersection patch plus native tuning inputs; "
-            "frozen bundle SHA-256 is authoritative"
-        ),
+        source_changes=spec["source_changes"] + "; frozen bundle SHA-256 is authoritative",
     )
 
 
@@ -677,12 +676,54 @@ def archive_audit(root):
     write(root / "archive.json", output)
 
 
-def prepare(output):
+def preparation_config(
+    config_path=None, controller_name=None, install=None, user_root=None, package=None
+):
+    """External configuration boundary; machine paths never alter flight policy."""
+    selected = tuple(ACTIVE_CONTROLLERS if controller_name is None else [controller_name])
+    profile = None
+    if config_path is None:
+        config = read(REPO / "docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.json")
+    else:
+        config_path = Path(config_path)
+        config_path = config_path if config_path.is_absolute() else REPO / config_path
+        document = read(config_path)
+        if document.get("schema") == "wsorb.stp.optimiser_profile.v1":
+            profile = document
+            if controller_name is not None and controller_name != profile["controller"]:
+                raise ValueError("Controller differs from the pinned optimiser profile")
+            selected = (profile["controller"],)
+            if selected[0] not in SPACES:
+                raise ValueError("Unknown optimiser controller in profile")
+            config = copy.deepcopy(profile["native_config"])
+            spec = SPACES[selected[0]]
+            if (
+                evidence.digest(REPO / spec["directory"] / spec["entrypoint"])
+                != profile["controller_sha256"]
+            ):
+                raise ValueError("Controller source differs from the handoff profile pin")
+        else:
+            config = document
+    if any(name not in SPACES for name in selected):
+        raise ValueError("Unknown optimiser controller")
+    for key, value in (("install", install), ("user_root", user_root), ("package", package)):
+        if value is not None:
+            config[key] = str(value)
+        if not config.get(key):
+            raise ValueError(f"Set --{key.replace('_', '-')} for this machine")
+    return config, selected, profile
+
+
+def prepare(
+    output, config_path=None, controller_name=None, install=None, user_root=None, package=None
+):
     root = Path(output).resolve()
     if not root.is_relative_to(REPO / "runs"):
         raise ValueError("Output must be under runs/")
+    config, selected, profile = preparation_config(
+        config_path, controller_name, install, user_root, package
+    )
     root.mkdir(parents=True, exist_ok=False)
-    config = read(REPO / "docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.json")
     for key in ("source_commit", "supersedes_execution", "seeds", "controllers", "reference"):
         config.pop(key, None)
     final_bank = read(REPO / config["seed_bank"])
@@ -708,7 +749,7 @@ def prepare(output):
     sources = root / "sources"
     sources.mkdir()
     resolved = {}
-    for name in ACTIVE_CONTROLLERS:
+    for name in selected:
         spec = SPACES[name]
         shutil.copytree(
             REPO / spec["directory"],
@@ -720,20 +761,22 @@ def prepare(output):
             fixed=spec["fixed"],
             source_hashes=benchmark.hashes(sources / name),
         )
-    ali_tree = ast.parse((sources / "ali/controller.py").read_text())
-    default_policy = next(
-        ast.literal_eval(n.value)
-        for n in ali_tree.body
-        if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "DEFAULT_POLICY" for t in n.targets)
-    )
-    resolved["ali"]["resolved_policy"] = default_policy | SPACES["ali"]["fixed"]
-    resolved["ali"]["native_fixed"] = {"time_budget_s": 300.0, "arrival_radius_m": 50.0}
+    if "ali" in selected:
+        ali_tree = ast.parse((sources / "ali/controller.py").read_text(encoding="utf-8"))
+        default_policy = next(
+            ast.literal_eval(n.value)
+            for n in ali_tree.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "DEFAULT_POLICY" for t in n.targets)
+        )
+        resolved["ali"]["resolved_policy"] = default_policy | SPACES["ali"]["fixed"]
+        resolved["ali"]["native_fixed"] = {"time_budget_s": 300.0, "arrival_radius_m": 50.0}
     write(
         root / "experiment.json",
         dict(
             schema="wsorb.stp.smac3.v1",
             native_config=config,
+            input_profile=profile,
             checkout_revision=benchmark.revision(REPO),
             train=values[:TRAIN_SEED_COUNT],
             validation=values[TRAIN_SEED_COUNT:],
@@ -742,15 +785,15 @@ def prepare(output):
             final_bank_source=config["seed_bank"],
             final_bank_sha256=evidence.digest(REPO / config["seed_bank"]),
             resolved_settings=resolved,
-            spaces={name: SPACES[name] for name in ACTIVE_CONTROLLERS},
-            controllers=list(ACTIVE_CONTROLLERS),
+            spaces={name: SPACES[name] for name in selected},
+            controllers=list(selected),
             cap_loss=CAP_LOSS,
             alternative_cap_loss=ALTERNATIVE_CAP_LOSS,
             damage_allowance_J=DAMAGE_ALLOWANCE_J,
             collision_early_abort=False,
             simulation_ceiling_s=300,
             smac_seed=73,
-            flight_budget=len(ACTIVE_CONTROLLERS)
+            flight_budget=len(selected)
             * (8 * TRAIN_SEED_COUNT + 3 * VALIDATION_SEED_COUNT + 2 * FINAL_TEST_SEED_COUNT),
             baseline_archive_reuse=0,
             objective=(
@@ -772,10 +815,7 @@ def prepare(output):
         root,
         root / "baseline",
         values[:TRAIN_SEED_COUNT],
-        [
-            controller(root, name, SPACES[name]["defaults"], f"{name}_baseline")
-            for name in ACTIVE_CONTROLLERS
-        ],
+        [controller(root, name, SPACES[name]["defaults"], f"{name}_baseline") for name in selected],
     )
     original_native = root / "baseline/native"
     original_provenance = read(original_native / "provenance.json")
@@ -846,13 +886,24 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     prep = sub.add_parser("prepare")
     prep.add_argument("--output", required=True)
+    prep.add_argument(
+        "--config", type=Path, help="Native campaign config or pinned optimiser profile"
+    )
+    prep.add_argument("--controller", choices=tuple(SPACES))
+    prep.add_argument("--install", help="Native Windows STP installation directory")
+    prep.add_argument(
+        "--user-root", help="STPro user directory; defaults to the configured user root"
+    )
+    prep.add_argument("--package", help="Exact reviewed STU4-Sim package directory")
     run = sub.add_parser("run")
     run.add_argument("root", type=Path)
     run.add_argument("--resume", action="store_true")
     run.add_argument("--stage", choices=("tune", "final-test", "all"), default="all")
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare(args.output)
+        prepare(
+            args.output, args.config, args.controller, args.install, args.user_root, args.package
+        )
         return
     root = args.root.resolve()
     assert_pins(root)

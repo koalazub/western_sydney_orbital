@@ -572,6 +572,74 @@ class CampaignScope(unittest.TestCase):
                 )
                 opt.assert_pins(root)
 
+    def test_polyfit_profile_prepares_without_ali_sources_or_local_machine_paths(self):
+        original_repo = opt.REPO
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            docs = Path("docs/analytics/stp-runs/20261117T040830Z-HY")
+            (repo / docs).mkdir(parents=True)
+            shutil.copy2(
+                original_repo / docs / "final-seed-bank.json", repo / docs / "final-seed-bank.json"
+            )
+            source_dir = opt.SPACES["polyfit"]["directory"]
+            shutil.copytree(
+                original_repo / source_dir,
+                repo / source_dir,
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+            profile_path = original_repo / "experiments/stp_optimiser/bui_polyfit.json"
+            root = repo / "runs/polyfit-fixture"
+            with (
+                patch.object(opt, "REPO", repo),
+                patch.object(opt.benchmark, "revision", return_value=None),
+                patch.object(
+                    opt,
+                    "prepare_stage",
+                    side_effect=lambda root, target, *args: native_fixture(
+                        target / "native", repo / "install"
+                    ),
+                ) as stage,
+                patch.object(
+                    opt, "archive_audit", side_effect=lambda p: opt.write(p / "archive.json", [])
+                ),
+            ):
+                opt.prepare(
+                    root,
+                    config_path=profile_path,
+                    install=repo / "install",
+                    package=repo / "inputs/STU4-Sim",
+                )
+            experiment = opt.read(root / "experiment.json")
+            self.assertEqual(experiment["controllers"], ["polyfit"])
+            self.assertEqual(experiment["flight_budget"], 88)
+            self.assertEqual(set(experiment["resolved_settings"]), {"polyfit"})
+            self.assertFalse((root / "sources/ali").exists())
+            self.assertEqual(stage.call_args.args[3][0]["id"], "polyfit_baseline")
+            self.assertNotIn("MPPI", stage.call_args.args[3][0]["method"])
+            self.assertNotIn("terminal-coast", stage.call_args.args[3][0]["source_changes"])
+            self.assertEqual(
+                json.loads(stage.call_args.args[3][0]["environment"]["WSORB_STP_TUNING"]),
+                opt.SPACES["polyfit"]["defaults"],
+            )
+            self.assertEqual(
+                experiment["input_profile"]["controller_sha256"],
+                opt.evidence.digest(root / "sources/polyfit/Controller.py"),
+            )
+
+    def test_polyfit_profile_requires_machine_path_and_exact_source(self):
+        profile_path = opt.REPO / "experiments/stp_optimiser/bui_polyfit.json"
+        with self.assertRaisesRegex(ValueError, "Set --install"):
+            opt.preparation_config(profile_path)
+        with self.assertRaisesRegex(ValueError, "differs from the pinned"):
+            opt.preparation_config(profile_path, controller_name="ali", install="installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = opt.read(profile_path)
+            profile["controller_sha256"] = "wrong"
+            broken = Path(temporary) / "broken-profile.json"
+            opt.write(broken, profile)
+            with self.assertRaisesRegex(ValueError, "source differs"):
+                opt.preparation_config(broken, install="installed")
+
     def test_run_dispatches_only_frozen_selected_controller(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

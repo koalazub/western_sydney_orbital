@@ -6,6 +6,10 @@ retry policy or replacement controller. The terminal-coast patch lives in
 `controllers/harry/mppi/`; tuning inputs use `WSORB_STP_TUNING` through the existing
 harness `environment` field.
 
+For Bui's separate Polyfit experiment, use the pinned profile and root-directory
+commands in [BUI_POLYFIT.md](BUI_POLYFIT.md). The default preparation remains MPPI;
+`--config` selects the Polyfit profile and machine paths are explicit inputs.
+
 ## Frozen design
 
 The active campaign tunes **Harry's terminal-coast-patched Ali MPPI only**. All earlier preparations are preserved. Use a fresh preparation for this variant.

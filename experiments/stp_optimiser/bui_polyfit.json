@@ -1,0 +1,39 @@
+{
+  "schema": "wsorb.stp.optimiser_profile.v1",
+  "controller": "polyfit",
+  "controller_sha256": "a1d4fed643440c85b0957c28aad22811fdfb35ddf6ac7a1c4a1b1b55e006626b",
+  "description": "Updated upstream Polyfit: logging crash fixed; source-default baseline; eight training/four confirmation/six final seeds; 88 flights",
+  "native_config": {
+    "schema": "wsorb.official_stp.benchmark.v1",
+    "experiment_id": "bui-polyfit-smac3",
+    "execution_batch": "viability",
+    "install": null,
+    "user_root": "%USERPROFILE%/AppData/Local/SimDynamX/STPro",
+    "package": "inputs/STU4-Sim",
+    "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+    "mission": "Sims/FINAL_SUBMISSION.simconf",
+    "mission_sha256": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
+    "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+    "execution_order": "coverage_first",
+    "repetitions": 1,
+    "seed_bank": "docs/analytics/stp-runs/20261117T040830Z-HY/final-seed-bank.json",
+    "seed_bank_id": "stu4-phobos-2026-11-11-final-impulses-radar100-v1",
+    "seed_bank_prefix_count": 22,
+    "seed_bank_prefix_sha256": "8eadb78d9a9b7de1044e7e0b5f2f59a83a986bfe550a2736277485438bc8cfb9",
+    "seed_count": 22,
+    "seed_scope": "saved_field_impulses_radar_fixed_100",
+    "sample_period_s": 0.1,
+    "limits": {
+      "simulation_s": 300,
+      "wall_s": 720,
+      "startup_s": 120,
+      "stall_s": 20,
+      "controller_stall_s": 45
+    },
+    "thresholds": {
+      "decision_overrun_s": 0.1,
+      "sensor_stale_s": 5.0
+    },
+    "diagnostic_rerun": false
+  }
+}
