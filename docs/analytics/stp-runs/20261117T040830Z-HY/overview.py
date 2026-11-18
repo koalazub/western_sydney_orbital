@@ -26,11 +26,95 @@ def _():
     if (_combined / "attempts.csv").exists():
         run_dir = _combined
     with (run_dir / "attempts.csv").open(encoding="utf-8", newline="") as _stream:
-        rows = list(csv.DictReader(_stream))
+        all_rows = list(csv.DictReader(_stream))
     versions = json.loads((run_dir / "controller_versions.json").read_text(encoding="utf-8"))
 
+    replacement_history = []
+    _replacement = root / "runs/stp-20261117T040830Z-HY-polyfit-replacement-001"
+    if (_replacement / "attempts.csv").exists():
+        _config = json.loads((_replacement / "campaign.json").read_text(encoding="utf-8"))["config"]
+        _link = _config["replacement_for"]
+        with (_replacement / "attempts.csv").open(encoding="utf-8", newline="") as _stream:
+            _new_rows = list(csv.DictReader(_stream))
+        if len(_new_rows) != 1:
+            raise ValueError("Expected one explicitly linked replacement slot")
+        _new = _new_rows[0]
+        _matches = [i for i, r in enumerate(all_rows) if r["run_id"] == _link["run_id"]]
+        if len(_matches) != 1:
+            raise ValueError("Replacement must identify exactly one preserved interrupted slot")
+        _index = _matches[0]
+        _old = all_rows[_index]
+        _base_config = json.loads(
+            (Path(_old["source_campaign"]) / "campaign.json").read_text(encoding="utf-8")
+        )["config"]
+        if _old["outcome"] != "interrupted" or any(
+            _old[k] != _new[k] for k in ("controller", "seed", "repetition")
+        ):
+            raise ValueError(
+                "Replacement does not match the interrupted controller/seed/repetition"
+            )
+        for _field in ("mission_sha256", "scorer_sha256", "limits", "sample_period_s"):
+            if _config[_field] != _base_config[_field]:
+                raise ValueError(f"Replacement changed {_field}")
+        _new_versions = json.loads(
+            (_replacement / "controller_versions.json").read_text(encoding="utf-8")
+        )
+        _identity = _new["controller"]
+        if (
+            _new_versions[_identity]["controller_source_sha256"]
+            != versions[_identity]["controller_source_sha256"]
+        ):
+            raise ValueError("Replacement frozen controller bundle differs")
+        _receipt = json.loads(
+            (Path(_new["source_campaign"]) / _new["physical_run_id"] / "receipt.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if _receipt.get("cleanup") != "owned_process_tree_exited":
+            raise ValueError("Replacement cleanup has not been verified")
+        replacement_history.append(
+            {
+                "controller": _identity,
+                "seed": _old["seed"],
+                "repetition": _old["repetition"],
+                "original_run_id": _old["run_id"],
+                "original_outcome": _old["outcome"],
+                "original_source_campaign": _old["source_campaign"],
+                "replacement_run_id": _new["run_id"],
+                "replacement_outcome": _new["outcome"],
+                "replacement_source_campaign": _new["source_campaign"],
+                "replacement_error": _receipt.get("error", {}).get("error"),
+                "cleanup": _receipt["cleanup"],
+                "owned_processes_after_cleanup": _receipt.get("owned_processes_after_cleanup"),
+            }
+        )
+        all_rows[_index] = _new
+
+    _bodge = root / "runs/stp-20261117T040830Z-HY-final-001/polyfit_v2_bodge-exceptions-001"
+    if (_bodge / "queue_status.json").exists() and json.loads(
+        (_bodge / "queue_status.json").read_text(encoding="utf-8")
+    )["state"] == "finished":
+        with (_bodge / "attempts.csv").open(encoding="utf-8", newline="") as _stream:
+            _bodge_rows = list(csv.DictReader(_stream))
+        _bodge_config = json.loads((_bodge / "campaign.json").read_text(encoding="utf-8"))["config"]
+        _expected = {
+            (r["seed"], r["repetition"]): r["run_id"] for r in _bodge_config["exception_cohort"]
+        }
+        if len(_bodge_rows) != 13 or {(r["seed"], r["repetition"]) for r in _bodge_rows} != set(
+            _expected
+        ):
+            raise ValueError("Logging-patch results do not match the 13 exception-seed slots")
+        for _row in _bodge_rows:
+            _prior = next(
+                r for r in all_rows if r["run_id"] == _expected[(_row["seed"], _row["repetition"])]
+            )
+            if _prior["outcome"] != "exception" or _row["controller"] != "polyfit_v2_bodge":
+                raise ValueError("Logging-patch cohort must link to preserved Polyfit exceptions")
+        all_rows.extend(_bodge_rows)
+        versions.update(json.loads((_bodge / "controller_versions.json").read_text("utf-8")))
+
     _aliases = {"tom_polyfit": "polyfit_bodge", "tom_polyfit_v2": "polyfit_bodge_v2"}
-    for _row in rows:
+    for _row in all_rows:
         _row["frozen_controller_id"] = _row["controller"]
         _row["controller"] = _aliases.get(_row["controller"], _row["controller"])
     versions = {_aliases.get(k, k): v for k, v in versions.items()}
@@ -46,7 +130,93 @@ def _():
         present = [v for v in values if v is not None]
         return stats.median(present) if present else None
 
-    return Path, alt, json, median, mo, number, rows, run_dir, versions
+    return Path, alt, json, median, mo, number, replacement_history, all_rows, run_dir, versions
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    hide_superseded_exceptions = mo.ui.checkbox(
+        value=True, label="Hide upstream exception attempts with completed logging-patch reruns"
+    )
+    mo.vstack([hide_superseded_exceptions])
+    return (hide_superseded_exceptions,)
+
+
+@app.cell
+def _(all_rows, hide_superseded_exceptions):
+    _rerun_slots = {
+        (r["seed"], r["repetition"]) for r in all_rows if r["controller"] == "polyfit_v2_bodge"
+    }
+    excluded_rows = [
+        r
+        for r in all_rows
+        if hide_superseded_exceptions.value
+        and r["controller"] == "tom_polyfit_updated"
+        and r["outcome"] == "exception"
+        and (r["seed"], r["repetition"]) in _rerun_slots
+    ]
+    _excluded_ids = {r["run_id"] for r in excluded_rows}
+    rows = [r for r in all_rows if r["run_id"] not in _excluded_ids]
+    return excluded_rows, rows
+
+
+@app.cell(hide_code=True)
+def _(all_rows, excluded_rows, mo, rows):
+    mo.md(f"""
+    **Results filter:** {len(rows)} of {len(all_rows)} rows shown;
+    {len(excluded_rows)} superseded upstream exception attempts hidden.
+    Summary percentages use the included rows; upstream Polyfit's filtered subset
+    is not its full 22-seed reliability result. Controller versions remain separate.
+    Uncheck the filter to restore the complete history. Raw evidence is unchanged.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(all_rows, median, mo, number, rows):
+    _new = [r for r in rows if r["controller"] == "polyfit_v2_bodge"]
+    _old = {
+        (r["seed"], r["repetition"]): r
+        for r in all_rows
+        if r["controller"] == "tom_polyfit_updated"
+    }
+    _pairs = [
+        {
+            "seed": r["seed"],
+            "prior_run_id": _old[(r["seed"], r["repetition"])]["run_id"],
+            "prior_outcome": _old[(r["seed"], r["repetition"])]["outcome"],
+            "new_run_id": r["run_id"],
+            "new_outcome": r["outcome"],
+            "new_official_score": number(r["official_score"]),
+            "new_damage_J": number(r["damage_J"]),
+            "new_fuel_kg": number(r["fuel_kg"]),
+            "new_arrival_s": number(r["arrival_time_s"]),
+            "new_source_campaign": r["source_campaign"],
+        }
+        for r in _new
+    ]
+    _success = [r for r in _new if r["outcome"] == "success"]
+    mo.vstack(
+        [
+            mo.md(f"""
+        ## polyfit_v2_bodge: logging patch on exception seeds
+
+        Completed results loaded: **{len(_new)}/13**; arrivals: **{len(_success)}**.
+        This separate controller copies updated upstream Polyfit and comments out
+        only the malformed `Dodge info` alert. It is distinct from `polyfit_bodge_v2`.
+        The cohort was selected because the previous version raised exceptions,
+        including the seed-3253 replacement. It is **not a full 22-seed sweep**;
+        do not compare its arrival percentage directly with unselected full sweeps.
+        Old exception outcomes and hashes remain preserved under `tom_polyfit_updated`.
+        There are no jointly scored old/new flights in this selected cohort, so no
+        paired score improvement is claimed. New scored-flight median:
+        **{median(number(r["official_score"]) for r in _new)}** (missing stays missing).
+        Raw results are appended under `final-001/polyfit_v2_bodge-exceptions-001`.
+        """),
+            mo.ui.table(_pairs, selection=None) if _pairs else mo.md("Awaiting completed batch."),
+        ]
+    )
+    return
 
 
 @app.cell(hide_code=True)
@@ -54,11 +224,12 @@ def _(mo):
     mo.md("""
     # Final STP run overview Ã‚Â· 20261117T040830Z-HY
 
-    Read-only analysis of **final-001**: native licensed STP 0.54.2, 22 saved
-    impulse seeds Ãƒâ€” three controllers Ãƒâ€” one repetition, 300 s simulation budget.
+    Read-only analysis of **final-001 plus the matched updated-candidates addition**:
+    native licensed STP 0.54.2, 22 saved
+    impulse seeds Ãƒâ€” five controllers Ãƒâ€” one repetition, 300 s simulation budget.
     The historical original/V2 arms are displayed as **polyfit_bodge** and
     **polyfit_bodge_v2**; frozen IDs and hashes remain unchanged. When the matched
-    MPPI-v2 combined report is available, it is loaded automatically. MPPI-v2 uses
+    five-controller combined report is available, it is loaded automatically. MPPI-v2 uses
     +Z attitude alignment, an 8.6-degree thrust gate, 25 m radial launch clearance,
     estimated radar-clock alignment and a combined raw/track emergency guard.
     See [MPPI-v2 design and execution](ali-mppi-v2.md).
@@ -84,6 +255,45 @@ def _(mo):
     one repetition cannot estimate within-seed repeatability. Asynchronous observations
     may differ between arms. Damage increases are not identified collision events.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, replacement_history, rows, run_dir):
+    _counts = {}
+    for _row in rows:
+        _key = (_row["controller"], _row["outcome"])
+        _counts[_key] = _counts.get(_key, 0) + 1
+    mo.vstack(
+        [
+            mo.md(f"""
+            ## Results capture: 18 November 2026
+
+            Loaded **{len(rows)} logical slots** from `{run_dir.name}`.
+            The updated-candidates queue finished at **2026-11-17 13:31:12 UTC**.
+            Before replacement, its 44 slots comprised MPPI-v2: **18 success, 4 simulation_limit**;
+            upstream Polyfit: **8 success, 1 simulation_limit, 12 exception,
+            1 interrupted**. Finished scheduling does not mean every flight succeeded.
+            Linked replacement slots applied: **{len(replacement_history)}**.
+            The current outcomes below count each slot once. The original interruption
+            remains disclosed in the replacement history, separate from evidence retries.
+            Replacement selection follows the owner's instruction, never its score.
+            See [replacement evidence](updated-candidates.md).
+            The seed-3253 replacement ended in a controller logging `TypeError`:
+            `OnScreenLogMessage` omitted its required category argument. No score was
+            recorded; all 18 owned processes exited. The frozen controller was not changed.
+            Original final-001 evidence is preserved. Diagnostics are excluded.
+            Source campaign paths and frozen IDs remain attached to each row.
+            """),
+            mo.ui.table(
+                [{"controller": c, "outcome": o, "slots": n} for (c, o), n in _counts.items()],
+                selection=None,
+            ),
+            mo.ui.table(replacement_history, selection=None)
+            if replacement_history
+            else mo.md("Awaiting the authorized Polyfit seed-3253 replacement."),
+        ]
+    )
     return
 
 
@@ -122,7 +332,7 @@ def _(mo, versions):
 
 
 @app.cell
-def _(median, number, rows, versions):
+def _(all_rows, median, number, rows, versions):
     summaries = []
     for controller in versions:
         selected = [r for r in rows if r["controller"] == controller]
@@ -132,9 +342,14 @@ def _(median, number, rows, versions):
         summaries.append(
             {
                 "controller": controller,
-                "scheduled": len(selected),
+                "scheduled_total": sum(r["controller"] == controller for r in all_rows),
+                "included_rows": len(selected),
+                "excluded_rows": sum(r["controller"] == controller for r in all_rows)
+                - len(selected),
                 "arrivals": len(successful),
-                "success_percent": 100 * len(successful) / len(selected),
+                "success_percent_included": 100 * len(successful) / len(selected)
+                if selected
+                else None,
                 "timeouts": sum(r["outcome"] == "simulation_limit" for r in selected),
                 "other_outcomes": [
                     r["outcome"]
@@ -166,11 +381,11 @@ def _(alt, mo, rows, summaries):
         .mark_bar()
         .encode(
             x=alt.X("controller:N", title=None),
-            y=alt.Y("count():Q", title="Scheduled runs"),
+            y=alt.Y("count():Q", title="Included runs"),
             color="outcome:N",
             tooltip=["controller:N", "outcome:N", "count():Q"],
         )
-        .properties(title="All scheduled outcomes", width=450)
+        .properties(title="Outcomes in the selected results view", width=450)
     )
     mo.vstack(
         [

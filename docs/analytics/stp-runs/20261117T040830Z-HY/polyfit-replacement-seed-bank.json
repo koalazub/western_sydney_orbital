@@ -1,0 +1,15 @@
+{
+  "schema": "wsorb.official_stp.seed_bank.v1",
+  "id": "stu4-phobos-2026-11-11-final-impulses-radar100-v1-replacement-3253",
+  "scenario": {
+    "package_revision": "0d753a28e1a4265b2839bf8e9fbbc9194efafb87",
+    "mission_sha256": "04abcfb54321b22b68322ecf98d785cc548a7bd7b7ba447aac511d9a4d38e06e",
+    "scorer_sha256": "ba8cc418522040692df09de7bbdaa2522b17e6e6cfa94d3364febc40ddf93cc4",
+    "seed_scope": "saved_field_impulses_radar_fixed_100"
+  },
+  "extension_algorithm": "sha256-index-v1",
+  "seeds": [
+    3253
+  ],
+  "source_bank": "final-seed-bank.json"
+}
