@@ -187,9 +187,8 @@ class Tracker:
             for r in radar_items:
                 debris_pos = r[0]
                 dot = np.dot(target_vec, debris_pos)
-                ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
+                ang = np.acos(dot / (np.linalg.norm(target_vec) * np.linalg.norm(debris_pos)))
                 ETC += f"({debris_pos}, {dot}, {np.degrees(ang)})\n"
-
 
         def debris_in_cone(debris) -> bool:
             # debris_pos already relative
@@ -197,7 +196,7 @@ class Tracker:
             if debris[1][0] < CORE_BUBBLE:
                 return True
             dot = np.dot(target_vec, debris_pos)
-            ang = np.acos(dot / (np.linalg.norm(debris_pos) * np.linalg.norm(target_vec)))
+            ang = np.acos(dot / (np.linalg.norm(target_vec) * np.linalg.norm(debris_pos)))
             return dot > 0.0 and ang < CONE_ANGLE
 
         radar_items = [r for r in radar_items if debris_in_cone(r)]
