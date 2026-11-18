@@ -191,7 +191,7 @@ def test_emergency_guard_includes_the_ship_radius_in_the_keep_out():
         "t": 0.0,
         "s": 0.5,
     }
-    policy = {**core.DEFAULT_POLICY, "guard_source": "tracks"}
+    policy = {**core.DEFAULT_POLICY, "guard_source": "tracks", "emergency_margin_m": 6.0}
     _, without_ship = core.emergency_guard(
         np.zeros(3), [], 0.0, 0.5, policy, [track], np.zeros(3), 0.0
     )

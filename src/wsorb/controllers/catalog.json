@@ -103,8 +103,8 @@
         "label": "Ali MPPI candidate",
         "owner": "Ali",
         "contributor": "Ali; WSO MPPI adapter",
-        "description": "8 m/s public-radar beeline with terminal coast, emergency guard, collision recovery, a 25 s velocity avoider, a 10/20 m goal corridor, and selectable line-fit/Kalman tracking, MPPI/hybrid guidance and full or proportional governors. Experimental candidate; not validated on the real server.",
-        "profile": "8 m/s default; 25 s velocity avoider, 10/20 m corridor; MPPI/hybrid opt-in",
+        "description": "8 m/s public-radar beeline with terminal coast, emergency guard, collision recovery, a 15 s velocity avoider, a 35 m stop / 45 m restart goal corridor, and selectable line-fit/Kalman tracking, MPPI/hybrid guidance and full or proportional governors. Experimental candidate; not validated on the real server.",
+        "profile": "8 m/s default; 15 s velocity avoider, 35/45 m corridor; MPPI/hybrid opt-in",
         "experimental": true,
         "target_seeking": true,
         "source": "controllers/ali/controller.py"

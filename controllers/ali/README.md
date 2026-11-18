@@ -81,24 +81,26 @@ the others. The persistent `state` dict remains the adapter/run boundary.
 
 The marked core is 1522 lines across eight stages. The original 200-line target
 remains a guideline, not a hard limit; the numeric test keeps a 1530-line
-regression guard. The
-current 8 m/s default is the line-fit tracker, 25 s velocity avoider, a 10/20 m
-goal corridor, the 0.3/0.1 m/s governor deadband, no launch clearance, and the
-+Z thrust axis. The emergency guard remains the last-resort layer. The high-speed
-braking-speed cap was removed: at 17 m/s it forced the ship down to 14.5 m/s
-before the 200 m terminal coast.
+regression guard. The current 8 m/s default is the line-fit tracker, 15 s
+velocity avoider, a 35 m stop / 45 m restart goal corridor, a 3 m
+emergency-guard surface margin, the 0.3/0.1 m/s governor deadband, no launch
+clearance, and the +Z thrust axis. The emergency guard remains the last-resort
+layer. The high-speed braking-speed cap was removed: at 17 m/s it forced the
+ship down to 14.5 m/s before the 200 m terminal coast.
 
-Against the native port of Tom's 8 m/s polyfit on seeds `100-107`, Ali averaged
-`67.87` points, `166.63 s` and `40.62 kg` versus Tom's `66.72`, `166.32 s` and
-`41.49 kg`, with zero damage on all eight. Seeds 102, 103 and 104 won points,
-time and fuel outright; 101 won points and fuel while arriving 0.8 s later;
-100, 105 and 106 lost points by 0.4-0.9. Against the Tom Kalman port at 17 m/s,
-Ali averaged `75.83` points, `91.45 s` and `79.03 kg` versus `62.81`, `91.13 s`
-and `89.16 kg`; seven of eight seeds won points and fuel, six were within 0.2 s,
-and seed 106 lost 2.3 s to its close-threat dodge. The remaining per-seed gaps
-are at the simulator's 0.3-1.0 point repeatability limit; seed 106's avoidance is
-the least stable. The Kalman, raw-radar guard, inflation, fixed-sample,
-proportional-governor and STP-source modes remain opt-in for seed studies.
+Against the native Tom ports, Ali won points on every seed at 8, 14 and 17 m/s, with
+zero damage in all 24 runs at 2x native playback. At 8 m/s the polyfit comparison
+averaged `71.09` vs `66.72` points (`168.79` vs `166.56 s`, `37.51` vs `41.49 kg`), with
+the smallest margin `+0.14` on seed 100. At 14 m/s it averaged `82.53` vs `79.23`
+(`104.75` vs `104.34 s`, `61.52` vs `64.34 kg`), with the smallest margin `+0.11` on
+seed 101. At 17 m/s the Kalman comparison averaged `79.65` vs `62.81` (`91.54` vs
+`91.13 s`, `76.09` vs `89.16 kg`), with the smallest margin `+3.39` on seed 106. The 1x
+spot checks on the thinnest seed at each speed also win: 8/100 `+0.48`, 14/101 `+0.10`
+and 17/106 `+3.02`. The 3 m guard surface margin removes the seed-106 false escape: the
+6 m margin fired a 5.8 kg burn when the predicted surface gap was 5.8 m. The 35 m stop /
+45 m restart corridor trades a small time increase for 0.5-1.3 kg less fuel. Kalman,
+raw-radar guard, inflation, fixed-sample, proportional-governor and STP-source modes
+remain opt-in for seed studies.
 
 Retired Ali entrypoints are kept for reproduction, not submission, in
 [`docs/history/controllers/ali/`](../../docs/history/controllers/ali/README.md):
