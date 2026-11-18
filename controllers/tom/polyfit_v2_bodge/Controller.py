@@ -399,9 +399,27 @@ class GoalPlanner:
 ####################################
 
 tracker = Tracker()
-avoider = Avoider()
+
+
+def native_tuning_settings():
+    """Optional native inputs; all non-tuned settings remain unchanged."""
+    import json
+
+    settings = {"cruise_speed": 8.0, "margin": 6.0, "horizon": 50.0}
+    supplied = json.loads(os.environ.get("WSORB_STP_TUNING", "{}"))
+    bounds = {"cruise_speed": (6.0, 12.0), "margin": (3.0, 12.0), "horizon": (15.0, 60.0)}
+    if set(supplied) - set(bounds):
+        raise ValueError("Unknown Polyfit tuning setting")
+    for key, value in supplied.items():
+        if type(value) not in (float, int) or not bounds[key][0] <= value <= bounds[key][1]:
+            raise ValueError(f"Invalid Polyfit tuning setting: {key}")
+    return settings | supplied
+
+
+tuning_settings = native_tuning_settings()
+avoider = Avoider(margin=tuning_settings["margin"], horizon=tuning_settings["horizon"])
 governor = BurnGovernor(gain=50.0)
-planner = GoalPlanner(cruise_speed=8.0)
+planner = GoalPlanner(cruise_speed=tuning_settings["cruise_speed"])
 
 ##################
 # Start the loop #
