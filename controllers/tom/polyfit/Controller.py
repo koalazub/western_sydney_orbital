@@ -169,7 +169,7 @@ class Rock:
 
 
 class Tracker:
-    def __init__(self, gate=15.0, max_age=5.0):
+    def __init__(self, gate=5.0, max_age=5.0):
         self.rocks = []
         self.gate = gate  # sightings closer than this (m) count as the same rock
         self.max_age = max_age  # forget rocks not seen for this long (s)
@@ -177,7 +177,7 @@ class Tracker:
     def update(self, radar_items, shuttle_position, now, target_position):
         TRACKER_DEBUG = False
 
-        CONE_ANGLE: float = np.radians(30.0)
+        CONE_ANGLE: float = np.radians(50.0)
         CORE_BUBBLE: float = 50 # (m)
         target_vec = target_position - shuttle_position
 
@@ -273,7 +273,8 @@ class Avoider:
     def choose(self, wanted_velocity, rocks, shuttle_position, now):
         """Return the velocity to fly: the wanted one if it is safe, else the smallest safe change."""
         def dodge_msg(msg) -> None:
-            st.OnScreenLogMessage(f"Dodge info: {msg}", st.Severity.Info)
+            
+            st.OnScreenLogMessage(f"Dodge info: {msg}", "Dodge", st.Severity.Info)
 
         wanted_velocity = np.asarray(wanted_velocity, float)
         speed = np.linalg.norm(wanted_velocity)
@@ -333,6 +334,16 @@ class Avoider:
             if score(candidate) > 0:
                 self.last_dodge = candidate
                 dodge_msg(f"trying to slow down: {str(self.last_dodge)}")
+                self.dodge_counter = 20
+                return candidate
+            tried.append(candidate)
+
+        # 4.5. Try speeding up!
+        for fraction in (1.15, 1.25, 1.5):
+            candidate = wanted_velocity * fraction
+            if score(candidate) > 0:
+                self.last_dodge = candidate
+                dodge_msg(f"trying to speed up: {str(self.last_dodge)}")
                 self.dodge_counter = 20
                 return candidate
             tried.append(candidate)
