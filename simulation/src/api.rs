@@ -103,6 +103,17 @@ pub(crate) enum ApiRequest {
         expected_context: CommandContext,
         expected_sensor_revision: u32,
     },
+    HoldControl {
+        controller_fence: crate::model::ControlFence,
+        source_time_s: f64,
+        hold_s: f64,
+        expected_context: CommandContext,
+        expected_sensor_revision: u32,
+    },
+    ReleaseControlHold {
+        controller_fence: crate::model::ControlFence,
+        expected_context: CommandContext,
+    },
     ReleaseControl {
         run_id: String,
         expected_epoch: u32,
@@ -154,6 +165,15 @@ pub(crate) enum Dispatch {
         request: crate::model::ControlRenewal,
         expected_context: CommandContext,
         expected_sensor_revision: u32,
+    },
+    HoldControl {
+        request: crate::model::ControlHold,
+        expected_context: CommandContext,
+        expected_sensor_revision: u32,
+    },
+    ReleaseControlHold {
+        request: crate::model::ControlHoldRelease,
+        expected_context: CommandContext,
     },
     ReleaseControl {
         request: crate::model::ControlRelease,
@@ -288,6 +308,28 @@ impl ApiRequest {
                 expected_context,
                 expected_sensor_revision,
             },
+            Self::HoldControl {
+                controller_fence,
+                source_time_s,
+                hold_s,
+                expected_context,
+                expected_sensor_revision,
+            } => Dispatch::HoldControl {
+                request: crate::model::ControlHold {
+                    controller_fence,
+                    source_time_s,
+                    hold_s,
+                },
+                expected_context,
+                expected_sensor_revision,
+            },
+            Self::ReleaseControlHold {
+                controller_fence,
+                expected_context,
+            } => Dispatch::ReleaseControlHold {
+                request: crate::model::ControlHoldRelease { controller_fence },
+                expected_context,
+            },
             Self::SetSensorFault {
                 target,
                 mode,
@@ -385,6 +427,19 @@ fn execute_response(json: &str, response: CommandResponse) -> String {
                 request,
                 expected_context,
             } => crate::session::dispatch_claim_control(request, expected_context),
+            Dispatch::HoldControl {
+                request,
+                expected_context,
+                expected_sensor_revision,
+            } => crate::session::dispatch_hold_control(
+                request,
+                expected_context,
+                expected_sensor_revision,
+            ),
+            Dispatch::ReleaseControlHold {
+                request,
+                expected_context,
+            } => crate::session::dispatch_release_control_hold(request, expected_context),
             Dispatch::ReleaseControl {
                 request,
                 expected_context,

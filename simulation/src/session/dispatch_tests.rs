@@ -1358,6 +1358,20 @@ fn control_renewal(fence: &crate::model::ControlFence, duration: f64) -> Value {
     })
 }
 
+fn control_hold(fence: &crate::model::ControlFence, hold_s: f64) -> Value {
+    serde_json::json!({
+        "op": "hold_control", "controller_fence": fence,
+        "source_time_s": snapshot().time_s, "hold_s": hold_s,
+        "expected_sensor_revision": sensor_revision(),
+    })
+}
+
+fn control_release_hold(fence: &crate::model::ControlFence) -> Value {
+    serde_json::json!({
+        "op": "release_control_hold", "controller_fence": fence,
+    })
+}
+
 fn assert_control_rejected_unchanged(mut request: Value, code: &str) {
     if request.get("expected_context").is_none() {
         request["expected_context"] = context_json(current_context());
@@ -1525,7 +1539,7 @@ fn native_api_excludes_healthy_standby_and_rejects_a_late_primary_with_fresh_con
     for _ in 0..3 {
         frame(&mut app, STEP);
     }
-    assert!(is_running());
+    assert!(!is_running());
     assert_eq!(observation()["control_authority"]["status"], "expired");
     assert_eq!(observation()["control_authority"]["epoch"], primary.epoch);
     assert_eq!(
@@ -1542,6 +1556,9 @@ fn native_api_excludes_healthy_standby_and_rejects_a_late_primary_with_fresh_con
     assert_eq!(standby.term, primary.term + 1);
     assert_eq!(control_call(control_lease(&standby, 0.3))["ok"], true);
     assert_control_rejected_unchanged(control_lease(&primary, 0.3), "stale_context");
+    let mut resume = serde_json::json!({"op": "play", "rate": 1.0});
+    resume["expected_context"] = context_json(current_context());
+    assert_eq!(control_call(resume)["ok"], true);
     frame(&mut app, STEP);
     assert!(
         applied_physics()
@@ -1751,8 +1768,94 @@ fn paused_ownership_renewal_cannot_extend_the_original_actuator_runtime_deadline
     assert_control_rejected_unchanged(control_renewal(&primary, 0.75), "stale_context");
     std::thread::sleep(Duration::from_millis(800));
     app.update();
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert!(!is_running());
+    std::thread::sleep(Duration::from_millis(2200));
+    app.update();
     assert_eq!(observation()["control_authority"]["status"], "expired");
     assert_control_rejected_unchanged(control_renewal(&primary, 0.75), "stale_context");
+}
+
+#[test]
+fn runtime_starvation_pauses_and_resumes_on_the_next_command() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.2))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.2))["ok"], true);
+    let mut play = serde_json::json!({"op": "play", "rate": 1.0});
+    play["expected_context"] = context_json(current_context());
+    assert_eq!(control_call(play)["ok"], true);
+    app.update();
+    assert!(is_running());
+    let before = observation()["time_s"].clone();
+    // Simulate a page/UI stall longer than the 0.75 s wall deadline.
+    std::thread::sleep(Duration::from_millis(1200));
+    app.update();
+    assert!(is_running());
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert_eq!(observation()["time_s"], before);
+    // The next controller command clears starvation and resumes the same trial.
+    assert_eq!(control_call(control_lease(&primary, 0.2))["ok"], true);
+    let mut resume = serde_json::json!({"op": "play", "rate": 1.0});
+    resume["expected_context"] = context_json(current_context());
+    assert_eq!(control_call(resume)["ok"], true);
+    app.update();
+    assert!(is_running());
+}
+
+#[test]
+fn page_hold_freezes_the_wall_deadline_and_pauses_the_session() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.2))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.2))["ok"], true);
+    let mut play = serde_json::json!({"op": "play", "rate": 1.0});
+    play["expected_context"] = context_json(current_context());
+    assert_eq!(control_call(play)["ok"], true);
+    app.update();
+    assert!(is_running());
+    let before = observation()["time_s"].clone();
+    assert_eq!(control_call(control_hold(&primary, 10.0))["ok"], true);
+    app.update();
+    assert!(is_running());
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    std::thread::sleep(Duration::from_millis(800));
+    app.update();
+    assert!(is_running());
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert_eq!(observation()["time_s"], before);
+    assert_eq!(control_call(control_release_hold(&primary))["ok"], true);
+    assert_eq!(control_call(control_lease(&primary, 0.2))["ok"], true);
+    let mut resume = serde_json::json!({"op": "play", "rate": 1.0});
+    resume["expected_context"] = context_json(current_context());
+    assert_eq!(control_call(resume)["ok"], true);
+    app.update();
+    assert!(is_running());
+}
+
+#[test]
+fn an_expired_page_hold_does_not_outlive_its_dead_wall_clock() {
+    let mut app = real_clock_app();
+    assert_eq!(
+        control_call(control_claim("run", "primary", 0, 0, 0.2))["ok"],
+        true
+    );
+    let primary = actual_fence();
+    assert_eq!(control_call(control_lease(&primary, 0.2))["ok"], true);
+    assert_eq!(control_call(control_hold(&primary, 0.1))["ok"], true);
+    std::thread::sleep(Duration::from_millis(300));
+    app.update();
+    assert_eq!(observation()["control_authority"]["status"], "active");
+    assert!(!is_running());
+    std::thread::sleep(Duration::from_millis(2200));
+    app.update();
+    assert_eq!(observation()["control_authority"]["status"], "expired");
 }
 
 #[test]
@@ -1774,7 +1877,9 @@ fn paused_real_runtime_expires_a_dead_primary_before_play_and_allows_same_consen
             "stale_context",
         );
         // No CheckedPlay is ever sent. Only real elapsed runtime advances.
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(2200));
+        app.update();
+        std::thread::sleep(Duration::from_millis(2200));
         app.update();
         let runtime_now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
         assert!(runtime_now - runtime_start >= 0.05);
@@ -1831,7 +1936,9 @@ fn runtime_expiry_cannot_clear_manual_force_or_resume_archived_authority() {
     }))
     .unwrap();
     let manual = physics_json();
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(2200));
+    app.update();
+    std::thread::sleep(Duration::from_millis(2200));
     app.update();
     assert_eq!(physics_json(), manual);
     assert!(!is_running());
@@ -1848,7 +1955,9 @@ fn runtime_expiry_cannot_clear_manual_force_or_resume_archived_authority() {
     );
     let next = actual_fence();
     assert_eq!(control_call(control_lease(&next, 0.05))["ok"], true);
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(2200));
+    app.update();
+    std::thread::sleep(Duration::from_millis(2200));
     app.update();
     let expired = snapshot();
     assert_eq!(observation()["control_authority"]["status"], "expired");
@@ -1884,7 +1993,9 @@ fn a_new_run_claim_after_runtime_expiry_uses_its_actual_granted_epoch() {
         true
     );
     let old = actual_fence();
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(2200));
+    app.update();
+    std::thread::sleep(Duration::from_millis(2200));
     app.update();
     assert_eq!(observation()["control_authority"]["status"], "expired");
     assert_eq!(

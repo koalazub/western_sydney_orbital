@@ -172,6 +172,52 @@ export function installControllerProfiles(options: Options) {
   const setupButton = byId<HTMLButtonElement>("setup-controller");
   const status = byId("controller-service-status");
   const error = byId("controller-error");
+  let controlHold = false;
+  // The page is the liveness bridge for a fenced controller. A blur or hidden
+  // page cannot service an HTTP decision loop, so it explicitly freezes the
+  // controller's wall deadline for a bounded interval. A dead page cannot send
+  // this event; the native watchdog still expires it.
+  function setControlHold(held: boolean) {
+    if (disposed || held === controlHold) return;
+    const engine = options.engine();
+    if (!engine) return;
+    const fail = (reason: string) => {
+      if (held) console.warn(`Controller hold not applied: ${reason}`);
+    };
+    try {
+      const observation = JSON.parse(engine.observation());
+      const authority = observation.control_authority;
+      const health = observation.sensor_health;
+      const runtime = JSON.parse(engine.runtime_status());
+      if (!record(authority) || authority.status !== "active"
+        || typeof authority.run_id !== "string" || typeof authority.controller_id !== "string"
+        || !Number.isSafeInteger(authority.epoch) || !Number.isSafeInteger(authority.term)
+        || !record(health) || !Number.isSafeInteger(health.revision)
+        || !Number.isSafeInteger(observation.trial_revision)
+        || !Number.isSafeInteger(observation.tuning_revision)
+        || !Number.isSafeInteger(observation.manual_interventions)
+        || !Number.isSafeInteger(observation.seed) || typeof runtime.running !== "boolean") {
+        fail("authority or context unavailable"); return;
+      }
+      if (held && !runtime.running) { fail("flight is not running"); return; }
+      const controller_fence = { epoch: authority.epoch, term: authority.term,
+        run_id: authority.run_id, controller_id: authority.controller_id };
+      const expected_context = { trial_revision: observation.trial_revision,
+        tuning_revision: observation.tuning_revision,
+        manual_interventions: observation.manual_interventions,
+        seed: observation.seed, running: runtime.running };
+      const request = held
+        ? { op: "hold_control", controller_fence, source_time_s: observation.time_s, hold_s: 3.0,
+            expected_context, expected_sensor_revision: health.revision }
+        : { op: "release_control_hold", controller_fence, expected_context };
+      const response = JSON.parse(engine.control(JSON.stringify(request)));
+      if (response.ok === true || !held) controlHold = held;
+      else fail(String(response.code ?? response.error ?? "native rejection"));
+    } catch (error) {
+      fail(error instanceof Error ? error.message : "request failed");
+      if (!held) controlHold = false;
+    }
+  }
   const table = byId<HTMLTableElement>("controller-results-table");
   const breakdownTable = byId<HTMLTableElement>("controller-score-breakdown-table");
   const legacyTable = byId<HTMLTableElement>("controller-legacy-results-table");
@@ -677,6 +723,9 @@ export function installControllerProfiles(options: Options) {
     chooseFlight(chosen);
   });
   byId("close-controllers").addEventListener("click", () => panel.close());
+  addEventListener("blur", () => setControlHold(true));
+  addEventListener("focus", () => setControlHold(false));
+  document.addEventListener("visibilitychange", () => setControlHold(document.hidden));
   watch.addEventListener("click", () => { if (!watch.disabled) panel.close("watch"); });
   byId<HTMLButtonElement>("disconnect-python").addEventListener("click", event => {
     if (!(event.currentTarget as HTMLButtonElement).hidden && panel.open) panel.close("watch");

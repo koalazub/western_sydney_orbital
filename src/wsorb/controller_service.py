@@ -820,7 +820,9 @@ def _job_client(source: LocalSimulation, job: ControllerJob) -> LocalSimulation:
         )
         client.bind_controller_page(job.owner_page_id)
         return client
-    return _JobLocalSimulation(job, source.url, source._token, timeout_s=2.0)
+    # A page hold freezes the simulation for up to 3 s. The local control
+    # transport must outlive that hold, not time out while the page is paused.
+    return _JobLocalSimulation(job, source.url, source._token, timeout_s=6.0)
 
 
 def _failure_trial(error: BaseException, elapsed_s: float) -> dict[str, Any]:

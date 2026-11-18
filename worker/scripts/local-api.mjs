@@ -10,7 +10,7 @@ import { CONTROLLER_BODY_LIMIT, ControllerJobsError, controllerJobsAction, contr
 const BODY_LIMIT = 1024 * 1024;
 const RESPONSE_LIMIT = 2 * BODY_LIMIT;
 const BODY_TIMEOUT_MS = 3000;
-const CALL_TIMEOUT_MS = 5000;
+const CALL_TIMEOUT_MS = 8000;
 const WORLD_CALL_TIMEOUT_MS = 180000;
 const CAPTURE_TIMEOUT_MS = 20000;
 const PAGE_LEASE_MS = 6000;

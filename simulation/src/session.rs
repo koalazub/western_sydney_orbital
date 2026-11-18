@@ -304,6 +304,17 @@ pub(crate) fn dispatch(request: Dispatch) -> Result<Rc<Snapshot>, String> {
         } => dispatch_renew_control(request, expected_context, expected_sensor_revision)
             .map(|_| snapshot())
             .map_err(|error| error.to_string()),
+        Dispatch::HoldControl {
+            request,
+            expected_context,
+            expected_sensor_revision,
+        } => dispatch_hold_control(request, expected_context, expected_sensor_revision)
+            .map_err(|error| error.to_string()),
+        Dispatch::ReleaseControlHold {
+            request,
+            expected_context,
+        } => dispatch_release_control_hold(request, expected_context)
+            .map_err(|error| error.to_string()),
         Dispatch::ReleaseControl {
             request,
             expected_context,
@@ -428,6 +439,46 @@ pub(crate) fn dispatch_renew_control(
     SIMULATION
         .with(|simulation| simulation.borrow_mut().renew_control(request))
         .map_err(lease_command_error)
+}
+
+pub(crate) fn dispatch_hold_control(
+    request: crate::model::ControlHold,
+    expected: CommandContext,
+    expected_sensor_revision: u32,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_context(expected, &playback)?;
+    if sensor_revision() != expected_sensor_revision
+        || ACTIONS.with(|actions| pending_flight_action(&actions.borrow(), playback.running))
+    {
+        return Err(CommandError::StaleContext);
+    }
+    let state = SIMULATION
+        .with(|simulation| {
+            let mut simulation = simulation.borrow_mut();
+            simulation
+                .hold_control(request)
+                .map(|()| simulation.snapshot())
+        })
+        .map_err(lease_command_error)?;
+    Ok(publish(state))
+}
+
+pub(crate) fn dispatch_release_control_hold(
+    request: crate::model::ControlHoldRelease,
+    expected: CommandContext,
+) -> Result<Rc<Snapshot>, CommandError> {
+    let playback = RUNTIME.with(|runtime| runtime.borrow().clone());
+    validate_setup_context(expected, &playback)?;
+    let state = SIMULATION
+        .with(|simulation| {
+            let mut simulation = simulation.borrow_mut();
+            simulation
+                .release_control_hold(request)
+                .map(|()| simulation.snapshot())
+        })
+        .map_err(lease_command_error)?;
+    Ok(publish(state))
 }
 
 fn validate_context(
@@ -760,6 +811,27 @@ pub(crate) fn advance_world(
     {
         refresh();
     }
+    let (control_frozen, control_expired) = SIMULATION.with(|simulation| {
+        let simulation = simulation.borrow();
+        (
+            simulation.control_held() || simulation.control_starved(),
+            simulation.control_authority().status == crate::model::ControlAuthorityStatus::Expired,
+        )
+    });
+    if control_frozen {
+        // Freeze the clock, not the playback state. A hold or a late controller
+        // must not look like a manual Pause to the external trial guard. The
+        // next fenced command clears the hold/starvation and resumes this clock.
+        state.accumulator = 0.0;
+        state.message = "Controller hold: clock frozen before the control lease expired.".into();
+        refresh();
+    } else if control_expired && state.running {
+        // A dead controller must not leave an uncontrolled coasting trial.
+        state.running = false;
+        state.accumulator = 0.0;
+        state.message = "Controller lease expired; playback stopped.".into();
+        refresh();
+    }
     let editor_focused = input_focus
         .as_ref()
         .and_then(|focus| focus.get())
@@ -881,7 +953,7 @@ pub(crate) fn advance_world(
         KEYBOARD_PILOT.with(|pilot| pilot.borrow_mut().rearm_for_launch());
     }
     update_keyboard_pilot(&state, movement, movement_blocked);
-    if state.running && state.can_control {
+    if state.running && state.can_control && !control_frozen {
         let step = scenario::settings().integration.fixed_step_s;
         state.accumulator += clocks.frame.delta_secs_f64().min(0.1) * state.rate.factor();
         let steps = (state.accumulator / step).floor().min(20.0) as u32;

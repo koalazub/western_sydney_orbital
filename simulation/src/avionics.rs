@@ -324,6 +324,24 @@ pub struct ControlRenewalReceipt {
     pub control_authority: ControlAuthority,
 }
 
+/// An explicit page/UI hold. It freezes the controller's wall deadline while
+/// the page cannot service control; it never extends the sim-time authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlHold {
+    pub controller_fence: ControlFence,
+    pub source_time_s: f64,
+    /// Wall-clock hold duration, not simulation seconds. The simulation is
+    /// paused while held, so a sim-time hold would never expire.
+    pub hold_s: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlHoldRelease {
+    pub controller_fence: ControlFence,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlRelease {

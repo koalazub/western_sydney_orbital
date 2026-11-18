@@ -92,6 +92,18 @@ function command(value: unknown): asserts value is Record<string, unknown> {
       if ((value.lease_sim_s as number) > 0.75 || !unsigned(value.expected_sensor_revision)) invalid("Invalid ownership renewal lease or sensor revision");
       fence(value.controller_fence);
       break;
+    case "hold_control":
+      shape(value, ["op", "controller_fence", "source_time_s", "hold_s", "expected_context", "expected_sensor_revision"]);
+      if (typeof value.source_time_s !== "number" || !Number.isFinite(value.source_time_s) || value.source_time_s < 0
+        || typeof value.hold_s !== "number" || !Number.isFinite(value.hold_s)
+        || value.hold_s < 0.1 || value.hold_s > 30
+        || !unsigned(value.expected_sensor_revision)) invalid("Invalid controller hold");
+      fence(value.controller_fence);
+      break;
+    case "release_control_hold":
+      shape(value, ["op", "controller_fence", "expected_context"]);
+      fence(value.controller_fence);
+      break;
     case "set_leased_command":
       shape(value, ["op", "accel", "angular_accel", "source_time_s", "lease_sim_s", "expected_context", "expected_sensor_revision", "controller_fence"]);
       lease(value);

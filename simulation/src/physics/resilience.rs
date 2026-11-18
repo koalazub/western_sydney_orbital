@@ -2,9 +2,10 @@
 use super::*;
 use crate::model::{
     CommandWatchdog, CommandWatchdogStatus, ControlAuthority, ControlAuthorityStatus, ControlClaim,
-    ControlFence, ControlRelease, ControlRenewal, ControlRenewalReceipt, LeaseError, LeasedCommand,
-    NavigationSample, RadarFrame, RadarRow, SensorDelivery, SensorFault, SensorFaultMode,
-    SensorFaultTarget, SensorState, SensorUnitId, sensor_delivery, valid_control_id,
+    ControlFence, ControlHold, ControlHoldRelease, ControlRelease, ControlRenewal,
+    ControlRenewalReceipt, LeaseError, LeasedCommand, NavigationSample, RadarFrame, RadarRow,
+    SensorDelivery, SensorFault, SensorFaultMode, SensorFaultTarget, SensorState, SensorUnitId,
+    sensor_delivery, valid_control_id,
 };
 
 /// Live runtime clock only. Neither value is loaded from or written to an archive.
@@ -14,7 +15,17 @@ pub(super) struct ControlRuntimeClock {
     deadline_s: Option<f64>,
     command_deadline_s: Option<f64>,
     ownership_renewed: bool,
+    /// An explicit page/UI hold freezes only the wall-clock deadlines. The
+    /// simulation-time lease still expires if the simulation advances.
+    hold_epoch: u32,
+    hold_term: u32,
+    hold_active: bool,
+    hold_deadline_s: f64,
+    starved: bool,
+    starved_at_s: f64,
 }
+
+const CONTROL_STARVATION_GRACE_S: f64 = 2.0;
 
 impl Simulation {
     fn sensor_state_mut(&mut self) -> &mut SensorState {
@@ -66,6 +77,7 @@ impl Simulation {
             if authority.status != ControlAuthorityStatus::Active {
                 self.control_runtime.deadline_s = None;
                 self.control_runtime.ownership_renewed = false;
+                self.clear_control_hold();
             }
             self.sensor_state_mut().control_authority = Some(authority);
         }
@@ -77,6 +89,12 @@ impl Simulation {
             deadline_s: None,
             command_deadline_s: None,
             ownership_renewed: false,
+            hold_epoch: 0,
+            hold_term: 0,
+            hold_active: false,
+            hold_deadline_s: 0.0,
+            starved: false,
+            starved_at_s: 0.0,
         };
     }
 
@@ -88,6 +106,33 @@ impl Simulation {
     ) -> bool {
         let now = time.elapsed_secs_f64();
         let previous = self.control_runtime.now_s.replace(now);
+        if self.control_runtime.hold_active && now >= self.control_runtime.hold_deadline_s {
+            self.clear_control_hold();
+        }
+        let active = self
+            .stored_control_authority()
+            .filter(|authority| authority.status == ControlAuthorityStatus::Active);
+        let sim_expired = active.is_some_and(|authority| {
+            authority
+                .expires_at_sim_time_s
+                .is_none_or(|expiry| expiry <= self.state.time_s)
+        });
+        let wall_passed = !self.control_hold_active()
+            && active.is_some_and(|_| {
+                self.control_runtime
+                    .now_s
+                    .zip(self.control_runtime.deadline_s)
+                    .is_some_and(|(now, deadline)| deadline <= now)
+            });
+        if wall_passed && !sim_expired {
+            if !self.control_runtime.starved {
+                self.control_runtime.starved = true;
+                self.control_runtime.starved_at_s = now;
+            }
+        } else if !wall_passed {
+            self.control_runtime.starved = false;
+            self.control_runtime.starved_at_s = 0.0;
+        }
         let active_expiry = self
             .stored_control_authority()
             .filter(|authority| authority.status == ControlAuthorityStatus::Active)
@@ -126,15 +171,115 @@ impl Simulation {
         self.expire_command_lease() || authority_expired
     }
 
-    fn control_deadline_elapsed(&self, authority: &ControlAuthority) -> bool {
-        authority
-            .expires_at_sim_time_s
-            .is_none_or(|expiry| expiry <= self.state.time_s)
-            || self
+    fn control_hold_active(&self) -> bool {
+        self.control_runtime.hold_active
+            && self
                 .control_runtime
                 .now_s
-                .zip(self.control_runtime.deadline_s)
-                .is_some_and(|(now, deadline)| deadline <= now)
+                .is_some_and(|now| now < self.control_runtime.hold_deadline_s)
+    }
+
+    /// True while an explicit page/UI hold is freezing wall-clock deadlines.
+    pub fn control_held(&self) -> bool {
+        self.control_hold_active()
+    }
+
+    fn clear_control_hold(&mut self) {
+        self.control_runtime.hold_active = false;
+        self.control_runtime.hold_deadline_s = 0.0;
+    }
+
+    /// True while wall time is ahead of a still-live simulation lease.
+    pub fn control_starved(&self) -> bool {
+        self.control_runtime.starved
+    }
+
+    fn clear_control_starvation(&mut self) {
+        self.control_runtime.starved = false;
+        self.control_runtime.starved_at_s = 0.0;
+    }
+
+    /// Hold the active owner across a bounded page/UI stall.
+    ///
+    /// The hold is a wall-clock event. It never changes the authority's
+    /// simulation expiry and never authorizes motion.
+    pub fn hold_control(&mut self, request: ControlHold) -> Result<(), LeaseError> {
+        if !request.hold_s.is_finite() || !(0.1..=30.0).contains(&request.hold_s) {
+            return Err(LeaseError::Rejected(
+                "hold_s must be finite and between 0.1 and 30.0 wall seconds.".into(),
+            ));
+        }
+        if !request.source_time_s.is_finite()
+            || request.source_time_s < 0.0
+            || request.source_time_s > self.state.time_s
+        {
+            return Err(LeaseError::Rejected(
+                "source_time_s must be a finite, nonfuture simulation timestamp.".into(),
+            ));
+        }
+        let Some(now) = self.control_runtime.now_s else {
+            return Err(LeaseError::Unavailable);
+        };
+        let authority = self.control_authority();
+        if authority.status != ControlAuthorityStatus::Active
+            || authority.fence().as_ref() != Some(&request.controller_fence)
+            || self.control_deadline_elapsed(&authority)
+        {
+            return Err(LeaseError::StaleContext);
+        }
+        self.control_runtime.hold_epoch = request.controller_fence.epoch;
+        self.control_runtime.hold_term = request.controller_fence.term;
+        self.control_runtime.hold_active = true;
+        self.control_runtime.hold_deadline_s = now + request.hold_s;
+        self.clear_control_starvation();
+        Ok(())
+    }
+
+    /// Release a page/UI hold. The controller's remaining simulation lease is
+    /// mapped back onto the wall clock so the next command can arrive.
+    pub fn release_control_hold(&mut self, request: ControlHoldRelease) -> Result<(), LeaseError> {
+        let authority = self.control_authority();
+        if authority.status != ControlAuthorityStatus::Active
+            || authority.fence().as_ref() != Some(&request.controller_fence)
+        {
+            return Err(LeaseError::StaleContext);
+        }
+        if self.control_runtime.hold_active
+            && (self.control_runtime.hold_epoch != request.controller_fence.epoch
+                || self.control_runtime.hold_term != request.controller_fence.term)
+        {
+            return Err(LeaseError::StaleContext);
+        }
+        self.clear_control_hold();
+        self.clear_control_starvation();
+        if let (Some(now), Some(expiry)) =
+            (self.control_runtime.now_s, authority.expires_at_sim_time_s)
+        {
+            let remaining = expiry - self.state.time_s;
+            if remaining > 0.0 {
+                // The page just proved it is alive. Leave enough wall time for
+                // the Python service to deliver its next decision; this does
+                // not extend the simulation-time authority.
+                self.control_runtime.deadline_s = Some(now + remaining.max(0.75));
+            }
+        }
+        Ok(())
+    }
+
+    fn control_deadline_elapsed(&self, authority: &ControlAuthority) -> bool {
+        if authority
+            .expires_at_sim_time_s
+            .is_none_or(|expiry| expiry <= self.state.time_s)
+        {
+            return true;
+        }
+        if self.control_hold_active() {
+            return false;
+        }
+        self.control_runtime.starved
+            && self.control_runtime.now_s.is_some_and(|now| {
+                now >= self.control_runtime.starved_at_s + CONTROL_STARVATION_GRACE_S
+            })
     }
 
     fn command_runtime_deadline(&self, sim_expiry: f64) -> Result<Option<f64>, LeaseError> {
@@ -280,6 +425,8 @@ impl Simulation {
         }));
         self.control_runtime.deadline_s = runtime_expiry;
         self.control_runtime.ownership_renewed = false;
+        self.clear_control_hold();
+        self.clear_control_starvation();
         Ok(())
     }
 
@@ -342,6 +489,8 @@ impl Simulation {
         self.install_control_authority(Some(authority.clone()));
         self.control_runtime.deadline_s = runtime_expiry;
         self.control_runtime.ownership_renewed = true;
+        self.clear_control_hold();
+        self.clear_control_starvation();
         Ok(ControlRenewalReceipt {
             source_time_s: request.source_time_s,
             lease_sim_s: request.lease_sim_s,
@@ -552,6 +701,8 @@ impl Simulation {
             self.control_runtime.deadline_s = authority_runtime_expiry;
         }
         self.control_runtime.command_deadline_s = command_runtime_expiry;
+        self.clear_control_hold();
+        self.clear_control_starvation();
         self.sensor_state_mut().command_watchdog = CommandWatchdog {
             status: CommandWatchdogStatus::Active,
             source_time_s: Some(request.source_time_s),
@@ -660,11 +811,12 @@ impl Simulation {
                     .command_watchdog
                     .expires_at_sim_time_s
                     .is_some_and(|expiry| expiry <= self.state.time_s)
-                    || self
-                        .control_runtime
-                        .now_s
-                        .zip(self.control_runtime.command_deadline_s)
-                        .is_some_and(|(now, deadline)| deadline <= now))
+                    || (!self.control_hold_active()
+                        && self
+                            .control_runtime
+                            .now_s
+                            .zip(self.control_runtime.command_deadline_s)
+                            .is_some_and(|(now, deadline)| deadline <= now)))
         });
         if expired {
             self.clear_owned_lease(CommandWatchdogStatus::Expired);
