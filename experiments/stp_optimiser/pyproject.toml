@@ -1,0 +1,8 @@
+[project]
+name = "phobos-stp-optimiser"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["smac==2.4.0", "ConfigSpace==1.2.1", "scikit-learn==1.6.1", "ruff==0.14.5"]
+
+[tool.uv]
+package = false
