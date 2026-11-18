@@ -125,7 +125,7 @@ function validateCall(value) {
       break;
     case "play":
       shape(command, ["op"], ["rate", "expected_context"]);
-      if (command.rate != null && ![1, 5, 10].includes(command.rate)) invalid("rate must be 1, 5 or 10");
+      if (command.rate != null && ![1, 2, 4, 5, 10].includes(command.rate)) invalid("rate must be 1, 2, 4, 5 or 10");
       validateContext(command.expected_context);
       break;
     case "reset":

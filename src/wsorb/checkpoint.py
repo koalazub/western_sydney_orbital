@@ -169,9 +169,10 @@ class CheckpointOptions:
         rate = self.playback_rate
         if rate is None:
             rate = 1
-        if type(rate) is not int or rate not in (1, 5) or (not self.isolated and rate != 1):
+        if type(rate) is not int or rate not in (1, 2, 4, 5) or (not self.isolated and rate != 1):
             raise CheckpointError(
-                "invalid_options", "Playback rate 5 is allowed only on an owned isolated server."
+                "invalid_options",
+                "Playback rates above 1 are allowed only on an owned isolated server.",
             )
         object.__setattr__(self, "playback_rate", rate)
         wait = _number(self.wait_for_owner_s)
@@ -224,7 +225,10 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
         "--cadence-hz", type=float, default=10, help="wall-clock decisions, 10..50 Hz"
     )
     parser.add_argument(
-        "--playback-rate", type=int, choices=(1, 5), help="default 1; rate 5 requires owned scope"
+        "--playback-rate",
+        type=int,
+        choices=(1, 2, 4, 5),
+        help="default 1; rates above 1 require owned scope",
     )
     parser.add_argument("--progress", action="store_true", help="bounded progress JSON on stderr")
     parser.add_argument(
@@ -989,6 +993,14 @@ def run_trial(
                 expect_running, awaiting_play = True, False
             if not owned and current["runtime"].get("rate") != 1:
                 raise CheckpointError("external_rate", "External playback rate changed; yielding.")
+            if owned and rate_requested and current["runtime"].get("rate") != options.playback_rate:
+                # The play ACK is not applied state. A later public receipt is,
+                # so a rejected or ignored rate change must fail, not be reported
+                # as a run at the requested speed.
+                raise CheckpointError(
+                    "rate_failed",
+                    "The actual native playback rate does not match the requested rate.",
+                )
             sample = (
                 sample_from_snapshot(current, source_kind=_source_kind(client))
                 if portable
@@ -1095,12 +1107,16 @@ def run_trial(
                     result["actuation_outcome"] = "play_acknowledged_not_running_proof"
                     awaiting_play = True
                     play_deadline = min(deadline, time.monotonic() + 2.0)
-                elif owned and options.playback_rate == 5 and not rate_requested:
+                elif owned and options.playback_rate != 1 and not rate_requested:
                     # Only after an actual running readback, using its actual context.
                     phase = "rate"
                     result["actuation_outcome"] = "unknown_do_not_retry"
                     client.command(
-                        {"op": "play", "rate": 5, "expected_context": control_context(current)}
+                        {
+                            "op": "play",
+                            "rate": options.playback_rate,
+                            "expected_context": control_context(current),
+                        }
                     )
                     result["actuation_outcome"] = "rate_acknowledged_not_running_proof"
                     rate_requested = True

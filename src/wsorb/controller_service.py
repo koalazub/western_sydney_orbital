@@ -28,6 +28,7 @@ from urllib.request import Request
 
 from . import diagnostics
 from .checkpoint import (
+    _OWNED_CLIENTS,
     MAX_OUTPUT_BYTES,
     CheckpointOptions,
     _summary,
@@ -842,17 +843,33 @@ def _failure_trial(error: BaseException, elapsed_s: float) -> dict[str, Any]:
     }
 
 
+def _owned_playback(
+    options: CheckpointOptions, source: LocalSimulation, allow_playback: bool
+) -> bool:
+    """Only a fresh server this process started may run isolated or changed rate.
+
+    The job's own forked HTTP transport is never itself proof of ownership.
+    """
+    return allow_playback and options.isolated and source in _OWNED_CLIENTS
+
+
 def execute_job(
-    source: LocalSimulation, job: ControllerJob, options: CheckpointOptions, monitor: JobMonitor
+    source: LocalSimulation,
+    job: ControllerJob,
+    options: CheckpointOptions,
+    monitor: JobMonitor,
+    *,
+    allow_playback: bool = False,
 ) -> dict[str, Any]:
     """Run once on the calling thread. Only run_trial writes native control."""
     if not isinstance(options, CheckpointOptions) or options.run is not True:
         raise ControllerServiceError(
             "run_required", "Controller execution requires explicit --run."
         )
-    if options.isolated or options.playback_rate != 1:
+    owned = _owned_playback(options, source, allow_playback)
+    if (options.isolated or options.playback_rate != 1) and not owned:
         raise ControllerServiceError(
-            "external_scope_required", "Service jobs require an external rate-1 transport."
+            "external_scope_required", "Isolated or changed-rate jobs require a fresh owned server."
         )
     started = time.monotonic()
     if monitor.cancelled():
@@ -861,8 +878,13 @@ def execute_job(
             | ({"world_id": job.world_id} if job.world_id is not None else {})
         )
     entered_runner = False
+    client = None
     try:
         client = _job_client(source, job)
+        if owned:
+            # This job's own HTTP transport is a new client for the same owned
+            # server, so run_trial must still see an isolated, owned run.
+            _OWNED_CLIENTS.add(client)
         with client.control_transaction():
             initial = client.snapshot()
             _validate_job_snapshot(job, initial)
@@ -877,7 +899,7 @@ def execute_job(
             client,
             trial_options,
             policy=job.profile_id,
-            owned=False,
+            owned=owned,
             deadline=started + options.wall_budget_s,
             expected_world=world_metadata(initial),
             world_id=job.world_id,
@@ -888,6 +910,9 @@ def execute_job(
         trial = _failure_trial(error, time.monotonic() - started)
         if entered_runner:
             trial["release_state"] = "unconfirmed_native_watchdog_no_fallback"
+    finally:
+        if client is not None:
+            _OWNED_CLIENTS.discard(client)
     if monitor.heartbeat_lost:
         trial["state"], trial["error"] = "error", {"code": "heartbeat_lost"}
     if job.world_id is not None:

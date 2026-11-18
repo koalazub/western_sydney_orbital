@@ -1,123 +1,134 @@
 [
-  {
-    "id": "baseline",
-    "label": "Checkpoint baseline",
-    "owner": "WSO",
-    "contributor": "WSO",
-    "description": "Existing portable checkpoint controller with unchanged policy configuration and eligibility checks.",
-    "profile": "Checkpoint velocity, 8 m/s",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "src/wsorb/stp_policy.py"
-  },
-  {
-    "id": "body-axis",
-    "label": "Body-axis checkpoint",
-    "owner": "WSO",
-    "contributor": "WSO",
-    "description": "Existing matched checkpoint controller with body-axis candidate preference enabled.",
-    "profile": "Body-axis preference, 8 m/s",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "src/wsorb/stp_policy.py"
-  },
-  {
-    "id": "basic_pd_radar",
-    "label": "Basic PD + radar",
-    "owner": "Harry",
-    "contributor": "HY sweep harness selection; existing WSO basic_command math",
-    "description": "The HY experiment selects the existing position/velocity PD controller with short-range public-radar repulsion. No predicted clearance guarantee.",
-    "profile": "HY-selected basic PD, 0.5 m/s² cap",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "src/wsorb/flight/control.py"
-  },
-  {
-    "id": "coast",
-    "label": "Coast control trial",
-    "owner": "Harry",
-    "contributor": "HY sweep harness selection; existing WSO coast_command math",
-    "description": "Zero linear and angular acceleration from the HY sweep control trial. Does not brake or seek the station.",
-    "profile": "HY-selected zero command",
-    "experimental": true,
-    "target_seeking": false,
-    "source": "src/wsorb/flight/control.py"
-  },
-  {
-    "id": "bui_alpha_beta_mvp",
-    "label": "Alpha-beta + sidestep",
-    "owner": "Bui",
-    "contributor": "Bui; WSO bounded native adapter",
-    "description": "Earlier alpha-beta tracking and cruise/sidestep guidance with a reviewed 0.25 m/s² hold plus 0.25 m/s² sidestep profile, retained for local comparison. It is not Bui's current self-contained 7 m/s controller in controllers/bui/Controller.py. Experimental best effort, not certified avoidance or docking.",
-    "profile": "Earlier alpha-beta adapter, 17 m/s cruise, 0.25 + 0.25 bounded burns",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "controllers/bui/mvp"
-  },
-  {
-    "id": "tom_kalman_velocity_mvp",
-    "label": "Earlier Kalman + velocity governor",
-    "owner": "Tom",
-    "contributor": "Tom; WSO bounded native adapter",
-    "description": "Earlier nearest-50 Kalman tracker and velocity candidates/cost/hysteresis adapter, retained for local comparison. It is not Tom's current 8 m/s no-Kalman entrypoint in controllers/tom/polyfit/Controller.py. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
-    "profile": "Earlier Kalman adapter, 17 m/s cruise, gain 2, 0.5 m/s² governor",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "controllers/tom"
-  },
-  {
-    "id": "ali_official_profile",
-    "label": "Ali official profile",
-    "owner": "Ali",
-    "contributor": "Ali; WSO fenced native adapter",
-    "description": "Existing official_profile_policy with fresh public-radar readiness and current-lease clearance gates. Uses the competition beeline on the official preset; no STP runtime equivalence or docking claim.",
-    "profile": "Official profile, 10 m/s beeline with radar avoidance",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "src/wsorb/controllers/official_profile.py"
-  },
-  {
-    "id": "ali_radar_mvp",
-    "label": "Ali radar MVP",
-    "owner": "Ali",
-    "contributor": "Ali; WSO functional adapter",
-    "description": "Radar-only polyfit tracker, conservative long-range planner and raw-radar emergency check. No camera, certified clearance or docking claim.",
-    "profile": "17 m/s cruise, functional planner plus emergency check",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "docs/history/controllers/ali"
-  },
-  {
-    "id": "ali_mppi",
-    "label": "Ali MPPI candidate",
-    "owner": "Ali",
-    "contributor": "Ali; WSO MPPI adapter",
-    "description": "14 m/s public-radar beeline with terminal coast, emergency guard, collision recovery, and selectable line-fit/Kalman tracking, MPPI or avoider guidance, and full or proportional governors. Experimental candidate; not validated on the real server.",
-    "profile": "14 m/s default; MPPI 48 x 40, Kalman/avoider/proportional modes opt-in",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "controllers/ali/controller.py"
-  },
-  {
-    "id": "official_basic_beeline",
-    "label": "Published BasicController",
-    "owner": "Published",
-    "contributor": "Published BasicController example; WSO bounded translation and attitude port",
-    "description": "The published 10 m/s unity-gain beeline, capped at the native actuator limits with bounded shortest-arc attitude alignment. No debris avoidance. This is the saved official_basic_policy baseline, not Harry's PD controller.",
-    "profile": "Published Basic, 10 m/s, no debris avoidance",
-    "experimental": true,
-    "target_seeking": true,
-    "source": "src/wsorb/flight/official_profile.py"
-  },
-  {
-    "id": "userapi_body_z",
-    "label": "Body +Z template",
-    "owner": "Tom",
-    "contributor": "UserAPI example template in Tom's source folder; WSO capped adapter",
-    "description": "Template only, not target-seeking. Original body [0, 0, 1] m/s² request is explicitly reduced to [0, 0, 0.5] for the native actuator limit. Does not import or run the licensed UserAPI entrypoint.",
-    "profile": "Template, body +Z at 0.5 m/s²",
-    "experimental": true,
-    "target_seeking": false,
-    "source": "docs/history/controllers/tom/UserAPI.py"
-  }
+    {
+        "id": "baseline",
+        "label": "Checkpoint baseline",
+        "owner": "WSO",
+        "contributor": "WSO",
+        "description": "Existing portable checkpoint controller with unchanged policy configuration and eligibility checks.",
+        "profile": "Checkpoint velocity, 8 m/s",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "src/wsorb/stp_policy.py"
+    },
+    {
+        "id": "body-axis",
+        "label": "Body-axis checkpoint",
+        "owner": "WSO",
+        "contributor": "WSO",
+        "description": "Existing matched checkpoint controller with body-axis candidate preference enabled.",
+        "profile": "Body-axis preference, 8 m/s",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "src/wsorb/stp_policy.py"
+    },
+    {
+        "id": "basic_pd_radar",
+        "label": "Basic PD + radar",
+        "owner": "Harry",
+        "contributor": "HY sweep harness selection; existing WSO basic_command math",
+        "description": "The HY experiment selects the existing position/velocity PD controller with short-range public-radar repulsion. No predicted clearance guarantee.",
+        "profile": "HY-selected basic PD, 0.5 m/s\u00b2 cap",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "src/wsorb/flight/control.py"
+    },
+    {
+        "id": "coast",
+        "label": "Coast control trial",
+        "owner": "Harry",
+        "contributor": "HY sweep harness selection; existing WSO coast_command math",
+        "description": "Zero linear and angular acceleration from the HY sweep control trial. Does not brake or seek the station.",
+        "profile": "HY-selected zero command",
+        "experimental": true,
+        "target_seeking": false,
+        "source": "src/wsorb/flight/control.py"
+    },
+    {
+        "id": "bui_alpha_beta_mvp",
+        "label": "Alpha-beta + sidestep",
+        "owner": "Bui",
+        "contributor": "Bui; WSO bounded native adapter",
+        "description": "Earlier alpha-beta tracking and cruise/sidestep guidance with a reviewed 0.25 m/s\u00b2 hold plus 0.25 m/s\u00b2 sidestep profile, retained for local comparison. It is not Bui's current self-contained 7 m/s controller in controllers/bui/Controller.py. Experimental best effort, not certified avoidance or docking.",
+        "profile": "Earlier alpha-beta adapter, 17 m/s cruise, 0.25 + 0.25 bounded burns",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "controllers/bui/mvp"
+    },
+    {
+        "id": "tom_kalman_velocity_mvp",
+        "label": "Earlier Kalman + velocity governor",
+        "owner": "Tom",
+        "contributor": "Tom; WSO bounded native adapter",
+        "description": "Earlier nearest-50 Kalman tracker and velocity candidates/cost/hysteresis adapter, retained for local comparison. It is not Tom's current 8 m/s no-Kalman entrypoint in controllers/tom/polyfit/Controller.py. Candidate assessment uses the same bounded gain-2 governor as execution, not the original instantaneous-velocity approximation. No docking or certified clearance claim.",
+        "profile": "Earlier Kalman adapter, 17 m/s cruise, gain 2, 0.5 m/s\u00b2 governor",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "controllers/tom"
+    },
+    {
+        "id": "tom_polyfit_mvp",
+        "label": "Tom polyfit 8 m/s native port",
+        "owner": "Tom",
+        "contributor": "Tom; WSO native polyfit port",
+        "description": "Native read-only port of Tom's current 8 m/s polyfit entrypoint: polyfit rock tracker, velocity-space sideways avoider, gain-50 burn governor and goal-corridor coast planner. The STP transport is replaced by the native observation contract; Tom's source file is unchanged. No docking or certified clearance claim.",
+        "profile": "8 m/s polyfit default; cruise_speed_mps configurable for matched-speed benchmarks",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "controllers/tom/polyfit/Controller.py"
+    },
+    {
+        "id": "ali_official_profile",
+        "label": "Ali official profile",
+        "owner": "Ali",
+        "contributor": "Ali; WSO fenced native adapter",
+        "description": "Existing official_profile_policy with fresh public-radar readiness and current-lease clearance gates. Uses the competition beeline on the official preset; no STP runtime equivalence or docking claim.",
+        "profile": "Official profile, 10 m/s beeline with radar avoidance",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "src/wsorb/controllers/official_profile.py"
+    },
+    {
+        "id": "ali_radar_mvp",
+        "label": "Ali radar MVP",
+        "owner": "Ali",
+        "contributor": "Ali; WSO functional adapter",
+        "description": "Radar-only polyfit tracker, conservative long-range planner and raw-radar emergency check. No camera, certified clearance or docking claim.",
+        "profile": "17 m/s cruise, functional planner plus emergency check",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "docs/history/controllers/ali"
+    },
+    {
+        "id": "ali_mppi",
+        "label": "Ali MPPI candidate",
+        "owner": "Ali",
+        "contributor": "Ali; WSO MPPI adapter",
+        "description": "8 m/s public-radar beeline with terminal coast, emergency guard, collision recovery, a 25 s velocity avoider, a 10/20 m goal corridor, and selectable line-fit/Kalman tracking, MPPI/hybrid guidance and full or proportional governors. Experimental candidate; not validated on the real server.",
+        "profile": "8 m/s default; 25 s velocity avoider, 10/20 m corridor; MPPI/hybrid opt-in",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "controllers/ali/controller.py"
+    },
+    {
+        "id": "official_basic_beeline",
+        "label": "Published BasicController",
+        "owner": "Published",
+        "contributor": "Published BasicController example; WSO bounded translation and attitude port",
+        "description": "The published 10 m/s unity-gain beeline, capped at the native actuator limits with bounded shortest-arc attitude alignment. No debris avoidance. This is the saved official_basic_policy baseline, not Harry's PD controller.",
+        "profile": "Published Basic, 10 m/s, no debris avoidance",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "src/wsorb/flight/official_profile.py"
+    },
+    {
+        "id": "userapi_body_z",
+        "label": "Body +Z template",
+        "owner": "Tom",
+        "contributor": "UserAPI example template in Tom's source folder; WSO capped adapter",
+        "description": "Template only, not target-seeking. Original body [0, 0, 1] m/s\u00b2 request is explicitly reduced to [0, 0, 0.5] for the native actuator limit. Does not import or run the licensed UserAPI entrypoint.",
+        "profile": "Template, body +Z at 0.5 m/s\u00b2",
+        "experimental": true,
+        "target_seeking": false,
+        "source": "docs/history/controllers/tom/UserAPI.py"
+    }
 ]

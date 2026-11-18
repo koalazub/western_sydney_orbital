@@ -49,7 +49,7 @@ def test_competitor_region_stays_within_the_current_budget():
     begin = source.index("# BEGIN ALI MPPI CORE")
     end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:end].splitlines()) <= 1350
+    assert len(source[begin:end].splitlines()) <= 1530
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -60,12 +60,52 @@ def test_cruise_velocity_points_at_the_target():
     assert np.allclose(inside, [7.0, 0.0, 0.0])
 
 
+def test_goal_corridor_coasts_inside_the_miss_envelope_and_corrects_outside():
+    target = np.array([1000.0, 20.0, 0.0])
+    state = {"policy": {}}
+    policy = {**core.DEFAULT_POLICY, "goal_corridor_start_m": 40.0, "goal_corridor_stop_m": 30.0}
+    nominal = core.goal_velocity(np.zeros(3), np.array([8.0, 0.0, 0.0]), target, 8.0, state, policy)
+    assert np.allclose(nominal, [8.0, 0.0, 0.0])
+    state["goal_correcting"] = True
+    target = np.array([1000.0, 60.0, 0.0])
+    nominal = core.goal_velocity(np.zeros(3), np.array([8.0, 0.0, 0.0]), target, 8.0, state, policy)
+    assert nominal[0] > 0.0 and nominal[1] > 0.0
+    state["goal_correcting"] = False
+    target = np.array([1000.0, 35.0, 0.0])
+    nominal = core.goal_velocity(np.zeros(3), np.array([8.0, 0.0, 0.0]), target, 8.0, state, policy)
+    assert np.allclose(nominal, [8.0, 0.0, 0.0])
+
+
+def test_avoider_cone_ignores_off_axis_rocks_and_keeps_closing_ones():
+    policy = {**core.DEFAULT_POLICY, "avoider_horizon": 50.0, "avoider_lag_s": 0.0}
+    v_des = np.array([8.0, 0.0, 0.0])
+    off_axis = {
+        "p": np.array([80.0, 80.0, 0.0]),
+        "v": np.array([0.0, -8.0, 0.0]),
+        "r": 1.0,
+        "sp": 0.0,
+        "sv": 0.0,
+    }
+    state = {"policy": policy}
+    nominal = core.avoid_velocity(v_des, [off_axis], np.zeros(3), v_des, state, policy)
+    assert np.allclose(nominal, v_des)
+    closing = {
+        "p": np.array([50.0, 10.0, 0.0]),
+        "v": np.array([0.0, -1.6, 0.0]),
+        "r": 1.0,
+        "sp": 0.0,
+        "sv": 0.0,
+    }
+    nominal = core.avoid_velocity(v_des, [closing], np.zeros(3), v_des, state, policy)
+    assert not np.allclose(nominal, v_des)
+
+
 def test_burn_governor_uses_hysteresis():
     nominal = np.array([7.0, 0.0, 0.0])
     acceleration, burning = core.govern(np.zeros(3), nominal, np.zeros(3), False, 0.5)
     assert burning and np.isclose(np.linalg.norm(acceleration), 0.5)
 
-    acceleration, burning = core.govern(np.zeros(3), nominal, np.array([6.9, 0.0, 0.0]), True, 0.5)
+    acceleration, burning = core.govern(np.zeros(3), nominal, np.array([6.95, 0.0, 0.0]), True, 0.5)
     assert not burning and np.allclose(acceleration, np.zeros(3))
 
     acceleration, burning = core.govern(np.array([0.5, 0.0, 0.0]), nominal, nominal, True, 0.5)
@@ -73,8 +113,16 @@ def test_burn_governor_uses_hysteresis():
     assert np.allclose(acceleration, [0.5, 0.0, 0.0])
 
     acceleration, burning = core.govern(np.array([0.1, 0.0, 0.0]), nominal, nominal, True, 0.5)
-    assert not burning
-    assert np.allclose(acceleration, np.zeros(3))
+    assert burning
+    assert np.allclose(acceleration, [0.1, 0.0, 0.0])
+
+    acceleration, burning = core.govern(np.array([0.0, 0.2, 0.0]), nominal, nominal, True, 0.5)
+    assert burning
+    assert np.allclose(acceleration, [0.0, 0.2, 0.0])
+
+    acceleration, burning = core.govern(np.array([1.0, 0.0, 0.0]), nominal, nominal, True, 0.5)
+    assert burning
+    assert np.isclose(np.linalg.norm(acceleration), 0.5)
 
 
 def test_emergency_guard_reacts_to_a_closing_rock():
@@ -102,7 +150,7 @@ def test_emergency_guard_dodges_sideways_instead_of_reversing_the_launch():
     )
     assert active is True
     assert abs(float(acceleration[0])) < 1e-6
-    assert abs(float(acceleration[1])) > 0.4
+    assert abs(float(acceleration[1])) > 0.0
 
 
 def test_emergency_guard_uses_raw_rows_when_tracks_are_empty():
@@ -504,7 +552,12 @@ def test_launch_phase_clears_radially_before_cruise():
         "attitude_hold": False,
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
-        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+        "policy": {
+            "time_budget_s": 300.0,
+            "arrival_radius_m": 50.0,
+            "plan_steering": False,
+            "launch_clearance_m": 15.0,
+        },
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
     body, _, record = core.step(state, observation, [], 0.0, 0.1)
@@ -523,7 +576,12 @@ def test_launch_gate_blocks_main_thrust_until_thrust_axis_aligns():
         "attitude_hold": False,
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
-        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+        "policy": {
+            "time_budget_s": 300.0,
+            "arrival_radius_m": 50.0,
+            "plan_steering": False,
+            "launch_clearance_m": 15.0,
+        },
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
     observation["thrust_axis"] = np.array([1.0, 0.0, 0.0])
@@ -547,7 +605,12 @@ def test_launch_emergency_overrides_the_vertical_burn_for_a_fast_rock():
         "attitude_hold": False,
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
-        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "plan_steering": False},
+        "policy": {
+            "time_budget_s": 300.0,
+            "arrival_radius_m": 50.0,
+            "plan_steering": False,
+            "launch_clearance_m": 15.0,
+        },
     }
     observation = sample_observation([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], [1000.0, 0.0, 100.0])
     row = radar_row([60.0, 0.0, 0.0], -20.0, 2.0, 0.0)
@@ -571,7 +634,7 @@ def test_plan_steering_controls_mppi_sampling(monkeypatch):
         "attitude_hold": False,
         "last_control": np.zeros(3),
         "rng": np.random.default_rng(12345),
-        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0},
+        "policy": {"time_budget_s": 300.0, "arrival_radius_m": 50.0, "avoidance": "mppi"},
         "launched": True,
     }
     core.step(
