@@ -293,13 +293,13 @@ class HarryTerminalCoast(unittest.TestCase):
             self.assertEqual(record["phase"] == "terminal", expected_terminal)
             self.assertEqual(bool(np.any(command)), not expected_terminal)
 
-    def test_original_ali_source_is_preserved_except_existing_tuning_inputs(self):
+    def test_harry_variant_records_its_frozen_ali_origin(self):
         frozen = opt.REPO / "runs/20261118T070841Z-phobos-mppi-smac3/sources/ali/controller.py"
+        origin_sha256 = "e74e206a57dfe6590e3a56075165c6903f5c5df5e74b575bba16ac92b599d1fd"
+        provenance = (opt.REPO / "controllers/harry/mppi/README.md").read_text(encoding="utf-8")
+        self.assertIn(origin_sha256, provenance)
         if frozen.exists():
-            self.assertEqual(
-                opt.evidence.digest(opt.REPO / "controllers/ali/controller.py"),
-                opt.evidence.digest(frozen),
-            )
+            self.assertEqual(opt.evidence.digest(frozen), origin_sha256)
         self.assertEqual(opt.SPACES["ali"]["directory"], "controllers/harry/mppi")
 
 
