@@ -40,7 +40,7 @@ class AliMppiController(ExperimentalController):
         dt = 0.1 if self.last_time is None else max(1e-3, now - self.last_time)
         self.last_time = now
         current_position = np.asarray(sample.position_world_m, dtype=float)
-        selected = np.asarray(rows, dtype=float)[:80].copy()
+        selected = np.asarray(rows, dtype=float)[:500].copy()
         body_x = body_to_reference(
             np.array([1.0, 0.0, 0.0]),
             sample.quaternion_xyzw,

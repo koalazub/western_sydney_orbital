@@ -49,7 +49,7 @@ def test_competitor_region_stays_within_the_current_budget():
     begin = source.index("# BEGIN ALI MPPI CORE")
     end = source.index("# END ALI MPPI CORE")
     # The 200-line target is a guideline. Keep a guard against unbounded growth.
-    assert len(source[begin:end].splitlines()) <= 1530
+    assert len(source[begin:end].splitlines()) <= 1820
 
 
 def test_cruise_velocity_points_at_the_target():
@@ -76,28 +76,137 @@ def test_goal_corridor_coasts_inside_the_miss_envelope_and_corrects_outside():
     assert np.allclose(nominal, [8.0, 0.0, 0.0])
 
 
-def test_avoider_cone_ignores_off_axis_rocks_and_keeps_closing_ones():
+def test_goal_velocity_coasts_inside_the_hold_band_before_relighting():
+    target = np.array([1000.0, 0.0, 0.0])
+    policy = {**core.DEFAULT_POLICY, "goal_corridor_start_m": 45.0, "goal_corridor_stop_m": 35.0}
+    state = {"goal_correcting": False}
+    coasting = core.goal_velocity(
+        np.zeros(3), np.array([6.0, 0.0, 0.0]), target, 8.0, state, policy
+    )
+    assert np.allclose(coasting, [6.0, 0.0, 0.0])
+    relight = core.goal_velocity(np.zeros(3), np.array([5.0, 0.0, 0.0]), target, 8.0, state, policy)
+    assert np.allclose(relight, [8.0, 0.0, 0.0])
+
+
+def test_avoider_uses_crossing_threats_and_ignores_clear_off_axis_rocks():
     policy = {**core.DEFAULT_POLICY, "avoider_horizon": 50.0, "avoider_lag_s": 0.0}
     v_des = np.array([8.0, 0.0, 0.0])
-    off_axis = {
+    clear = {
         "p": np.array([80.0, 80.0, 0.0]),
-        "v": np.array([0.0, -8.0, 0.0]),
+        "v": np.array([0.0, 8.0, 0.0]),
         "r": 1.0,
         "sp": 0.0,
         "sv": 0.0,
     }
     state = {"policy": policy}
-    nominal = core.avoid_velocity(v_des, [off_axis], np.zeros(3), v_des, state, policy)
+    nominal = core.avoid_velocity(v_des, [clear], np.zeros(3), v_des, state, policy)
     assert np.allclose(nominal, v_des)
-    closing = {
+    crossing = {
         "p": np.array([50.0, 10.0, 0.0]),
         "v": np.array([0.0, -1.6, 0.0]),
         "r": 1.0,
         "sp": 0.0,
         "sv": 0.0,
     }
-    nominal = core.avoid_velocity(v_des, [closing], np.zeros(3), v_des, state, policy)
+    nominal = core.avoid_velocity(v_des, [crossing], np.zeros(3), v_des, state, policy)
     assert not np.allclose(nominal, v_des)
+
+
+def test_score_cruise_speed_follows_delivered_authority():
+    low = core.score_cruise_speed(1250.0, 0.0, 0.1, 3388.7, core.DEFAULT_POLICY)
+    high = core.score_cruise_speed(1250.0, 0.0, 0.5, 3388.7, core.DEFAULT_POLICY)
+    assert low == 7.2
+    assert 13.0 < high < 16.0
+
+
+def test_radar_surface_range_can_only_expand_the_reported_radius():
+    row = radar_row([100.0, 0.0, 0.0], 0.0, 2.0, 0.0)
+    row[1, 0] = 80.0
+    assert np.isclose(core.radar_radius(row), 20.0)
+    row[1, 0] = 99.5
+    assert np.isclose(core.radar_radius(row), 1.0)
+    row[1, 0] = 0.0
+    assert np.isclose(core.radar_radius(row), 1.0)
+
+
+def test_plant_estimator_learns_a_saturated_delivered_authority():
+    state = {
+        "plant_velocity": np.zeros(3),
+        "plant_accel": np.array([0.5, 0.0, 0.0]),
+        "plant_burning": True,
+        "plant_time": 0.0,
+        "plant_damage": 0.0,
+        "max_accel_effective": 0.5,
+        "external_accel_mps2": np.zeros(3),
+    }
+    velocity = np.zeros(3)
+    for step in range(1, 8):
+        command = float(state["max_accel_effective"])
+        delivered = min(command, 0.1)
+        velocity = velocity + np.array([delivered * 0.1, 0.0, 0.0])
+        state["plant_accel"] = np.array([command, 0.0, 0.0])
+        state["plant_burning"] = True
+        estimate, external = core.estimate_plant(state, velocity, 0.0, step * 0.1, 0.1, 0.5)
+        assert 0.09 <= estimate <= 0.13
+        assert np.allclose(external, np.zeros(3))
+
+
+def test_avoider_uses_delivered_authority_for_the_reachable_turn():
+    v_des = np.array([7.2, 0.0, 0.0])
+    track = {
+        "p": np.array([160.0, 0.0, 0.0]),
+        "v": np.zeros(3),
+        "r": 10.0,
+        "sp": 0.0,
+        "sv": 0.0,
+    }
+    state = {"policy": core.DEFAULT_POLICY, "max_accel_effective": 0.1}
+    selected = core.avoid_velocity(
+        v_des,
+        [track],
+        np.zeros(3),
+        v_des,
+        state,
+        core.DEFAULT_POLICY,
+        max_accel=0.1,
+    )
+    assert state["avoid_info"]["authority_mps2"] == 0.1
+    assert state["avoid_info"]["threats"] == 1
+    assert np.linalg.norm(selected[1:]) > 0.0
+
+
+def test_low_authority_head_on_rock_is_avoided_before_contact():
+    state = {
+        "burning": False,
+        "attitude_hold": False,
+        "last_control": np.zeros(3),
+        "rng": np.random.default_rng(12345),
+        "policy": {},
+    }
+    position, velocity = np.zeros(3), np.zeros(3)
+    rock_position, rock_radius = np.array([180.0, 0.0, 0.0]), 10.0
+    minimum = np.inf
+    for step in range(800):
+        now = step * 0.1
+        relative = rock_position - position
+        distance = float(np.linalg.norm(relative))
+        row = radar_row(
+            relative, float(relative @ (-velocity) / max(distance, 1e-9)), 2 * rock_radius, now
+        )
+        row[1, 0] = distance - rock_radius
+        observation = sample_observation(position, velocity, [1300.0, 0.0, 0.0])
+        observation["thrust_axis"] = np.array([1.0, 0.0, 0.0])
+        body, _, record = core.step(state, observation, [row], now, 0.1)
+        command = np.asarray(body, float)
+        size = float(np.linalg.norm(command))
+        applied = command * min(1.0, 0.1 / max(size, 1e-9)) if size > 1e-9 else command
+        velocity = velocity + applied * 0.1
+        position = position + velocity * 0.1
+        minimum = min(minimum, float(np.linalg.norm(rock_position - position)))
+        assert record["collision"] is False
+        if step >= 2:
+            assert record["max_accel_effective_mps2"] <= 0.13
+    assert minimum > rock_radius + 3.0
 
 
 def test_burn_governor_uses_hysteresis():
@@ -471,7 +580,7 @@ def test_collision_detour_offsets_the_route_after_the_escape_burn():
     assert record["gate"] in {"alignment", "burn"}
     assert state["steer_target"][1] < -20.0
     assert state["collision"]["offset"] > 20.0
-    assert np.isclose(state["collision"]["offset"], 25.0)
+    assert np.isclose(state["collision"]["offset"], 40.0)
     assert state["collision"]["impulse_s"] < 0.6
     assert record["collision_hits"] == 1
 
@@ -707,6 +816,14 @@ def test_pre_sweep_radar_timestamps_do_not_define_the_clock_origin():
     _, offset = core.align_radar_rows(state, [row], 1.0)
     assert offset == 0.0
     assert "radar_clock_offset_s" not in state
+
+
+def test_radar_started_before_mission_keeps_its_negative_origin_offset():
+    state = {}
+    row = radar_row([100.0, 0.0, 0.0], 0.0, 2.0, 55.0)
+    aligned, offset = core.align_radar_rows(state, [row], 5.0)
+    assert np.isclose(offset, -50.0)
+    assert np.isclose(aligned[0][2, 0], 5.0)
 
 
 def test_kalman_tracker_confirms_a_closing_track_from_position_and_range_rate():

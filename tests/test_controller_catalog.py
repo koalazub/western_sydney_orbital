@@ -750,6 +750,8 @@ def test_native_profiles_never_infer_missing_clock_or_sensor_provenance(controll
         {"collision_offset_m": -1.0},
         {"collision_slow_fraction": 0.0},
         {"collision_slow_fraction": 1.1},
+        {"coast_hold_fraction": 0.0},
+        {"coast_hold_fraction": 1.1},
         {"tracker": "linear"},
         {"guard_source": "trackers"},
         {"avoidance": "mppi2"},

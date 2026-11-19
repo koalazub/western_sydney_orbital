@@ -55,6 +55,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "launch_speed_mps",
             "coast_range_m",
             "coast_speed_mps",
+            "coast_hold_fraction",
             "emergency_range_m",
             "emergency_lookahead_s",
             "emergency_margin_m",
@@ -116,6 +117,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "plan_horizon_s",
             "avoidance_range_m",
             "coast_speed_mps",
+            "coast_hold_fraction",
             "risk_weight",
             "switch_weight",
             "attitude_brake_scale",
@@ -157,8 +159,8 @@ def create_controller(controller_id: str, settings: dict | None = None):
                 or (value == 0 and key in positive)
             ):
                 raise ValueError(f"Ali MPPI {key} must be a non-negative finite number")
-            if key == "collision_slow_fraction" and not 0.0 < value <= 1.0:
-                raise ValueError("Ali MPPI collision_slow_fraction must be in (0, 1]")
+            if key in ("collision_slow_fraction", "coast_hold_fraction") and not 0.0 < value <= 1.0:
+                raise ValueError(f"Ali MPPI {key} must be in (0, 1]")
             if key == "plan_filter_alpha" and not 0.0 < value <= 1.0:
                 raise ValueError("Ali MPPI plan_filter_alpha must be in (0, 1]")
     if controller_id in ("baseline", "body-axis"):
