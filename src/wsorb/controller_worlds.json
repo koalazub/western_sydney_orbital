@@ -4,7 +4,7 @@
     "label": "Official competition reference",
     "preset": "competition_reference",
     "settings": {
-      "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0 },
+      "ship": { "mass_kg": 3388.7, "inertia_scale": 1.0, "thrust_scale": 0.22 },
       "debris": {
         "count": 500,
         "distribution": { "kind": "official_cloud" },

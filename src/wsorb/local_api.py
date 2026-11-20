@@ -321,8 +321,14 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
         "stream_axis",
         "stream_sign",
     }
-    if not isinstance(ship, Mapping) or set(ship) != {"mass_kg", "inertia_scale"}:
-        raise ValueError("Experiment ship requires mass_kg and inertia_scale")
+    if (
+        not isinstance(ship, Mapping)
+        or not {"mass_kg", "inertia_scale"}.issubset(ship)
+        or set(ship) - {"mass_kg", "inertia_scale", "thrust_scale"}
+    ):
+        raise ValueError(
+            "Experiment ship requires mass_kg and inertia_scale, with optional thrust_scale"
+        )
     if (
         not isinstance(debris, Mapping)
         or not fields.issubset(debris)
@@ -333,6 +339,8 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
         "mass_kg": _bounded_number(ship["mass_kg"], "mass_kg", 100, 100_000),
         "inertia_scale": _bounded_number(ship["inertia_scale"], "inertia_scale", 0.1, 10),
     }
+    if "thrust_scale" in ship:
+        parsed_ship["thrust_scale"] = _bounded_number(ship["thrust_scale"], "thrust_scale", 0.1, 10)
     minimum = _bounded_number(debris["radius_min_m"], "radius_min_m", 0.05, 100)
     maximum = _bounded_number(debris["radius_max_m"], "radius_max_m", minimum, 100)
     speed = _bounded_number(debris["speed_mps"], "speed_mps", 0.1, 200)
@@ -367,6 +375,11 @@ def validate_experiment_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
         if adjustment != "off":
             parsed["debris"]["trajectory_adjustment"] = adjustment
     return parsed
+
+
+def expected_ship_tuning(ship: Mapping[str, Any]) -> dict[str, Any]:
+    """Native readback for a parsed experiment ship, including the default gain."""
+    return {**ship, "thrust_scale": ship.get("thrust_scale", 1.0)}
 
 
 def control_context(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -1420,7 +1433,7 @@ class LocalSimulation:
                     and validate_experiment_settings(snapshot["observation"]["experiment_settings"])
                     == parsed
                     and snapshot["observation"].get("ship_tuning")
-                    == {**parsed["ship"], "thrust_scale": 1.0}
+                    == expected_ship_tuning(parsed["ship"])
                     and isinstance(snapshot["observation"].get("applied_physics"), dict)
                 ),
                 "World configuration ACK did not produce the requested paused world/readback.",
@@ -1480,7 +1493,7 @@ class LocalSimulation:
                     return False
                 mass = body.get("mass_kg")
                 return (
-                    tuning == {**parsed["ship"], "thrust_scale": 1.0}
+                    tuning == expected_ship_tuning(parsed["ship"])
                     and type(mass) in (int, float)
                     and math.isfinite(mass)
                     and math.isclose(mass, parsed["ship"]["mass_kg"], rel_tol=1e-6, abs_tol=1e-5)

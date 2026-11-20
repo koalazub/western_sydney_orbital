@@ -1285,6 +1285,13 @@ fn initial_for_flight(
     ship.name = "Lander".into();
     ship.rotation = site.rotation;
     ship.status = EntityStatus::Landed;
+    if let Some(experiment) = experiment {
+        let tuning = ShipTuning::from(experiment.ship);
+        tuning.validate()?;
+        ship.mass_kg = tuning.mass_kg;
+        ship.actuator_gain = tuning.thrust_scale;
+        ship.max_thrust_n = local_max_thrust_for_mass_n(tuning.mass_kg) * tuning.thrust_scale;
+    }
     if let Some(tuning) = ship_tuning_override {
         tuning.validate()?;
         ship.mass_kg = tuning.mass_kg;

@@ -132,6 +132,7 @@ impl Snapshot {
                     || ShipExperimentSettings {
                         mass_kg: crate::scenario::settings().lander.mass_kg,
                         inertia_scale: 1.0,
+                        thrust_scale: 1.0,
                     },
                     |experiment| experiment.ship,
                 )

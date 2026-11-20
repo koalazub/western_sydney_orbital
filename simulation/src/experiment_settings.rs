@@ -19,6 +19,22 @@ pub struct ShipExperimentSettings {
     pub mass_kg: f64,
     /// Additional inertia multiplier after scaling the reference tensor by mass.
     pub inertia_scale: f64,
+    /// Delivered-force gain. The command cap stays separate, so a calibrated
+    /// plant can accept a 0.5 m/s² request while delivering the measured
+    /// authority.
+    #[serde(
+        default = "unit_thrust_scale",
+        skip_serializing_if = "is_unit_thrust_scale"
+    )]
+    pub thrust_scale: f64,
+}
+
+fn unit_thrust_scale() -> f64 {
+    1.0
+}
+
+fn is_unit_thrust_scale(value: &f64) -> bool {
+    *value == 1.0
 }
 
 /// Local actuator calibration, not an SDK setter or a reference-parity claim.
@@ -214,6 +230,9 @@ impl ExperimentSettings {
         if !finite_between(ship.inertia_scale, 0.1, 10.0) {
             return Err("ship.inertia_scale must be finite and between 0.1 and 10".into());
         }
+        if !finite_between(ship.thrust_scale, 0.1, 10.0) {
+            return Err("ship.thrust_scale must be finite and between 0.1 and 10".into());
+        }
         if debris.count > MAX_DEBRIS_COUNT {
             return Err("debris.count must be a whole number from 0 to 100000".into());
         }
@@ -277,7 +296,7 @@ impl From<ShipExperimentSettings> for ShipTuning {
         Self {
             mass_kg: ship.mass_kg,
             inertia_scale: ship.inertia_scale,
-            thrust_scale: 1.0,
+            thrust_scale: ship.thrust_scale,
         }
     }
 }
@@ -300,6 +319,7 @@ impl ShipTuning {
         ShipExperimentSettings {
             mass_kg: self.mass_kg,
             inertia_scale: self.inertia_scale,
+            thrust_scale: self.thrust_scale,
         }
         .inertia_kg_m2()
     }

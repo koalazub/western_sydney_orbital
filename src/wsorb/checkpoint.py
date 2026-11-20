@@ -45,6 +45,7 @@ from .local_api import (
     StaleContextError,
     control_context,
     controller_fence,
+    expected_ship_tuning,
     validate_experiment_settings,
 )
 from .room_api import RoomSimulation
@@ -369,7 +370,7 @@ def _stock_world(snapshot: Mapping[str, Any]) -> bool:
             and actual["debris"]["count"] == observation["geometry"]["debris_count"] == 500
             and observation["flight_preset"] == "far_side_l2"
             and observation["launch_site_direction"] is None
-            and observation["ship_tuning"] == {**expected["ship"], "thrust_scale": 1.0}
+            and observation["ship_tuning"] == expected_ship_tuning(expected["ship"])
             and observation["debris_flow"]
             == {
                 name: expected["debris"][name]

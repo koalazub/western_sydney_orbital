@@ -45,7 +45,10 @@ export async function freshTrial(api: RoomEngine, selection: FlightSelection, si
       launch_site_direction: actual.launch_site_direction === null,
       debris_count: actual.geometry?.debris_count === world.settings.debris.count,
       arrival_radius_m: actual.geometry?.arrival_radius_m === 50,
-      ship_tuning: sameData(actual.ship_tuning, { ...world.settings.ship, thrust_scale: 1 }),
+      ship_tuning: sameData(actual.ship_tuning, {
+        ...world.settings.ship,
+        thrust_scale: world.settings.ship.thrust_scale ?? 1,
+      }),
       debris_flow: sameData(actual.debris_flow, Object.fromEntries(["speed_mps", "speed_spread_mps", "stream_axis", "stream_sign"]
         .map(key => [key, world.settings.debris[key]]))),
       max_accel_mps2: actual.max_accel_mps2 === 0.5,

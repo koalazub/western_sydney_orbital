@@ -88,6 +88,10 @@ def world_matches(snapshot: Mapping[str, Any], world_id: str, seed: int) -> bool
         world, seed = controller_world(world_id), uint32(seed)
         observation = snapshot["observation"]
         expected = world.settings
+        expected_ship = {
+            **expected["ship"],
+            "thrust_scale": expected["ship"].get("thrust_scale", 1.0),
+        }
         actual = validate_experiment_settings(observation["experiment_settings"])
         # Native serde omits the default DirectedStream variant. Restore only
         # that documented default before comparing the complete receipt. Other
@@ -108,7 +112,7 @@ def world_matches(snapshot: Mapping[str, Any], world_id: str, seed: int) -> bool
             and observation["launch_site_direction"] is None
             and observation["geometry"]["debris_count"] == expected["debris"]["count"] == 500
             and observation["geometry"]["arrival_radius_m"] == 50.0
-            and observation["ship_tuning"] == {**expected["ship"], "thrust_scale": 1.0}
+            and observation["ship_tuning"] == expected_ship
             and observation["debris_flow"]
             == {
                 name: expected["debris"][name]

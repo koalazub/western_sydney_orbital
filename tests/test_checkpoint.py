@@ -72,7 +72,10 @@ def _world_receipt(world_id, seed=100):
             "launch_site_direction": None,
             "experiment_settings": settings,
             "geometry": {"debris_count": 500, "arrival_radius_m": 50.0},
-            "ship_tuning": {**settings["ship"], "thrust_scale": 1.0},
+            "ship_tuning": {
+                **settings["ship"],
+                "thrust_scale": settings["ship"].get("thrust_scale", 1.0),
+            },
             "debris_flow": {
                 name: settings["debris"][name]
                 for name in ("speed_mps", "speed_spread_mps", "stream_axis", "stream_sign")
@@ -105,6 +108,7 @@ def test_versioned_worlds_are_full_normalized_distinct_and_preserve_archived_tea
     assert controller_world("official").preset == official["preset"]
     expected_official = deepcopy(defaults)
     expected_official["debris"].update(official["settings"]["debris"])
+    expected_official["ship"]["thrust_scale"] = 0.22
     assert controller_world("official").settings == expected_official
     expected_team = deepcopy(defaults)
     expected_team["debris"].update(
