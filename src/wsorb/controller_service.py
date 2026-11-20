@@ -173,6 +173,7 @@ _SUMMARY_FIELDS = frozenset(
         "elapsed_s",
     }
 )
+_TELEMETRY_FIELDS = frozenset({"schema", "schema_version", "sample_period_s", "columns", "samples"})
 
 
 class ControllerServiceError(RuntimeError):
@@ -340,7 +341,7 @@ def validate_summary(value: Any) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or not _SUMMARY_FIELDS.issubset(value)
-        or set(value) - _SUMMARY_FIELDS - {"analytics", "world_id"}
+        or set(value) - _SUMMARY_FIELDS - {"analytics", "world_id", "telemetry"}
     ):
         raise ControllerServiceError("invalid_queue_response", message)
     measurement = value["measurement"]
@@ -385,6 +386,18 @@ def validate_summary(value: Any) -> dict[str, Any]:
     analytics = validate_run_analytics(value.get("analytics"))
     if value.get("analytics") is not None and (analytics is None or len(analytics["samples"]) > 48):
         raise ControllerServiceError("invalid_queue_response", message)
+    telemetry = value.get("telemetry")
+    if telemetry is not None and (
+        not isinstance(telemetry, dict)
+        or set(telemetry) != _TELEMETRY_FIELDS
+        or telemetry.get("schema") != "wsorb.flight_telemetry"
+        or telemetry.get("schema_version") != 1
+        or telemetry.get("sample_period_s") != 0.5
+        or not isinstance(telemetry.get("columns"), list)
+        or not isinstance(telemetry.get("samples"), list)
+        or len(telemetry["samples"]) > 4096
+    ):
+        raise ControllerServiceError("invalid_queue_response", message)
     if "world_id" in value:
         try:
             controller_world(value["world_id"])
@@ -397,7 +410,9 @@ def validate_summary(value: Any) -> dict[str, Any]:
     }
 
 
-def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
+def completion_summary(
+    trial: Mapping[str, Any], *, include_telemetry: bool = False
+) -> dict[str, Any]:
     """Copy only native outcome fields, never reports, radar, URLs or exception text."""
     final = trial.get("final")
     final = final if isinstance(final, Mapping) else {}
@@ -457,6 +472,11 @@ def completion_summary(trial: Mapping[str, Any]) -> dict[str, Any]:
                 validate_run_analytics(trial.get("analytics"))
                 if trial.get("world_metadata_unchanged") is True
                 else None
+            ),
+            **(
+                {"telemetry": trial.get("telemetry")}
+                if include_telemetry and trial.get("telemetry") is not None
+                else {}
             ),
             **({"world_id": controller_world(trial["world_id"]).id} if "world_id" in trial else {}),
         }
@@ -919,7 +939,7 @@ def execute_job(
         trial["state"], trial["error"] = "error", {"code": "heartbeat_lost"}
     if job.world_id is not None:
         trial["world_id"] = job.world_id
-    return completion_summary(trial)
+    return completion_summary(trial, include_telemetry=options.telemetry)
 
 
 def serve(options: CheckpointOptions, *, stopped: threading.Event | None = None) -> dict[str, Any]:
@@ -1105,6 +1125,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         playback_rate=getattr(args, "playback_rate", 1),
         progress=getattr(args, "progress", False),
         diagnostics=args.diagnostics,
+        telemetry=getattr(args, "telemetry", False),
         await_owner=getattr(args, "await_owner", False),
     )
     return args

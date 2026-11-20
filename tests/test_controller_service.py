@@ -453,6 +453,21 @@ def test_completion_summary_is_allowlisted_finite_and_cannot_disclose_credential
             validate_summary({**summary, **changes})
 
 
+def test_completion_summary_includes_bounded_telemetry_only_on_request():
+    telemetry = {
+        "schema": "wsorb.flight_telemetry",
+        "schema_version": 1,
+        "sample_period_s": 0.5,
+        "columns": ["time_s", "position_m"],
+        "samples": [[0.0, [0.0, 0.0, 0.0]], [0.5, [1.0, 0.0, 0.0]]],
+    }
+    trial = {"state": "native_terminal", "telemetry": telemetry}
+    assert "telemetry" not in completion_summary(trial)
+    summary = completion_summary(trial, include_telemetry=True)
+    assert summary["telemetry"] == telemetry
+    assert validate_summary(summary)["telemetry"] == telemetry
+
+
 @pytest.mark.parametrize("score", [-26000.125, 0, 35.5])
 @pytest.mark.parametrize("basis", ["time_ratio", "remaining_distance_ratio"])
 def test_score_and_native_terms_are_forwarded_signed_without_formula_recalculation(score, basis):

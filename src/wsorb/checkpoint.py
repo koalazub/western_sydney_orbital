@@ -121,12 +121,13 @@ class CheckpointOptions:
     playback_rate: int | None = None
     progress: bool = False
     diagnostics: bool = False
+    telemetry: bool = False
     wait_for_owner_s: float = 0.0
     await_owner: bool = False
     settings: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        for name in ("isolated", "run", "progress", "diagnostics", "await_owner"):
+        for name in ("isolated", "run", "progress", "diagnostics", "telemetry", "await_owner"):
             if type(getattr(self, name)) is not bool:
                 raise CheckpointError(
                     "invalid_options", "Consent and scope flags must be booleans."
@@ -234,6 +235,11 @@ def parse_args(argv: Sequence[str] | None = None) -> CheckpointOptions:
     parser.add_argument("--progress", action="store_true", help="bounded progress JSON on stderr")
     parser.add_argument(
         "--diagnostics", action="store_true", help="opt in to bounded, allowlisted JSONL on stderr"
+    )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        help="include ownship flight telemetry in the completion summary",
     )
     parser.add_argument(
         "--wait-for-owner-s",
@@ -907,6 +913,10 @@ def run_trial(
             # Optional measurement must not change flight control or retry it.
             analytics_failed = True
 
+    trace_samples: list[list[Any]] | None = [] if options.telemetry else None
+    trace_period_s = 0.5
+    next_trace_s = origin_sim
+
     result: dict[str, Any] = {
         "ok": False,
         "state": "starting",
@@ -1050,6 +1060,21 @@ def run_trial(
                 raise CheckpointError(
                     "policy_ineligible", "Shared policy did not approve an eligible decision."
                 )
+            if trace_samples is not None and now >= next_trace_s:
+                trace_samples.append(
+                    [
+                        float(now),
+                        [float(value) for value in sample.position_world_m],
+                        [float(value) for value in sample.velocity_world_mps],
+                        [float(value) for value in sample.quaternion_xyzw],
+                        [float(value) for value in sample.target_position_world_m],
+                        float(sample.fuel_used_kg),
+                        float(sample.damage_j),
+                        [float(value) for value in accel],
+                        [float(value) for value in angular],
+                    ]
+                )
+                next_trace_s = now + trace_period_s
             lease = decision_lease(policy_report, now)
             if cancelled is not None and cancelled():
                 result["state"] = "stopped"
@@ -1177,6 +1202,24 @@ def run_trial(
             and "error" not in result
             and result["release_state"] == "acknowledged"
         )
+    if trace_samples is not None:
+        result["telemetry"] = {
+            "schema": "wsorb.flight_telemetry",
+            "schema_version": 1,
+            "sample_period_s": trace_period_s,
+            "columns": [
+                "time_s",
+                "position_m",
+                "velocity_mps",
+                "quaternion_xyzw",
+                "target_m",
+                "fuel_used_kg",
+                "damage_j",
+                "command_accel_body_mps2",
+                "command_angular_body_rad_s2",
+            ],
+            "samples": trace_samples,
+        }
     return result
 
 
