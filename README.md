@@ -37,6 +37,42 @@ Compare time, arrival speed, fuel and damage together. Local arrival means entry
 
 The [older teammate comparison](docs/flight-lab.md#recorded-teammate-flights) used a different broad-stream world. Do not mix its results with the official-cloud or transit experiments. Instructions for [repeating and publishing comparisons](docs/flight-lab.md#repeat-and-publish-a-comparison) are in the guide.
 
+### Team benchmarks
+
+The reviewed benchmarks use different worlds and runner versions. Keep the tables separate; they are not one leaderboard.
+
+**Official STP 0.54.2, 22 seeds, 300 s**
+
+| Person | Controller | Arrivals | Simulation limits | Exceptions |
+| --- | --- | ---: | ---: | ---: |
+| Ali | `ali_mppi_v2` | 18/22 | 4 | 0 |
+| Tom | `tom_polyfit_updated` | 8/22 | 1 | 13 |
+
+Bui and Harry were not part of this campaign. The current v0.56 source has not yet completed a new official campaign. See the [matched campaign evidence](docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.md).
+
+**Local official cloud, competition reference, 3 seeds × 2 attempts**
+
+| Person | Controller | Arrivals | Median arrival, s | Median fuel, kg | Runs with damage |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ali | official profile | 6/6 | 153.2 | 109.0 | 2/6 |
+| Harry | Basic PD + radar | 6/6 | 160.4 | 146.4 | 0/6 |
+| WSO | checkpoint body-axis | 4/6 | 186.9 | 75.0 | 2/6 |
+| Published | Basic beeline | 4/6 | 138.9 | 46.0 | 4/6 |
+
+Tom and Bui are not in this local official-cloud set. These are local counters, not STP scores. See the [official-profile comparison](docs/official-comparison.md).
+
+**Local far-side L2 broad stream, 5 seeds × 2 attempts, 600 s**
+
+| Person | Controller | Arrivals | Median duration, s | Median fuel, kg |
+| --- | --- | ---: | ---: | ---: |
+| Tom | Earlier Kalman + velocity governor | 10/10 | 222.7 | 85.0 |
+| Bui | Earlier alpha-beta + sidestep | 10/10 | 239.8 | 83.2 |
+| Harry | Basic PD + radar (shared baseline) | 10/10 | 224.4 | 304.6 |
+
+Ali is not in this broad-stream set. The Tom and Bui rows use their earlier local adapters, not their current self-contained entrypoints; Tom's current Polyfit is in the STP table. All 30 physical trials arrived with zero measured damage; the results are descriptive matched seeds, not independent draws. See [recorded teammate flights](docs/flight-lab.md#recorded-teammate-flights) and the [summary CSV](docs/analytics/team-comparison/aggregate.csv).
+
+The current Ali MPPI, Tom Polyfit and Bui entrypoints have not yet been run together in one matched benchmark. Do not treat these separate tables as a cross-person ranking.
+
 ## Team records
 
 - [Meeting minutes](docs/minutes/)
