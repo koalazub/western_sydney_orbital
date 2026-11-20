@@ -90,7 +90,7 @@ main{padding:16px 20px 28px;max-width:1440px;margin:0 auto}
 .charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
 .panel svg{display:block;width:100%;height:auto}
-#points,#fuel{cursor:crosshair}
+#fuel{cursor:crosshair}
 .slice{margin-top:14px}.slice h2{display:flex;gap:8px;align-items:baseline}
 .slice table{width:100%;border-collapse:collapse;font-size:13px}
 .slice th,.slice td{padding:5px 7px;border-bottom:1px solid var(--line);text-align:right}
@@ -118,14 +118,14 @@ main{padding:16px 20px 28px;max-width:1440px;margin:0 auto}
 <main>
   <section class="grid" id="cards"></section>
   <section class="charts">
-    <div class="panel"><h2>Points</h2><div class="legend" id="points-legend"></div><svg id="points" viewBox="0 0 560 220" role="img" aria-label="Points against time"></svg></div>
+    <div class="panel"><h2>Terminal points</h2><svg id="points" viewBox="0 0 560 220" role="img" aria-label="Terminal points by controller"></svg></div>
     <div class="panel"><h2>Fuel used</h2><div class="legend" id="fuel-legend"></div><svg id="fuel" viewBox="0 0 560 220" role="img" aria-label="Fuel against time"></svg></div>
   </section>
   <section class="panel slice">
     <h2>Time slice <span id="slice-clock" class="pill">0.0 s</span></h2>
     <table id="slice" aria-label="Values at the selected time"></table>
   </section>
-  <p class="note">Points use the local published formula on actual time, fuel and damage. Dots freeze at each run’s terminal state; a gap after the last dot means the run ended there. This is a fresh capture; terminal points can differ from the five-seed table by timing. Attitude is the body +Z thrust axis relative to the route.</p>
+  <p class="note">Terminal points use the local formula at arrival. The cursor shows fuel, speed, range, altitude and thrust-axis attitude at the selected time. Dots freeze at each run’s terminal state; this is a fresh capture, so terminal points can differ from the five-seed table by timing.</p>
 </main>
 <script id="flight-data" type="application/json">__DATA__</script>
 <script>
@@ -157,20 +157,21 @@ for(const p of profiles){const card=document.createElement("article");card.class
 const psvg=document.getElementById("points"),fsvg=document.getElementById("fuel"),slice=document.getElementById("slice");
 function series(max){const w=560,h=220,pad={l:36,r:10,t:10,b:24},sx=t=>pad.l+(t/tMax)*(w-pad.l-pad.r),sy=v=>h-pad.b-(v/max)*(h-pad.t-pad.b);return{t:sx,v:sy}}
 function chartAxes(svg,xmax,ymax,labelX){const w=560,h=220,pad={l:36,r:10,t:10,b:24},g=el("g",{stroke:"#e2e8f0","stroke-width":"1"});for(let i=0;i<=4;i++){const x=pad.l+(w-pad.l-pad.r)*i/4;g.appendChild(el("line",{x1:x,y1:pad.t,x2:x,y2:h-pad.b}));addText(svg,x,h-14,(xmax*i/4).toFixed(0),"","middle")}for(let i=0;i<=4;i++){const y=pad.t+(h-pad.t-pad.b)*i/4;g.appendChild(el("line",{x1:pad.l,y1:y,x2:w-pad.r,y2:y}));addText(svg,pad.l-4,y+4,(ymax*(4-i)/4).toFixed(0),"","end")}svg.appendChild(g);addText(svg,w/2,h-2,labelX)}
-const ps=series(80),fs=series(140);
+const fs=series(140);
+function renderPoints(){const w=560,padL=150,padR=50,y0=14,gap=48,barW=w-padL-padR;psvg.replaceChildren();profiles.forEach((p,i)=>{const y=y0+i*gap;addText(psvg,8,y+18,p.label.split(" · ")[0]);psvg.appendChild(el("rect",{x:padL,y,width:barW,height:26,rx:3,fill:"#e2e8f0"}));if(p.points!==null){psvg.appendChild(el("rect",{x:padL,y,width:barW*p.points/70,height:26,rx:3,fill:p.color}));addText(psvg,padL+barW+8,y+18,p.points.toFixed(1))}else{addText(psvg,padL+barW+8,y+18,"—")}})}
 function drawSeries(svg,profile,map,t,key){const pts=profile.path.filter(s=>s.t<=t&&(key!=="points"||s.t>=5)).map(s=>({x:s.t,y:s[key]}));if(pts.length<2)return;svg.appendChild(el("path",{d:pts.map((q,i)=>`${i?"L":"M"}${map.t(q.x).toFixed(1)},${map.v(q.y).toFixed(1)}`).join(""),fill:"none",stroke:profile.color,"stroke-width":"2"}));const cur=pts[pts.length-1];svg.appendChild(el("circle",{cx:map.t(cur.x),cy:map.v(cur.y),r:3,fill:profile.color}))}
-function renderSlice(t){document.getElementById("slice-clock").textContent=t.toFixed(1)+" s";const metrics=[["state",p=>t>=p.end-0.01?p.status:"flying",v=>v],["points",p=>pathAt(p.path,t).points,v=>v.toFixed(1)],["fuel kg",p=>pathAt(p.path,t).fuel,v=>v.toFixed(1)],["speed m/s",p=>pathAt(p.path,t).speed,v=>v.toFixed(1)],["range m",p=>pathAt(p.path,t).range,v=>v.toFixed(1)],["alt m",p=>pathAt(p.path,t).p[2],v=>v.toFixed(1)],["att °",p=>pathAt(p.path,t).attDeg,v=>v.toFixed(1)]];slice.innerHTML=`<thead><tr><th>metric</th>${profiles.map(p=>`<th style="color:${p.color}">${p.label}</th>`).join("")}</tr></thead><tbody>${metrics.map(([name,value,format])=>`<tr><td>${name}</td>${profiles.map(p=>`<td>${format(value(p))}</td>`).join("")}</tr>`).join("")}</tbody>`}
-function render(t){document.getElementById("clock").textContent=t.toFixed(1)+" s";document.getElementById("scrub").value=t;for(const p of profiles){p.top.replaceChildren();p.alt.replaceChildren();drawPath(p.top,p,p.card,t);drawAlt(p.alt,p,t);const s=pathAt(p.path,t);const vals=[s.points,s.fuel,s.speed,s.range,s.p[2],s.attDeg];const names=["points","fuel kg","speed m/s","range m","alt m","att °"];p.stats.forEach((li,i)=>{li.innerHTML=`<b>${vals[i].toFixed(1)}</b><span>${names[i]}</span>`});p.card.querySelector(".pill").textContent=t>=p.end-0.01?p.status:"flying"}psvg.replaceChildren();fsvg.replaceChildren();chartAxes(psvg,tMax,80,"time, s");chartAxes(fsvg,tMax,140,"time, s");for(const p of profiles){drawSeries(psvg,p,ps,t,"points");drawSeries(fsvg,p,fs,t,"fuel")}psvg.appendChild(el("line",{x1:ps.t(t),y1:10,x2:ps.t(t),y2:196,stroke:"#94a3b8","stroke-dasharray":"3 3"}));fsvg.appendChild(el("line",{x1:fs.t(t),y1:10,x2:fs.t(t),y2:196,stroke:"#94a3b8","stroke-dasharray":"3 3"}));renderSlice(t)}
-document.getElementById("points-legend").innerHTML=profiles.map(p=>`<span><i style="background:${p.color}"></i>${p.label}</span>`).join("");document.getElementById("fuel-legend").innerHTML=document.getElementById("points-legend").innerHTML;
+function renderSlice(t){document.getElementById("slice-clock").textContent=t.toFixed(1)+" s";const metrics=[["state",p=>t>=p.end-0.01?p.status:"flying",v=>v],["final points",p=>p.points,v=>v===null?"—":v.toFixed(1)],["fuel kg",p=>pathAt(p.path,t).fuel,v=>v.toFixed(1)],["speed m/s",p=>pathAt(p.path,t).speed,v=>v.toFixed(1)],["range m",p=>pathAt(p.path,t).range,v=>v.toFixed(1)],["alt m",p=>pathAt(p.path,t).p[2],v=>v.toFixed(1)],["att °",p=>pathAt(p.path,t).attDeg,v=>v.toFixed(1)]];slice.innerHTML=`<thead><tr><th>metric</th>${profiles.map(p=>`<th style="color:${p.color}">${p.label}</th>`).join("")}</tr></thead><tbody>${metrics.map(([name,value,format])=>`<tr><td>${name}</td>${profiles.map(p=>`<td>${format(value(p))}</td>`).join("")}</tr>`).join("")}</tbody>`}
+function render(t){document.getElementById("clock").textContent=t.toFixed(1)+" s";document.getElementById("scrub").value=t;for(const p of profiles){p.top.replaceChildren();p.alt.replaceChildren();drawPath(p.top,p,p.card,t);drawAlt(p.alt,p,t);const s=pathAt(p.path,t);const vals=[p.points,s.fuel,s.speed,s.range,s.p[2],s.attDeg];const names=["final pts","fuel kg","speed m/s","range m","alt m","att °"];p.stats.forEach((li,i)=>{li.innerHTML=`<b>${vals[i]===null?"—":vals[i].toFixed(1)}</b><span>${names[i]}</span>`});p.card.querySelector(".pill").textContent=t>=p.end-0.01?p.status:"flying"}fsvg.replaceChildren();chartAxes(fsvg,tMax,140,"time, s");for(const p of profiles)drawSeries(fsvg,p,fs,t,"fuel");fsvg.appendChild(el("line",{x1:fs.t(t),y1:10,x2:fs.t(t),y2:196,stroke:"#94a3b8","stroke-dasharray":"3 3"}));renderSlice(t)}
+document.getElementById("fuel-legend").innerHTML=profiles.map(p=>`<span><i style="background:${p.color}"></i>${p.label}</span>`).join("");
 let t=0,playing=false,speed=1,last=0;
 function setPlaying(v){playing=v;document.getElementById("play").textContent=v?"Pause":"Play"}
 document.getElementById("play").onclick=()=>setPlaying(!playing);document.getElementById("reset").onclick=()=>{t=0;setPlaying(false);render(t)};
 document.getElementById("scrub").oninput=e=>{t=+e.target.value;setPlaying(false);render(t)};
 const speeds=document.getElementById("speeds");for(const s of [1,2,4,8]){const b=document.createElement("button");b.textContent=s+"×";b.setAttribute("aria-pressed",s===speed);b.onclick=()=>{speed=s;for(const x of speeds.children)x.setAttribute("aria-pressed",x===b)};speeds.appendChild(b)}
 function chartTime(evt,svg){const r=svg.getBoundingClientRect(),padL=36,padR=10,x=((evt.clientX-r.left)/r.width)*560;return clamp((x-padL)/(560-padL-padR)*tMax,0,tMax)}
-for(const svg of [psvg,fsvg])svg.addEventListener("pointermove",e=>{t=chartTime(e,svg);setPlaying(false);render(t)});
+fsvg.addEventListener("pointermove",e=>{t=chartTime(e,fsvg);setPlaying(false);render(t)});
 window.addEventListener("keydown",e=>{if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight")return;e.preventDefault();t=clamp(t+(e.key==="ArrowRight"?0.5:-0.5),0,tMax);setPlaying(false);render(t)});
-function frame(now){const dt=Math.min(0.1,(now-last)/1000);last=now;if(playing){t=Math.min(tMax,t+dt*speed);if(t>=tMax)setPlaying(false);render(t)}requestAnimationFrame(frame)}render(0);requestAnimationFrame(frame);
+function frame(now){const dt=Math.min(0.1,(now-last)/1000);last=now;if(playing){t=Math.min(tMax,t+dt*speed);if(t>=tMax)setPlaying(false);render(t)}requestAnimationFrame(frame)}renderPoints();render(0);requestAnimationFrame(frame);
 </script>
 </body>
 </html>"""
