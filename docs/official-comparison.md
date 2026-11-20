@@ -14,7 +14,24 @@ The published run predates the owner designation and labels the same policy
 [`ali_official_profile`](history/controllers/ali/official_profile.py); the old sweep key
 remains an alias so the published configuration still reproduces.
 
-## Policies
+## Calibrated v0.56 benchmark
+
+Seeds 100–104, one flight per profile, 1×, official cloud, thrust scale `0.22`. Means use arrivals only.
+
+![Calibrated outcome, score, fuel/time and seed spread](analytics/official-comparison/calibrated-performance.svg)
+
+[Interactive seed-104 playback: slide or hover to inspect points, fuel, speed, range and attitude](analytics/official-comparison/calibrated-flight.html) · [trial rows](analytics/official-comparison/calibrated-trials.csv)
+
+| Policy | Arrivals | Mean points | Mean time | Mean fuel |
+| --- | ---: | ---: | ---: | ---: |
+| Ali / MPPI | 5/5 | 61.61 | 215.5 s | 33.05 kg |
+| Tom / Polyfit | 5/5 | 60.88 | 195.9 s | 37.79 kg |
+| Bui / alpha-beta adapter | 3/5 | 31.24 | 218.2 s | 55.32 kg |
+| Harry / PD radar | 3/5 | 22.76 | 180.3 s | 70.35 kg |
+
+Ali leads mean points and fuel efficiency. Tom is fastest on a full five-seed set and wins seed 104. Bui has two damaged timeouts; Harry has one. Local points, not STP scores.
+
+## Archived 0.55 policies
 
 | Policy | What it is | Source |
 | --- | --- | --- |
@@ -28,7 +45,7 @@ The official baseline deliberately has no debris avoidance. An arrival by that
 policy is not evidence that its path was safe or that it would reproduce in the
 licensed runtime.
 
-## Matched conditions
+## Archived 0.55 conditions
 
 - Preset: `competition_reference`, 1,305.8 m target, 50 m arrival region.
 - Debris: `official_cloud`, 500 physical bodies, seed 100 in the published source.
@@ -48,7 +65,9 @@ three-seed sample, not six independent reliability draws. The official script
 hardcodes seed 100, but matching that number does not make the local and STP
 populations identical. See [seed and generator differences](competition-reference.md#remaining-local-differences).
 
-## Results
+## Archived 0.55 comparison
+
+Pre-calibration, three seeds, two attempts. Retained for provenance; not comparable with the table above.
 
 The per-trial records and summary are the published result:
 

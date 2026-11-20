@@ -29,11 +29,11 @@ For competition-focused practice, select **Competition reference · 1.31 km hop*
 
 The default **Far-side L2** world uses **Transit traffic** moving **Across Phobos** at 20 m/s. It is a separate stress test, not the competition field.
 
-The [official-profile comparison](docs/official-comparison.md) records matched attempts by the published beeline controller, Ali's official-profile policy, WSO's checkpoint profiles and the basic PD/radar reference.
+The [official-profile comparison](docs/official-comparison.md) now leads with the calibrated four-profile benchmark: Ali, Tom, Bui and Harry on five matched seeds.
 
-![Official-profile outcomes, arrival time, final speed, local fuel and damage](docs/analytics/official-comparison/performance.svg)
+![Calibrated outcomes, mean score, fuel/time trade-off and points by seed](docs/analytics/official-comparison/calibrated-performance.svg)
 
-Compare time, arrival speed, fuel and damage together. Local arrival means entry to the station's 50 m region, not docking. Displayed points apply the published formula to local counters; they are not official STP results.
+[Interactive seed-104 playback: slide or hover to inspect points, fuel, speed, range and attitude](docs/analytics/official-comparison/calibrated-flight.html) · local points, not official STP results.
 
 The [older teammate comparison](docs/flight-lab.md#recorded-teammate-flights) used a different broad-stream world. Do not mix its results with the official-cloud or transit experiments. Instructions for [repeating and publishing comparisons](docs/flight-lab.md#repeat-and-publish-a-comparison) are in the guide.
 

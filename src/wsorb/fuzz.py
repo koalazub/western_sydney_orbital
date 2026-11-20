@@ -113,6 +113,7 @@ def run_seed(
                     cadence_hz=min(50.0, 10.0 * playback_rate),
                     playback_rate=playback_rate,
                     settings=settings,
+                    telemetry=True,
                 ),
                 JobMonitor(job, threading.Event()),
                 allow_playback=True,
@@ -141,6 +142,7 @@ def run_seed(
         "engine_sha256": summary.get("engine_sha256"),
         "elapsed_s": summary.get("elapsed_s"),
         "analytics": summary.get("analytics"),
+        "telemetry": summary.get("telemetry"),
     }
 
 
