@@ -25,7 +25,7 @@ Use the repository's pinned Nix flake environment and [Just recipes](justfile). 
 
 ## Competition experiments
 
-For competition-focused practice, select **Competition reference · 1.31 km hop** with **Official debris cloud**. This ports the official relative geometry and 500-body debris distribution into the local model.
+For competition-focused practice, select **Competition reference · 1.31 km hop** with **Official debris cloud**. This ports the official relative geometry and 500-body debris distribution into the local model. The official local world also applies the measured v0.56 actuator calibration: `ship.thrust_scale` is `0.22`, so a `0.5 m/s²` request delivers about `0.11 m/s²` and burns about `0.48 kg/s` at full command. The command cap and readback remain `0.5 m/s²`; controllers must estimate the delivered authority. This is local plant data, not STP parity.
 
 The default **Far-side L2** world uses **Transit traffic** moving **Across Phobos** at 20 m/s. It is a separate stress test, not the competition field.
 
@@ -50,7 +50,28 @@ The reviewed benchmarks use different worlds and runner versions. Keep the table
 
 Bui and Harry were not part of this campaign. The current v0.56 source has not yet completed a new official campaign. See the [matched campaign evidence](docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.md).
 
-**Local official cloud, competition reference, 3 seeds × 2 attempts**
+**Calibrated local official cloud, seeds 100–104, 300 s**
+
+The `official` world applies the measured v0.56 thrust gain (`0.22`). Each row is one flight per seed at 1× with the current self-contained entrypoint. These are local points, not STP scores.
+
+| Person | Controller | Arrivals | Mean points | Mean time, s | Mean fuel, kg | Damage, J |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Ali | `ali_mppi` | 5/5 | 61.61 | 215.5 | 33.05 | 0 |
+| Tom | `tom_polyfit_mvp` | 5/5 | 60.88 | 195.9 | 37.79 | 0 |
+
+| Seed | Ali points | Tom points | Ali fuel, kg | Tom fuel, kg | Ali time, s | Tom time, s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 64.14 | 62.66 | 31.14 | 36.42 | 215.6 | 196.0 |
+| 101 | 58.12 | 58.04 | 35.49 | 39.77 | 216.5 | 196.5 |
+| 102 | 61.57 | 60.17 | 33.23 | 38.46 | 214.8 | 195.3 |
+| 103 | 64.14 | 62.66 | 31.12 | 36.42 | 215.7 | 196.0 |
+| 104 | 60.09 | 60.87 | 34.29 | 37.87 | 215.0 | 195.6 |
+
+Ali is ahead on mean points by `0.73` and on fuel by `4.74 kg`, with zero damage on every seed. Seed 104 is the exception: Ali scores `60.09` against Tom's `60.87`, so the strict no-seed-loss gate is not met and this is not a decisive points win.
+
+Bui's `bui_alpha_beta_mvp` completed one calibrated seed at 29.07 points, 218.5 s and 56.89 kg with zero damage; Harry's `basic_pd_radar` stopped with `policy_ineligible` before a physical result. Neither has a five-seed row here, so this is an Ali/Tom matched comparison, not a four-way ranking.
+
+**Pre-calibration local official cloud, 3 seeds × 2 attempts**
 
 | Person | Controller | Arrivals | Median arrival, s | Median fuel, kg | Runs with damage |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -61,7 +82,7 @@ Bui and Harry were not part of this campaign. The current v0.56 source has not y
 
 Tom and Bui are not in this local official-cloud set. These are local counters, not STP scores. See the [official-profile comparison](docs/official-comparison.md).
 
-**Local far-side L2 broad stream, 5 seeds × 2 attempts, 600 s**
+**Pre-calibration local far-side L2 broad stream, 5 seeds × 2 attempts, 600 s**
 
 | Person | Controller | Arrivals | Median duration, s | Median fuel, kg |
 | --- | --- | ---: | ---: | ---: |
