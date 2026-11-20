@@ -52,24 +52,44 @@ Bui and Harry were not part of this campaign. The current v0.56 source has not y
 
 **Calibrated local official cloud, seeds 100–104, 300 s**
 
-The `official` world applies the measured v0.56 thrust gain (`0.22`). Each row is one flight per seed at 1× with the current self-contained entrypoint. These are local points, not STP scores.
+The `official` world applies the measured v0.56 thrust gain (`0.22`). Each row is one flight per seed at 1× with the reviewed local profile shown. Aggregate points, time and fuel use arrived runs only; failures are shown by seed below. These are local points, not STP scores.
 
-| Person | Controller | Arrivals | Mean points | Mean time, s | Mean fuel, kg | Damage, J |
+| Person | Controller | Arrivals | Mean points | Mean time, s | Mean fuel, kg | Damaged runs |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Ali | `ali_mppi` | 5/5 | 61.61 | 215.5 | 33.05 | 0 |
-| Tom | `tom_polyfit_mvp` | 5/5 | 60.88 | 195.9 | 37.79 | 0 |
+| Ali | `ali_mppi` | 5/5 | 61.61 | 215.5 | 33.05 | 0/5 |
+| Tom | `tom_polyfit_mvp` | 5/5 | 60.88 | 195.9 | 37.79 | 0/5 |
+| Bui | `bui_alpha_beta_mvp` | 3/5 | 31.24 | 218.2 | 55.32 | 2/5 |
+| Harry | `basic_pd_radar` | 3/5 | 22.76 | 180.3 | 70.35 | 1/5 |
 
-| Seed | Ali points | Tom points | Ali fuel, kg | Tom fuel, kg | Ali time, s | Tom time, s |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | 64.14 | 62.66 | 31.14 | 36.42 | 215.6 | 196.0 |
-| 101 | 58.12 | 58.04 | 35.49 | 39.77 | 216.5 | 196.5 |
-| 102 | 61.57 | 60.17 | 33.23 | 38.46 | 214.8 | 195.3 |
-| 103 | 64.14 | 62.66 | 31.12 | 36.42 | 215.7 | 196.0 |
-| 104 | 60.09 | 60.87 | 34.29 | 37.87 | 215.0 | 195.6 |
+| Seed | Ali points | Tom points | Bui points | Harry points |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 64.14 | 62.66 | 29.07 | 17.45 |
+| 101 | 58.12 | 58.04 | — | — |
+| 102 | 61.57 | 60.17 | 32.14 | — |
+| 103 | 64.14 | 62.66 | 32.49 | 26.53 |
+| 104 | 60.09 | 60.87 | — | 24.30 |
 
-Ali is ahead on mean points by `0.73` and on fuel by `4.74 kg`, with zero damage on every seed. Seed 104 is the exception: Ali scores `60.09` against Tom's `60.87`, so the strict no-seed-loss gate is not met and this is not a decisive points win.
+| Seed | Ali fuel, kg | Tom fuel, kg | Bui fuel, kg | Harry fuel, kg |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 31.14 | 36.42 | 56.89 | 73.69 |
+| 101 | 35.49 | 39.77 | 77.96 | 120.41 |
+| 102 | 33.23 | 38.46 | 54.73 | 108.28 |
+| 103 | 31.12 | 36.42 | 54.33 | 68.08 |
+| 104 | 34.29 | 37.87 | 72.18 | 69.29 |
 
-Bui's `bui_alpha_beta_mvp` completed one calibrated seed at 29.07 points, 218.5 s and 56.89 kg with zero damage; Harry's `basic_pd_radar` stopped with `policy_ineligible` before a physical result. Neither has a five-seed row here, so this is an Ali/Tom matched comparison, not a four-way ranking.
+| Seed | Ali time, s | Tom time, s | Bui time, s | Harry time, s |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | 215.6 | 196.0 | 218.5 | 182.7 |
+| 101 | 216.5 | 196.5 | 300.1 | 300.1 |
+| 102 | 214.8 | 195.3 | 217.8 | 300.1 |
+| 103 | 215.7 | 196.0 | 218.5 | 178.3 |
+| 104 | 215.0 | 195.6 | 300.1 | 180.0 |
+
+Bui's failures were seeds 101 and 104 (`duration_limit`, 300.1 s, 47,616 J and 36,665 J). Harry's failures were seeds 101 and 102 (`duration_limit`; seed 101 carried 65,844 J, seed 102 carried none).
+
+Ali has the highest mean points and the lowest mean fuel. Harry has the lowest mean time among arrived runs, but only 3/5 arrivals; Tom is the fastest profile with all five arrivals. Seed 104 is the matched Ali/Tom exception: Ali scores `60.09` against Tom's `60.87`, so the strict no-seed-loss gate is not met and this is not a decisive points win.
+
+Bui's row uses the reviewed `bui_alpha_beta_mvp` adapter, not his current `controllers/bui/Controller.py`; Harry's row is the shared `basic_pd_radar` baseline selected by his workflow. These are the available reviewed local profiles, not claims that every row is the teammate's current submission entrypoint.
 
 **Pre-calibration local official cloud, 3 seeds × 2 attempts**
 
