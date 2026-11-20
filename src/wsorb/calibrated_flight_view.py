@@ -125,7 +125,7 @@ main{padding:16px 20px 28px;max-width:1440px;margin:0 auto}
     <h2>Time slice <span id="slice-clock" class="pill">0.0 s</span></h2>
     <table id="slice" aria-label="Values at the selected time"></table>
   </section>
-  <p class="note">Points use the local published formula on actual time, fuel and damage. Dots freeze at each run’s terminal state; a gap after the last dot means the run ended there. This is a fresh capture; terminal points can differ from the five-seed table by timing.</p>
+  <p class="note">Points use the local published formula on actual time, fuel and damage. Dots freeze at each run’s terminal state; a gap after the last dot means the run ended there. This is a fresh capture; terminal points can differ from the five-seed table by timing. Attitude is the body +Z thrust axis relative to the route.</p>
 </main>
 <script id="flight-data" type="application/json">__DATA__</script>
 <script>
