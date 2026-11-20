@@ -104,7 +104,7 @@ If the game and lab are already running, leave them up and only start the runner
 
 Check **Controller running**, not just **API connected**. The game must have accepted the controller's command and be running physics. The status panel shows the command time and expiry.
 
-Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. The reviewed Ali profile uses that rule: it cruises at 14 m/s by default, and inside 200 m at ≥4 m/s it coasts through the region when the raw-radar emergency is clear, instead of braking for a non-existent arrival-speed gate. The emergency guard and damage threshold still apply. After a contact, the same profile takes a short lateral escape impulse and flies a capped parallel-route offset; repeated contacts flip the side and reduce cruise speed when damage is high. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
+Native command limits remain **0.5 m/s²** and **0.05 rad/s²**. Local `success` means entry to the station's 50 m region, not docking or a safe arrival speed. The reviewed Ali profile uses that rule: it holds 7.2 m/s on the calibrated low-authority plant (8 m/s on the high-authority practice plant), and inside 200 m at ≥4 m/s it coasts through the region when the raw-radar emergency is clear, instead of braking for a non-existent arrival-speed gate. The emergency guard and damage threshold still apply. After a contact, the same profile takes a short lateral escape impulse and flies a capped parallel-route offset; repeated contacts flip the side and reduce cruise speed when damage is high. See [debris settings and model limits](#debris-settings-and-model-limits) before interpreting a practice result.
 
 For run budgets, sensor failures, standby takeover and isolated CLI runs, see [notebook policies and failures](#notebook-policies-and-failures).
 
@@ -362,6 +362,18 @@ The viewing camera is for us. The mounted ship cameras are sensors with their ow
 Viewer lighting, stars, route guides, instrument panels and exhaust effects do not enter those captured pixels. A night-side scene can therefore be readable in the viewer and dark in a ship-camera capture. Use the **Cameras** tab to aim and capture the sensors; zooming the viewer does not improve their optics.
 
 Phobos and Mars use [credited spacecraft surface maps](../worker/web/assets/ATTRIBUTION.md). These help us recognise the setting; they do not establish that our terrain or camera rendering matches the official simulator.
+
+### Local v0.56 actuator calibration
+
+The official local world carries a versioned `ship.thrust_scale` of `0.22`.
+The published command cap and `max_accel_mps2` readback remain `0.5`, while the
+calibrated plant delivers about `0.11 m/s²` and burns about `0.48 kg/s` at full
+command. That matches the 19 November final-submission step response, where a
+`0.5 m/s²` request produced roughly `0.1 m/s²` and `0.49 kg/s`. The controller
+must estimate the delivered authority; it is not told the calibrated cap.
+`thrust_scale` is local plant data, not an STP hardware setter or a claim of
+engine parity. The `team` and `across_phobos` worlds keep the original gain of
+`1.0`.
 
 ## Reading the comparison
 

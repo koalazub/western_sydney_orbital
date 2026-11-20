@@ -79,11 +79,10 @@ ARRIVAL_RADIUS_M = 50.0
 MPPI_SAMPLES, MPPI_STEPS = 48, 40
 CRUISE_SPEED_MPS, MIN_CRUISE_SPEED_MPS = 7.0, 1.0
 ATTITUDE_HOLD_RAD, ATTITUDE_HOLD_RATE_RAD_S = np.radians(1.0), 0.01
-RADAR_TRACK_LIMIT = 240
+RADAR_TRACK_LIMIT = 160
 LOW_AUTHORITY_CRUISE_MPS2 = 0.15
 LOW_AUTHORITY_CRUISE_FLOOR_MPS = 7.2
 PLANT_ACCEL_FLOOR_FRACTION = 0.02
-PLANT_ACCEL_DECAY = 0.98
 PLANT_EXTERNAL_ALPHA = 0.1
 DEFAULT_SCORE = {
     "nominal_time_s": 120.0,
@@ -96,7 +95,7 @@ DEFAULT_SCORE = {
 DEFAULT_POLICY = {
     "cruise_fraction": 0.5,
     "cruise_speed_mps": None,
-    "main_engine_gate_rad": 0.15,
+    "main_engine_gate_rad": 0.0,
     "launch_clearance_m": 0.0,
     "launch_speed_mps": 2.5,
     "coast_range_m": 200.0,
@@ -201,15 +200,14 @@ def radar_radius(row, center_range=None):
     return max(0.0, radius)
 
 
-def estimate_plant(state, velocity, damage, now, dt, reported_max):
+def estimate_plant(state, velocity, damage, now, dt, reported_max, fuel=None, ship_mass=None):
     """Learn delivered translation authority and the uncommanded acceleration.
 
     The licensed actuator can deliver much less acceleration than its published
-    command cap. Planning with the cap then predicts turns the ship cannot make
-    and understates fuel use. This estimator compares the previous command with
-    the observed velocity change. It accepts a sample only when the response is
-    mostly along the command, so a collision, a gated command or a weak lateral
-    jet does not permanently collapse the authority estimate.
+    command cap. A full command's fuel delta gives the delivered force directly,
+    even while the ship is rotating or a lateral command is poorly aligned. Use
+    that sample to lower the authority ceiling. Velocity response is retained as
+    the fallback for callers that do not supply fuel.
     """
     reported = max(0.02, float(reported_max))
     previous_velocity = state.get("plant_velocity")
@@ -217,11 +215,13 @@ def estimate_plant(state, velocity, damage, now, dt, reported_max):
     previous_burning = bool(state.get("plant_burning", False))
     previous_time = state.get("plant_time")
     previous_damage = float(state.get("plant_damage", damage))
+    previous_fuel = state.get("plant_fuel")
     if previous_velocity is None or previous_time is None:
         state.update(
             plant_velocity=np.asarray(velocity, float).copy(),
             plant_time=float(now),
             plant_damage=float(damage),
+            plant_fuel=None if fuel is None else float(fuel),
             max_accel_effective=reported,
             external_accel_mps2=np.zeros(3),
         )
@@ -231,6 +231,7 @@ def estimate_plant(state, velocity, damage, now, dt, reported_max):
         state["plant_velocity"] = np.asarray(velocity, float).copy()
         state["plant_time"] = float(now)
         state["plant_damage"] = float(damage)
+        state["plant_fuel"] = None if fuel is None else float(fuel)
         return float(state.get("max_accel_effective", reported)), np.asarray(
             state.get("external_accel_mps2", np.zeros(3)), float
         )
@@ -238,29 +239,30 @@ def estimate_plant(state, velocity, damage, now, dt, reported_max):
     external = np.asarray(state.get("external_accel_mps2", np.zeros(3)), float)
     command_norm = float(np.linalg.norm(previous_accel))
     max_accel = float(state.get("max_accel_effective", reported))
-    if previous_burning and command_norm > 0.02:
-        direction = previous_accel / command_norm
-        along = float(change @ direction) / elapsed - float(external @ direction)
-        total = float(np.linalg.norm(change)) / elapsed
+    full_command = previous_burning and command_norm >= 0.9 * reported
+    full_burn_s = float(state.get("plant_full_burn_s", 0.0)) + elapsed if full_command else 0.0
+    state["plant_full_burn_s"] = full_burn_s
+    if full_command and full_burn_s >= 1.0:
+        floor = PLANT_ACCEL_FLOOR_FRACTION * reported
+        fuel_sample = None
         if (
-            along > 0.0
-            and total > 1e-6
-            and along >= 0.7 * total
-            and command_norm >= 0.5 * max_accel
+            fuel is not None
+            and previous_fuel is not None
+            and ship_mass is not None
+            and float(ship_mass) > 0.0
         ):
-            floor = PLANT_ACCEL_FLOOR_FRACTION * reported
-            if along < 0.9 * command_norm:
-                # The actuator saturated below the requested command. The
-                # delivered acceleration is the authority, not a fraction of
-                # the request. The response direction has already been checked
-                # above, so use the observed ceiling immediately.
+            delta_fuel = max(0.0, float(fuel) - float(previous_fuel))
+            fuel_sample = delta_fuel / elapsed * (80.0 * 9.8) / float(ship_mass)
+        if fuel_sample is not None and 0.0 < fuel_sample <= 2.0 * reported:
+            max_accel = min(reported, fuel_sample)
+        else:
+            direction = previous_accel / command_norm
+            along = float(change @ direction) / elapsed - float(external @ direction)
+            total = float(np.linalg.norm(change)) / elapsed
+            if along > 0.0 and total > 1e-6 and along >= 0.7 * total:
                 max_accel = min(max_accel, along)
-            elif command_norm >= max_accel * 0.9:
-                # The full request was delivered. There is no evidence of a
-                # lower ceiling, so retain the current conservative estimate.
-                max_accel = max(max_accel, command_norm * PLANT_ACCEL_DECAY)
-            state["max_accel_effective"] = float(np.clip(max_accel, floor, reported))
-    elif command_norm <= 0.02:
+        state["max_accel_effective"] = float(np.clip(max_accel, floor, reported))
+    elif not previous_burning and command_norm <= 0.02:
         sample = change / elapsed
         state["external_accel_mps2"] = (
             external * (1.0 - PLANT_EXTERNAL_ALPHA) + sample * PLANT_EXTERNAL_ALPHA
@@ -268,6 +270,7 @@ def estimate_plant(state, velocity, damage, now, dt, reported_max):
     state["plant_velocity"] = np.asarray(velocity, float).copy()
     state["plant_time"] = float(now)
     state["plant_damage"] = float(damage)
+    state["plant_fuel"] = None if fuel is None else float(fuel)
     return float(state.get("max_accel_effective", reported)), np.asarray(
         state.get("external_accel_mps2", np.zeros(3)), float
     )
@@ -779,11 +782,19 @@ def goal_velocity(position, velocity, target_position, cruise_speed, state, poli
         float(policy.get("coast_speed_mps", 0.0)),
         float(policy.get("coast_hold_fraction", 0.74)) * float(cruise_speed),
     )
-    # Once the corridor is clear, coast down through the hold band instead of
-    # burning continuously to maintain the score-optimal cruise speed. The
-    # governor only re-lights below the hold speed, which is about 5.3 m/s for
-    # the measured 7.2 m/s v0.56 optimum.
-    return np.asarray(velocity, float).copy() if (not correcting and speed >= hold) else aim
+    reached = bool(state.get("cruise_reached", False))
+    if speed >= 0.98 * float(cruise_speed):
+        reached = True
+    elif speed < hold:
+        reached = False
+    state["cruise_reached"] = reached
+    # Only coast after the ship has actually reached cruise. The hold band is
+    # where it may drift before relighting, not an early cap on acceleration.
+    return (
+        np.asarray(velocity, float).copy()
+        if (not correcting and reached and speed >= hold)
+        else aim
+    )
 
 
 def govern(desired_accel, nominal_velocity, velocity, burning, max_accel, policy=None):
@@ -855,7 +866,7 @@ def emergency_guard(
     if not items:
         return np.zeros(3), False
     relative, rock_velocity, keep_out = (np.array(values) for values in zip(*items, strict=True))
-    times = np.linspace(0.0, float(policy["emergency_lookahead_s"]), 41)
+    times = np.linspace(0.0, float(policy["emergency_lookahead_s"]), 25)
 
     def clearance(acceleration):
         relative_acceleration = -np.asarray(acceleration, float)
@@ -976,7 +987,7 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=Non
         }
         return v_des
     indices = np.flatnonzero(threat)
-    indices = indices[np.argsort(cpa[indices])[:48]]
+    indices = indices[np.argsort(cpa[indices])[:24]]
     p_rel, v_abs, radii, sigma_p, sigma_v = (
         values[indices] for values in (p_rel, v_abs, radii, sigma_p, sigma_v)
     )
@@ -985,18 +996,18 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=Non
     axis = np.array([1.0, 0.0, 0.0]) if abs(float(heading[0])) < 0.9 else np.array([0.0, 1.0, 0.0])
     e1 = unit(np.cross(heading, axis))
     e2 = unit(np.cross(heading, e1))
-    phis = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+    phis = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
     ring = np.cos(phis)[:, None] * e1 + np.sin(phis)[:, None] * e2
-    fractions = np.array([0.05, 0.10, 0.18, 0.28, 0.40, 0.60, 0.90])
+    fractions = np.array([0.08, 0.15, 0.25, 0.40, 0.65, 0.90])
     candidates = [v_des, velocity, previous, np.zeros(3)]
-    for scale in (1.0, 0.7, 0.4):
+    for scale in (1.0, 0.6):
         candidates.extend(
             (scale * v_des + fractions[:, None, None] * speed * ring[None]).reshape(-1, 3)
         )
     options = np.array(candidates)
     delta_v = options - velocity
     reach = np.linalg.norm(delta_v, axis=1) / authority
-    times = np.linspace(0.0, limit, 49)
+    times = np.linspace(0.0, limit, 33)
     ramp = np.minimum(times[None, :], reach[:, None])
     ship = np.asarray(velocity, float)[None, None, :] * ramp[..., None] + 0.5 * delta_v[
         :, None, :
@@ -1059,17 +1070,26 @@ def avoid_velocity(v_des, tracks, position, velocity, state, policy, horizon=Non
 
 
 def score_cruise_speed(remaining, current_speed, max_accel, ship_mass_kg, policy):
-    """Maximise the published points formula over reachable cruise speeds.
+    """Choose a measured fuel-dominant cruise band, with a score fallback.
 
-    The delivered acceleration and fuel rate set the burn cost, while distance
-    sets the coast time. A low-authority v0.56 vehicle therefore chooses a much
-    slower cruise than a 0.5 m/s2 practice vehicle without hard-coding either
-    optimum. Explicit ``cruise_speed_mps`` settings remain available for
-    matched-speed experiments and are applied by ``prepare_cruise``.
+    The v0.56 plant uses the supervisor's 7.2 m/s band. The high-authority
+    practice plant keeps the matched 8 m/s band that previously beat the
+    reference controller on both points and fuel. Maximising the time-heavy
+    points formula at high authority selected a faster but much thirstier
+    trajectory, so it is only a fallback between the two measured bands.
+    Explicit ``cruise_speed_mps`` settings remain available for matched-speed
+    experiments and are applied by ``prepare_cruise``.
     """
     authority = max(0.02, float(max_accel))
     distance = max(0.0, float(remaining))
     current = max(0.0, float(current_speed))
+    if authority <= LOW_AUTHORITY_CRUISE_MPS2:
+        return LOW_AUTHORITY_CRUISE_FLOOR_MPS
+    if authority >= 0.3:
+        # On the high-authority practice plant, keep the matched 8 m/s band.
+        # It previously beat the reference controller on both points and fuel;
+        # maximising the time-heavy points formula there spent too much fuel.
+        return 8.0
     fuel_rate = max(1e-6, float(ship_mass_kg) * authority / (80.0 * 9.8))
     nominal_time = float(policy.get("nominal_time_s", DEFAULT_SCORE["nominal_time_s"]))
     nominal_fuel = float(policy.get("nominal_fuel_kg", DEFAULT_SCORE["nominal_fuel_kg"]))
@@ -1087,12 +1107,6 @@ def score_cruise_speed(remaining, current_speed, max_accel, ship_mass_kg, policy
         )
         if points > best_points:
             best_speed, best_points = float(speed), float(points)
-    if authority <= LOW_AUTHORITY_CRUISE_MPS2:
-        # The supervisor's v0.56 sweep put the measured optimum at 7.2 m/s and
-        # kept 5.9-8.8 m/s within two points. The simplified model omits the
-        # observed low-thrust coast losses and would speed up near the target,
-        # so hold the measured mid-band value for the whole low-authority run.
-        return LOW_AUTHORITY_CRUISE_FLOOR_MPS
     return best_speed
 
 
@@ -1448,12 +1462,20 @@ class GuidanceController:
         )
         t.thrust_axis = unit(t.thrust_axis)
         t.reported_accel = float(obs["max_accel"])
+        t.command_accel = t.reported_accel
         t.max_angular = float(obs["max_angular"])
         t.ship_radius = float(obs["radius"])
         t.radius = float(policy.get("arrival_radius_m", ARRIVAL_RADIUS_M))
         t.damage = float(obs["damage"])
         t.max_accel, t.external_accel = estimate_plant(
-            state, t.velocity, t.damage, t.now, t.dt, t.reported_accel
+            state,
+            t.velocity,
+            t.damage,
+            t.now,
+            t.dt,
+            t.reported_accel,
+            float(obs["fuel"]),
+            float(obs["mass"]),
         )
         t.history = record_shuttle_state(state, t.now, t.position)
         t.rows, t.radar_offset = align_radar_rows(state, t.rows, t.now)
@@ -1706,20 +1728,27 @@ class GuidanceController:
             t.steering,
             t.avoider,
         )
+        # The plant may accept a larger command than it delivers. Convert the
+        # planned delivered acceleration back to the command scale; a plant
+        # that saturates instead of scaling simply receives its existing cap.
+        if np.linalg.norm(t.acceleration) > 1e-9 and t.max_accel > 1e-9:
+            scale = min(t.command_accel / t.max_accel, 1e6)
+            t.acceleration = t.acceleration * scale
+            length = float(np.linalg.norm(t.acceleration))
+            if length > t.command_accel:
+                t.acceleration = t.acceleration * (t.command_accel / length)
         t.state["burning"] = t.burning
 
     def _steer(self, t):
         policy = t.policy
-        if np.linalg.norm(t.acceleration) > 1e-6:
-            # Point the main axis at the actual burn. Using the goal velocity
-            # here let a lateral avoider command a large off-axis acceleration
-            # while the ship still pointed at the target; the actuator then
-            # delivered only a fraction of the requested thrust.
-            t.desired = unit(t.acceleration)
-        else:
-            t.desired = unit(
-                t.collision["side"] if self.collision_mode is CollisionMode.ESCAPE else t.v_des
-            )
+        # Keep attitude on the route, not on every lateral avoidance or guard
+        # impulse. The body command is already frame-converted, so a lateral
+        # jet does not need a new attitude; rotating for each candidate burned
+        # angular propellant and added tens of seconds on obstacle seeds.
+        # Collision escapes still point at the escape side.
+        t.desired = unit(
+            t.collision["side"] if self.collision_mode is CollisionMode.ESCAPE else t.v_des
+        )
         t.alignment = (
             np.arccos(float(np.clip(t.thrust_axis @ t.desired, -1.0, 1.0)))
             if np.linalg.norm(t.desired) > 1e-9

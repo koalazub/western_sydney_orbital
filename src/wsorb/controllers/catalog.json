@@ -103,8 +103,8 @@
         "label": "Ali MPPI candidate",
         "owner": "Ali",
         "contributor": "Ali; WSO MPPI adapter",
-        "description": "Full-public-radar beeline with delivered-authority calibration, reachable velocity avoidance, closest-surface keep-out, terminal coast, emergency guard and collision recovery. Cruise speed maximizes the published points formula from the observed authority, with a 35 m stop / 45 m restart corridor and selectable line-fit/Kalman tracking, MPPI/hybrid guidance and full or proportional governors. Experimental candidate; not validated on the real server.",
-        "profile": "Score-optimal cruise from measured authority; 30 s reachable avoider, 35/45 m corridor; MPPI/hybrid opt-in",
+        "description": "Full-public-radar beeline with delivered-authority calibration, reachable velocity avoidance, closest-surface keep-out, terminal coast, emergency guard and collision recovery. Cruise speed uses measured fuel-dominant bands: 7.2 m/s at low authority and 8.0 m/s on the high-authority practice plant, with a 35 m stop / 45 m restart corridor and selectable line-fit/Kalman tracking, MPPI/hybrid guidance and full or proportional governors. Experimental candidate; not validated on the real server.",
+        "profile": "Fuel-dominant cruise bands from measured authority; 30 s reachable avoider, 35/45 m corridor; MPPI/hybrid opt-in",
         "experimental": true,
         "target_seeking": true,
         "source": "controllers/ali/controller.py"

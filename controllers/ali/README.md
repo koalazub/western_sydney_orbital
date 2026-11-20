@@ -13,8 +13,9 @@ stay separate.
 The runtime profile is `ali_mppi`. The policy is settings-driven: cruise
 speed, terminal coast, emergency guard, MPPI plan steering, main-engine gate,
 risk/switch weights, attitude brake scale and collision response. With no
-explicit `cruise_speed_mps`, the controller maximises the published points
-formula from the delivered acceleration and distance; a fixed setting remains
+explicit `cruise_speed_mps`, the controller uses measured fuel-dominant bands:
+7.2 m/s at low authority and 8.0 m/s on the high-authority practice plant. The
+points model is only a fallback between those bands; a fixed setting remains
 available for matched-speed experiments. The core also keeps the reviewed
 estimator and guidance alternatives as settings: `tracker` (`line`/`kalman`),
 `guard_source` (`raw`/`tracks`/`both`, default `both`), `risk_inflation`,
@@ -58,7 +59,7 @@ onto its own clock first; if the measurement epoch is outside the history, the
 current position is used. The origin estimate accepts large negative offsets,
 because a radar loop that started before the mission is not a future
 measurement. The submission requests all 500 available rows; tracking keeps the
-nearest 240 and the raw guard keeps every close row.
+nearest 160 and the raw guard keeps every close row.
 
 Radar rows carry a noisy centre, a separate closest-surface range and a diameter.
 `radar_radius` uses the larger of half the diameter and `centre - surface`, so a
@@ -84,12 +85,14 @@ uv run --locked wsorb tune --grid '{"cruise_speed_mps":[7.0,8.0,9.0]}' \
   --seeds 101,102 --validation-seeds 200,201 --workers 2
 ```
 
-Attitude control and the launch gate track the lander's **+Z thrust axis**;
-`+X` remains the nose and capsule axis used for lateral collision geometry.
-Aligning `+X` to the launch direction tips a tail-lander onto its side. The
-radial clearance phase is retained but starts disabled (`launch_clearance_m`
-defaults to `0`), so the transit begins immediately; set it above zero to climb
-clear of a crowded pad before cruising.
+Attitude control tracks the lander's **+Z thrust axis**; `+X` remains the nose
+and capsule axis used for lateral collision geometry. Aligning `+X` to the
+launch direction tips a tail-lander onto its side. The main-engine gate is
+retained as a setting but defaults to `0` on the calibrated plant: the
+delivered-command compensation, not an attitude interlock, is what converts
+the plan into actuator requests. The radial clearance phase starts disabled
+(`launch_clearance_m` defaults to `0`), so the transit begins immediately; set
+it above zero to climb clear of a crowded pad before cruising.
 
 The emergency guard evaluates fitted tracks and raw radar rows together, so a
 close rock is not invisible when association fails. Its keep-out includes the
@@ -115,9 +118,9 @@ _steer -> _report`. Each stage owns one responsibility and writes only the
 The `_stages` tuple is the composition seam; replacing one stage does not change
 the others. The persistent `state` dict remains the adapter/run boundary.
 
-The marked core is 1797 lines across eight stages. The original 200-line target
-remains a guideline, not a hard limit; the numeric test keeps an 1820-line
-regression guard. Defaults are the line-fit tracker, score-optimal cruise,
+The marked core is 1826 lines across eight stages. The original 200-line target
+remains a guideline, not a hard limit; the numeric test keeps an 1850-line
+regression guard. Defaults are the line-fit tracker, fuel-dominant cruise bands,
 a 0.74 coast-hold fraction (about 5.3 m/s at the v0.56 7.2 m/s optimum),
 30 s base reachable avoider, a 35 m stop / 45 m restart goal corridor, a 3 m
 emergency-guard surface margin, a 40 m collision offset, the 0.3/0.1 m/s
