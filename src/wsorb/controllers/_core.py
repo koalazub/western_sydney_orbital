@@ -314,9 +314,15 @@ class ExperimentalController:
         except _Rejected as error:
             self._report["failure_reasons"].append(str(error))
             accel, angular = coast_command()
-        except (ValueError, TypeError, OverflowError, FloatingPointError, np.linalg.LinAlgError):
+        except (
+            ValueError,
+            TypeError,
+            OverflowError,
+            FloatingPointError,
+            np.linalg.LinAlgError,
+        ) as error:
             self._report["failure_reasons"].append(
-                "Invalid numeric source sample or profile calculation"
+                f"Invalid numeric source sample or profile calculation: {error}"
             )
             accel, angular = coast_command()
         self._report["command"] = {

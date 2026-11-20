@@ -139,7 +139,7 @@ def test_jobs_are_exact_bounded_metadata_not_arbitrary_python_or_commands():
 def test_all_fixed_ids_are_accepted_without_loading_example_scripts():
     from wsorb.controllers import PROFILE_IDS as catalog_ids
 
-    assert len(PROFILE_IDS) == 11
+    assert len(PROFILE_IDS) == 12
     assert catalog_ids == PROFILE_IDS
     for profile in PROFILE_IDS:
         assert parse_job(_job_metadata(profile_id=profile)).profile_id == profile

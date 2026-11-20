@@ -313,6 +313,20 @@ def test_rolling_radar_accepts_per_row_epochs_at_or_before_publication():
     sample(data)
 
 
+def test_basic_pd_uses_the_newest_rolling_row_epoch_for_the_shared_clock():
+    data = observation(10.0, rows=[row(9.9)])
+    data["sensor_health"]["units"][1]["sample_time_s"] = 10.0
+    data["radar_selection"] = {
+        "schema_version": 1,
+        "selection": "official_rolling",
+        "sample_limit": 500,
+    }
+    data["radar"][-1][2][0] = float(np.nextafter(10.0, np.inf))
+    controller = create_controller("basic_pd_radar")
+    command(controller, data)
+    assert controller.report["eligible"] is True
+
+
 def test_non_rolling_radar_still_requires_newest_row_to_match_publication():
     data = observation(10.0, rows=[row(9.5), row(9.8)])
     data["sensor_health"]["units"][1]["sample_time_s"] = 10.0

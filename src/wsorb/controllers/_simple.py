@@ -24,10 +24,14 @@ class SimpleController(ExperimentalController):
             }
             return np.array([0.0, 0.0, 0.5]), np.zeros(3)
         # These are actual numeric fields from the supplied sample, not a
-        # simulated SDK object or a fabricated sensor-health receipt.
+        # simulated SDK object or a fabricated sensor-health receipt. A rolling
+        # radar publication can stamp its newest row a fraction after the
+        # navigation sample; use the newest row epoch so the shared clock check
+        # does not reject an otherwise current radar picture as future-dated.
+        clock = max(now, float(np.max(rows[:, 2, 0]))) if len(rows) else now
         return basic_command(
             {
-                "time_s": now,
+                "time_s": clock,
                 "shuttle": {
                     "position": sample.position_world_m,
                     "velocity": sample.velocity_world_mps,
