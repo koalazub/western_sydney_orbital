@@ -355,7 +355,7 @@ class GoalPlanner:
     def miss_distance(self, shuttle_position, shuttle_velocity, target_position):
         """How far from the target centre we would pass if we kept our current velocity."""
         speed = np.linalg.norm(shuttle_velocity)
-        if speed < 0.98 * self.cruise_speed:
+        if speed < 0.98 * self.cruise_speed and (np.linalg.norm(target_position) - np.linalg.norm(shuttle_position)) > 1000.0:
             return np.inf  # not at cruise speed yet: keep accelerating
         heading = shuttle_velocity / speed
         to_target = target_position - shuttle_position
@@ -460,7 +460,7 @@ while not exit_flag:
     )  # forward desired accelerations to the sim shuttle
 
     st.OnScreenLogMessage(
-        f"Current Velocity: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg",
+        f"Current Speed: {np.linalg.norm(vel)}\nDesired Velocity: {safe_velocity}\nFuel Used: {fuelUsed} kg",
         "Velocity",
         st.Severity.Info,
     )
