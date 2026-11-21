@@ -273,7 +273,7 @@ def time_to_collision(my_velocity, rel_pos, rock_vel, keep_out, horizon=20.0):
 
 
 class Avoider:
-    def __init__(self, margin=6.0, unknown_extra=4.0, horizon=50.0, buffer=5.0):
+    def __init__(self, margin=6.0, unknown_extra=4.0, horizon=20.0, buffer=5.0):
         self.margin = margin  # metres of clearance beyond each rock's surface
         self.unknown_extra = (
             unknown_extra  # extra margin for rocks whose velocity we don't know yet
@@ -313,35 +313,42 @@ class Avoider:
         def score(velocity):
             return clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
 
-        if score(wanted_velocity) > 0:
+        # 1. Release: the path we actually want is safe WITH the buffer (same bar as a dodge must clear).
+        if score(wanted_velocity) > self.buffer:
             self.last_dodge = None
             return wanted_velocity
 
-        forward = wanted_velocity / speed # Get the current unit vector of shuttle velocity
+        # 2. Hold: keep flying the committed dodge velocity until the wanted path is clear.
+        #    last_dodge is an absolute velocity, so the target doesn't move as we accelerate.
+        if self.last_dodge is not None and score(self.last_dodge) > 0:
+            return self.last_dodge
+
+        # 3. Otherwise pick a new dodge.
+        forward = wanted_velocity / speed
         side1, side2 = two_sideways_directions(forward)
 
         candidates = []
         for size in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75):
             for angle in np.linspace(0, 2 * np.pi, 12, endpoint=False):
                 sideways = np.cos(angle) * side1 + np.sin(angle) * side2
-                for along in (-0.3, 0.0, 0.3):  # slow down / keep / speed up
+                for along in (-0.3, 0.0, 0.3):
                     candidates.append(wanted_velocity + speed * (size * sideways + along * forward))
-        for fraction in (0.5, 0.25, 0.0):
-            candidates.append(wanted_velocity * fraction)
+
+        def cost(c):
+            return np.linalg.norm(c - current_velocity) + np.linalg.norm(wanted_velocity - c)
 
         scored = [(c, score(c)) for c in candidates]
         safe = [c for c, s in scored if s > self.buffer]
-        if safe:
-            # cheapest in actual fuel: change from the velocity we have NOW
-            best = min(safe, key=lambda c: np.linalg.norm(c - current_velocity))
-        else:
-            best = max(scored, key=lambda cs: cs[1])[0]  # least-bad
+        if not safe:
+            for fraction in (0.5, 0.25, 0.0):
+                c = wanted_velocity * fraction
+                if score(c) > 0:
+                    safe.append(c)
+
+        best = min(safe, key=cost) if safe else max(scored, key=lambda cs: cs[1])[0]
 
         self.last_dodge = best
-        st.OnScreenLogMessage(
-                f"Dodging: required delta V: {best}",
-                "Dodge",
-                st.Severity.Info,)
+        st.OnScreenLogMessage(f"Dodging: target dV {best - current_velocity}", "Dodge", st.Severity.Info)
         return best
 
 
@@ -351,7 +358,7 @@ class Avoider:
 
 
 class BurnGovernor:
-    def __init__(self, gain=5.0, start=0.3, stop=0.1):
+    def __init__(self, gain=5.0, start=0.1, stop=0.01):
         self.gain = gain  # acceleration (m/s^2) per m/s of velocity error
         self.start = start  # start burning when the error is bigger than this (m/s)
         self.stop = stop  # stop burning once the error is smaller than this (m/s)
