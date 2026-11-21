@@ -103,7 +103,11 @@ def create_controller(controller_id: str, settings: dict | None = None):
             "collision_slow_fraction",
         }
         if controller_id == "ali_mppi"
-        else ({"cruise_speed_mps"} if controller_id == "tom_polyfit_mvp" else set())
+        else (
+            {"cruise_speed_mps"}
+            if controller_id in ("tom_polyfit_mvp", "tom_polyfit_dodge")
+            else set()
+        )
     )
     if set(settings) - allowed:
         raise ValueError("Unsupported settings for this fixed reviewed controller profile")
@@ -179,7 +183,7 @@ def create_controller(controller_id: str, settings: dict | None = None):
         from ._tom import TomController
 
         return TomController(metadata)
-    if controller_id == "tom_polyfit_mvp":
+    if controller_id in ("tom_polyfit_mvp", "tom_polyfit_dodge"):
         if set(settings) - {"cruise_speed_mps"}:
             raise ValueError("Unsupported settings for this fixed reviewed controller profile")
         if "cruise_speed_mps" in settings:
@@ -191,6 +195,10 @@ def create_controller(controller_id: str, settings: dict | None = None):
                 or value <= 0
             ):
                 raise ValueError("Tom polyfit cruise_speed_mps must be positive and finite")
+        if controller_id == "tom_polyfit_dodge":
+            from ._tom_polyfit_dodge import TomPolyfitDodgeController
+
+            return TomPolyfitDodgeController(metadata, settings)
         from ._tom_polyfit import TomPolyfitController
 
         return TomPolyfitController(metadata, settings)

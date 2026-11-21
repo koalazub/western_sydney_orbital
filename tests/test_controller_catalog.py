@@ -30,6 +30,7 @@ IDS = (
     "bui_alpha_beta_mvp",
     "tom_kalman_velocity_mvp",
     "tom_polyfit_mvp",
+    "tom_polyfit_dodge",
     "ali_official_profile",
     "ali_radar_mvp",
     "ali_mppi",
@@ -105,13 +106,31 @@ def command(controller, value):
     return controller.command(sample(value), value["radar"], now_elapsed_time_s=value["time_s"])
 
 
-def test_tom_polyfit_accepts_only_the_benchmark_cruise_setting():
-    controller = create_controller("tom_polyfit_mvp", {"cruise_speed_mps": 14})
+@pytest.mark.parametrize("controller_id", ("tom_polyfit_mvp", "tom_polyfit_dodge"))
+def test_tom_polyfit_accepts_only_the_benchmark_cruise_setting(controller_id):
+    controller = create_controller(controller_id, {"cruise_speed_mps": 14})
     assert controller.planner.cruise_speed == 14.0
     with pytest.raises(ValueError):
-        create_controller("tom_polyfit_mvp", {"other": 1})
+        create_controller(controller_id, {"other": 1})
     with pytest.raises(ValueError):
-        create_controller("tom_polyfit_mvp", {"cruise_speed_mps": 0})
+        create_controller(controller_id, {"cruise_speed_mps": 0})
+
+
+def test_tom_polyfit_dodge_reports_first_sighting_collision_and_candidate_effort():
+    controller = create_controller("tom_polyfit_dodge")
+    data = observation(
+        2.0,
+        rows=[row(2.0, (20.0, 0.0, 0.0), diameter=20.0)],
+        velocity=[6.0, 0.0, 0.0],
+    )
+    command(controller, data)
+    guidance = controller.report["guidance"]
+    assert controller.report["eligible"] is True
+    assert guidance["next_collision_s"] == 0.0
+    assert guidance["next_rock_diameter_m"] == 20.0
+    assert guidance["unknown_velocity_count"] == 1
+    assert guidance["candidate_count"] > 0
+    assert guidance["delta_v_from_current_mps"] >= 0.0
 
 
 def test_shared_json_catalog_is_exact_detached_safe_and_grouped_by_name():
@@ -147,6 +166,7 @@ def test_shared_json_catalog_is_exact_detached_safe_and_grouped_by_name():
                 "Harry",
                 "Harry",
                 "Bui",
+                "Tom",
                 "Tom",
                 "Tom",
                 "Ali",

@@ -77,6 +77,17 @@
         "source": "controllers/tom/polyfit/Controller.py"
     },
     {
+        "id": "tom_polyfit_dodge",
+        "label": "Tom polyfit_dodge review port",
+        "owner": "Tom",
+        "contributor": "Tom; WSO native review port",
+        "description": "Native review port of Tom's current controllers/tom/polyfit_dodge entrypoint: 90-degree target cone tracker, 50 s clearance scoring, explicit time-to-collision report, 12-angle dodge candidates with a 5 m clearance buffer, gain-5 burn governor and 6 m/s goal planner. The native observation contract replaces the STP transport; Tom's source file is unchanged. Retained source quirks are documented in the adapter. No docking or certified clearance claim.",
+        "profile": "6 m/s polyfit_dodge default; cruise_speed_mps configurable for matched-speed benchmarks",
+        "experimental": true,
+        "target_seeking": true,
+        "source": "controllers/tom/polyfit_dodge/Controller.py"
+    },
+    {
         "id": "ali_official_profile",
         "label": "Ali official profile",
         "owner": "Ali",
