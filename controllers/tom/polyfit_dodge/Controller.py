@@ -169,7 +169,7 @@ class Rock:
 
 
 class Tracker:
-    def __init__(self, gate=5.0, max_age=5.0):
+    def __init__(self, gate=15.0, max_age=5.0):
         self.rocks = []
         self.gate = gate  # sightings closer than this (m) count as the same rock
         self.max_age = max_age  # forget rocks not seen for this long (s)
@@ -220,7 +220,7 @@ class Tracker:
 # =====================================================================================
 
 
-def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=20.0):
+def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=50.0):
     """
     If we fly at my_velocity, how close do we get to the worst rock in the next `horizon` seconds,
     after subtracting its keep-out radius? Positive = safe, negative = collision course.
@@ -234,7 +234,7 @@ def clearance(my_velocity, rel_pos, rock_vel, keep_out, horizon=20.0):
     t = -(rel_pos * rel_vel).sum(axis=1) / speed_squared
     t = np.clip(t, 0.0, horizon)  # only look from now until the horizon
     closest = np.linalg.norm(rel_pos + t[:, None] * rel_vel, axis=1)
-    st.OnScreenLogMessage(f"Closest Approach: {(closest - keep_out).min()}m","dodge", st.Severity.Info)
+    
     return (closest - keep_out).min()
 
 
@@ -246,15 +246,41 @@ def two_sideways_directions(direction):
     side2 = np.cross(direction, side1)
     return side1, side2
 
+def time_to_collision(my_velocity, rel_pos, rock_vel, keep_out, horizon=20.0):
+    """
+    Time until we first enter the keep-out sphere of any rock, flying at my_velocity.
+    Returns (time, index_of_rock), or (None, None) if no collision within the horizon.
+    """
+    rel_vel = rock_vel - my_velocity
+    a = (rel_vel**2).sum(axis=1) + 1e-9
+    b = (rel_pos * rel_vel).sum(axis=1)
+    c = (rel_pos**2).sum(axis=1) - keep_out**2
+
+    disc = b**2 - a * c
+    t_hit = np.full(len(rel_pos), np.inf)
+
+    inside = c <= 0.0                                   # already within keep-out
+    t_hit[inside] = 0.0
+
+    approaching = (~inside) & (disc >= 0.0) & (b < 0.0)  # will reach the sphere
+    t_hit[approaching] = (-b[approaching] - np.sqrt(disc[approaching])) / a[approaching]
+
+    t_hit[t_hit > horizon] = np.inf                     # beyond the horizon: ignore
+    i = int(np.argmin(t_hit))
+    if not np.isfinite(t_hit[i]):
+        return None, None
+    return float(t_hit[i]), i
+
 
 class Avoider:
-    def __init__(self, margin=10.0, unknown_extra=4.0, horizon=20.0):
+    def __init__(self, margin=10.0, unknown_extra=4.0, horizon=50.0, buffer=5.0):
         self.margin = margin  # metres of clearance beyond each rock's surface
         self.unknown_extra = (
             unknown_extra  # extra margin for rocks whose velocity we don't know yet
         )
         self.horizon = horizon
         self.last_dodge = None  # remembered so we don't flip-flop between dodges
+        self.buffer = buffer
 
     def choose(self, wanted_velocity, rocks, shuttle_position, now, current_velocity):
         wanted_velocity = np.asarray(wanted_velocity, float)
@@ -273,6 +299,17 @@ class Avoider:
             ]
         )
 
+        # Calculate time remaining until the predicted collision:
+        t_hit, idx = time_to_collision(wanted_velocity, rel_pos, rock_vel, keep_out, self.horizon)
+        if t_hit is None:
+            st.OnScreenLogMessage("No collision predicted", "collision", st.Severity.Info)
+        else:
+            st.OnScreenLogMessage(
+                f"Next collision in {t_hit:.1f}s (rock {idx}, d={rocks[idx].diameter:.1f}m)",
+                "collision",
+                st.Severity.Warning,
+            )
+
         def score(velocity):
             return clearance(velocity, rel_pos, rock_vel, keep_out, self.horizon)
 
@@ -285,7 +322,7 @@ class Avoider:
 
         candidates = []
         for size in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75):
-            for angle in np.linspace(0, 2 * np.pi, 16, endpoint=False):
+            for angle in np.linspace(0, 2 * np.pi, 8, endpoint=False):
                 sideways = np.cos(angle) * side1 + np.sin(angle) * side2
                 for along in (-0.3, 0.0, 0.3):  # slow down / keep / speed up
                     candidates.append(wanted_velocity + speed * (size * sideways + along * forward))
@@ -293,7 +330,7 @@ class Avoider:
             candidates.append(wanted_velocity * fraction)
 
         scored = [(c, score(c)) for c in candidates]
-        safe = [c for c, s in scored if s > 0]
+        safe = [c for c, s in scored if s > self.buffer]
         if safe:
             # cheapest in actual fuel: change from the velocity we have NOW
             best = min(safe, key=lambda c: np.linalg.norm(c - current_velocity))
@@ -342,7 +379,7 @@ class GoalPlanner:
     goal sphere, and only steers when the path drifts towards the edge. Less steering = less fuel.
     """
 
-    def __init__(self, cruise_speed, goal_radius=15.0, start_fraction=0.7, stop_fraction=0.3):
+    def __init__(self, cruise_speed, goal_radius=20.0, start_fraction=0.7, stop_fraction=0.3):
         self.cruise_speed = cruise_speed
         self.goal_radius = goal_radius
         self.start = (
@@ -440,7 +477,7 @@ while not exit_flag:
     ##############################
 
     goalDirection: npt.NDArray = (targetLoc - loc) / np.linalg.norm(targetLoc - loc)
-    goalSpeed_m_s: float = 8.0
+    goalSpeed_m_s: float = 6.0
     goalVelocity = planner.wanted_velocity(loc, vel, targetLoc)
 
     ####################################################################
