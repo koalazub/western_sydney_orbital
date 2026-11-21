@@ -8,7 +8,13 @@ unchanged.
 
 ![Navigation, speed, fuel and points for six, seven and eight metres per second](review.svg)
 
-Published evidence: [review.json](review.json) and [review.svg](review.svg). The
+[Open the interactive explorer](explorer.html). It has seed and cruise
+selection, 1×/2×/4×/8× playback, top-down and altitude paths, speed, fuel,
+control effort, running points, and a direct seed 101 deadlock callout. The page
+is self-contained and works offline.
+
+Published evidence: [review.json](review.json), [review.svg](review.svg) and
+[explorer.html](explorer.html). The
 underlying fuzz reports are in `runs/tom-polyfit-dodge-20261121/` on the machine
 that ran them; `runs/` is not versioned. The review port is
 `src/wsorb/controllers/_tom_polyfit_dodge.py`; the profile is
@@ -229,6 +235,55 @@ simulation seconds. Throttle these to 1 Hz or log only state changes.
   209,200 J limit. The local cloud is sparse and the margins are enough on the
   seeds that arrive.
 
+## Navigation strategies that fit this controller
+
+The avoider is a velocity sampler. That is a known family, and several published
+methods map onto small changes to your existing loop.
+
+Dynamic window approach. DWA samples the velocities reachable in the next
+control interval and scores each one on obstacle distance, heading and speed.
+Your candidate sampler already does the reachable-velocity part. The missing
+piece is the heading term. Add a progress score to the candidate cost and the
+stop-trap disappears. [Fox, Burgard and Thrun, 1997](https://doi.org/10.1109/100.580977)
+
+Velocity obstacles. A moving rock maps to a cone of forbidden velocities. If the
+goal velocity is inside a cone, project it to the nearest point outside the
+union of cones. That replaces the 216-candidate search with a geometric
+calculation. Keep the sampler as a fallback when many cones overlap.
+[Fiorini and Shiller, 1998](https://journals.sagepub.com/doi/10.1177/027836499801700706)
+
+Control barrier safety filter. Your clearance is a one-step check at the new
+velocity. A discrete-time barrier checks the next state and keeps a positive
+margin: `h(next) >= (1 - gamma) h(now)`. This is a cheap projection after the
+candidate is chosen, and it catches the transient that the current clearance
+ignores. [Ames et al., 2019](https://arxiv.org/abs/1903.11199)
+
+Zero-effort miss. Spacecraft guidance uses the miss distance if neither vehicle
+manoeuvres, plus time-to-go. You already compute closest approach. Adding the
+radar range rate gives the same quantity on the first sighting, before three
+polyfit samples exist. [Palumbo et al., 2010](https://secwww.jhuapl.edu/techdigest/content/techdigest/pdf/V29-N01/29-01-Palumbo_Homing.pdf)
+
+Tangent-bug escape. When no candidate makes progress, follow the tangent around
+the keep-out sphere instead of stopping. This is a local-minimum escape from the
+range-sensor navigation literature, and it fits as the fallback branch of your
+sampler. [Kamon and Rivlin, 1998](https://journals.sagepub.com/doi/10.1177/027836499801700903)
+
+Inevitable collision states. A state is inevitable if no future trajectory can
+avoid collision. Use the delivered acceleration limit to estimate the lateral
+displacement available before time-to-collision. If it is less than the required
+miss, reject the candidate now instead of waiting for the rock to get closer.
+[Fraichard and Asama, 2004](https://inria.hal.science/inria-00182082)
+
+Glideslope. A terminal approach along a fixed line with a decreasing speed
+profile is standard for rendezvous. You do not need it for score, because there
+is no arrival-speed gate. Consider it only if damage at the station region
+starts to appear.
+
+Global graph search. A* or RRT* would add latency and a map-maintenance problem
+for a 1.3 km hop through a local cloud. The direct beeline plus a better local
+avoider is the lower-risk path. Keep the global layer out unless the cloud is
+dense enough that local dodges cannot make progress.
+
 ## Suggested order
 
 1. Fix the avoidance deadlock. Add a progress floor and keep stop as an
@@ -262,6 +317,16 @@ uv run --locked python experiments/tom_polyfit_dodge_review.py \
   --series "8 m/s benchmark=runs/tom-polyfit-dodge-20261121/official-cruise8-seeds100-104.json" \
   --output docs/analytics/tom-polyfit-dodge/review.svg \
   --json docs/analytics/tom-polyfit-dodge/review.json
+```
+
+Build the explorer:
+
+```sh
+uv run --locked python experiments/tom_polyfit_dodge_explorer.py \
+  --series "6 m/s source=runs/tom-polyfit-dodge-20261121/official-cruise6-seeds100-104.json" \
+  --series "7 m/s=runs/tom-polyfit-dodge-20261121/official-cruise7-seeds100-104.json" \
+  --series "8 m/s benchmark=runs/tom-polyfit-dodge-20261121/official-cruise8-seeds100-104.json" \
+  --output docs/analytics/tom-polyfit-dodge/explorer.html
 ```
 
 ## Limits
