@@ -273,7 +273,7 @@ def time_to_collision(my_velocity, rel_pos, rock_vel, keep_out, horizon=20.0):
 
 
 class Avoider:
-    def __init__(self, margin=10.0, unknown_extra=4.0, horizon=50.0, buffer=5.0):
+    def __init__(self, margin=6.0, unknown_extra=4.0, horizon=50.0, buffer=5.0):
         self.margin = margin  # metres of clearance beyond each rock's surface
         self.unknown_extra = (
             unknown_extra  # extra margin for rocks whose velocity we don't know yet
@@ -322,7 +322,7 @@ class Avoider:
 
         candidates = []
         for size in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75):
-            for angle in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+            for angle in np.linspace(0, 2 * np.pi, 12, endpoint=False):
                 sideways = np.cos(angle) * side1 + np.sin(angle) * side2
                 for along in (-0.3, 0.0, 0.3):  # slow down / keep / speed up
                     candidates.append(wanted_velocity + speed * (size * sideways + along * forward))
@@ -379,7 +379,7 @@ class GoalPlanner:
     goal sphere, and only steers when the path drifts towards the edge. Less steering = less fuel.
     """
 
-    def __init__(self, cruise_speed, goal_radius=20.0, start_fraction=0.7, stop_fraction=0.3):
+    def __init__(self, cruise_speed, goal_radius=40.0, start_fraction=0.7, stop_fraction=0.3):
         self.cruise_speed = cruise_speed
         self.goal_radius = goal_radius
         self.start = (
