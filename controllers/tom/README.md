@@ -22,3 +22,9 @@ The controller index for the whole team is [`../README.md`](../README.md).
 upstream Polyfit with only its malformed `Dodge info` simulator alert commented
 out. It is distinct from `polyfit_bodge_v2`. Its native exception-seed follow-up
 is documented in `docs/analytics/stp-runs/20261117T040830Z-HY/updated-candidates.md`.
+
+[`polyfit_dodge/Controller.py`](polyfit_dodge/Controller.py) is the current
+target-cone, time-to-collision and progress-candidate version. Its local native
+review, including the avoidance deadlock on seed 101, radar timing regression and
+fuel/points trade-off, is in
+[`docs/analytics/tom-polyfit-dodge/README.md`](../../docs/analytics/tom-polyfit-dodge/README.md).
